@@ -47,8 +47,9 @@
               pkg-config
               postgresql
               rustAnalyzer
-              rustToolchainWithWasm
+              # Must appear _before_ `rustToolchainWithWasm`.
               rustfmt
+              rustToolchainWithWasm
               wabt
               wasm-bindgen-cli
               wasm-pack
