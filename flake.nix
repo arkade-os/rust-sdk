@@ -55,7 +55,7 @@
               worker-build
             ];
 
-            RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
+            RUST_SRC_PATH = "${rustToolchainWithWasm}/lib/rustlib/src/rust/library";
           };
         }
     );
