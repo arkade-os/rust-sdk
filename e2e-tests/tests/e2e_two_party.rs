@@ -72,7 +72,7 @@ pub async fn e2e() {
     assert_eq!(bob_offchain_balance.total(), Amount::ZERO);
 
     let send_to_bob_vtxo_amount = Amount::from_sat(100_000);
-    let (bob_offchain_address, _) = bob.get_offchain_address();
+    let (bob_offchain_address, _) = bob.get_offchain_address().unwrap();
 
     tracing::info!(
         %send_to_bob_vtxo_amount,

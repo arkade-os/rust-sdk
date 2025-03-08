@@ -1,6 +1,8 @@
 use crate::script::csv_sig_script;
 use crate::script::multisig_script;
 use crate::script::tr_script_pubkey;
+use crate::Error;
+use crate::ExplorerUtxo;
 use crate::UNSPENDABLE_KEY;
 use bitcoin::key::PublicKey;
 use bitcoin::key::Secp256k1;
@@ -11,7 +13,9 @@ use bitcoin::taproot::LeafVersion;
 use bitcoin::taproot::TaprootBuilder;
 use bitcoin::taproot::TaprootSpendInfo;
 use bitcoin::Address;
+use bitcoin::Amount;
 use bitcoin::Network;
+use bitcoin::OutPoint;
 use bitcoin::ScriptBuf;
 use bitcoin::XOnlyPublicKey;
 use std::time::Duration;
@@ -22,7 +26,6 @@ pub struct BoardingOutput {
     owner: XOnlyPublicKey,
     spend_info: TaprootSpendInfo,
     address: Address,
-    ark_descriptor: String,
     exit_delay: bitcoin::Sequence,
 }
 
@@ -31,7 +34,6 @@ impl BoardingOutput {
         secp: &Secp256k1<C>,
         server: XOnlyPublicKey,
         owner: XOnlyPublicKey,
-        boarding_descriptor_template: &str,
         exit_delay: bitcoin::Sequence,
         network: Network,
     ) -> Self
@@ -52,9 +54,6 @@ impl BoardingOutput {
             .finalize(secp, unspendable_key)
             .expect("can be finalized");
 
-        let ark_descriptor =
-            boarding_descriptor_template.replace("USER", owner.to_string().as_str());
-
         let script_pubkey = tr_script_pubkey(&spend_info);
         let address = Address::from_script(&script_pubkey, network).expect("valid script");
 
@@ -63,7 +62,6 @@ impl BoardingOutput {
             owner,
             spend_info,
             address,
-            ark_descriptor,
             exit_delay,
         }
     }
@@ -74,10 +72,6 @@ impl BoardingOutput {
 
     pub fn owner_pk(&self) -> XOnlyPublicKey {
         self.owner
-    }
-
-    pub fn ark_descriptor(&self) -> &str {
-        &self.ark_descriptor
     }
 
     pub fn script_pubkey(&self) -> ScriptBuf {
@@ -154,4 +148,101 @@ impl BoardingOutput {
     fn exit_script(&self) -> ScriptBuf {
         csv_sig_script(self.exit_delay, self.owner)
     }
+}
+
+/// The on-chain status of a collection of boarding outputs.
+#[derive(Debug, Clone, Default)]
+pub struct BoardingOutpoints {
+    /// Boarding outputs that can be converted into VTXOs in collaboration with the Ark server.
+    pub spendable: Vec<(OutPoint, Amount, BoardingOutput)>,
+    /// Boarding outputs that should only be spent unilaterally.
+    pub expired: Vec<(OutPoint, Amount, BoardingOutput)>,
+    /// Boarding outputs that are not yet confirmed on-chain.
+    pub pending: Vec<(OutPoint, Amount, BoardingOutput)>,
+    /// Boarding outputs that were already spent.
+    pub spent: Vec<(OutPoint, Amount)>,
+}
+
+impl BoardingOutpoints {
+    pub fn spendable_balance(&self) -> Amount {
+        self.spendable.iter().fold(Amount::ZERO, |acc, x| acc + x.1)
+    }
+
+    pub fn expired_balance(&self) -> Amount {
+        self.expired.iter().fold(Amount::ZERO, |acc, x| acc + x.1)
+    }
+
+    pub fn pending_balance(&self) -> Amount {
+        self.pending.iter().fold(Amount::ZERO, |acc, x| acc + x.1)
+    }
+}
+
+/// Given a list of [`BoardingOutput`]s, determine their on-chain status.
+pub fn list_boarding_outpoints<F>(
+    find_outpoints_fn: F,
+    boarding_outputs: &[BoardingOutput],
+) -> Result<BoardingOutpoints, Error>
+where
+    F: Fn(&Address) -> Result<Vec<ExplorerUtxo>, Error>,
+{
+    let mut spendable = Vec::new();
+    let mut expired = Vec::new();
+    let mut pending = Vec::new();
+    let mut spent = Vec::new();
+    for boarding_output in boarding_outputs.iter() {
+        let boarding_address = boarding_output.address();
+
+        // The boarding outputs corresponding to this address that we can find on-chain.
+        let boarding_utxos = find_outpoints_fn(boarding_address)?;
+
+        for boarding_utxo in boarding_utxos.iter() {
+            match *boarding_utxo {
+                // The boarding output can be found on-chain.
+                ExplorerUtxo {
+                    confirmation_blocktime: Some(confirmation_blocktime),
+                    outpoint,
+                    amount,
+                    is_spent: false,
+                } => {
+                    let now = std::time::UNIX_EPOCH.elapsed().map_err(Error::ad_hoc)?;
+
+                    // If the boarding output is on-chain can be spent unilaterally, it has expired.
+                    if boarding_output.can_be_claimed_unilaterally_by_owner(
+                        now,
+                        Duration::from_secs(confirmation_blocktime),
+                    ) {
+                        expired.push((outpoint, amount, boarding_output.clone()));
+                    }
+                    // If the boarding output is on-chain and cannot be spent unilaterally, it is
+                    // spendable.
+                    else {
+                        spendable.push((outpoint, amount, boarding_output.clone()));
+                    }
+                }
+                // The boarding output is still pending confirmation.
+                ExplorerUtxo {
+                    confirmation_blocktime: None,
+                    outpoint,
+                    amount,
+                    is_spent: false,
+                } => {
+                    pending.push((outpoint, amount, boarding_output.clone()));
+                }
+                // The boarding output was spent.
+                ExplorerUtxo {
+                    outpoint,
+                    amount,
+                    is_spent: true,
+                    ..
+                } => spent.push((outpoint, amount)),
+            }
+        }
+    }
+
+    Ok(BoardingOutpoints {
+        spendable,
+        expired,
+        pending,
+        spent,
+    })
 }

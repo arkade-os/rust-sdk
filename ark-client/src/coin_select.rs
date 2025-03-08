@@ -85,7 +85,7 @@ where
 
     let mut selected_vtxo_outputs = Vec::new();
 
-    for (_, vtxo) in client.get_offchain_addresses() {
+    for (_, vtxo) in client.get_offchain_addresses()? {
         if target_amount <= selected_amount {
             return Ok((selected_boarding_outputs, selected_vtxo_outputs));
         }

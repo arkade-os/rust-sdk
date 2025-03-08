@@ -1,14 +1,13 @@
-use crate::default_vtxo::DefaultVtxo;
 use crate::tx_weight_estimator;
 use crate::tx_weight_estimator::compute_redeem_tx_fee;
+use crate::vtxo::Vtxo;
 use crate::ArkAddress;
 use crate::Error;
 use crate::ErrorContext;
 use bitcoin::absolute::LockTime;
 use bitcoin::hashes::Hash;
-use bitcoin::key::Keypair;
-use bitcoin::key::Secp256k1;
 use bitcoin::secp256k1;
+use bitcoin::secp256k1::schnorr;
 use bitcoin::sighash::Prevouts;
 use bitcoin::sighash::SighashCache;
 use bitcoin::taproot;
@@ -22,15 +21,14 @@ use bitcoin::TapSighashType;
 use bitcoin::Transaction;
 use bitcoin::TxIn;
 use bitcoin::TxOut;
+use bitcoin::XOnlyPublicKey;
 use std::collections::BTreeMap;
 
 /// A VTXO to be spent into an unconfirmed VTXO.
 #[derive(Debug, Clone)]
 pub struct VtxoInput {
     /// The information needed to spend the VTXO, besides the amount.
-    ///
-    /// TODO: Eventually we will support VTXOs beyond [`DefaultVtxo`].
-    vtxo: DefaultVtxo,
+    vtxo: Vtxo,
     /// The amount of coins locked in the VTXO.
     amount: Amount,
     /// Where the VTXO would end up on the blockchain if it were to become a UTXO.
@@ -38,7 +36,7 @@ pub struct VtxoInput {
 }
 
 impl VtxoInput {
-    pub fn new(vtxo: DefaultVtxo, amount: Amount, outpoint: OutPoint) -> Self {
+    pub fn new(vtxo: Vtxo, amount: Amount, outpoint: OutPoint) -> Self {
         Self {
             vtxo,
             amount,
@@ -47,44 +45,50 @@ impl VtxoInput {
     }
 }
 
-/// Build and sign a transaction to send VTXOs to another [`ArkAddress`].
-///
-/// The inputs will be signed using the forfeit (multisignature) branch of the Taproot tree. Thus,
-/// the inputs will still need a signature from the Ark server.
-pub fn create_and_sign_redeem_transaction(
-    kp: &Keypair,
-    to_address: &ArkAddress,
-    to_amount: Amount,
-    change_address: &ArkAddress,
+/// Build a transaction to send VTXOs to another [`ArkAddress`].
+pub fn build_redeem_transaction(
+    outputs: &[(&ArkAddress, Amount)],
+    change_address: Option<&ArkAddress>,
     vtxo_inputs: &[VtxoInput],
 ) -> Result<Psbt, Error> {
     if vtxo_inputs.is_empty() {
         return Err(Error::transaction(
-            "cannot create redeem transaction without inputs",
+            "cannot build redeem transaction without inputs",
         ));
     }
 
-    let secp = Secp256k1::new();
+    let mut outputs = outputs
+        .iter()
+        .map(|(address, amount)| TxOut {
+            value: *amount,
+            script_pubkey: address.to_p2tr_script_pubkey(),
+        })
+        .collect::<Vec<_>>();
 
-    let mut outputs = vec![TxOut {
-        value: to_amount,
-        script_pubkey: to_address.to_p2tr_script_pubkey(),
-    }];
+    let total_input_amount: Amount = vtxo_inputs.iter().map(|v| v.amount).sum();
+    let total_output_amount: Amount = outputs.iter().map(|v| v.value).sum();
 
-    let total_amount: Amount = vtxo_inputs.iter().map(|v| v.amount).sum();
-
-    let change_amount = total_amount.checked_sub(to_amount).ok_or_else(|| {
+    let change_amount = total_input_amount.checked_sub(total_output_amount).ok_or_else(|| {
         Error::transaction(format!(
-            "cannot cover to_amount ({to_amount}) with total input amount ({total_amount})"
+            "cannot cover total output amount ({total_output_amount}) with total input amount ({total_input_amount})"
         ))
     })?;
 
-    if change_amount > Amount::ZERO {
-        outputs.push(TxOut {
-            value: change_amount,
-            script_pubkey: change_address.to_p2tr_script_pubkey(),
-        })
-    }
+    let (change_index, extra_fee) = if change_amount > Amount::ZERO {
+        match change_address {
+            Some(change_address) => {
+                outputs.push(TxOut {
+                    value: change_amount,
+                    script_pubkey: change_address.to_p2tr_script_pubkey(),
+                });
+
+                (Some(outputs.len() - 1), Amount::ZERO)
+            }
+            None => (None, change_amount),
+        }
+    } else {
+        (None, Amount::ZERO)
+    };
 
     let fee = {
         let vtxos = vtxo_inputs
@@ -102,26 +106,47 @@ pub fn create_and_sign_redeem_transaction(
                         amount: *amount,
                         revealed_script: Some(script),
                         control_block,
-                        witness_size: DefaultVtxo::FORFEIT_WITNESS_SIZE,
+                        witness_size: Vtxo::FORFEIT_WITNESS_SIZE,
                     }
                 },
             )
             .collect::<Vec<_>>();
 
-        compute_redeem_tx_fee(
+        let computed_fee = compute_redeem_tx_fee(
             FeeRate::from_sat_per_kwu(253),
             vtxos.as_slice(),
             outputs.len(),
         )
-        .map_err(Error::from)?
+        .map_err(Error::from)?;
+
+        computed_fee + extra_fee
     };
 
-    if let Some(change) = outputs.last_mut() {
-        let change_amount = change.value;
+    // Subtract the fee from somewhere.
+    //
+    // TODO: We need a more robust solution.
+    match change_index {
+        Some(change_index) => {
+            let change_output = outputs.get_mut(change_index).expect("change output");
 
-        change.value = change_amount.checked_sub(fee).ok_or_else(|| {
-            Error::coin_select("fee ({fee}) greater than change ({change_amount})")
-        })?;
+            let change_amount = change_output.value;
+            change_output.value = change_amount.checked_sub(fee).ok_or_else(|| {
+                Error::coin_select("fee ({fee}) greater than change ({change_amount})")
+            })?;
+        }
+        // If there is no change output, subtract fee evenly from all outputs.
+        _ => {
+            let fee_per_output = fee / (outputs.len() as u64);
+
+            for output in outputs.iter_mut() {
+                output.value = output.value.checked_sub(fee_per_output).ok_or_else(|| {
+                    Error::transaction(format!(
+                        "failed to subtract fee portion ({fee_per_output}) from output ({})",
+                        output.value
+                    ))
+                })?;
+            }
+        }
     };
 
     // TODO: Use a different locktime if we have CLTV multisig script.
@@ -142,86 +167,104 @@ pub fn create_and_sign_redeem_transaction(
             .collect(),
         output: outputs,
     };
-    let unsigned_psbt = Psbt::from_unsigned_tx(unsigned_tx).map_err(Error::transaction)?;
-    let mut signed_redeem_psbt = unsigned_psbt;
 
-    let prevouts = vtxo_inputs
-        .iter()
-        .map(|VtxoInput { vtxo, amount, .. }| TxOut {
-            value: *amount,
-            script_pubkey: vtxo.script_pubkey(),
-        })
-        .collect::<Vec<_>>();
+    let unsigned_redeem_psbt = Psbt::from_unsigned_tx(unsigned_tx).map_err(Error::transaction)?;
 
-    // Sign all redeem transaction inputs (could be multiple VTXOs!).
-    for VtxoInput {
+    Ok(unsigned_redeem_psbt)
+}
+
+/// Sign an input for the given redeem transaction.
+pub fn sign_redeem_transaction<S>(
+    sign_fn: S,
+    redeem_psbt: &mut Psbt,
+    vtxo_inputs: &[VtxoInput],
+    input_index: usize,
+) -> Result<(), Error>
+where
+    S: FnOnce(secp256k1::Message) -> Result<(schnorr::Signature, XOnlyPublicKey), Error>,
+{
+    let VtxoInput {
         vtxo,
         amount,
         outpoint,
-    } in vtxo_inputs.iter()
-    {
-        tracing::debug!(
-            ?outpoint,
-            %amount,
-            ?vtxo,
-            "Attempting to sign selected VTXO for redeem transaction"
-        );
+    } = vtxo_inputs
+        .get(input_index)
+        .ok_or_else(|| Error::ad_hoc(format!("no input to sign at index {input_index}")))?;
 
-        for (i, psbt_input) in signed_redeem_psbt.inputs.iter_mut().enumerate() {
-            let psbt_input_outpoint = signed_redeem_psbt.unsigned_tx.input[i].previous_output;
+    tracing::debug!(
+        ?outpoint,
+        %amount,
+        ?vtxo,
+        "Attempting to sign selected VTXO for redeem transaction"
+    );
 
-            if psbt_input_outpoint == *outpoint {
-                tracing::debug!(
-                    ?outpoint,
-                    ?vtxo,
-                    index = i,
-                    "Signing selected VTXO for redeem transaction"
-                );
+    let prevout = TxOut {
+        value: *amount,
+        script_pubkey: vtxo.script_pubkey(),
+    };
 
-                psbt_input.witness_utxo = Some(prevouts[i].clone());
+    let (input_index, _) = redeem_psbt
+        .unsigned_tx
+        .input
+        .iter()
+        .enumerate()
+        .find(|(_, input)| input.previous_output == *outpoint)
+        .ok_or_else(|| Error::transaction(format!("missing input for outpoint {outpoint}")))?;
 
-                // In the case of input VTXOs, we are actually using a script spend path.
-                let (forfeit_script, forfeit_control_block) = vtxo.forfeit_spend_info();
+    tracing::debug!(
+        ?outpoint,
+        ?vtxo,
+        index = input_index,
+        "Signing selected VTXO for redeem transaction"
+    );
 
-                let leaf_version = forfeit_control_block.leaf_version;
-                psbt_input.tap_scripts = BTreeMap::from_iter([(
-                    forfeit_control_block,
-                    (forfeit_script.clone(), leaf_version),
-                )]);
+    let psbt_input = redeem_psbt
+        .inputs
+        .get_mut(input_index)
+        .expect("input at index");
 
-                let prevouts = Prevouts::All(&prevouts);
+    psbt_input.witness_utxo = Some(prevout.clone());
 
-                let leaf_hash = TapLeafHash::from_script(&forfeit_script, leaf_version);
+    // In the case of input VTXOs, we are actually using a script spend path.
+    let (forfeit_script, forfeit_control_block) = vtxo.forfeit_spend_info();
 
-                let tap_sighash = SighashCache::new(&signed_redeem_psbt.unsigned_tx)
-                    .taproot_script_spend_signature_hash(
-                        i,
-                        &prevouts,
-                        leaf_hash,
-                        TapSighashType::Default,
-                    )
-                    .map_err(Error::crypto)
-                    .context("failed to generate sighash")?;
+    let leaf_version = forfeit_control_block.leaf_version;
+    psbt_input.tap_scripts = BTreeMap::from_iter([(
+        forfeit_control_block,
+        (forfeit_script.clone(), leaf_version),
+    )]);
 
-                let msg =
-                    secp256k1::Message::from_digest(tap_sighash.to_raw_hash().to_byte_array());
+    let prevouts = vtxo_inputs
+        .iter()
+        .map(|v| TxOut {
+            value: v.amount,
+            script_pubkey: v.vtxo.script_pubkey(),
+        })
+        .collect::<Vec<_>>();
+    let prevouts = Prevouts::All(&prevouts);
 
-                let sig = secp.sign_schnorr_no_aux_rand(&msg, kp);
-                let pk = kp.x_only_public_key().0;
+    let leaf_hash = TapLeafHash::from_script(&forfeit_script, leaf_version);
 
-                secp.verify_schnorr(&sig, &msg, &pk)
-                    .map_err(Error::crypto)
-                    .context("failed to verify own redeem signature")?;
+    let tap_sighash = SighashCache::new(&redeem_psbt.unsigned_tx)
+        .taproot_script_spend_signature_hash(
+            input_index,
+            &prevouts,
+            leaf_hash,
+            TapSighashType::Default,
+        )
+        .map_err(Error::crypto)
+        .context("failed to generate sighash")?;
 
-                let sig = taproot::Signature {
-                    signature: sig,
-                    sighash_type: TapSighashType::Default,
-                };
+    let msg = secp256k1::Message::from_digest(tap_sighash.to_raw_hash().to_byte_array());
 
-                psbt_input.tap_script_sigs = BTreeMap::from_iter([((pk, leaf_hash), sig)]);
-            }
-        }
-    }
+    let (sig, pk) = sign_fn(msg)?;
 
-    Ok(signed_redeem_psbt)
+    let sig = taproot::Signature {
+        signature: sig,
+        sighash_type: TapSighashType::Default,
+    };
+
+    psbt_input.tap_script_sigs = BTreeMap::from_iter([((pk, leaf_hash), sig)]);
+
+    Ok(())
 }

@@ -1,4 +1,4 @@
-use crate::default_vtxo::DefaultVtxo;
+use crate::Vtxo;
 use bitcoin::constants::WITNESS_SCALE_FACTOR;
 use bitcoin::Address;
 use bitcoin::AddressType;
@@ -8,7 +8,7 @@ use bitcoin::VarInt;
 
 pub fn compute_forfeit_min_relay_fee(
     fee_rate_sats_per_kvb: u64,
-    vtxo: &DefaultVtxo,
+    vtxo: &Vtxo,
     forfeit_address: &Address,
 ) -> Amount {
     const INPUT_SIZE: u64 = 32 + 4 + 1 + 4;

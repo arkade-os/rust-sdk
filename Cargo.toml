@@ -8,6 +8,7 @@ members = [
   "e2e-tests",
   "ark-sample",
   "ark-rust-secp256k1-zkp",
+  "ark-dlc-sample",
 ]
 
 resolver = "2"

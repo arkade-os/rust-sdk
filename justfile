@@ -104,7 +104,7 @@ arkd-setup:
 
     set -euxo pipefail
 
-    echo "Running arkd from $CLARKD_DIR"
+    echo "Running arkd from $ARKD_DIR"
 
     just arkd-run
 
@@ -135,11 +135,11 @@ arkd-run:
 
     set -euxo pipefail
 
-    make -C $CLARKD_DIR run &> {{arkd_logs}} &
+    make -C $ARKD_DIR run &> {{arkd_logs}} &
 
     just _wait-until-arkd-is-ready
 
-    echo "Clarkd started. Find the logs in {{arkd_logs}}"
+    echo "Arkd started. Find the logs in {{arkd_logs}}"
 
 
 # Build `arkd` binary.
@@ -148,9 +148,9 @@ arkd-build:
 
     set -euxo pipefail
 
-    make -C $CLARKD_DIR build
+    make -C $ARKD_DIR build
 
-    echo "Clarkd built"
+    echo "Arkd built"
 
 
 
@@ -188,13 +188,13 @@ arkd-fund n:
 
 # Stop `arkd` binary and delete logs.
 arkd-kill:
-    pkill -9 arkd && echo "Stopped arkd" || echo "Clarkd not running, skipped"
+    pkill -9 arkd && echo "Stopped arkd" || echo "Arkd not running, skipped"
     [ ! -e "{{arkd_logs}}" ] || mv -f {{arkd_logs}} {{arkd_logs}}.old
 
 # Wipe `arkd` data directory.
 arkd-wipe:
-    @echo Clearing arkd in $CLARKD_DIR/data
-    rm -rf $CLARKD_DIR/data
+    @echo Clearing arkd in $ARKD_DIR/data
+    rm -rf $ARKD_DIR/data
 
 _wait-until-arkd-is-ready:
     #!/usr/bin/env bash

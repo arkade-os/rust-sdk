@@ -48,7 +48,7 @@ where
         R: Rng + CryptoRng + Clone,
     {
         // Get off-chain address and send all funds to this address, no change output 🦄
-        let (to_address, _) = self.get_offchain_address();
+        let (to_address, _) = self.get_offchain_address()?;
 
         let (boarding_inputs, vtxo_inputs, total_amount) =
             self.fetch_round_transaction_inputs().await?;
@@ -104,7 +104,7 @@ where
     where
         R: Rng + CryptoRng + Clone,
     {
-        let (change_address, _) = self.get_offchain_address();
+        let (change_address, _) = self.get_offchain_address()?;
 
         let (boarding_inputs, vtxo_inputs, total_amount) =
             self.fetch_round_transaction_inputs().await?;

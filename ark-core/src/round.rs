@@ -5,9 +5,9 @@ use crate::internal_node::VtxoTreeInternalNodeScript;
 use crate::server::TxTree;
 use crate::server::TxTreeNode;
 use crate::BoardingOutput;
-use crate::DefaultVtxo;
 use crate::Error;
 use crate::ErrorContext;
+use crate::Vtxo;
 use crate::VTXO_INPUT_INDEX;
 use bitcoin::absolute::LockTime;
 use bitcoin::hashes::Hash;
@@ -89,9 +89,7 @@ impl OnChainInput {
 #[derive(Debug, Clone)]
 pub struct VtxoInput {
     /// The information needed to spend the VTXO, besides the amount.
-    ///
-    /// TODO: Eventually we will support VTXOs beyond [`DefaultVtxo`].
-    vtxo: DefaultVtxo,
+    vtxo: Vtxo,
     /// The amount of coins locked in the VTXO.
     amount: Amount,
     /// Where the VTXO would end up on the blockchain if it were to become a UTXO.
@@ -99,7 +97,7 @@ pub struct VtxoInput {
 }
 
 impl VtxoInput {
-    pub fn new(vtxo: DefaultVtxo, amount: Amount, outpoint: OutPoint) -> Self {
+    pub fn new(vtxo: Vtxo, amount: Amount, outpoint: OutPoint) -> Self {
         Self {
             vtxo,
             amount,
@@ -111,7 +109,7 @@ impl VtxoInput {
         self.outpoint
     }
 
-    pub fn vtxo(&self) -> &DefaultVtxo {
+    pub fn vtxo(&self) -> &Vtxo {
         &self.vtxo
     }
 }

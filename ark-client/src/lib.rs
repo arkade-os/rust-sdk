@@ -1,6 +1,5 @@
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
-use ark_core::default_vtxo::DefaultVtxo;
 use ark_core::generate_incoming_vtxo_transaction_history;
 use ark_core::generate_outgoing_vtxo_transaction_history;
 use ark_core::server;
@@ -9,6 +8,7 @@ use ark_core::server::Round;
 use ark_core::server::VtxoOutPoint;
 use ark_core::ArkAddress;
 use ark_core::ArkTransaction;
+use ark_core::Vtxo;
 use bitcoin::key::Keypair;
 use bitcoin::key::Secp256k1;
 use bitcoin::secp256k1::All;
@@ -289,29 +289,30 @@ where
     W: BoardingWallet + OnchainWallet,
 {
     // At the moment we are always generating the same address.
-    pub fn get_offchain_address(&self) -> (ArkAddress, DefaultVtxo) {
+    pub fn get_offchain_address(&self) -> Result<(ArkAddress, Vtxo), Error> {
         let server_info = &self.server_info;
 
         let (server, _) = server_info.pk.x_only_public_key();
         let (owner, _) = self.inner.kp.public_key().x_only_public_key();
 
-        let default_vtxo = DefaultVtxo::new(
+        let vtxo = Vtxo::new(
             self.secp(),
             server,
             owner,
+            vec![],
             server_info.unilateral_exit_delay,
             server_info.network,
-        );
+        )?;
 
-        let ark_address = default_vtxo.to_ark_address();
+        let ark_address = vtxo.to_ark_address();
 
-        (ark_address, default_vtxo)
+        Ok((ark_address, vtxo))
     }
 
-    pub fn get_offchain_addresses(&self) -> Vec<(ArkAddress, DefaultVtxo)> {
-        let address = self.get_offchain_address();
+    pub fn get_offchain_addresses(&self) -> Result<Vec<(ArkAddress, Vtxo)>, Error> {
+        let address = self.get_offchain_address()?;
 
-        vec![address]
+        Ok(vec![address])
     }
 
     // At the moment we are always generating the same address.
@@ -320,7 +321,6 @@ where
         let boarding_output = self.inner.wallet.new_boarding_output(
             server_info.pk.x_only_public_key().0,
             server_info.unilateral_exit_delay,
-            &server_info.boarding_descriptor_template,
             server_info.network,
         )?;
 
@@ -334,7 +334,7 @@ where
     }
 
     pub async fn list_vtxos(&self) -> Result<ListVtxo, Error> {
-        let addresses = self.get_offchain_addresses();
+        let addresses = self.get_offchain_addresses()?;
 
         let mut vtxos = ListVtxo {
             spendable: Vec::new(),
@@ -356,8 +356,8 @@ where
         Ok(round)
     }
 
-    pub async fn spendable_vtxos(&self) -> Result<Vec<(Vec<VtxoOutPoint>, DefaultVtxo)>, Error> {
-        let addresses = self.get_offchain_addresses();
+    pub async fn spendable_vtxos(&self) -> Result<Vec<(Vec<VtxoOutPoint>, Vtxo)>, Error> {
+        let addresses = self.get_offchain_addresses()?;
 
         let now = Timestamp::now();
 

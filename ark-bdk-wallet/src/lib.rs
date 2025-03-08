@@ -184,20 +184,12 @@ where
         &self,
         server_pk: XOnlyPublicKey,
         exit_delay: bitcoin::Sequence,
-        descriptor_template: &str,
         network: Network,
     ) -> Result<BoardingOutput, Error> {
         let sk = self.kp.secret_key();
         let (owner_pk, _) = sk.public_key(&self.secp).x_only_public_key();
 
-        let address = BoardingOutput::new(
-            &self.secp,
-            server_pk,
-            owner_pk,
-            descriptor_template,
-            exit_delay,
-            network,
-        );
+        let address = BoardingOutput::new(&self.secp, server_pk, owner_pk, exit_delay, network);
 
         self.db
             .save_boarding_output(sk, address.clone())

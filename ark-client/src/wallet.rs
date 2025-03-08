@@ -15,7 +15,6 @@ pub trait BoardingWallet {
         &self,
         server_pubkey: XOnlyPublicKey,
         exit_delay: bitcoin::Sequence,
-        descriptor_template: &str,
         network: Network,
     ) -> Result<BoardingOutput, Error>;
 

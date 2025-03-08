@@ -1,0 +1,18 @@
+[package]
+name = "ark-dlc-sample"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+ark-core = { path = "../ark-core" }
+ark-grpc = { path = "../ark-grpc" }
+bitcoin = { version = "0.32" }
+esplora-client = { version = "0.10", features = ["async-https"] }
+futures = "0.3"
+rand = "0.8"
+regex = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi", "env-filter", "time", "tracing-log", "json"] }
+zkp = { package = "ark-secp256k1-zkp", version = "0.10.0", path = "../ark-rust-secp256k1-zkp" }

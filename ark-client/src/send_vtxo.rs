@@ -6,10 +6,15 @@ use crate::Client;
 use crate::Error;
 use ark_core::coin_select::select_vtxos;
 use ark_core::redeem;
-use ark_core::redeem::create_and_sign_redeem_transaction;
+use ark_core::redeem::build_redeem_transaction;
+use ark_core::redeem::sign_redeem_transaction;
 use ark_core::ArkAddress;
+use bitcoin::key::Secp256k1;
+use bitcoin::secp256k1;
+use bitcoin::secp256k1::schnorr;
 use bitcoin::Amount;
 use bitcoin::Psbt;
+use bitcoin::XOnlyPublicKey;
 
 impl<B, W> Client<B, W>
 where
@@ -60,23 +65,30 @@ where
             })
             .collect::<Vec<_>>();
 
-        let (change_address, _) = self.get_offchain_address();
+        let (change_address, _) = self.get_offchain_address()?;
 
-        let signed_redeem_psbt = create_and_sign_redeem_transaction(
-            self.kp(),
-            &address,
-            amount,
-            &change_address,
-            &vtxo_inputs,
-        )
-        .map_err(Error::from)?;
+        let mut redeem_psbt =
+            build_redeem_transaction(&[(&address, amount)], Some(&change_address), &vtxo_inputs)
+                .map_err(Error::from)?;
+
+        let sign_fn =
+        |msg: secp256k1::Message| -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+            let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, self.kp());
+            let pk = self.kp().x_only_public_key().0;
+
+            Ok((sig, pk))
+        };
+
+        for (i, _) in vtxo_inputs.iter().enumerate() {
+            sign_redeem_transaction(sign_fn, &mut redeem_psbt, &vtxo_inputs, i)?;
+        }
 
         self.network_client()
-            .submit_redeem_transaction(signed_redeem_psbt.clone())
+            .submit_redeem_transaction(redeem_psbt.clone())
             .await
             .map_err(Error::ark_server)
             .context("failed to complete payment request")?;
 
-        Ok(signed_redeem_psbt)
+        Ok(redeem_psbt)
     }
 }

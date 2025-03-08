@@ -3,11 +3,14 @@
 
 use anyhow::bail;
 use anyhow::Result;
+use ark_core::boarding_output::list_boarding_outpoints;
+use ark_core::boarding_output::BoardingOutpoints;
 use ark_core::coin_select::select_vtxos;
 use ark_core::generate_incoming_vtxo_transaction_history;
 use ark_core::generate_outgoing_vtxo_transaction_history;
 use ark_core::redeem;
-use ark_core::redeem::create_and_sign_redeem_transaction;
+use ark_core::redeem::build_redeem_transaction;
+use ark_core::redeem::sign_redeem_transaction;
 use ark_core::round;
 use ark_core::round::create_and_sign_forfeit_txs;
 use ark_core::round::generate_nonce_tree;
@@ -17,10 +20,13 @@ use ark_core::server::RoundInput;
 use ark_core::server::RoundOutput;
 use ark_core::server::RoundStreamEvent;
 use ark_core::server::VtxoOutPoint;
+use ark_core::vtxo::list_virtual_tx_outpoints;
+use ark_core::vtxo::VirtualTxOutpoints;
 use ark_core::ArkAddress;
 use ark_core::ArkTransaction;
 use ark_core::BoardingOutput;
-use ark_core::DefaultVtxo;
+use ark_core::ExplorerUtxo;
+use ark_core::Vtxo;
 use bitcoin::key::Keypair;
 use bitcoin::key::Secp256k1;
 use bitcoin::secp256k1;
@@ -37,9 +43,10 @@ use futures::StreamExt;
 use jiff::Timestamp;
 use rand::thread_rng;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::fs;
 use std::str::FromStr;
-use std::time::Duration;
+use tokio::task::block_in_place;
 
 #[derive(Parser)]
 #[command(name = "ark-sample")]
@@ -123,40 +130,58 @@ async fn main() -> Result<()> {
     let esplora_client = EsploraClient::new(&config.esplora_url)?;
 
     // In this example we use the same script for all VTXOs.
-    let default_vtxo = DefaultVtxo::new(
+    let vtxo = Vtxo::new(
         &secp,
         server_info.pk.x_only_public_key().0,
         pk.x_only_public_key().0,
+        vec![],
         server_info.unilateral_exit_delay,
         server_info.network,
-    );
+    )?;
 
     // In this example we use the same script for all boarding outputs.
     let boarding_output = BoardingOutput::new(
         &secp,
         server_info.pk.x_only_public_key().0,
         pk.x_only_public_key().0,
-        &server_info.boarding_descriptor_template,
         server_info.unilateral_exit_delay,
         server_info.network,
     );
 
+    let runtime = tokio::runtime::Handle::current();
+    let find_outpoints_fn =
+        |address: &bitcoin::Address| -> Result<Vec<ExplorerUtxo>, ark_core::Error> {
+            block_in_place(|| {
+                runtime.block_on(async {
+                    let outpoints = esplora_client
+                        .find_outpoints(address)
+                        .await
+                        .map_err(ark_core::Error::ad_hoc)?;
+
+                    Ok(outpoints)
+                })
+            })
+        };
+
     match &cli.command {
         Commands::Balance => {
-            let vtxos = list_vtxos(&grpc_client, &esplora_client, &[default_vtxo]).await?;
-            let boarding_outputs =
-                list_boarding_outputs(&esplora_client, &[boarding_output]).await?;
+            let virtual_tx_outpoints = {
+                let spendable_vtxos = spendable_vtxos(&grpc_client, &[vtxo]).await?;
+                list_virtual_tx_outpoints(find_outpoints_fn, spendable_vtxos)?
+            };
+            let boarding_outpoints =
+                list_boarding_outpoints(find_outpoints_fn, &[boarding_output])?;
 
             println!(
                 "Offchain balance: spendable = {}, expired = {}",
-                vtxos.spendable_balance(),
-                vtxos.expired_balance()
+                virtual_tx_outpoints.spendable_balance(),
+                virtual_tx_outpoints.expired_balance()
             );
             println!(
                 "Boarding balance: spendable = {}, expired = {}, pending = {}",
-                boarding_outputs.spendable_balance(),
-                boarding_outputs.expired_balance(),
-                boarding_outputs.pending_balance()
+                boarding_outpoints.spendable_balance(),
+                boarding_outpoints.expired_balance(),
+                boarding_outpoints.pending_balance()
             );
         }
         Commands::TransactionHistory => {
@@ -164,7 +189,7 @@ async fn main() -> Result<()> {
                 &grpc_client,
                 &esplora_client,
                 &[boarding_output.address().clone()],
-                &[default_vtxo],
+                &[vtxo],
             )
             .await?;
 
@@ -182,16 +207,19 @@ async fn main() -> Result<()> {
             );
         }
         Commands::OffchainAddress => {
-            let offchain_address = default_vtxo.to_ark_address();
+            let offchain_address = vtxo.to_ark_address();
 
             println!("Send VTXOs to this offchain address: {offchain_address}\n");
         }
         Commands::SendToArkAddress { address, amount } => {
             let amount = Amount::from_sat(*amount);
 
-            let vtxos = list_vtxos(&grpc_client, &esplora_client, &[default_vtxo.clone()]).await?;
+            let virtual_tx_outpoints = {
+                let spendable_vtxos = spendable_vtxos(&grpc_client, &[vtxo.clone()]).await?;
+                list_virtual_tx_outpoints(find_outpoints_fn, spendable_vtxos)?
+            };
 
-            let vtxo_outpoints = vtxos
+            let vtxo_outpoints = virtual_tx_outpoints
                 .spendable
                 .iter()
                 .map(|(outpoint, _)| ark_core::coin_select::VtxoOutPoint {
@@ -203,7 +231,7 @@ async fn main() -> Result<()> {
 
             let selected_outpoints = select_vtxos(vtxo_outpoints, amount, server_info.dust, true)?;
 
-            let vtxo_inputs = vtxos
+            let vtxo_inputs = virtual_tx_outpoints
                 .spendable
                 .into_iter()
                 .filter(|(outpoint, _)| {
@@ -216,21 +244,31 @@ async fn main() -> Result<()> {
                 })
                 .collect::<Vec<_>>();
 
-            let change_address = default_vtxo.to_ark_address();
+            let change_address = vtxo.to_ark_address();
 
             let secp = Secp256k1::new();
             let kp = Keypair::from_secret_key(&secp, &sk);
 
-            let signed_redeem_psbt = create_and_sign_redeem_transaction(
-                &kp,
-                &address.0,
-                amount,
-                &change_address,
+            let mut redeem_psbt = build_redeem_transaction(
+                &[(&address.0, amount)],
+                Some(&change_address),
                 &vtxo_inputs,
             )?;
 
+            let sign_fn =
+                |msg: secp256k1::Message| -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+                    let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &kp);
+                    let pk = kp.x_only_public_key().0;
+
+                    Ok((sig, pk))
+                };
+
+            for (i, _) in vtxo_inputs.iter().enumerate() {
+                sign_redeem_transaction(sign_fn, &mut redeem_psbt, &vtxo_inputs, i)?;
+            }
+
             let psbt = grpc_client
-                .submit_redeem_transaction(signed_redeem_psbt.clone())
+                .submit_redeem_transaction(redeem_psbt.clone())
                 .await?;
 
             let txid = psbt.extract_tx()?.compute_txid();
@@ -238,17 +276,20 @@ async fn main() -> Result<()> {
             println!("Sent {amount} to {} in transaction {txid}", address.0);
         }
         Commands::Settle => {
-            let vtxos = list_vtxos(&grpc_client, &esplora_client, &[default_vtxo.clone()]).await?;
-            let boarding_outputs =
-                list_boarding_outputs(&esplora_client, &[boarding_output]).await?;
+            let virtual_tx_outpoints = {
+                let spendable_vtxos = spendable_vtxos(&grpc_client, &[vtxo.clone()]).await?;
+                list_virtual_tx_outpoints(find_outpoints_fn, spendable_vtxos)?
+            };
+            let boarding_outpoints =
+                list_boarding_outpoints(find_outpoints_fn, &[boarding_output])?;
 
             let res = settle(
                 &grpc_client,
                 &server_info,
                 sk,
-                vtxos,
-                boarding_outputs,
-                default_vtxo.to_ark_address(),
+                virtual_tx_outpoints,
+                boarding_outpoints,
+                vtxo.to_ark_address(),
             )
             .await;
 
@@ -271,168 +312,27 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-struct Vtxos {
-    /// VTXOs that can be spent in collaboration with the Ark server.
-    spendable: Vec<(VtxoOutPoint, DefaultVtxo)>,
-    /// VTXOs that should only be spent unilaterally.
-    expired: Vec<(VtxoOutPoint, DefaultVtxo)>,
-}
-
-impl Vtxos {
-    fn spendable_balance(&self) -> Amount {
-        self.spendable
-            .iter()
-            .fold(Amount::ZERO, |acc, x| acc + x.0.amount)
-    }
-
-    fn expired_balance(&self) -> Amount {
-        self.expired
-            .iter()
-            .fold(Amount::ZERO, |acc, x| acc + x.0.amount)
-    }
-}
-
-async fn list_vtxos(
+async fn spendable_vtxos(
     grpc_client: &ark_grpc::Client,
-    onchain_explorer: &EsploraClient,
-    vtxos: &[DefaultVtxo],
-) -> Result<Vtxos> {
-    let mut spendable = Vec::new();
-    let mut expired = Vec::new();
+    vtxos: &[Vtxo],
+) -> Result<HashMap<Vtxo, Vec<VtxoOutPoint>>> {
+    let mut spendable_vtxos = HashMap::new();
     for vtxo in vtxos.iter() {
         // The VTXOs for the given Ark address that the Ark server tells us about.
         let vtxo_outpoints = grpc_client.list_vtxos(&vtxo.to_ark_address()).await?;
 
-        // We look to see if we can find any on-chain VTXOs for this address.
-        let onchain_vtxos = onchain_explorer.find_outpoints(vtxo.address()).await?;
-
-        for vtxo_outpoint in vtxo_outpoints.spendable {
-            let now = std::time::UNIX_EPOCH.elapsed()?;
-            match onchain_vtxos
-                .iter()
-                .find(|onchain_utxo| onchain_utxo.outpoint == vtxo_outpoint.outpoint)
-            {
-                // VTXOs that have been confirmed on the blockchain, but whose
-                // exit path is now _active_, have expired.
-                Some(ExplorerUtxo {
-                    confirmation_blocktime: Some(confirmation_blocktime),
-                    ..
-                }) if vtxo.can_be_claimed_unilaterally_by_owner(
-                    now,
-                    Duration::from_secs(*confirmation_blocktime),
-                ) =>
-                {
-                    expired.push((vtxo_outpoint, vtxo.clone()));
-                }
-                // All other VTXOs (either still offchain or on-chain but with an inactive exit
-                // path) are spendable.
-                _ => {
-                    spendable.push((vtxo_outpoint, vtxo.clone()));
-                }
-            }
-        }
+        spendable_vtxos.insert(vtxo.clone(), vtxo_outpoints.spendable);
     }
 
-    Ok(Vtxos { spendable, expired })
-}
-
-struct BoardingOutputs {
-    /// Boarding outputs that can be converted into VTXOs in collaboration with the Ark server.
-    spendable: Vec<(OutPoint, Amount, BoardingOutput)>,
-    /// Boarding outputs that should only be spent unilaterally.
-    expired: Vec<(OutPoint, Amount, BoardingOutput)>,
-    /// Boarding outputs that are not yet confirmed on-chain.
-    pending: Vec<(OutPoint, Amount, BoardingOutput)>,
-    /// Boarding outputs that were already spent.
-    _spent: Vec<(OutPoint, Amount)>,
-}
-
-impl BoardingOutputs {
-    fn spendable_balance(&self) -> Amount {
-        self.spendable.iter().fold(Amount::ZERO, |acc, x| acc + x.1)
-    }
-
-    fn expired_balance(&self) -> Amount {
-        self.expired.iter().fold(Amount::ZERO, |acc, x| acc + x.1)
-    }
-
-    fn pending_balance(&self) -> Amount {
-        self.pending.iter().fold(Amount::ZERO, |acc, x| acc + x.1)
-    }
-}
-
-async fn list_boarding_outputs(
-    onchain_explorer: &EsploraClient,
-    boarding_outputs: &[BoardingOutput],
-) -> Result<BoardingOutputs> {
-    let mut spendable = Vec::new();
-    let mut expired = Vec::new();
-    let mut pending = Vec::new();
-    let mut spent = Vec::new();
-    for boarding_output in boarding_outputs.iter() {
-        let boarding_address = boarding_output.address();
-
-        // The boarding outputs corresponding to this address that we can find on-chain.
-        let boarding_utxos = onchain_explorer.find_outpoints(boarding_address).await?;
-
-        for boarding_utxo in boarding_utxos.iter() {
-            match *boarding_utxo {
-                // The boarding output can be found on-chain.
-                ExplorerUtxo {
-                    confirmation_blocktime: Some(confirmation_blocktime),
-                    outpoint,
-                    amount,
-                    is_spent: false,
-                } => {
-                    let now = std::time::UNIX_EPOCH.elapsed()?;
-
-                    // If the boarding output is on-chain can be spent unilaterally, it has expired.
-                    if boarding_output.can_be_claimed_unilaterally_by_owner(
-                        now,
-                        Duration::from_secs(confirmation_blocktime),
-                    ) {
-                        expired.push((outpoint, amount, boarding_output.clone()));
-                    }
-                    // If the boarding output is on-chain and cannot be spent unilaterally, it is
-                    // spendable.
-                    else {
-                        spendable.push((outpoint, amount, boarding_output.clone()));
-                    }
-                }
-                // The boarding output is still pending confirmation.
-                ExplorerUtxo {
-                    confirmation_blocktime: None,
-                    outpoint,
-                    amount,
-                    is_spent: false,
-                } => {
-                    pending.push((outpoint, amount, boarding_output.clone()));
-                }
-                // The boarding output was spent.
-                ExplorerUtxo {
-                    outpoint,
-                    amount,
-                    is_spent: true,
-                    ..
-                } => spent.push((outpoint, amount)),
-            }
-        }
-    }
-
-    Ok(BoardingOutputs {
-        spendable,
-        expired,
-        pending,
-        _spent: spent,
-    })
+    Ok(spendable_vtxos)
 }
 
 async fn settle(
     grpc_client: &ark_grpc::Client,
     server_info: &ark_core::server::Info,
     sk: SecretKey,
-    vtxos: Vtxos,
-    boarding_outputs: BoardingOutputs,
+    vtxos: VirtualTxOutpoints,
+    boarding_outputs: BoardingOutpoints,
     to_address: ArkAddress,
 ) -> Result<Option<Txid>> {
     let secp = Secp256k1::new();
@@ -612,14 +512,6 @@ pub struct EsploraClient {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct ExplorerUtxo {
-    pub outpoint: OutPoint,
-    pub amount: Amount,
-    pub confirmation_blocktime: Option<u64>,
-    pub is_spent: bool,
-}
-
-#[derive(Clone, Copy, Debug)]
 pub struct SpendStatus {
     pub spend_txid: Option<Txid>,
 }
@@ -701,7 +593,7 @@ async fn transaction_history(
     grpc_client: &ark_grpc::Client,
     onchain_explorer: &EsploraClient,
     boarding_addresses: &[bitcoin::Address],
-    vtxos: &[DefaultVtxo],
+    vtxos: &[Vtxo],
 ) -> Result<Vec<ArkTransaction>> {
     let mut boarding_transactions = Vec::new();
     let mut boarding_round_transactions = Vec::new();

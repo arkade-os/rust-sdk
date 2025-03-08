@@ -94,9 +94,9 @@ pub async fn concurrent_boarding() {
     assert_eq!(claire_offchain_balance.confirmed(), claire_fund_amount);
     assert_eq!(claire_offchain_balance.pending(), Amount::ZERO);
 
-    let (alice_offchain_address, _) = alice.get_offchain_address();
-    let (bob_offchain_address, _) = bob.get_offchain_address();
-    let (claire_offchain_address, _) = claire.get_offchain_address();
+    let (alice_offchain_address, _) = alice.get_offchain_address().unwrap();
+    let (bob_offchain_address, _) = bob.get_offchain_address().unwrap();
+    let (claire_offchain_address, _) = claire.get_offchain_address().unwrap();
 
     let alice_to_bob_send_amount = Amount::from_sat(100_000);
     let bob_to_claire_send_amount = Amount::from_sat(50_000);
