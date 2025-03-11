@@ -39,6 +39,7 @@
             # TODO: Trim these.
             buildInputs = [
               binaryen
+              dprint
               gcc
               go
               jq
