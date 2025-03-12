@@ -12,7 +12,7 @@ env:
   CARGO_INCREMENTAL: 0
   CARGO_TERM_COLOR: always
   ARK_GO_DIR: ./ark-go
-  CLARKD_DIR: ./ark-go/ark/server
+  ARKD_DIR: ./ark-go/ark/server
 
 jobs:
   build-tests:
@@ -103,7 +103,7 @@ jobs:
 
       - name: Run go work sync
         run: |
-          cd $CLARKD_DIR
+          cd $ARKD_DIR
           go work sync
 
       - name: Build arkd server
