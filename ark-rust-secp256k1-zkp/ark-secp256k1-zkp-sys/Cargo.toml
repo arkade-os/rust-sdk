@@ -14,6 +14,7 @@ keywords = [ "secp256k1", "libsecp256k1-zkp", "ffi" ]
 readme = "README.md"
 build = "build.rs"
 links = "rustsecp256k1zkp_v0_8_0"
+edition = "2015"
 
 # Should make docs.rs show all functions, even those behind non-default features
 [package.metadata.docs.rs]
