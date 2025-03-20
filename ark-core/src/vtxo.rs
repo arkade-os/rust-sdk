@@ -91,7 +91,7 @@ impl Vtxo {
         };
 
         let exit_delay_seconds = match exit_delay.to_relative_lock_time() {
-            Some(relative::LockTime::Time(time)) => time.value() * 512,
+            Some(relative::LockTime::Time(time)) => time.value() as u64 * 512,
             _ => unreachable!("VTXO redeem script must use relative lock time in seconds"),
         };
 
@@ -105,7 +105,7 @@ impl Vtxo {
             extra_scripts,
             address,
             exit_delay,
-            exit_delay_seconds: exit_delay_seconds as u64,
+            exit_delay_seconds,
             network,
         })
     }
