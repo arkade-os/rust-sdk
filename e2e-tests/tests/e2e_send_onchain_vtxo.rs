@@ -113,6 +113,13 @@ async fn wait_until_balance(
         loop {
             let offchain_balance = client.offchain_balance().await.unwrap();
 
+            tracing::debug!(
+                ?offchain_balance,
+                %confirmed_target,
+                %pending_target,
+                "Waiting for balance to match targets"
+            );
+
             if offchain_balance.confirmed() == confirmed_target
                 && offchain_balance.pending() == pending_target
             {
