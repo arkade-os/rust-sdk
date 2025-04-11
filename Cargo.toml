@@ -9,6 +9,7 @@ members = [
   "ark-sample",
   "ark-rust-secp256k1-zkp",
   "ark-rs",
+  "ark-web-app"
 ]
 
 resolver = "2"
