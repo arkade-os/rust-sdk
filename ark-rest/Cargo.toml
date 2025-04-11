@@ -1,9 +1,9 @@
 [package]
 name = "ark-rest"
-description = "REST client for Ark server communication"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+description = "REST client for Ark server communication"
 
 [dependencies]
 ark-core = { path = "../ark-core", version = "0.1.0" }

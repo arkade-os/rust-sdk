@@ -1,9 +1,9 @@
 [package]
 name = "ark-client"
-description = "Main client library for interacting with Ark servers"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+description = "Main client library for interacting with Ark servers"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(genproto)'] }
