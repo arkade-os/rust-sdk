@@ -185,8 +185,12 @@ message SubmitRedeemTxRequest {
   string redeem_tx = 1;
 }
 message SubmitRedeemTxResponse {
+  // The signed redeem transaction for the current submission
   string signed_redeem_tx = 1;
+  // The transaction ID of the current redeem transaction
   string txid = 2;
+  // The complete chain of ancestor redeem transactions that must be confirmed first
+  repeated string ancestor_redeem_txs = 3;
 }
 
 message GetTransactionsStreamRequest {}

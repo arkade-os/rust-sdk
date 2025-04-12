@@ -146,9 +146,10 @@ pub struct VtxoOutPoint {
     pub expire_at: i64,
     pub swept: bool,
     pub is_pending: bool,
-    /// The redeem transaction which has this [`VtxoOutPoint`] as an output. The txid matches the
-    /// TXID of the `outpoint` field.
-    pub redeem_tx: Option<Psbt>,
+    /// The chain of redeem transactions that lead to this VTXO, ordered from earliest to latest.
+    /// Each transaction in this list spends a VTXO output from the previous transaction,
+    /// forming a chain from the round transaction to this VTXO.
+    pub redeem_txs: Vec<Psbt>,
     pub amount: Amount,
     pub pubkey: String,
     pub created_at: i64,
