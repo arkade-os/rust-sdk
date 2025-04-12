@@ -266,7 +266,7 @@ impl VtxoProvenance {
         Self {
             outpoint,
             round_txid,
-            redeem_txs,
+            redeem_txs: redeem_transactions,
         }
     }
 
@@ -317,14 +317,10 @@ pub fn prepare_vtxo_tree_transactions(
     let mut tx_set = HashSet::new();
 
     // First process all redeem transaction chains
-    for VtxoProvenance {
-        redeem_txs,
-        ..
-    } in vtxos.iter()
-    {
+    for vtxo in vtxos.iter() {
         // Add all redeem transactions in order (they are already ordered from earliest to latest)
-        if !redeem_txs.is_empty() {
-            for psbt in redeem_txs.iter() {
+        if !vtxo.redeem_txs.is_empty() {
+            for psbt in vtxo.redeem_txs.iter() {
                 let tx = psbt.clone().extract_tx().map_err(Error::transaction)?;
                 let txid = tx.compute_txid();
                 if !tx_set.contains(&txid) {
@@ -337,8 +333,8 @@ pub fn prepare_vtxo_tree_transactions(
 
         // If no redeem transactions, proceed with VTXO tree processing
         let round = rounds
-            .get(round_txid)
-            .ok_or_else(|| Error::ad_hoc(format!("missing info for round {round_txid}")))?;
+            .get(&vtxo.round_txid)
+            .ok_or_else(|| Error::ad_hoc(format!("missing info for round {}", vtxo.round_txid)))?;
 
         let round_psbt = &round.round_tx;
 
@@ -347,13 +343,13 @@ pub fn prepare_vtxo_tree_transactions(
             .clone()
             .extract_tx()
             .map_err(Error::transaction)?;
-        let round_txid = round_tx.compute_txid();
+        let _round_txid = round_tx.compute_txid();
 
         let vtxo_tree = round.vtxo_tree.clone();
 
         let root = &vtxo_tree.levels[0].nodes[0];
 
-        let vtxo_txid = outpoint.txid;
+        let vtxo_txid = vtxo.outpoint.txid;
         let leaf_node = vtxo_tree
             .levels
             .last()

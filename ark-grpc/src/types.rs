@@ -71,7 +71,7 @@ impl TryFrom<&generated::ark::v1::Vtxo> for server::VtxoOutPoint {
             
             while !psbt_data.is_empty() {
                 let psbt = Psbt::deserialize(&psbt_data).map_err(Error::conversion)?;
-                redeem_txs.push(psbt);
+                redeem_txs.push(psbt.clone());
                 
                 let consumed = psbt.serialize().len();
                 psbt_data = psbt_data.split_off(consumed);
@@ -116,16 +116,25 @@ impl From<server::VtxoOutPoint> for generated::ark::v1::Vtxo {
 
         Self {
             outpoint: Some(value.outpoint.into()),
-            spent: Some(value.spent),
-            round_txid: Some(value.round_txid.to_string()),
-            spent_by: Some(value.spent_by.map_or_else(String::new, |txid| txid.to_string())),
-            expire_at: Some(value.expire_at),
-            swept: Some(value.swept),
-            is_pending: Some(value.is_pending),
-            redeem_tx: Some(redeem_tx),
-            amount: Some(value.amount.to_sat()),
-            pubkey: Some(value.pubkey.to_string()),
-            created_at: Some(value.created_at),
+            spent: value.spent,
+            round_txid: value.round_txid.to_string(),
+            spent_by: value.spent_by.map_or_else(String::new, |txid| txid.to_string()),
+            expire_at: value.expire_at,
+            swept: value.swept,
+            is_pending: value.is_pending,
+            redeem_tx,
+            amount: value.amount.to_sat(),
+            pubkey: value.pubkey,
+            created_at: value.created_at,
+        }
+    }
+}
+
+impl From<OutPoint> for generated::ark::v1::Outpoint {
+    fn from(value: OutPoint) -> Self {
+        Self {
+            txid: value.txid.to_string(),
+            vout: value.vout,
         }
     }
 }
