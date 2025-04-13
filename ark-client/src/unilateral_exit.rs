@@ -18,6 +18,7 @@ use bitcoin::TxOut;
 use bitcoin::Txid;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 // TODO: We should not _need_ to connect to the Ark server to perform unilateral exit. Currently we
 // do talk to the Ark server for simplicity.
@@ -36,15 +37,15 @@ where
             .flat_map(|(vtxo_outpoints, _)| {
                 vtxo_outpoints
                     .into_iter()
-                    .map(|vtxo_outpoint| match vtxo_outpoint.redeem_tx {
-                        Some(redeem_transaction) => {
+                    .map(|vtxo_outpoint| match &vtxo_outpoint.redeem_txs {
+                        redeem_txs if !redeem_txs.is_empty() => {
                             unilateral_exit::VtxoProvenance::new_unconfirmed(
                                 vtxo_outpoint.outpoint,
                                 vtxo_outpoint.round_txid,
-                                redeem_transaction,
+                                redeem_txs.clone(),
                             )
                         }
-                        None => unilateral_exit::VtxoProvenance::new(
+                        _ => unilateral_exit::VtxoProvenance::new(
                             vtxo_outpoint.outpoint,
                             vtxo_outpoint.round_txid,
                         ),
@@ -72,8 +73,41 @@ where
 
         let blockchain = &self.blockchain();
 
-        let off_board_txs_len = off_board_txs.len();
-        for (i, tx) in off_board_txs.iter().enumerate() {
+        // Sort transactions by dependency order - ancestors must be broadcast before descendants
+        let mut sorted_txs = Vec::new();
+        let mut processed_txids = HashSet::new();
+        
+        // Helper function to recursively add transactions in dependency order
+        fn add_tx_with_deps(
+            tx: &Transaction,
+            all_txs: &[Transaction],
+            sorted_txs: &mut Vec<Transaction>,
+            processed_txids: &mut HashSet<Txid>,
+        ) {
+            // Skip if already processed
+            if processed_txids.contains(&tx.compute_txid()) {
+                return;
+            }
+
+            // First add all parent transactions
+            for input in tx.input.iter() {
+                if let Some(parent_tx) = all_txs.iter().find(|t| t.compute_txid() == input.previous_output.txid) {
+                    add_tx_with_deps(parent_tx, all_txs, sorted_txs, processed_txids);
+                }
+            }
+
+            // Then add this transaction
+            sorted_txs.push(tx.clone());
+            processed_txids.insert(tx.compute_txid());
+        }
+
+        // Sort all transactions by dependency order
+        for tx in off_board_txs.iter() {
+            add_tx_with_deps(tx, &off_board_txs, &mut sorted_txs, &mut processed_txids);
+        }
+
+        // Broadcast transactions in order
+        for tx in sorted_txs.iter() {
             let txid = tx.compute_txid();
 
             let is_not_published = blockchain.find_tx(&txid).await?.is_none();
@@ -84,7 +118,6 @@ where
                 broadcast
                     .retry(ExponentialBuilder::default().with_max_times(5))
                     .sleep(sleep)
-                    // TODO: Use `when` to only retry certain errors.
                     .notify(|err: &Error, dur: std::time::Duration| {
                         tracing::warn!(
                             "Retrying broadcasting VTXO transaction {txid} after {dur:?}. Error: {err}",
@@ -93,7 +126,7 @@ where
                     .await
                     .with_context(|| format!("Failed to broadcast VTXO transaction {txid}"))?;
 
-                tracing::info!(%txid, i, total_txs = off_board_txs_len, "Broadcasted VTXO transaction");
+                tracing::info!(%txid, "Broadcasted VTXO transaction");
             }
         }
 

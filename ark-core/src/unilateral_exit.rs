@@ -249,11 +249,8 @@ pub struct VtxoProvenance {
     outpoint: OutPoint,
     /// The ID of the round transaction from which this VTXO comes from.
     round_txid: Txid,
-    /// If this is an unconfirmed (out-of-round) VTXO, this is the redeem transaction the VTXO is
-    /// an output of.
-    // TODO: Given that an unconfirmed VTXO can come from another unconfirmed VTXO, one transaction
-    // is not enough! Thus, this should be a list.
-    redeem_transaction: Option<Psbt>,
+    /// Chain of redeem transactions for unconfirmed VTXOs
+    redeem_txs: Vec<Psbt>,
 }
 
 impl VtxoProvenance {
@@ -261,15 +258,15 @@ impl VtxoProvenance {
         Self {
             outpoint,
             round_txid,
-            redeem_transaction: None,
+            redeem_txs: Vec::new(),
         }
     }
 
-    pub fn new_unconfirmed(outpoint: OutPoint, round_txid: Txid, redeem_transaction: Psbt) -> Self {
+    pub fn new_unconfirmed(outpoint: OutPoint, round_txid: Txid, redeem_transactions: Vec<Psbt>) -> Self {
         Self {
             outpoint,
             round_txid,
-            redeem_transaction: Some(redeem_transaction),
+            redeem_txs: redeem_transactions,
         }
     }
 
@@ -316,28 +313,28 @@ pub fn prepare_vtxo_tree_transactions(
     vtxos: &[VtxoProvenance],
     rounds: HashMap<Txid, Round>,
 ) -> Result<Vec<Transaction>, Error> {
-    let mut vtxo_trees = HashMap::new();
-    let mut redeem_branches = HashMap::new();
-    for VtxoProvenance {
-        outpoint,
-        round_txid,
-        redeem_transaction,
-    } in vtxos.iter()
-    {
-        let round = rounds
-            .get(round_txid)
-            .ok_or_else(|| Error::ad_hoc(format!("missing info for round {round_txid}")))?;
+    let mut all_txs = Vec::new();
+    let mut tx_set = HashSet::new();
 
-        // TODO: If this VTXO is an output of a redeem transaction, we should walk back up the chain
-        // of redeem transactions and the VTXO tree to unilaterally off-board this VTXO.
-        if redeem_transaction.is_some() {
-            tracing::warn!(
-                %outpoint,
-                "Spending unconfirmed VTXOs unilaterally is not supported yet. Skipping"
-            );
-
+    // First process all redeem transaction chains
+    for vtxo in vtxos.iter() {
+        // Add all redeem transactions in order (they are already ordered from earliest to latest)
+        if !vtxo.redeem_txs.is_empty() {
+            for psbt in vtxo.redeem_txs.iter() {
+                let tx = psbt.clone().extract_tx().map_err(Error::transaction)?;
+                let txid = tx.compute_txid();
+                if !tx_set.contains(&txid) {
+                    tx_set.insert(txid);
+                    all_txs.push(tx);
+                }
+            }
             continue;
         }
+
+        // If no redeem transactions, proceed with VTXO tree processing
+        let round = rounds
+            .get(&vtxo.round_txid)
+            .ok_or_else(|| Error::ad_hoc(format!("missing info for round {}", vtxo.round_txid)))?;
 
         let round_psbt = &round.round_tx;
 
@@ -346,16 +343,13 @@ pub fn prepare_vtxo_tree_transactions(
             .clone()
             .extract_tx()
             .map_err(Error::transaction)?;
-        let round_txid = round_tx.compute_txid();
-        vtxo_trees
-            .entry(round_txid)
-            .or_insert_with(|| round.vtxo_tree.clone());
+        let _round_txid = round_tx.compute_txid();
 
-        let vtxo_tree = vtxo_trees.get(&round_txid).expect("is there");
+        let vtxo_tree = round.vtxo_tree.clone();
 
         let root = &vtxo_tree.levels[0].nodes[0];
 
-        let vtxo_txid = outpoint.txid;
+        let vtxo_txid = vtxo.outpoint.txid;
         let leaf_node = vtxo_tree
             .levels
             .last()
@@ -382,12 +376,8 @@ pub fn prepare_vtxo_tree_transactions(
             .map(|node| node.tx.clone())
             .collect::<Vec<_>>();
 
-        redeem_branches.insert(vtxo_txid, (RedeemBranch { branch }, round_psbt.clone()));
-    }
+        let redeem_branch = RedeemBranch { branch };
 
-    let mut tx_set = HashSet::new();
-    let mut all_txs = Vec::new();
-    for (redeem_branch, round_psbt) in redeem_branches.values() {
         for psbt in redeem_branch.branch.iter() {
             let mut psbt = psbt.clone();
 

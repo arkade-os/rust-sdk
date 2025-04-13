@@ -327,7 +327,7 @@ mod tests {
             expire_at: 1730934927,
             swept: false,
             is_pending: false,
-            redeem_tx: None,
+            redeem_txs: Vec::new(),
             amount: Amount::from_sat(20_000),
             pubkey: "fc3ed4822401bc75858c6a7e08a974c68a777bcf87e6ba535d48afab7d00cf5f"
                 .parse()
@@ -372,7 +372,7 @@ mod tests {
             expire_at: 1730934927,
             swept: false,
             is_pending: true,
-            redeem_tx: Some("cHNidP8BAIkCAAAAAX5SNz6Ces7ONgkhFk5+zIziPh99YTqjOReeOIKmrkYmAAAAAAD/////AugDAAAAAAAAIlEgqlhusFLr8eZ29t9OrzWRyQ1WqXmHGu+ptn5WGMt8DyVgSQAAAAAAACJRIPw+1IIkAbx1hYxqfgipdMaKd3vPh+a6U11Ir6t9AM9fAAAAAAABASsgTgAAAAAAACJRIPw+1IIkAbx1hYxqfgipdMaKd3vPh+a6U11Ir6t9AM9fQRRzba+JiJXvEqldJ7Squ3RSy3Tygj+kNcbZ9sdwtY13kLn0kC6mChU9UVqsaZC/ptUXmqKnA1BqwBIdRoXN3UIQQPXRlndrrsGBbJZ0P1+K+UWTytCU+O1AZbfg/APqOYkI+e7ne0BRtQVTKu2V8mEMydDRmpy5UCGcr9ZhfRRr6d1BFL+NVPnBYGBLoEcv5/9swwUPUfu0KQNTf5WWzvL0XQGlufSQLqYKFT1RWqxpkL+m1ReaoqcDUGrAEh1Ghc3dQhBANfxQ5evXPI16w88zj7VkcarvA6MUPKjTKmOTzAnYGHUb2GkQa6Ixdg+s/z+Nt5jMyL+KUsiLsuoFeat5dn6r3UIVwVCSm3TBoElUt4tLYDXpel4HiloPKOyW1Ue/7prOgDrASdfU5FE/s1XZ2TstJV7kIKp/CP0Z2eTjaXuvl4qCX/NFIHNtr4mIle8SqV0ntKq7dFLLdPKCP6Q1xtn2x3C1jXeQrSC/jVT5wWBgS6BHL+f/bMMFD1H7tCkDU3+Vls7y9F0BpazAAAAA".parse().unwrap()),
+            redeem_txs: Vec::new(),
             amount: Amount::from_sat(18_784),
             pubkey: "fc3ed4822401bc75858c6a7e08a974c68a777bcf87e6ba535d48afab7d00cf5f"
                 .parse()
@@ -399,7 +399,7 @@ mod tests {
             expire_at: 1730934927,
             swept: false,
             is_pending: false,
-            redeem_tx: None,
+            redeem_txs: Vec::new(),
             amount: Amount::from_sat(20_000),
             pubkey: "fc3ed4822401bc75858c6a7e08a974c68a777bcf87e6ba535d48afab7d00cf5f"
                 .parse()
@@ -449,7 +449,7 @@ mod tests {
             expire_at: 1730934927,
             swept: false,
             is_pending: true,
-            redeem_tx: Some("cHNidP8BAIkCAAAAAX5SNz6Ces7ONgkhFk5+zIziPh99YTqjOReeOIKmrkYmAAAAAAD/////AugDAAAAAAAAIlEgqlhusFLr8eZ29t9OrzWRyQ1WqXmHGu+ptn5WGMt8DyVgSQAAAAAAACJRIPw+1IIkAbx1hYxqfgipdMaKd3vPh+a6U11Ir6t9AM9fAAAAAAABASsgTgAAAAAAACJRIPw+1IIkAbx1hYxqfgipdMaKd3vPh+a6U11Ir6t9AM9fQRRzba+JiJXvEqldJ7Squ3RSy3Tygj+kNcbZ9sdwtY13kLn0kC6mChU9UVqsaZC/ptUXmqKnA1BqwBIdRoXN3UIQQPXRlndrrsGBbJZ0P1+K+UWTytCU+O1AZbfg/APqOYkI+e7ne0BRtQVTKu2V8mEMydDRmpy5UCGcr9ZhfRRr6d1BFL+NVPnBYGBLoEcv5/9swwUPUfu0KQNTf5WWzvL0XQGlufSQLqYKFT1RWqxpkL+m1ReaoqcDUGrAEh1Ghc3dQhBANfxQ5evXPI16w88zj7VkcarvA6MUPKjTKmOTzAnYGHUb2GkQa6Ixdg+s/z+Nt5jMyL+KUsiLsuoFeat5dn6r3UIVwVCSm3TBoElUt4tLYDXpel4HiloPKOyW1Ue/7prOgDrASdfU5FE/s1XZ2TstJV7kIKp/CP0Z2eTjaXuvl4qCX/NFIHNtr4mIle8SqV0ntKq7dFLLdPKCP6Q1xtn2x3C1jXeQrSC/jVT5wWBgS6BHL+f/bMMFD1H7tCkDU3+Vls7y9F0BpazAAAAA".parse().unwrap()),
+            redeem_txs: Vec::new(),
             amount: Amount::from_sat(1_000),
             pubkey: "aa586eb052ebf1e676f6df4eaf3591c90d56a979871aefa9b67e5618cb7c0f25"
                 .parse()
@@ -470,7 +470,7 @@ mod tests {
             expire_at: 1730935548,
             swept: false,
             is_pending: true,
-            redeem_tx: Some("cHNidP8BAIkCAAAAAT7y41Cb5k0SMpEYaB/3NLlJ8leksHt08k6sK2gRlx3/AAAAAAD/////AtAHAAAAAAAAIlEgqlhusFLr8eZ29t9OrzWRyQ1WqXmHGu+ptn5WGMt8DyVoHgAAAAAAACJRIHnxG3UzOEn7H8oZrxQCVXCjoUVhUEBBgzDLu8ARqongAAAAAAABASsQJwAAAAAAACJRIHnxG3UzOEn7H8oZrxQCVXCjoUVhUEBBgzDLu8ARqongQRRzba+JiJXvEqldJ7Squ3RSy3Tygj+kNcbZ9sdwtY13kH1QsQK/Pk7/PqAmUThCuTCfbTo69ePAgzsvSuR97VgUQBSvpq/lJ7+uc8nyWwV5sCRukn5TnOybRHCjCOUPviykP6C+ue768mRDK6PxQ5FpNJhHmNLpfdTbIQwGCNIJr7pBFOchVKNhwXJqAhCx+u7ObLBb4YqW5vA1iW45rGgxtmP7fVCxAr8+Tv8+oCZROEK5MJ9tOjr148CDOy9K5H3tWBRALxMyiBhy6eGAHjj0OJ+LRFYI8PCIplSLl+SqfMLoSHZzsXkDIyDcLdV6w4Vvq4oBQN+lfKAX2IKZGB0WUGavn0IVwVCSm3TBoElUt4tLYDXpel4HiloPKOyW1Ue/7prOgDrAL6zdBmWt8+odVYaSKdWl60i5qQGel8jvirsvt2ageslFIHNtr4mIle8SqV0ntKq7dFLLdPKCP6Q1xtn2x3C1jXeQrSDnIVSjYcFyagIQsfruzmywW+GKlubwNYluOaxoMbZj+6zAAAAA".parse().unwrap()),
+            redeem_txs: Vec::new(),
             amount: Amount::from_sat(2_000),
             pubkey: "aa586eb052ebf1e676f6df4eaf3591c90d56a979871aefa9b67e5618cb7c0f25"
                 .parse()
@@ -531,7 +531,7 @@ mod tests {
             expire_at: 1730935835,
             swept: false,
             is_pending: false,
-            redeem_tx: None,
+            redeem_txs: Vec::new(),
             amount: Amount::from_sat(3_000),
             pubkey: "aa586eb052ebf1e676f6df4eaf3591c90d56a979871aefa9b67e5618cb7c0f25"
                 .parse()
@@ -554,7 +554,7 @@ mod tests {
             expire_at: 1730934927,
             swept: false,
             is_pending: true,
-            redeem_tx: Some("cHNidP8BAIkCAAAAAX5SNz6Ces7ONgkhFk5+zIziPh99YTqjOReeOIKmrkYmAAAAAAD/////AugDAAAAAAAAIlEgqlhusFLr8eZ29t9OrzWRyQ1WqXmHGu+ptn5WGMt8DyVgSQAAAAAAACJRIPw+1IIkAbx1hYxqfgipdMaKd3vPh+a6U11Ir6t9AM9fAAAAAAABASsgTgAAAAAAACJRIPw+1IIkAbx1hYxqfgipdMaKd3vPh+a6U11Ir6t9AM9fQRRzba+JiJXvEqldJ7Squ3RSy3Tygj+kNcbZ9sdwtY13kLn0kC6mChU9UVqsaZC/ptUXmqKnA1BqwBIdRoXN3UIQQPXRlndrrsGBbJZ0P1+K+UWTytCU+O1AZbfg/APqOYkI+e7ne0BRtQVTKu2V8mEMydDRmpy5UCGcr9ZhfRRr6d1BFL+NVPnBYGBLoEcv5/9swwUPUfu0KQNTf5WWzvL0XQGlufSQLqYKFT1RWqxpkL+m1ReaoqcDUGrAEh1Ghc3dQhBANfxQ5evXPI16w88zj7VkcarvA6MUPKjTKmOTzAnYGHUb2GkQa6Ixdg+s/z+Nt5jMyL+KUsiLsuoFeat5dn6r3UIVwVCSm3TBoElUt4tLYDXpel4HiloPKOyW1Ue/7prOgDrASdfU5FE/s1XZ2TstJV7kIKp/CP0Z2eTjaXuvl4qCX/NFIHNtr4mIle8SqV0ntKq7dFLLdPKCP6Q1xtn2x3C1jXeQrSC/jVT5wWBgS6BHL+f/bMMFD1H7tCkDU3+Vls7y9F0BpazAAAAA".parse().unwrap()),
+            redeem_txs: Vec::new(),
             amount: Amount::from_sat(1_000),
             pubkey: "aa586eb052ebf1e676f6df4eaf3591c90d56a979871aefa9b67e5618cb7c0f25"
                 .parse()
@@ -575,12 +575,33 @@ mod tests {
             expire_at: 1730935548,
             swept: false,
             is_pending: true,
-            redeem_tx: Some("cHNidP8BAIkCAAAAAT7y41Cb5k0SMpEYaB/3NLlJ8leksHt08k6sK2gRlx3/AAAAAAD/////AtAHAAAAAAAAIlEgqlhusFLr8eZ29t9OrzWRyQ1WqXmHGu+ptn5WGMt8DyVoHgAAAAAAACJRIHnxG3UzOEn7H8oZrxQCVXCjoUVhUEBBgzDLu8ARqongAAAAAAABASsQJwAAAAAAACJRIHnxG3UzOEn7H8oZrxQCVXCjoUVhUEBBgzDLu8ARqongQRRzba+JiJXvEqldJ7Squ3RSy3Tygj+kNcbZ9sdwtY13kH1QsQK/Pk7/PqAmUThCuTCfbTo69ePAgzsvSuR97VgUQBSvpq/lJ7+uc8nyWwV5sCRukn5TnOybRHCjCOUPviykP6C+ue768mRDK6PxQ5FpNJhHmNLpfdTbIQwGCNIJr7pBFOchVKNhwXJqAhCx+u7ObLBb4YqW5vA1iW45rGgxtmP7fVCxAr8+Tv8+oCZROEK5MJ9tOjr148CDOy9K5H3tWBRALxMyiBhy6eGAHjj0OJ+LRFYI8PCIplSLl+SqfMLoSHZzsXkDIyDcLdV6w4Vvq4oBQN+lfKAX2IKZGB0WUGavn0IVwVCSm3TBoElUt4tLYDXpel4HiloPKOyW1Ue/7prOgDrAL6zdBmWt8+odVYaSKdWl60i5qQGel8jvirsvt2ageslFIHNtr4mIle8SqV0ntKq7dFLLdPKCP6Q1xtn2x3C1jXeQrSDnIVSjYcFyagIQsfruzmywW+GKlubwNYluOaxoMbZj+6zAAAAA".parse().unwrap()),
+            redeem_txs: Vec::new(),
             amount: Amount::from_sat(2_000),
             pubkey: "aa586eb052ebf1e676f6df4eaf3591c90d56a979871aefa9b67e5618cb7c0f25"
                 .parse()
                 .unwrap(),
             created_at: 1730330748,
+        }, VtxoOutPoint {
+            outpoint: OutPoint {
+                txid: "d9c95372c0c419fd007005edd54e21dabac0375a37fc5f17c313bc1e5f483af9"
+                    .parse()
+                    .unwrap(),
+                vout: 0,
+            },
+            spent: true,
+            round_txid: "7fd65ce87e0f9a7af583593d5b0124aabd65c97e05159525d0a98201d6ae95a4"
+                .parse()
+                .unwrap(),
+            spent_by: Some("c59004f8c468a922216f513ec7d63d9b6a13571af0bacd51910709351d27fe55".parse().unwrap()),
+            expire_at: 1730935835,
+            swept: false,
+            is_pending: false,
+            redeem_txs: Vec::new(),
+            amount: Amount::from_sat(3_000),
+            pubkey: "aa586eb052ebf1e676f6df4eaf3591c90d56a979871aefa9b67e5618cb7c0f25"
+                .parse()
+                .unwrap(),
+            created_at: 1730331035,
         }];
 
         let mut inc_txs =
@@ -634,7 +655,7 @@ mod tests {
             expire_at: 1730935835,
             swept: false,
             is_pending: true,
-            redeem_tx: Some("cHNidP8BAIkCAAAAAfk6SF8evBPDF1/8N1o3wLraIU7V7QVwAP0ZxMByU8nZAAAAAAD/////AjQIAAAAAAAAIlEgefEbdTM4SfsfyhmvFAJVcKOhRWFQQEGDMMu7wBGqieCsAgAAAAAAACJRIKpYbrBS6/HmdvbfTq81kckNVql5hxrvqbZ+VhjLfA8lAAAAAAABASu4CwAAAAAAACJRIKpYbrBS6/HmdvbfTq81kckNVql5hxrvqbZ+VhjLfA8lQRRzba+JiJXvEqldJ7Squ3RSy3Tygj+kNcbZ9sdwtY13kMkuxL2rXufbKxVtT1EaM9Vz7X2fpReM0c3VdBGWLTt6QOQzMhmzDjjLlb76u3ZS/xfu4DdmpxClsIAtAjvKhMycpjoPpLqdFMZkfRR3hM6rSUHpED+NY2UdqCyyh4EhZKVBFIdwPOfQj0BBcg2i+i3lRh1pA4SOHkW+q0rabgNGEdfiyS7Evate59srFW1PURoz1XPtfZ+lF4zRzdV0EZYtO3pAVlbcq0Z0Fh/BHSNd6IDksw8RC0fitTYPdnaWOmAlUHmH9d343v25QSc6q/2HdE8VoQi3+sQ6cS3Xm+EWBClZAUIVwFCSm3TBoElUt4tLYDXpel4HiloPKOyW1Ue/7prOgDrAUNUCehfUMhBKXlquGl4TQ7nsvjlxxe9WfEPi4eN3DDtFIHNtr4mIle8SqV0ntKq7dFLLdPKCP6Q1xtn2x3C1jXeQrSCHcDzn0I9AQXINovot5UYdaQOEjh5FvqtK2m4DRhHX4qzAAAAA".parse().unwrap()),
+            redeem_txs: Vec::new(),
             amount: Amount::from_sat(684),
             pubkey: "aa586eb052ebf1e676f6df4eaf3591c90d56a979871aefa9b67e5618cb7c0f25"
                 .parse()
@@ -658,7 +679,7 @@ mod tests {
                 expire_at: 1730934927,
                 swept: false,
                 is_pending: true,
-                redeem_tx: Some("cHNidP8BAIkCAAAAAX5SNz6Ces7ONgkhFk5+zIziPh99YTqjOReeOIKmrkYmAAAAAAD/////AugDAAAAAAAAIlEgqlhusFLr8eZ29t9OrzWRyQ1WqXmHGu+ptn5WGMt8DyVgSQAAAAAAACJRIPw+1IIkAbx1hYxqfgipdMaKd3vPh+a6U11Ir6t9AM9fAAAAAAABASsgTgAAAAAAACJRIPw+1IIkAbx1hYxqfgipdMaKd3vPh+a6U11Ir6t9AM9fQRRzba+JiJXvEqldJ7Squ3RSy3Tygj+kNcbZ9sdwtY13kLn0kC6mChU9UVqsaZC/ptUXmqKnA1BqwBIdRoXN3UIQQPXRlndrrsGBbJZ0P1+K+UWTytCU+O1AZbfg/APqOYkI+e7ne0BRtQVTKu2V8mEMydDRmpy5UCGcr9ZhfRRr6d1BFL+NVPnBYGBLoEcv5/9swwUPUfu0KQNTf5WWzvL0XQGlufSQLqYKFT1RWqxpkL+m1ReaoqcDUGrAEh1Ghc3dQhBANfxQ5evXPI16w88zj7VkcarvA6MUPKjTKmOTzAnYGHUb2GkQa6Ixdg+s/z+Nt5jMyL+KUsiLsuoFeat5dn6r3UIVwVCSm3TBoElUt4tLYDXpel4HiloPKOyW1Ue/7prOgDrASdfU5FE/s1XZ2TstJV7kIKp/CP0Z2eTjaXuvl4qCX/NFIHNtr4mIle8SqV0ntKq7dFLLdPKCP6Q1xtn2x3C1jXeQrSC/jVT5wWBgS6BHL+f/bMMFD1H7tCkDU3+Vls7y9F0BpazAAAAA".parse().unwrap()),
+                redeem_txs: Vec::new(),
                 amount: Amount::from_sat(1_000),
                 pubkey: "aa586eb052ebf1e676f6df4eaf3591c90d56a979871aefa9b67e5618cb7c0f25"
                     .parse()
@@ -680,7 +701,7 @@ mod tests {
                 expire_at: 1730935548,
                 swept: false,
                 is_pending: true,
-                redeem_tx: Some("cHNidP8BAIkCAAAAAT7y41Cb5k0SMpEYaB/3NLlJ8leksHt08k6sK2gRlx3/AAAAAAD/////AtAHAAAAAAAAIlEgqlhusFLr8eZ29t9OrzWRyQ1WqXmHGu+ptn5WGMt8DyVoHgAAAAAAACJRIHnxG3UzOEn7H8oZrxQCVXCjoUVhUEBBgzDLu8ARqongAAAAAAABASsQJwAAAAAAACJRIHnxG3UzOEn7H8oZrxQCVXCjoUVhUEBBgzDLu8ARqongQRRzba+JiJXvEqldJ7Squ3RSy3Tygj+kNcbZ9sdwtY13kH1QsQK/Pk7/PqAmUThCuTCfbTo69ePAgzsvSuR97VgUQBSvpq/lJ7+uc8nyWwV5sCRukn5TnOybRHCjCOUPviykP6C+ue768mRDK6PxQ5FpNJhHmNLpfdTbIQwGCNIJr7pBFOchVKNhwXJqAhCx+u7ObLBb4YqW5vA1iW45rGgxtmP7fVCxAr8+Tv8+oCZROEK5MJ9tOjr148CDOy9K5H3tWBRALxMyiBhy6eGAHjj0OJ+LRFYI8PCIplSLl+SqfMLoSHZzsXkDIyDcLdV6w4Vvq4oBQN+lfKAX2IKZGB0WUGavn0IVwVCSm3TBoElUt4tLYDXpel4HiloPKOyW1Ue/7prOgDrAL6zdBmWt8+odVYaSKdWl60i5qQGel8jvirsvt2ageslFIHNtr4mIle8SqV0ntKq7dFLLdPKCP6Q1xtn2x3C1jXeQrSDnIVSjYcFyagIQsfruzmywW+GKlubwNYluOaxoMbZj+6zAAAAA".parse().unwrap()),
+                redeem_txs: Vec::new(),
                 amount: Amount::from_sat(2_000),
                 pubkey: "aa586eb052ebf1e676f6df4eaf3591c90d56a979871aefa9b67e5618cb7c0f25"
                     .parse()
@@ -702,7 +723,7 @@ mod tests {
                 expire_at: 1730935835,
                 swept: false,
                 is_pending: false,
-                redeem_tx: None,
+                redeem_txs: Vec::new(),
                 amount: Amount::from_sat(3_000),
                 pubkey: "aa586eb052ebf1e676f6df4eaf3591c90d56a979871aefa9b67e5618cb7c0f25"
                     .parse()

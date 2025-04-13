@@ -58,20 +58,26 @@ impl TryFrom<&generated::ark::v1::Vtxo> for server::VtxoOutPoint {
             false => Some(value.spent_by.parse().map_err(Error::conversion)?),
         };
 
-        let redeem_tx = match value.redeem_tx.is_empty() {
-            true => None,
-            false => {
-                let base64 = base64::engine::GeneralPurpose::new(
-                    &base64::alphabet::STANDARD,
-                    base64::engine::GeneralPurposeConfig::new(),
-                );
+        let redeem_txs = if value.redeem_tx.is_empty() {
+            Vec::new()
+        } else {
+            let base64 = base64::engine::GeneralPurpose::new(
+                &base64::alphabet::STANDARD,
+                base64::engine::GeneralPurposeConfig::new(),
+            );
 
-                let psbt = base64
-                    .decode(value.redeem_tx.clone())
-                    .map_err(Error::conversion)?;
-                let psbt = Psbt::deserialize(&psbt).map_err(Error::conversion)?;
-                Some(psbt)
+            let mut redeem_txs = Vec::new();
+            let mut psbt_data = base64.decode(value.redeem_tx.clone()).map_err(Error::conversion)?;
+            
+            while !psbt_data.is_empty() {
+                let psbt = Psbt::deserialize(&psbt_data).map_err(Error::conversion)?;
+                redeem_txs.push(psbt.clone());
+                
+                let consumed = psbt.serialize().len();
+                psbt_data = psbt_data.split_off(consumed);
             }
+            
+            redeem_txs
         };
 
         Ok(Self {
@@ -82,10 +88,53 @@ impl TryFrom<&generated::ark::v1::Vtxo> for server::VtxoOutPoint {
             expire_at: value.expire_at,
             swept: value.swept,
             is_pending: value.is_pending,
-            redeem_tx,
+            redeem_txs,
             amount: Amount::from_sat(value.amount),
             pubkey: value.pubkey.clone(),
             created_at: value.created_at,
         })
+    }
+}
+
+impl From<server::VtxoOutPoint> for generated::ark::v1::Vtxo {
+    fn from(value: server::VtxoOutPoint) -> Self {
+        let base64 = base64::engine::GeneralPurpose::new(
+            &base64::alphabet::STANDARD,
+            base64::engine::GeneralPurposeConfig::new(),
+        );
+
+        let redeem_tx = if value.redeem_txs.is_empty() {
+            String::new()
+        } else {
+            // Concatenate all redeem transactions into a single base64 string
+            let mut combined_psbt = Vec::new();
+            for psbt in value.redeem_txs {
+                combined_psbt.extend_from_slice(&psbt.serialize());
+            }
+            base64.encode(combined_psbt)
+        };
+
+        Self {
+            outpoint: Some(value.outpoint.into()),
+            spent: value.spent,
+            round_txid: value.round_txid.to_string(),
+            spent_by: value.spent_by.map_or_else(String::new, |txid| txid.to_string()),
+            expire_at: value.expire_at,
+            swept: value.swept,
+            is_pending: value.is_pending,
+            redeem_tx,
+            amount: value.amount.to_sat(),
+            pubkey: value.pubkey,
+            created_at: value.created_at,
+        }
+    }
+}
+
+impl From<OutPoint> for generated::ark::v1::Outpoint {
+    fn from(value: OutPoint) -> Self {
+        Self {
+            txid: value.txid.to_string(),
+            vout: value.vout,
+        }
     }
 }
