@@ -127,7 +127,7 @@ impl fmt::Display for ConversionError {
             ConversionError::InvalidNetwork => write!(f, "Invalid network value"),
             ConversionError::MissingForfeitAddress => write!(f, "Missing forfeit address"),
             ConversionError::MissingVersion => write!(f, "Missing version field"),
-            ConversionError::ParseError(msg) => write!(f, "Parse error: {}", msg),
+            ConversionError::ParseError(msg) => write!(f, "Parse error: {msg}"),
             ConversionError::MissingUtxoMinAmount => write!(f, "Missing UTXO minimum amount"),
             ConversionError::MissingUtxoMaxAmount => write!(f, "Missing UTXO maximum amount"),
             ConversionError::MissingVtxoMinAmount => write!(f, "Missing VTXO minimum amount"),

@@ -101,7 +101,9 @@ impl ElligatorSwift {
     }
 
     /// Returns the 64-byte array representation of this `ElligatorSwift` object.
-    pub fn to_array(&self) -> [u8; 64] { self.0.to_array() }
+    pub fn to_array(&self) -> [u8; 64] {
+        self.0.to_array()
+    }
 
     /// Creates the Elligator Swift encoding from a secret key, using some aux_rand if defined.
     /// This method is preferred instead of just decoding, because the private key offers extra
@@ -109,7 +111,7 @@ impl ElligatorSwift {
     /// # Example
     /// ```
     /// # #[cfg(feature = "alloc")] {
-    ///     use secp256k1::{ellswift::ElligatorSwift, PublicKey, Secp256k1, SecretKey};
+    ///     use ark_secp256k1::{ellswift::ElligatorSwift, PublicKey, Secp256k1, SecretKey};
     ///     let secp = Secp256k1::new();
     ///     let sk = SecretKey::from_slice(&[1; 32]).unwrap();
     ///     let es = ElligatorSwift::from_seckey(&secp, sk, None);
@@ -138,7 +140,7 @@ impl ElligatorSwift {
     /// # Example
     /// ```
     /// # #[cfg(feature = "alloc")] {
-    ///     use secp256k1::{ellswift::ElligatorSwift, PublicKey, Secp256k1, SecretKey};
+    ///     use ark_secp256k1::{ellswift::ElligatorSwift, PublicKey, Secp256k1, SecretKey};
     ///     let secp = Secp256k1::new();
     ///     let sk = SecretKey::from_slice(&[1; 32]).unwrap();
     ///     let pk = PublicKey::from_secret_key(&secp, &sk);
@@ -146,14 +148,16 @@ impl ElligatorSwift {
     /// # }
     ///
     /// ```
-    pub fn from_pubkey(pk: PublicKey) -> ElligatorSwift { Self::encode(pk) }
+    pub fn from_pubkey(pk: PublicKey) -> ElligatorSwift {
+        Self::encode(pk)
+    }
 
     /// Computes a shared secret only known by Alice and Bob. This is obtained by computing
     /// the x-only Elliptic Curve Diffie-Hellman (ECDH) shared secret between Alice and Bob.
     /// # Example
     /// ```
     /// # #[cfg(feature = "alloc")] {
-    ///     use secp256k1::{
+    ///     use ark_secp256k1::{
     ///         ellswift::{ElligatorSwift, Party},
     ///         PublicKey, SecretKey, XOnlyPublicKey, Secp256k1,
     ///     };
@@ -274,13 +278,19 @@ impl ElligatorSwiftSharedSecret {
     ///
     /// This is generally not needed except for unusual cases like restoring the secret from a
     /// database.
-    pub const fn from_secret_bytes(bytes: [u8; 32]) -> Self { Self(bytes) }
+    pub const fn from_secret_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
 
     /// Returns the secret bytes as an array.
-    pub const fn to_secret_bytes(self) -> [u8; 32] { self.0 }
+    pub const fn to_secret_bytes(self) -> [u8; 32] {
+        self.0
+    }
 
     /// Returns the secret bytes as a reference to an array.
-    pub const fn as_secret_bytes(&self) -> &[u8; 32] { &self.0 }
+    pub const fn as_secret_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
 }
 
 /// Represents which party we are in the ECDH.
@@ -352,13 +362,19 @@ impl fmt::LowerHex for ElligatorSwift {
 }
 
 impl Display for ElligatorSwift {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result { core::fmt::LowerHex::fmt(&self, f) }
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        core::fmt::LowerHex::fmt(&self, f)
+    }
 }
 
 impl ffi::CPtr for ElligatorSwift {
     type Target = u8;
-    fn as_mut_c_ptr(&mut self) -> *mut Self::Target { self.0.as_mut_c_ptr() }
-    fn as_c_ptr(&self) -> *const Self::Target { self.0.as_c_ptr() }
+    fn as_mut_c_ptr(&mut self) -> *mut Self::Target {
+        self.0.as_mut_c_ptr()
+    }
+    fn as_c_ptr(&self) -> *const Self::Target {
+        self.0.as_c_ptr()
+    }
 }
 
 #[cfg(test)]

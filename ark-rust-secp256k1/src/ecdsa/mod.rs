@@ -25,7 +25,9 @@ pub struct Signature(pub(crate) ffi::Signature);
 impl_fast_comparisons!(Signature);
 
 impl fmt::Debug for Signature {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { fmt::Display::fmt(self, f) }
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
 }
 
 impl fmt::Display for Signature {
@@ -148,7 +150,9 @@ impl Signature {
     /// Obtains a raw pointer suitable for use with FFI functions
     #[inline]
     #[deprecated(since = "0.25.0", note = "Use Self::as_c_ptr if you need to access the FFI layer")]
-    pub fn as_ptr(&self) -> *const ffi::Signature { self.as_c_ptr() }
+    pub fn as_ptr(&self) -> *const ffi::Signature {
+        self.as_c_ptr()
+    }
 
     /// Obtains a raw mutable pointer suitable for use with FFI functions
     #[inline]
@@ -156,7 +160,9 @@ impl Signature {
         since = "0.25.0",
         note = "Use Self::as_mut_c_ptr if you need to access the FFI layer"
     )]
-    pub fn as_mut_ptr(&mut self) -> *mut ffi::Signature { self.as_mut_c_ptr() }
+    pub fn as_mut_ptr(&mut self) -> *mut ffi::Signature {
+        self.as_mut_c_ptr()
+    }
 
     #[inline]
     /// Serializes the signature in DER format
@@ -202,15 +208,21 @@ impl Signature {
 impl CPtr for Signature {
     type Target = ffi::Signature;
 
-    fn as_c_ptr(&self) -> *const Self::Target { &self.0 }
+    fn as_c_ptr(&self) -> *const Self::Target {
+        &self.0
+    }
 
-    fn as_mut_c_ptr(&mut self) -> *mut Self::Target { &mut self.0 }
+    fn as_mut_c_ptr(&mut self) -> *mut Self::Target {
+        &mut self.0
+    }
 }
 
 /// Creates a new signature from a FFI signature
 impl From<ffi::Signature> for Signature {
     #[inline]
-    fn from(sig: ffi::Signature) -> Signature { Signature(sig) }
+    fn from(sig: ffi::Signature) -> Signature {
+        Signature(sig)
+    }
 }
 
 #[cfg(feature = "serde")]
@@ -368,7 +380,7 @@ impl<C: Verification> Secp256k1<C> {
     ///
     /// ```rust
     /// # #[cfg(all(feature = "rand", feature = "std"))] {
-    /// # use secp256k1::{rand, Secp256k1, Message, Error};
+    /// # use ark_secp256k1::{rand, Secp256k1, Message, Error};
     /// #
     /// # let secp = Secp256k1::new();
     /// # let (secret_key, public_key) = secp.generate_keypair(&mut rand::thread_rng());

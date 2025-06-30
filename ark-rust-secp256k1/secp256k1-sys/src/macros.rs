@@ -48,7 +48,9 @@ macro_rules! impl_array_newtype {
             type Output = <[$ty] as core::ops::Index<I>>::Output;
 
             #[inline]
-            fn index(&self, index: I) -> &Self::Output { &self.0[index] }
+            fn index(&self, index: I) -> &Self::Output {
+                &self.0[index]
+            }
         }
 
         impl $crate::CPtr for $thing {
@@ -64,7 +66,7 @@ macro_rules! impl_array_newtype {
                 dat.as_mut_ptr()
             }
         }
-    }
+    };
 }
 
 #[macro_export]
@@ -78,5 +80,5 @@ macro_rules! impl_raw_debug {
                 Ok(())
             }
         }
-     }
+    };
 }

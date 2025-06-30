@@ -58,7 +58,9 @@ impl fmt::LowerHex for Signature {
 }
 
 impl fmt::Display for Signature {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { fmt::LowerHex::fmt(self, f) }
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::LowerHex::fmt(self, f)
+    }
 }
 
 impl str::FromStr for Signature {
@@ -75,7 +77,9 @@ impl str::FromStr for Signature {
 impl Signature {
     /// Construct a `Signature` from a 64 bytes array.
     #[inline]
-    pub fn from_byte_array(sig: [u8; constants::SCHNORR_SIGNATURE_SIZE]) -> Self { Self(sig) }
+    pub fn from_byte_array(sig: [u8; constants::SCHNORR_SIGNATURE_SIZE]) -> Self {
+        Self(sig)
+    }
 
     /// Creates a `Signature` directly from a slice.
     #[deprecated(since = "TBD", note = "Use `from_byte_array` instead.")]
@@ -93,15 +97,21 @@ impl Signature {
 
     /// Returns a signature as a byte array.
     #[deprecated(since = "0.30.0", note = "Use `to_byte_array` instead.")]
-    pub fn serialize(&self) -> [u8; constants::SCHNORR_SIGNATURE_SIZE] { self.0 }
+    pub fn serialize(&self) -> [u8; constants::SCHNORR_SIGNATURE_SIZE] {
+        self.0
+    }
 
     /// Returns a signature as a byte array.
     #[inline]
-    pub fn to_byte_array(self) -> [u8; constants::SCHNORR_SIGNATURE_SIZE] { self.0 }
+    pub fn to_byte_array(self) -> [u8; constants::SCHNORR_SIGNATURE_SIZE] {
+        self.0
+    }
 
     /// Returns a signature as a byte array.
     #[inline]
-    pub fn as_byte_array(&self) -> &[u8; constants::SCHNORR_SIGNATURE_SIZE] { &self.0 }
+    pub fn as_byte_array(&self) -> &[u8; constants::SCHNORR_SIGNATURE_SIZE] {
+        &self.0
+    }
 
     /// Verifies a schnorr signature for `msg` using `pk` and the global [`SECP256K1`] context.
     #[inline]
@@ -241,7 +251,9 @@ mod tests {
 
     #[test]
     #[cfg(all(feature = "rand", feature = "std"))]
-    fn schnorr_sign_verify() { sign_helper(|secp, msg, seckey, _| secp.sign_schnorr(msg, seckey)) }
+    fn schnorr_sign_verify() {
+        sign_helper(|secp, msg, seckey, _| secp.sign_schnorr(msg, seckey))
+    }
 
     #[test]
     #[cfg(all(feature = "rand", feature = "std"))]

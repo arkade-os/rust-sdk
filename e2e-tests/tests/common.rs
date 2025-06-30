@@ -71,26 +71,23 @@ impl BitcoinRpc {
 
         if !status.is_success() {
             return Err(Error::wallet(format!(
-                "Bitcoin RPC request failed with status {}: {}",
-                status, response_text,
+                "Bitcoin RPC request failed with status {status}: {response_text}",
             )));
         }
 
         if response_text.contains("failed") {
             return Err(Error::wallet(format!(
-                "Bitcoin RPC submitpackage failed: {}",
-                response_text
+                "Bitcoin RPC submitpackage failed: {response_text}"
             )));
         }
 
         // Parse JSON-RPC response to check for RPC-level errors
         let rpc_response: serde_json::Value = serde_json::from_str(&response_text)
-            .map_err(|e| Error::wallet(format!("Failed to parse RPC response: {}", e)))?;
+            .map_err(|e| Error::wallet(format!("Failed to parse RPC response: {e}")))?;
 
         if let Some(error) = rpc_response.get("error") {
             return Err(Error::wallet(format!(
-                "Bitcoin RPC submitpackage error: {}",
-                error
+                "Bitcoin RPC submitpackage error: {error}"
             )));
         }
 

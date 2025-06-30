@@ -50,7 +50,7 @@ pub use error::Error;
 /// # use bitcoin::{Address, Amount, FeeRate, Network, Psbt, Transaction, Txid, XOnlyPublicKey};
 /// # use bitcoin::secp256k1::schnorr::Signature;
 /// # use ark_client::wallet::{Balance, BoardingWallet, OnchainWallet, Persistence};
-/// # use ark_core::BoardingOutput;
+/// # use ark_core::{BoardingOutput, UtxoCoinSelection};
 ///
 /// struct MyBlockchain {}
 /// #

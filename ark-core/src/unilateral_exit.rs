@@ -330,8 +330,7 @@ pub fn build_unilateral_exit_tree_txids(
 
         if !reached_commitment && chain.spends.is_empty() {
             return Err(Error::ad_hoc(format!(
-                "dead end reached at TXID {} with no commitment transaction",
-                current_txid
+                "dead end reached at TXID {current_txid} with no commitment transaction"
             )));
         }
 

@@ -12,11 +12,11 @@ async fn test_get_info() {
         Ok(info) => {
             assert!(info.round_interval > 0, "Round interval should be positive");
 
-            web_sys::console::log_1(&format!("Got info: {:?}", info).into());
+            web_sys::console::log_1(&format!("Got info: {info:?}").into());
         }
         Err(err) => {
-            web_sys::console::error_1(&format!("Error getting info: {:?}", err).into());
-            panic!("get_info failed with error: {:?}", err);
+            web_sys::console::error_1(&format!("Error getting info: {err:?}").into());
+            panic!("get_info failed with error: {err:?}");
         }
     }
 }

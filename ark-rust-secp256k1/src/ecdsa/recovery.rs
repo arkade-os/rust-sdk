@@ -86,7 +86,9 @@ impl RecoverableSignature {
     /// Obtains a raw pointer suitable for use with FFI functions.
     #[inline]
     #[deprecated(since = "0.25.0", note = "Use Self::as_c_ptr if you need to access the FFI layer")]
-    pub fn as_ptr(&self) -> *const ffi::RecoverableSignature { self.as_c_ptr() }
+    pub fn as_ptr(&self) -> *const ffi::RecoverableSignature {
+        self.as_c_ptr()
+    }
 
     /// Obtains a raw mutable pointer suitable for use with FFI functions.
     #[inline]
@@ -94,7 +96,9 @@ impl RecoverableSignature {
         since = "0.25.0",
         note = "Use Self::as_mut_c_ptr if you need to access the FFI layer"
     )]
-    pub fn as_mut_ptr(&mut self) -> *mut ffi::RecoverableSignature { self.as_mut_c_ptr() }
+    pub fn as_mut_ptr(&mut self) -> *mut ffi::RecoverableSignature {
+        self.as_mut_c_ptr()
+    }
 
     #[inline]
     /// Serializes the recoverable signature in compact format.
@@ -140,15 +144,21 @@ impl RecoverableSignature {
 
 impl CPtr for RecoverableSignature {
     type Target = ffi::RecoverableSignature;
-    fn as_c_ptr(&self) -> *const Self::Target { &self.0 }
+    fn as_c_ptr(&self) -> *const Self::Target {
+        &self.0
+    }
 
-    fn as_mut_c_ptr(&mut self) -> *mut Self::Target { &mut self.0 }
+    fn as_mut_c_ptr(&mut self) -> *mut Self::Target {
+        &mut self.0
+    }
 }
 
 /// Creates a new recoverable signature from a FFI one.
 impl From<ffi::RecoverableSignature> for RecoverableSignature {
     #[inline]
-    fn from(sig: ffi::RecoverableSignature) -> RecoverableSignature { RecoverableSignature(sig) }
+    fn from(sig: ffi::RecoverableSignature) -> RecoverableSignature {
+        RecoverableSignature(sig)
+    }
 }
 
 impl<C: Signing> Secp256k1<C> {

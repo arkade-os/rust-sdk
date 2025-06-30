@@ -42,7 +42,9 @@ impl Scalar {
 
     /// Generates a random scalar
     #[cfg(all(feature = "rand", feature = "std"))]
-    pub fn random() -> Self { Self::random_custom(rand::thread_rng()) }
+    pub fn random() -> Self {
+        Self::random_custom(rand::thread_rng())
+    }
 
     /// Generates a random scalar using supplied RNG
     #[cfg(feature = "rand")]
@@ -88,7 +90,9 @@ impl Scalar {
     }
 
     /// Serializes to big endian bytes
-    pub fn to_be_bytes(self) -> [u8; 32] { self.0 }
+    pub fn to_be_bytes(self) -> [u8; 32] {
+        self.0
+    }
 
     /// Serializes to little endian bytes
     pub fn to_le_bytes(self) -> [u8; 32] {
@@ -99,7 +103,9 @@ impl Scalar {
 
     // returns a reference to internal bytes
     // non-public to not leak the internal representation
-    pub(crate) fn as_be_bytes(&self) -> &[u8; 32] { &self.0 }
+    pub(crate) fn as_be_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
 
     pub(crate) fn as_c_ptr(&self) -> *const u8 {
         use secp256k1_sys::CPtr;
@@ -115,11 +121,15 @@ where
     type Output = <[u8] as ops::Index<I>>::Output;
 
     #[inline]
-    fn index(&self, index: I) -> &Self::Output { &self.0[index] }
+    fn index(&self, index: I) -> &Self::Output {
+        &self.0[index]
+    }
 }
 
 impl From<crate::SecretKey> for Scalar {
-    fn from(value: crate::SecretKey) -> Self { Scalar(value.secret_bytes()) }
+    fn from(value: crate::SecretKey) -> Self {
+        Scalar(value.secret_bytes())
+    }
 }
 
 /// Error returned when the value of scalar is invalid - larger than the curve order.

@@ -21,8 +21,8 @@ const SHARED_SECRET_SIZE: usize = constants::SECRET_KEY_SIZE;
 ///
 /// ```
 /// # #[cfg(all(feature = "rand", feature = "std"))] {
-/// # use secp256k1::{rand, Secp256k1};
-/// # use secp256k1::ecdh::SharedSecret;
+/// # use ark_secp256k1::{rand, Secp256k1};
+/// # use ark_secp256k1::ecdh::SharedSecret;
 /// let s = Secp256k1::new();
 /// let (sk1, pk1) = s.generate_keypair(&mut rand::thread_rng());
 /// let (sk2, pk2) = s.generate_keypair(&mut rand::thread_rng());
@@ -57,11 +57,15 @@ impl SharedSecret {
 
     /// Returns the shared secret as a byte value.
     #[inline]
-    pub fn secret_bytes(&self) -> [u8; SHARED_SECRET_SIZE] { self.0 }
+    pub fn secret_bytes(&self) -> [u8; SHARED_SECRET_SIZE] {
+        self.0
+    }
 
     /// Creates a shared secret from `bytes` array.
     #[inline]
-    pub fn from_bytes(bytes: [u8; SHARED_SECRET_SIZE]) -> SharedSecret { SharedSecret(bytes) }
+    pub fn from_bytes(bytes: [u8; SHARED_SECRET_SIZE]) -> SharedSecret {
+        SharedSecret(bytes)
+    }
 
     /// Creates a shared secret from `bytes` slice.
     #[deprecated(since = "TBD", note = "Use `from_bytes` instead.")]
@@ -90,11 +94,15 @@ impl str::FromStr for SharedSecret {
 }
 
 impl Borrow<[u8]> for SharedSecret {
-    fn borrow(&self) -> &[u8] { &self.0 }
+    fn borrow(&self) -> &[u8] {
+        &self.0
+    }
 }
 
 impl AsRef<[u8]> for SharedSecret {
-    fn as_ref(&self) -> &[u8] { &self.0 }
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
 }
 
 /// Creates a shared point from public key and secret key.
@@ -112,8 +120,8 @@ impl AsRef<[u8]> for SharedSecret {
 /// # Examples
 /// ```
 /// # #[cfg(all(feature = "hashes", feature = "rand", feature = "std"))] {
-/// # use secp256k1::{ecdh, rand, Secp256k1, PublicKey, SecretKey};
-/// # use secp256k1::hashes::{Hash, sha512};
+/// # use ark_secp256k1::{ecdh, rand, Secp256k1, PublicKey, SecretKey};
+/// # use ark_secp256k1::hashes::{Hash, sha512};
 ///
 /// let s = Secp256k1::new();
 /// let (sk1, pk1) = s.generate_keypair(&mut rand::thread_rng());

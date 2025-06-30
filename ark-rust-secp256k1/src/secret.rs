@@ -87,7 +87,7 @@ impl SecretKey {
     /// ```
     /// # #[cfg(feature = "std")] {
     /// # use std::str::FromStr;
-    /// use secp256k1::SecretKey;
+    /// use ark_secp256k1::SecretKey;
     /// let key = SecretKey::from_str("0000000000000000000000000000000000000000000000000000000000000001").unwrap();
     ///
     /// // Normal debug hides value (`Display` is not implemented for `SecretKey`).
@@ -106,7 +106,9 @@ impl SecretKey {
     /// # }
     /// ```
     #[inline]
-    pub fn display_secret(&self) -> DisplaySecret { DisplaySecret { secret: self.secret_bytes() } }
+    pub fn display_secret(&self) -> DisplaySecret {
+        DisplaySecret { secret: self.secret_bytes() }
+    }
 }
 
 impl Keypair {
@@ -121,7 +123,7 @@ impl Keypair {
     /// ```
     /// # #[cfg(feature = "std")] {
     /// # use std::str::FromStr;
-    /// use secp256k1::{Keypair, Secp256k1, SecretKey};
+    /// use ark_secp256k1::{Keypair, Secp256k1, SecretKey};
     ///
     /// let secp = Secp256k1::new();
     /// let key = SecretKey::from_str("0000000000000000000000000000000000000000000000000000000000000001").unwrap();
@@ -139,7 +141,9 @@ impl Keypair {
     /// # }
     /// ```
     #[inline]
-    pub fn display_secret(&self) -> DisplaySecret { DisplaySecret { secret: self.secret_bytes() } }
+    pub fn display_secret(&self) -> DisplaySecret {
+        DisplaySecret { secret: self.secret_bytes() }
+    }
 }
 
 impl SharedSecret {
@@ -155,8 +159,8 @@ impl SharedSecret {
     /// # #[cfg(not(secp256k1_fuzz))]
     /// # #[cfg(feature = "std")] {
     /// # use std::str::FromStr;
-    /// use secp256k1::{SecretKey, PublicKey};
-    /// use secp256k1::ecdh::SharedSecret;
+    /// use ark_secp256k1::{SecretKey, PublicKey};
+    /// use ark_secp256k1::ecdh::SharedSecret;
     ///
     /// # let pk = PublicKey::from_slice(&[3, 23, 183, 225, 206, 31, 159, 148, 195, 42, 67, 115, 146, 41, 248, 140, 11, 3, 51, 41, 111, 180, 110, 143, 114, 134, 88, 73, 198, 174, 52, 184, 78]).expect("hard coded slice should parse correctly");
     /// # let sk = SecretKey::from_str("57f0148f94d13095cfda539d0da0d1541304b678d8b36e243980aab4e1b7cead").unwrap();
@@ -175,5 +179,7 @@ impl SharedSecret {
     /// # }
     /// ```
     #[inline]
-    pub fn display_secret(&self) -> DisplaySecret { DisplaySecret { secret: self.secret_bytes() } }
+    pub fn display_secret(&self) -> DisplaySecret {
+        DisplaySecret { secret: self.secret_bytes() }
+    }
 }

@@ -13,7 +13,8 @@ use std;
 
 use crate::ffi::{self, CPtr};
 use crate::{
-    schnorr, Error, Keypair, Message, PublicKey, Scalar, Secp256k1, SecretKey, Signing, Verification, XOnlyPublicKey
+    schnorr, Error, Keypair, Message, PublicKey, Scalar, Secp256k1, SecretKey, Signing,
+    Verification, XOnlyPublicKey,
 };
 
 /// Musig partial signature parsing errors
@@ -62,30 +63,39 @@ impl SessionSecretRand {
     ///
     /// In rand-std environment, [`SessionSecretRand::new`] can be used to generate a random
     /// session id using thread rng.
-    pub fn assume_unique_per_nonce_gen(inner: [u8; 32]) -> Self { SessionSecretRand(inner) }
+    pub fn assume_unique_per_nonce_gen(inner: [u8; 32]) -> Self {
+        SessionSecretRand(inner)
+    }
 
     /// Obtains the inner bytes of the [`SessionSecretRand`].
-    pub fn to_bytes(&self) -> [u8; 32] { self.0 }
+    pub fn to_bytes(&self) -> [u8; 32] {
+        self.0
+    }
 
     /// Obtains a reference to the inner bytes of the [`SessionSecretRand`].
-    pub fn as_bytes(&self) -> &[u8; 32] { &self.0 }
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
 }
 
 ///  Cached data related to a key aggregation.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct KeyAggCache{
+pub struct KeyAggCache {
     data: ffi::MusigKeyAggCache,
-    aggregated_xonly_public_key: XOnlyPublicKey
+    aggregated_xonly_public_key: XOnlyPublicKey,
 }
 
 impl CPtr for KeyAggCache {
     type Target = ffi::MusigKeyAggCache;
 
-    fn as_c_ptr(&self) -> *const Self::Target { self.as_ptr() }
+    fn as_c_ptr(&self) -> *const Self::Target {
+        self.as_ptr()
+    }
 
-    fn as_mut_c_ptr(&mut self) -> *mut Self::Target { self.as_mut_ptr() }
+    fn as_mut_c_ptr(&mut self) -> *mut Self::Target {
+        self.as_mut_ptr()
+    }
 }
-
 
 /// Musig tweaking related error.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd, Ord, Hash)]
@@ -139,8 +149,8 @@ impl fmt::Display for InvalidTweakErr {
 ///
 /// ```rust
 /// # # [cfg(any(test, feature = "rand-std"))] {
-/// # use secp256k1::rand::{thread_rng, RngCore};
-/// # use secp256k1::{PublicKey, Secp256k1, SecretKey, new_nonce_pair, SessionSecretRand};
+/// # use ark_secp256k1::rand::{thread_rng, RngCore};
+/// # use ark_secp256k1::{PublicKey, Secp256k1, SecretKey, new_nonce_pair, SessionSecretRand};
 /// # let secp = Secp256k1::new();
 /// // The session id must be sampled at random. Read documentation for more details.
 /// let session_secrand = SessionSecretRand::new(&mut thread_rng());
@@ -206,9 +216,13 @@ pub struct PartialSignature(ffi::MusigPartialSignature);
 impl CPtr for PartialSignature {
     type Target = ffi::MusigPartialSignature;
 
-    fn as_c_ptr(&self) -> *const Self::Target { self.as_ptr() }
+    fn as_c_ptr(&self) -> *const Self::Target {
+        self.as_ptr()
+    }
 
-    fn as_mut_c_ptr(&mut self) -> *mut Self::Target { self.as_mut_ptr() }
+    fn as_mut_c_ptr(&mut self) -> *mut Self::Target {
+        self.as_mut_ptr()
+    }
 }
 
 impl PartialSignature {
@@ -239,7 +253,9 @@ impl PartialSignature {
     /// # Errors:
     ///
     /// - MalformedArg: If the signature [`PartialSignature`] is out of curve order
-    pub fn from_byte_array(data: &[u8; ffi::MUSIG_PART_SIG_SERIALIZED_LEN]) -> Result<Self, ParseError> {
+    pub fn from_byte_array(
+        data: &[u8; ffi::MUSIG_PART_SIG_SERIALIZED_LEN],
+    ) -> Result<Self, ParseError> {
         let mut partial_sig = MaybeUninit::<ffi::MusigPartialSignature>::uninit();
         unsafe {
             if ffi::secp256k1_musig_partial_sig_parse(
@@ -256,10 +272,14 @@ impl PartialSignature {
     }
 
     /// Get a const pointer to the inner PartialSignature
-    pub fn as_ptr(&self) -> *const ffi::MusigPartialSignature { &self.0 }
+    pub fn as_ptr(&self) -> *const ffi::MusigPartialSignature {
+        &self.0
+    }
 
     /// Get a mut pointer to the inner PartialSignature
-    pub fn as_mut_ptr(&mut self) -> *mut ffi::MusigPartialSignature { &mut self.0 }
+    pub fn as_mut_ptr(&mut self) -> *mut ffi::MusigPartialSignature {
+        &mut self.0
+    }
 }
 
 impl KeyAggCache {
@@ -287,8 +307,8 @@ impl KeyAggCache {
     ///
     /// ```rust
     /// # # [cfg(any(test, feature = "rand-std"))] {
-    /// # use secp256k1::rand::{thread_rng, RngCore};
-    /// # use secp256k1::{KeyAggCache, Secp256k1, SecretKey, Keypair, PublicKey};
+    /// # use ark_secp256k1::rand::{thread_rng, RngCore};
+    /// # use ark_secp256k1::{KeyAggCache, Secp256k1, SecretKey, Keypair, PublicKey};
     /// # let secp = Secp256k1::new();
     /// # let sk1 = SecretKey::new(&mut thread_rng());
     /// # let pub_key1 = PublicKey::from_secret_key(&secp, &sk1);
@@ -306,7 +326,10 @@ impl KeyAggCache {
         let mut agg_pk = MaybeUninit::<ffi::XOnlyPublicKey>::uninit();
 
         unsafe {
-            let pubkeys_ref = core::slice::from_raw_parts(pubkeys.as_c_ptr() as *const *const ffi::PublicKey, pubkeys.len());
+            let pubkeys_ref = core::slice::from_raw_parts(
+                pubkeys.as_c_ptr() as *const *const ffi::PublicKey,
+                pubkeys.len(),
+            );
 
             if ffi::secp256k1_musig_pubkey_agg(
                 cx,
@@ -322,13 +345,15 @@ impl KeyAggCache {
                 // secp256k1_musig_pubkey_agg overwrites the cache and the key so this is sound.
                 let key_agg_cache = key_agg_cache.assume_init();
                 let agg_pk = XOnlyPublicKey::from(agg_pk.assume_init());
-                KeyAggCache{ data: key_agg_cache,  aggregated_xonly_public_key: agg_pk }
+                KeyAggCache { data: key_agg_cache, aggregated_xonly_public_key: agg_pk }
             }
         }
     }
 
     /// Obtains the aggregate public key for this [`KeyAggCache`]
-    pub fn agg_pk(&self) -> XOnlyPublicKey { self.aggregated_xonly_public_key }
+    pub fn agg_pk(&self) -> XOnlyPublicKey {
+        self.aggregated_xonly_public_key
+    }
 
     /// Obtains the aggregate public key for this [`KeyAggCache`] as a full [`PublicKey`].
     ///
@@ -373,8 +398,8 @@ impl KeyAggCache {
     ///
     /// ```rust
     /// # # [cfg(any(test, feature = "rand-std"))] {
-    /// # use secp256k1::rand::{thread_rng, RngCore};
-    /// # use secp256k1::{KeyAggCache, Secp256k1, SecretKey, Keypair, PublicKey};
+    /// # use ark_secp256k1::rand::{thread_rng, RngCore};
+    /// # use ark_secp256k1::{KeyAggCache, Secp256k1, SecretKey, Keypair, PublicKey};
     /// # let secp = Secp256k1::new();
     /// # let sk1 = SecretKey::new(&mut thread_rng());
     /// # let pub_key1 = PublicKey::from_secret_key(&secp, &sk1);
@@ -432,8 +457,8 @@ impl KeyAggCache {
     ///
     /// ```rust
     /// # # [cfg(any(test, feature = "rand-std"))] {
-    /// # use secp256k1::rand::{thread_rng, RngCore};
-    /// # use secp256k1::{KeyAggCache, Secp256k1, SecretKey, Keypair, PublicKey};
+    /// # use ark_secp256k1::rand::{thread_rng, RngCore};
+    /// # use ark_secp256k1::{KeyAggCache, Secp256k1, SecretKey, Keypair, PublicKey};
     /// # let secp = Secp256k1::new();
     /// # let sk1 = SecretKey::new(&mut thread_rng());
     /// # let pub_key1 = PublicKey::from_secret_key(&secp, &sk1);
@@ -506,8 +531,8 @@ impl KeyAggCache {
     ///
     /// ```rust
     /// # # [cfg(any(test, feature = "rand-std"))] {
-    /// # use secp256k1::rand::{thread_rng, RngCore};
-    /// # use secp256k1::{KeyAggCache, Secp256k1, SecretKey, Keypair, PublicKey, SessionSecretRand, Message};
+    /// # use ark_secp256k1::rand::{thread_rng, RngCore};
+    /// # use ark_secp256k1::{KeyAggCache, Secp256k1, SecretKey, Keypair, PublicKey, SessionSecretRand, Message};
     /// # let secp = Secp256k1::new();
     /// # let sk1 = SecretKey::new(&mut thread_rng());
     /// # let pub_key1 = PublicKey::from_secret_key(&secp, &sk1);
@@ -541,10 +566,14 @@ impl KeyAggCache {
     }
 
     /// Get a const pointer to the inner KeyAggCache
-    pub fn as_ptr(&self) -> *const ffi::MusigKeyAggCache { &self.data }
+    pub fn as_ptr(&self) -> *const ffi::MusigKeyAggCache {
+        &self.data
+    }
 
     /// Get a mut pointer to the inner KeyAggCache
-    pub fn as_mut_ptr(&mut self) -> *mut ffi::MusigKeyAggCache { &mut self.data }
+    pub fn as_mut_ptr(&mut self) -> *mut ffi::MusigKeyAggCache {
+        &mut self.data
+    }
 }
 
 /// Musig Secret Nonce.
@@ -574,17 +603,25 @@ pub struct SecretNonce(ffi::MusigSecNonce);
 impl CPtr for SecretNonce {
     type Target = ffi::MusigSecNonce;
 
-    fn as_c_ptr(&self) -> *const Self::Target { self.as_ptr() }
+    fn as_c_ptr(&self) -> *const Self::Target {
+        self.as_ptr()
+    }
 
-    fn as_mut_c_ptr(&mut self) -> *mut Self::Target { self.as_mut_ptr() }
+    fn as_mut_c_ptr(&mut self) -> *mut Self::Target {
+        self.as_mut_ptr()
+    }
 }
 
 impl SecretNonce {
     /// Get a const pointer to the inner KeyAggCache
-    pub fn as_ptr(&self) -> *const ffi::MusigSecNonce { &self.0 }
+    pub fn as_ptr(&self) -> *const ffi::MusigSecNonce {
+        &self.0
+    }
 
     /// Get a mut pointer to the inner KeyAggCache
-    pub fn as_mut_ptr(&mut self) -> *mut ffi::MusigSecNonce { &mut self.0 }
+    pub fn as_mut_ptr(&mut self) -> *mut ffi::MusigSecNonce {
+        &mut self.0
+    }
 
     /// Function to return a copy of the internal array. See WARNING before using this function.
     ///
@@ -616,9 +653,13 @@ pub struct PublicNonce(ffi::MusigPubNonce);
 impl CPtr for PublicNonce {
     type Target = ffi::MusigPubNonce;
 
-    fn as_c_ptr(&self) -> *const Self::Target { self.as_ptr() }
+    fn as_c_ptr(&self) -> *const Self::Target {
+        self.as_ptr()
+    }
 
-    fn as_mut_c_ptr(&mut self) -> *mut Self::Target { self.as_mut_ptr() }
+    fn as_mut_c_ptr(&mut self) -> *mut Self::Target {
+        self.as_mut_ptr()
+    }
 }
 
 impl PublicNonce {
@@ -645,7 +686,9 @@ impl PublicNonce {
     /// # Errors:
     ///
     /// - MalformedArg: If the [`PublicNonce`] is 132 bytes, but out of curve order
-    pub fn from_byte_array(data: &[u8; ffi::MUSIG_PUBNONCE_SERIALIZED_LEN]) -> Result<Self, ParseError> {
+    pub fn from_byte_array(
+        data: &[u8; ffi::MUSIG_PUBNONCE_SERIALIZED_LEN],
+    ) -> Result<Self, ParseError> {
         let mut pub_nonce = MaybeUninit::<ffi::MusigPubNonce>::uninit();
         unsafe {
             if ffi::secp256k1_musig_pubnonce_parse(
@@ -662,10 +705,14 @@ impl PublicNonce {
     }
 
     /// Get a const pointer to the inner PublicNonce
-    pub fn as_ptr(&self) -> *const ffi::MusigPubNonce { &self.0 }
+    pub fn as_ptr(&self) -> *const ffi::MusigPubNonce {
+        &self.0
+    }
 
     /// Get a mut pointer to the inner PublicNonce
-    pub fn as_mut_ptr(&mut self) -> *mut ffi::MusigPubNonce { &mut self.0 }
+    pub fn as_mut_ptr(&mut self) -> *mut ffi::MusigPubNonce {
+        &mut self.0
+    }
 }
 
 /// Musig aggregated nonce computed by aggregating all individual public nonces
@@ -675,9 +722,13 @@ pub struct AggregatedNonce(ffi::MusigAggNonce);
 impl CPtr for AggregatedNonce {
     type Target = ffi::MusigAggNonce;
 
-    fn as_c_ptr(&self) -> *const Self::Target { self.as_ptr() }
+    fn as_c_ptr(&self) -> *const Self::Target {
+        self.as_ptr()
+    }
 
-    fn as_mut_c_ptr(&mut self) -> *mut Self::Target { self.as_mut_ptr() }
+    fn as_mut_c_ptr(&mut self) -> *mut Self::Target {
+        self.as_mut_ptr()
+    }
 }
 
 impl AggregatedNonce {
@@ -692,8 +743,8 @@ impl AggregatedNonce {
     ///
     /// ```rust
     /// # # [cfg(any(test, feature = "rand-std"))] {
-    /// # use secp256k1::rand::{thread_rng, RngCore};
-    /// # use secp256k1::{KeyAggCache, Secp256k1, SecretKey, Keypair, PublicKey, SessionSecretRand, Message, AggregatedNonce};
+    /// # use ark_secp256k1::rand::{thread_rng, RngCore};
+    /// # use ark_secp256k1::{KeyAggCache, Secp256k1, SecretKey, Keypair, PublicKey, SessionSecretRand, Message, AggregatedNonce};
     /// # let secp = Secp256k1::new();
     /// # let sk1 = SecretKey::new(&mut thread_rng());
     /// # let pub_key1 = PublicKey::from_secret_key(&secp, &sk1);
@@ -718,7 +769,6 @@ impl AggregatedNonce {
     /// # }
     /// ```
     pub fn new<C: Signing>(secp: &Secp256k1<C>, nonces: &[&PublicNonce]) -> Self {
-
         if nonces.is_empty() {
             panic!("Cannot aggregate an empty slice of nonces");
         }
@@ -726,7 +776,10 @@ impl AggregatedNonce {
         let mut aggnonce = MaybeUninit::<ffi::MusigAggNonce>::uninit();
 
         unsafe {
-            let pubnonces = core::slice::from_raw_parts(nonces.as_c_ptr() as *const *const ffi::MusigPubNonce, nonces.len());
+            let pubnonces = core::slice::from_raw_parts(
+                nonces.as_c_ptr() as *const *const ffi::MusigPubNonce,
+                nonces.len(),
+            );
 
             if ffi::secp256k1_musig_nonce_agg(
                 secp.ctx().as_ptr(),
@@ -767,7 +820,9 @@ impl AggregatedNonce {
     /// # Errors:
     ///
     /// - MalformedArg: If the byte slice is 66 bytes, but the [`AggregatedNonce`] is invalid
-    pub fn from_byte_array(data: &[u8; ffi::MUSIG_AGGNONCE_SERIALIZED_LEN]) -> Result<Self, ParseError> {
+    pub fn from_byte_array(
+        data: &[u8; ffi::MUSIG_AGGNONCE_SERIALIZED_LEN],
+    ) -> Result<Self, ParseError> {
         let mut aggnonce = MaybeUninit::<ffi::MusigAggNonce>::uninit();
         unsafe {
             if ffi::secp256k1_musig_aggnonce_parse(
@@ -784,10 +839,14 @@ impl AggregatedNonce {
     }
 
     /// Get a const pointer to the inner AggregatedNonce
-    pub fn as_ptr(&self) -> *const ffi::MusigAggNonce { &self.0 }
+    pub fn as_ptr(&self) -> *const ffi::MusigAggNonce {
+        &self.0
+    }
 
     /// Get a mut pointer to the inner AggregatedNonce
-    pub fn as_mut_ptr(&mut self) -> *mut ffi::MusigAggNonce { &mut self.0 }
+    pub fn as_mut_ptr(&mut self) -> *mut ffi::MusigAggNonce {
+        &mut self.0
+    }
 }
 
 /// The aggregated signature of all partial signatures.
@@ -807,13 +866,17 @@ impl AggregatedSignature {
     /// signature is more performant. Thus it should be generally better to verify the signature using this function first
     /// and fall back to detection of violators if it fails.
     pub fn assume_valid(self) -> schnorr::Signature {
-        schnorr::Signature::from_slice(&self.0)
-            .expect("Invalid signature data")
+        schnorr::Signature::from_slice(&self.0).expect("Invalid signature data")
     }
 
     /// Verify the aggregated signature against the aggregate public key and message
     /// before returning the signature.
-    pub fn verify<C: Verification>(self, secp: &Secp256k1<C>, aggregate_key: &XOnlyPublicKey, message: &[u8]) -> Result<schnorr::Signature, Error> {
+    pub fn verify<C: Verification>(
+        self,
+        secp: &Secp256k1<C>,
+        aggregate_key: &XOnlyPublicKey,
+        message: &[u8],
+    ) -> Result<schnorr::Signature, Error> {
         let sig = schnorr::Signature::from_slice(&self.0)?;
         secp.verify_schnorr(&sig, message, aggregate_key)
             .map(|_| sig)
@@ -846,8 +909,8 @@ impl Session {
     ///
     /// ```rust
     /// # # [cfg(any(test, feature = "rand-std"))] {
-    /// # use secp256k1::rand::{thread_rng, RngCore};
-    /// # use secp256k1::{KeyAggCache, Secp256k1, SecretKey, Keypair, PublicKey, SessionSecretRand, Message, AggregatedNonce, Session};
+    /// # use ark_secp256k1::rand::{thread_rng, RngCore};
+    /// # use ark_secp256k1::{KeyAggCache, Secp256k1, SecretKey, Keypair, PublicKey, SessionSecretRand, Message, AggregatedNonce, Session};
     /// # let secp = Secp256k1::new();
     /// # let sk1 = SecretKey::new(&mut thread_rng());
     /// # let pub_key1 = PublicKey::from_secret_key(&secp, &sk1);
@@ -982,8 +1045,8 @@ impl Session {
     ///
     /// ```rust
     /// # # [cfg(any(test, feature = "rand-std"))] {
-    /// # use secp256k1::rand::{thread_rng, RngCore};
-    /// # use secp256k1::{KeyAggCache, Secp256k1, SecretKey, Keypair, PublicKey, SessionSecretRand, Message, AggregatedNonce, Session};
+    /// # use ark_secp256k1::rand::{thread_rng, RngCore};
+    /// # use ark_secp256k1::{KeyAggCache, Secp256k1, SecretKey, Keypair, PublicKey, SessionSecretRand, Message, AggregatedNonce, Session};
     /// # let secp = Secp256k1::new();
     /// # let sk1 = SecretKey::new(&mut thread_rng());
     /// # let pub_key1 = PublicKey::from_secret_key(&secp, &sk1);
@@ -1065,8 +1128,8 @@ impl Session {
     ///
     /// ```rust
     /// # # [cfg(any(test, feature = "rand-std"))] {
-    /// # use secp256k1::rand::{thread_rng, RngCore};
-    /// # use secp256k1::{KeyAggCache, Secp256k1, SecretKey, Keypair, PublicKey, SessionSecretRand, Message, AggregatedNonce, Session};
+    /// # use ark_secp256k1::rand::{thread_rng, RngCore};
+    /// # use ark_secp256k1::{KeyAggCache, Secp256k1, SecretKey, Keypair, PublicKey, SessionSecretRand, Message, AggregatedNonce, Session};
     /// # let secp = Secp256k1::new();
     /// # let sk1 = SecretKey::new(&mut thread_rng());
     /// # let pub_key1 = PublicKey::from_secret_key(&secp, &sk1);
@@ -1123,15 +1186,16 @@ impl Session {
     /// # }
     /// ```
     pub fn partial_sig_agg(&self, partial_sigs: &[&PartialSignature]) -> AggregatedSignature {
-
         if partial_sigs.is_empty() {
             panic!("Cannot aggregate an empty slice of partial signatures");
         }
 
         let mut sig = [0u8; 64];
         unsafe {
-
-            let partial_sigs_ref = core::slice::from_raw_parts(partial_sigs.as_ptr() as *const *const ffi::MusigPartialSignature, partial_sigs.len());
+            let partial_sigs_ref = core::slice::from_raw_parts(
+                partial_sigs.as_ptr() as *const *const ffi::MusigPartialSignature,
+                partial_sigs.len(),
+            );
 
             if ffi::secp256k1_musig_partial_sig_agg(
                 ffi::secp256k1_context_no_precomp,
@@ -1151,8 +1215,12 @@ impl Session {
     }
 
     /// Get a const pointer to the inner Session
-    pub fn as_ptr(&self) -> *const ffi::MusigSession { &self.0 }
+    pub fn as_ptr(&self) -> *const ffi::MusigSession {
+        &self.0
+    }
 
     /// Get a mut pointer to the inner Session
-    pub fn as_mut_ptr(&mut self) -> *mut ffi::MusigSession { &mut self.0 }
+    pub fn as_mut_ptr(&mut self) -> *mut ffi::MusigSession {
+        &mut self.0
+    }
 }

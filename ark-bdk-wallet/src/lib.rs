@@ -213,8 +213,7 @@ where
 
         if total_selected < target_amount {
             return Err(Error::wallet(format!(
-                "Insufficient funds: need {}, have {}",
-                target_amount, total_selected
+                "Insufficient funds: need {target_amount}, have {total_selected}"
             )));
         }
 

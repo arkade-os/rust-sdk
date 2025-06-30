@@ -162,7 +162,9 @@ impl PublicKey {
     /// If you pass this to any FFI functions, except as an out-pointer,
     /// the result is likely to be an assertation failure and process
     /// termination.
-    pub unsafe fn new() -> Self { Self::from_array_unchecked([0; 64]) }
+    pub unsafe fn new() -> Self {
+        Self::from_array_unchecked([0; 64])
+    }
 
     /// Create a new public key usable for the FFI interface from raw bytes
     ///
@@ -173,13 +175,17 @@ impl PublicKey {
     /// the underlying library. You should not use this method except with data
     /// that you obtained from the FFI interface of the same version of this
     /// library.
-    pub unsafe fn from_array_unchecked(data: [c_uchar; 64]) -> Self { PublicKey(data) }
+    pub unsafe fn from_array_unchecked(data: [c_uchar; 64]) -> Self {
+        PublicKey(data)
+    }
 
     /// Returns the underlying FFI opaque representation of the public key
     ///
     /// You should not use this unless you really know what you are doing. It is
     /// essentially only useful for extending the FFI interface itself.
-    pub fn underlying_bytes(self) -> [c_uchar; 64] { self.0 }
+    pub fn underlying_bytes(self) -> [c_uchar; 64] {
+        self.0
+    }
 
     /// Serializes this public key as a byte-encoded pair of values, in compressed form.
     fn serialize(&self) -> [u8; 33] {
@@ -217,7 +223,9 @@ impl Ord for PublicKey {
 
 #[cfg(not(secp256k1_fuzz))]
 impl PartialEq for PublicKey {
-    fn eq(&self, other: &Self) -> bool { self.cmp(other) == core::cmp::Ordering::Equal }
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == core::cmp::Ordering::Equal
+    }
 }
 
 #[cfg(not(secp256k1_fuzz))]
@@ -247,7 +255,9 @@ impl Signature {
     /// If you pass this to any FFI functions, except as an out-pointer,
     /// the result is likely to be an assertation failure and process
     /// termination.
-    pub unsafe fn new() -> Self { Self::from_array_unchecked([0; 64]) }
+    pub unsafe fn new() -> Self {
+        Self::from_array_unchecked([0; 64])
+    }
 
     /// Create a new signature usable for the FFI interface from raw bytes
     ///
@@ -258,13 +268,17 @@ impl Signature {
     /// the underlying library. You should not use this method except with data
     /// that you obtained from the FFI interface of the same version of this
     /// library.
-    pub unsafe fn from_array_unchecked(data: [c_uchar; 64]) -> Self { Signature(data) }
+    pub unsafe fn from_array_unchecked(data: [c_uchar; 64]) -> Self {
+        Signature(data)
+    }
 
     /// Returns the underlying FFI opaque representation of the signature
     ///
     /// You should not use this unless you really know what you are doing. It is
     /// essentially only useful for extending the FFI interface itself.
-    pub fn underlying_bytes(self) -> [c_uchar; 64] { self.0 }
+    pub fn underlying_bytes(self) -> [c_uchar; 64] {
+        self.0
+    }
 
     /// Serializes the signature in compact format.
     fn serialize(&self) -> [u8; 64] {
@@ -299,7 +313,9 @@ impl Ord for Signature {
 
 #[cfg(not(secp256k1_fuzz))]
 impl PartialEq for Signature {
-    fn eq(&self, other: &Self) -> bool { self.cmp(other) == core::cmp::Ordering::Equal }
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == core::cmp::Ordering::Equal
+    }
 }
 
 #[cfg(not(secp256k1_fuzz))]
@@ -328,7 +344,9 @@ impl XOnlyPublicKey {
     /// If you pass this to any FFI functions, except as an out-pointer,
     /// the result is likely to be an assertation failure and process
     /// termination.
-    pub unsafe fn new() -> Self { Self::from_array_unchecked([0; 64]) }
+    pub unsafe fn new() -> Self {
+        Self::from_array_unchecked([0; 64])
+    }
 
     /// Create a new x-only public key usable for the FFI interface from raw bytes
     ///
@@ -339,13 +357,17 @@ impl XOnlyPublicKey {
     /// the underlying library. You should not use this method except with data
     /// that you obtained from the FFI interface of the same version of this
     /// library.
-    pub unsafe fn from_array_unchecked(data: [c_uchar; 64]) -> Self { XOnlyPublicKey(data) }
+    pub unsafe fn from_array_unchecked(data: [c_uchar; 64]) -> Self {
+        XOnlyPublicKey(data)
+    }
 
     /// Returns the underlying FFI opaque representation of the x-only public key
     ///
     /// You should not use this unless you really know what you are doing. It is
     /// essentially only useful for extending the FFI interface itself.
-    pub fn underlying_bytes(self) -> [c_uchar; 64] { self.0 }
+    pub fn underlying_bytes(self) -> [c_uchar; 64] {
+        self.0
+    }
 
     /// Serializes this key as a byte-encoded x coordinate value (32 bytes).
     fn serialize(&self) -> [u8; 32] {
@@ -379,7 +401,9 @@ impl Ord for XOnlyPublicKey {
 
 #[cfg(not(secp256k1_fuzz))]
 impl PartialEq for XOnlyPublicKey {
-    fn eq(&self, other: &Self) -> bool { self.cmp(other) == core::cmp::Ordering::Equal }
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == core::cmp::Ordering::Equal
+    }
 }
 
 #[cfg(not(secp256k1_fuzz))]
@@ -408,7 +432,9 @@ impl Keypair {
     /// If you pass this to any FFI functions, except as an out-pointer,
     /// the result is likely to be an assertation failure and process
     /// termination.
-    pub unsafe fn new() -> Self { Self::from_array_unchecked([0; 96]) }
+    pub unsafe fn new() -> Self {
+        Self::from_array_unchecked([0; 96])
+    }
 
     /// Create a new keypair usable for the FFI interface from raw bytes
     ///
@@ -419,13 +445,17 @@ impl Keypair {
     /// the underlying library. You should not use this method except with data
     /// that you obtained from the FFI interface of the same version of this
     /// library.
-    pub unsafe fn from_array_unchecked(data: [c_uchar; 96]) -> Self { Keypair(data) }
+    pub unsafe fn from_array_unchecked(data: [c_uchar; 96]) -> Self {
+        Keypair(data)
+    }
 
     /// Returns the underlying FFI opaque representation of the x-only public key
     ///
     /// You should not use this unless you really know what you are doing. It is
     /// essentially only useful for extending the FFI interface itself.
-    pub fn underlying_bytes(self) -> [c_uchar; 96] { self.0 }
+    pub fn underlying_bytes(self) -> [c_uchar; 96] {
+        self.0
+    }
 
     /// Creates a new compressed public key from this key pair.
     fn public_key(&self) -> PublicKey {
@@ -444,7 +474,9 @@ impl Keypair {
     /// is very subtle. For more discussion on this, please see the documentation
     /// of the [`zeroize`](https://docs.rs/zeroize) crate.
     #[inline]
-    pub fn non_secure_erase(&mut self) { non_secure_erase_impl(&mut self.0, DUMMY_KEYPAIR); }
+    pub fn non_secure_erase(&mut self) {
+        non_secure_erase_impl(&mut self.0, DUMMY_KEYPAIR);
+    }
 }
 
 // DUMMY_KEYPAIR is the internal repr of a valid key pair with secret key `[1u8; 32]`
@@ -490,7 +522,9 @@ pub fn non_secure_erase_impl<T>(dst: &mut T, src: T) {
 
 #[cfg(not(secp256k1_fuzz))]
 impl PartialOrd for Keypair {
-    fn partial_cmp(&self, other: &Keypair) -> Option<core::cmp::Ordering> { Some(self.cmp(other)) }
+    fn partial_cmp(&self, other: &Keypair) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 #[cfg(not(secp256k1_fuzz))]
@@ -504,7 +538,9 @@ impl Ord for Keypair {
 
 #[cfg(not(secp256k1_fuzz))]
 impl PartialEq for Keypair {
-    fn eq(&self, other: &Self) -> bool { self.cmp(other) == core::cmp::Ordering::Equal }
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == core::cmp::Ordering::Equal
+    }
 }
 
 #[cfg(not(secp256k1_fuzz))]
@@ -528,8 +564,12 @@ impl core::hash::Hash for Keypair {
 pub struct ElligatorSwift([u8; 64]);
 
 impl ElligatorSwift {
-    pub fn from_array(arr: [u8; 64]) -> Self { ElligatorSwift(arr) }
-    pub fn to_array(self) -> [u8; 64] { self.0 }
+    pub fn from_array(arr: [u8; 64]) -> Self {
+        ElligatorSwift(arr)
+    }
+    pub fn to_array(self) -> [u8; 64] {
+        self.0
+    }
 }
 
 impl_array_newtype!(ElligatorSwift, u8, 64);
@@ -1410,9 +1450,13 @@ impl<T> CPtr for &[T] {
 
 impl CPtr for [u8; 32] {
     type Target = u8;
-    fn as_c_ptr(&self) -> *const Self::Target { self.as_ptr() }
+    fn as_c_ptr(&self) -> *const Self::Target {
+        self.as_ptr()
+    }
 
-    fn as_mut_c_ptr(&mut self) -> *mut Self::Target { self.as_mut_ptr() }
+    fn as_mut_c_ptr(&mut self) -> *mut Self::Target {
+        self.as_mut_ptr()
+    }
 }
 
 impl<T: CPtr> CPtr for Option<T> {
@@ -1490,7 +1534,9 @@ impl MusigSecNonce {
         MusigSecNonce(bytes)
     }
 
-    pub fn dangerous_into_bytes(self) -> [c_uchar; MUSIG_SECNONCE_LEN] { self.0 }
+    pub fn dangerous_into_bytes(self) -> [c_uchar; MUSIG_SECNONCE_LEN] {
+        self.0
+    }
 }
 
 #[repr(C)]
@@ -1678,7 +1724,7 @@ mod fuzz_dummy {
     ) -> c_int {
         check_context_flags(cx, 0);
         match in_len {
-            33 =>
+            33 => {
                 if *input != 2 && *input != 3 {
                     0
                 } else {
@@ -1690,15 +1736,17 @@ mod fuzz_dummy {
                         (*pk).0[32] = 0;
                     }
                     test_pk_validate(cx, pk)
-                },
-            65 =>
+                }
+            }
+            65 => {
                 if *input != 4 && *input != 6 && *input != 7 {
                     0
                 } else {
                     ptr::copy(input.offset(1), (*pk).0.as_mut_ptr(), 64);
                     test_cleanup_pk(pk);
                     test_pk_validate(cx, pk)
-                },
+                }
+            }
             _ => 0,
         }
     }
