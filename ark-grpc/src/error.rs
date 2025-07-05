@@ -58,6 +58,10 @@ impl Error {
         Error::new(Kind::EventStream).with(source)
     }
 
+    pub(crate) fn empty_response() -> Self {
+        Error::new(Kind::Conversion).with("empty response from server")
+    }
+
     fn description(&self) -> &str {
         match &self.inner.kind {
             Kind::Connect => "failed to connect to Ark server",

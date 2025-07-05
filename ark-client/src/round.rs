@@ -158,7 +158,7 @@ where
 
     /// Get all the [`round::OnChainInput`]s and [`round::VtxoInput`]s that can be used to join an
     /// upcoming round.
-    async fn fetch_round_transaction_inputs(
+    pub async fn fetch_round_transaction_inputs(
         &self,
         select_recoverable_vtxos: bool,
     ) -> Result<(Vec<round::OnChainInput>, Vec<round::VtxoInput>, Amount), Error> {
@@ -229,7 +229,7 @@ where
         Ok((boarding_inputs, vtxo_inputs, total_amount))
     }
 
-    async fn join_next_ark_round<R>(
+    pub async fn join_next_ark_round<R>(
         &self,
         rng: &mut R,
         onchain_inputs: Vec<round::OnChainInput>,
@@ -721,7 +721,8 @@ where
     }
 }
 
-enum RoundOutputType {
+#[derive(Debug, Clone)]
+pub enum RoundOutputType {
     Board {
         to_address: ArkAddress,
         to_amount: Amount,
