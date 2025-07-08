@@ -1,6 +1,9 @@
 #![allow(clippy::unwrap_used)]
 
+use ark_client::RoundOutputType;
+use ark_core::round;
 use ark_core::ArkNote;
+use ark_core::Vtxo;
 use bitcoin::key::Secp256k1;
 use bitcoin::Amount;
 use common::init_tracing;
@@ -61,7 +64,50 @@ pub async fn e2e_arknote_redemption() {
     let tx_out = arknote.to_tx_out();
     assert_eq!(tx_out.value, fund_amount);
 
-    alice.settle(arknote).await.unwrap();
+    // FIXME: how to crate the VtxoInput for ArkNote?
+    let vtxo = Vtxo::new_default(
+        &secp,
+        alice.server_info.pk.into(),
+        // FIXME: what is the owner public key? for sure using the server pk is wrong
+        alice.server_info.pk.into(),
+        alice.server_info.unilateral_exit_delay,
+        alice.server_info.network,
+    );
+    assert!(
+        vtxo.is_ok(),
+        "Failed to create Vtxo from ArkNote: {:?}",
+        vtxo.err()
+    );
+    let vtxo = vtxo.unwrap();
+    let vtxo_arknote = round::VtxoInput::new(vtxo, arknote.value(), arknote.outpoint(), true);
+    let inputs = vec![vtxo_arknote];
+
+    // Create the outpoint to the offchain address
+    let arkaddr = alice.get_offchain_address();
+    assert!(
+        arkaddr.is_ok(),
+        "Failed to get offchain address: {:?}",
+        arkaddr.err()
+    );
+    let arkaddr = arkaddr.unwrap().0;
+
+    let rng = &mut rand::thread_rng();
+    let result = alice
+        .join_next_ark_round(
+            rng,
+            vec![],
+            inputs,
+            RoundOutputType::Board {
+                to_address: arkaddr.clone(),
+                to_amount: arknote.value(),
+            },
+        )
+        .await;
+    assert!(
+        result.is_ok(),
+        "Failed to join Ark round with ArkNote: {:?}",
+        result.err()
+    );
 
     tracing::info!("ArkNote redemption test completed successfully");
 }

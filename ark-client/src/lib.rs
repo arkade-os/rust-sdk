@@ -28,14 +28,13 @@ pub mod error;
 pub mod round;
 pub mod wallet;
 
-pub use round::RoundOutputType;
-
 mod coin_select;
 mod send_vtxo;
 mod unilateral_exit;
 mod utils;
 
 pub use error::Error;
+pub use round::RoundOutputType;
 
 /// A client to interact with Ark Server
 ///
@@ -605,7 +604,7 @@ where
         }
     }
 
-    // FIXME: document this function
+    #[cfg(feature = "e2e")]
     pub async fn make_arknote(&self, amount: Amount) -> Result<ArkNote, Error> {
         let note = self.network_client().create_note(amount, 1).await?;
         Ok(note)

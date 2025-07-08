@@ -23,7 +23,6 @@ mod tx_graph;
 
 pub use ark_address::ArkAddress;
 pub use arknote::ArkNote;
-pub use arknote::ExtendedCoin;
 pub use arknote::Status;
 pub use boarding_output::BoardingOutput;
 pub use error::Error;

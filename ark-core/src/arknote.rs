@@ -33,18 +33,6 @@ pub struct Status {
     pub confirmed: bool,
 }
 
-/// Extended coin trait that ArkNote implements
-pub trait ExtendedCoin {
-    fn txid(&self) -> &str;
-    fn vout(&self) -> u32;
-    fn value(&self) -> Amount;
-    fn status(&self) -> &Status;
-    fn extra_witness(&self) -> Option<&[Vec<u8>]>;
-    fn tap_tree(&self) -> Vec<String>;
-    fn forfeit_tap_leaf_script(&self) -> &ScriptBuf;
-    fn intent_tap_leaf_script(&self) -> &ScriptBuf;
-}
-
 impl fmt::Display for ArkNote {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let encoded = self.encode();
@@ -254,40 +242,6 @@ impl ArkNote {
             .push_slice(preimage_hash.as_byte_array())
             .push_opcode(OP_EQUAL)
             .into_script()
-    }
-}
-
-impl ExtendedCoin for ArkNote {
-    fn txid(&self) -> &str {
-        &self.txid
-    }
-
-    fn vout(&self) -> u32 {
-        FAKE_OUTPOINT_INDEX
-    }
-
-    fn value(&self) -> Amount {
-        self.value
-    }
-
-    fn status(&self) -> &Status {
-        &self.status
-    }
-
-    fn extra_witness(&self) -> Option<&[Vec<u8>]> {
-        Some(&self.extra_witness)
-    }
-
-    fn tap_tree(&self) -> Vec<String> {
-        self.tap_tree()
-    }
-
-    fn forfeit_tap_leaf_script(&self) -> &ScriptBuf {
-        self.forfeit_tap_leaf_script()
-    }
-
-    fn intent_tap_leaf_script(&self) -> &ScriptBuf {
-        self.intent_tap_leaf_script()
     }
 }
 

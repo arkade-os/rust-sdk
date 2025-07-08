@@ -44,3 +44,7 @@ tonic-build = { version = "0.12.3" }
 
 [dev-dependencies]
 tokio = { version = "1.41.0", features = ["macros", "rt"] }
+
+[features]
+default = []
+e2e = []
