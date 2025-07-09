@@ -15,8 +15,6 @@ pub mod boltz;
 #[cfg(feature = "bip353")]
 pub mod bip353;
 
-#[cfg(feature = "bip353")]
-pub use bip353::*;
 pub use errors::*;
 pub use lightning_swaps::*;
 pub use traits::*;
