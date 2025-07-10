@@ -69,7 +69,7 @@ pub async fn e2e_arknote_redemption() {
         &secp,
         alice.server_info.pk.into(),
         // FIXME: what is the owner public key? for sure using the server pk is wrong
-        alice.server_info.pk.into(),
+        arknote.vtxo_script().x_only_public_key(),
         alice.server_info.unilateral_exit_delay,
         alice.server_info.network,
     );

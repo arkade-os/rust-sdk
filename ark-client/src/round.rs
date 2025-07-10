@@ -232,7 +232,9 @@ where
     pub async fn join_next_ark_round<R>(
         &self,
         rng: &mut R,
+        // Boarding inputs
         onchain_inputs: Vec<round::OnChainInput>,
+        // VTXO inputs
         vtxo_inputs: Vec<round::VtxoInput>,
         output_type: RoundOutputType,
     ) -> Result<Txid, Error>

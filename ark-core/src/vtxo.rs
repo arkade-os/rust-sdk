@@ -114,6 +114,7 @@ impl Vtxo {
     pub fn new_default<C>(
         secp: &Secp256k1<C>,
         server: XOnlyPublicKey,
+        // Wallet owner public key.
         owner: XOnlyPublicKey,
         exit_delay: bitcoin::Sequence,
         network: Network,
