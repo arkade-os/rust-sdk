@@ -1,3 +1,4 @@
+use crate::proof_of_funds;
 use crate::Error;
 use crate::VirtualUtxoScript;
 use bitcoin::hashes::sha256;
@@ -7,6 +8,7 @@ use bitcoin::opcodes::all::*;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
 use bitcoin::ScriptBuf;
+use bitcoin::Sequence;
 use bitcoin::TxOut;
 use serde::Deserialize;
 use serde::Serialize;

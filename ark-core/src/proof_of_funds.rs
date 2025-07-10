@@ -1,3 +1,4 @@
+use crate::ArkNote;
 use crate::Error;
 use crate::ErrorContext;
 use bitcoin::absolute::LockTime;
@@ -16,6 +17,8 @@ use bitcoin::secp256k1::PublicKey;
 use bitcoin::sighash::Prevouts;
 use bitcoin::sighash::SighashCache;
 use bitcoin::taproot;
+use bitcoin::taproot::LeafVersion;
+use bitcoin::taproot::TaprootBuilder;
 use bitcoin::transaction::Version;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
@@ -46,6 +49,37 @@ pub struct Input {
     pk: XOnlyPublicKey,
     spend_info: (ScriptBuf, taproot::ControlBlock),
     is_onchain: bool,
+}
+
+impl From<&ArkNote> for Input {
+    fn from(value: &ArkNote) -> Self {
+        let taprootkey = value.vtxo_script().spend_info().output_key();
+        let script_pubkey = value.to_tx_out().script_pubkey;
+
+        let spending_info = value.vtxo_script().spend_info();
+
+        // FIXME: remove the unwrap!
+        let spending_scripts = value.vtxo_script().tap_leaves();
+        let spending_scripts = spending_scripts.first().unwrap();
+        let spending_script = spending_scripts.0.clone();
+        let spending_control_block = spending_scripts.1.clone();
+
+        Self {
+            outpoint: value.outpoint(),
+            sequence: Sequence::MAX,
+            witness_utxo: TxOut {
+                value: value.value(),
+                script_pubkey: script_pubkey.clone(),
+            },
+            // FIXME: I completely made it up
+            tapscripts: vec![],
+            // FIXME: I completely made it up
+            pk: taprootkey.to_x_only_public_key(),
+            spend_info: (spending_script, spending_control_block),
+            // FIXME: I completely made it up
+            is_onchain: false,
+        }
+    }
 }
 
 impl Input {

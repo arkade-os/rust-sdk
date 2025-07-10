@@ -437,6 +437,31 @@ where
         Ok(Some(vtxo_chain))
     }
 
+    // FIXME: make a typed return type for this!
+    pub async fn redeem_notes(&self, arknotes: &[ArkNote]) -> Result<Txid, Error> {
+        let (address, _) = self.get_offchain_address()?;
+        let mut amount = Amount::from_sat(0);
+
+        for arknote in arknotes {
+            amount += arknote.value();
+        }
+
+        let rng = &mut rand::thread_rng();
+        let txid = self
+            .join_next_ark_round(
+                rng,
+                vec![],
+                vec![],
+                arknotes,
+                RoundOutputType::Board {
+                    to_address: address,
+                    to_amount: amount,
+                },
+            )
+            .await?;
+        Ok(txid)
+    }
+
     pub async fn spendable_vtxos(
         &self,
         select_recoverable_vtxos: bool,
