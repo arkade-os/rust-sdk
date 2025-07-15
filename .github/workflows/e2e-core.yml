@@ -12,7 +12,7 @@ env:
   CARGO_INCREMENTAL: 0
   CARGO_TERM_COLOR: always
   ARK_GO_DIR: ./ark-go
-  ARKD_DIR: ./ark-go/ark/server
+  ARKD_DIR: ./ark-go/ark
   ARKD_WALLET_DIR: ./ark-go/ark/pkg/ark-wallet
   ARK_LIVE_STORE_TYPE: inmemory
   ARK_DB_TYPE: sqlite
