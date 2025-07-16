@@ -41,6 +41,7 @@ use ark_core::server::VtxoChain;
 use ark_core::server::VtxoChains;
 use ark_core::server::VtxoOutPoint;
 use ark_core::ArkAddress;
+use ark_core::ArkNote;
 use ark_core::ArkTransaction;
 use ark_core::TxGraphChunk;
 use async_stream::stream;
@@ -48,6 +49,7 @@ use base64::Engine;
 use bitcoin::hex::FromHex;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::taproot::Signature;
+use bitcoin::Amount;
 use bitcoin::OutPoint;
 use bitcoin::Psbt;
 use bitcoin::SignedAmount;
@@ -63,6 +65,9 @@ pub struct Client {
     url: String,
     ark_client: Option<ArkServiceClient<tonic::transport::Channel>>,
     indexer_client: Option<IndexerServiceClient<tonic::transport::Channel>>,
+    admin_client: Option<
+        generated::ark::v1::admin_service_client::AdminServiceClient<tonic::transport::Channel>,
+    >,
 }
 
 impl Client {
@@ -71,6 +76,7 @@ impl Client {
             url,
             ark_client: None,
             indexer_client: None,
+            admin_client: None,
         }
     }
 
@@ -81,9 +87,14 @@ impl Client {
         let indexer_client = IndexerServiceClient::connect(self.url.clone())
             .await
             .map_err(Error::connect)?;
+        let admin_client =
+            generated::ark::v1::admin_service_client::AdminServiceClient::connect(self.url.clone())
+                .await
+                .map_err(Error::connect)?;
 
         self.ark_client = Some(ark_service_client);
         self.indexer_client = Some(indexer_client);
+        self.admin_client = Some(admin_client);
         Ok(())
     }
 
@@ -96,6 +107,23 @@ impl Client {
             .map_err(Error::request)?;
 
         response.into_inner().try_into()
+    }
+
+    pub async fn create_note(&self, amount: Amount, quantity: u64) -> Result<ArkNote, Error> {
+        let mut client = self.admin_client.clone().ok_or(Error::not_connected())?;
+
+        let response = client
+            .create_note(generated::ark::v1::CreateNoteRequest {
+                amount: amount.to_sat() as u32,
+                quantity: quantity as u32,
+            })
+            .await
+            .map_err(Error::request)?;
+
+        // FIXME: this is only one item or are more items returned?
+        let notes = response.into_inner();
+        let note = notes.notes.first().ok_or(Error::empty_response())?;
+        ArkNote::from_string(note).map_err(Error::conversion)
     }
 
     pub async fn list_vtxos(&self, address: &ArkAddress) -> Result<ListVtxo, Error> {

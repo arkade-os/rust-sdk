@@ -3,6 +3,7 @@ use bitcoin::OutPoint;
 use bitcoin::ScriptBuf;
 use bitcoin::TxOut;
 
+pub mod arknote;
 pub mod boarding_output;
 pub mod coin_select;
 pub mod conversions;
@@ -21,6 +22,8 @@ mod script;
 mod tx_graph;
 
 pub use ark_address::ArkAddress;
+pub use arknote::ArkNote;
+pub use arknote::Status;
 pub use boarding_output::BoardingOutput;
 pub use error::Error;
 pub use error::ErrorContext;
@@ -33,6 +36,8 @@ pub use unilateral_exit::build_anchor_tx;
 pub use unilateral_exit::build_unilateral_exit_tree_txids;
 pub use unilateral_exit::SelectedUtxo;
 pub use unilateral_exit::UtxoCoinSelection;
+pub use vtxo::EncodedVirtualUtxoScript;
+pub use vtxo::VirtualUtxoScript;
 pub use vtxo::Vtxo;
 
 pub const UNSPENDABLE_KEY: &str =

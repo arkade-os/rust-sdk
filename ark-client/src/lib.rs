@@ -6,7 +6,9 @@ use ark_core::server;
 use ark_core::server::VtxoOutPoint;
 use ark_core::sort_transactions_by_created_at;
 use ark_core::ArkAddress;
+use ark_core::ArkNote;
 use ark_core::ArkTransaction;
+use ark_core::BoardingOutput;
 use ark_core::UtxoCoinSelection;
 use ark_core::Vtxo;
 use ark_grpc::VtxoChainResponse;
@@ -32,6 +34,7 @@ mod unilateral_exit;
 mod utils;
 
 pub use error::Error;
+pub use round::RoundOutputType;
 
 /// A client to interact with Ark Server
 ///
@@ -240,6 +243,27 @@ impl OffChainBalance {
     }
 }
 
+pub enum SettleInput {
+    BoardingOutput(BoardingOutput),
+    VtxoOutPoint(VtxoOutPoint),
+    ArkNote(ArkNote),
+}
+
+pub struct SettleOutput {
+    // FIXME: this is an ark address or we should have some other type?
+    pub address: ArkAddress,
+    pub amount: Amount,
+}
+
+// FIXME: move this somewhere else
+pub struct SettleParams {
+    // FIXME: what type should we use here? probably we should define a new one?
+    // regarding the inputs probably we should have some sort of enum to aggregate boarding
+    // outputs, vtxo and arknotes?
+    pub inputs: Vec<SettleInput>,
+    pub outputs: Vec<SettleOutput>,
+}
+
 pub trait Blockchain {
     fn find_outpoints(
         &self,
@@ -413,6 +437,31 @@ where
         Ok(Some(vtxo_chain))
     }
 
+    // FIXME: make a typed return type for this!
+    pub async fn redeem_notes(&self, arknotes: &[ArkNote]) -> Result<Txid, Error> {
+        let (address, _) = self.get_offchain_address()?;
+        let mut amount = Amount::from_sat(0);
+
+        for arknote in arknotes {
+            amount += arknote.value();
+        }
+
+        let rng = &mut rand::thread_rng();
+        let txid = self
+            .join_next_ark_round(
+                rng,
+                vec![],
+                vec![],
+                arknotes,
+                RoundOutputType::Board {
+                    to_address: address,
+                    to_amount: amount,
+                },
+            )
+            .await?;
+        Ok(txid)
+    }
+
     pub async fn spendable_vtxos(
         &self,
         select_recoverable_vtxos: bool,
@@ -578,6 +627,32 @@ where
             bitcoin::relative::LockTime::Time(time) => time.value() as u64 * 512,
             bitcoin::relative::LockTime::Blocks(_) => unreachable!(),
         }
+    }
+
+    #[cfg(feature = "e2e")]
+    pub async fn make_arknote(&self, amount: Amount) -> Result<ArkNote, Error> {
+        let note = self.network_client().create_note(amount, 1).await?;
+        Ok(note)
+    }
+
+    /// Settle VTXOs and boarding outputs by consolidating them into new VTXOs.
+    ///
+    /// This method settles (consolidates) all available spendable VTXOs and boarding outputs
+    /// into a single VTXO at the specified address. This is useful for cleaning up
+    /// fragmented VTXOs and reducing the number of UTXOs you need to track.
+    ///
+    /// # Arguments
+    ///
+    /// * `rng` - Random number generator for cryptographic operations
+    /// * `to_address` - The Ark address to settle all funds to
+    /// * `select_recoverable_vtxos` - Whether to include recoverable VTXOs in settlement
+    ///
+    /// # Returns
+    ///
+    /// Returns the transaction ID of the settlement round if successful.
+    /// Returns None if there are no inputs available for settlement.
+    pub async fn settle(&self, _params: SettleParams) -> Result<Option<Txid>, Error> {
+        unimplemented!()
     }
 
     fn network_client(&self) -> ark_grpc::Client {

@@ -16,6 +16,7 @@ use ark_core::round::NonceKps;
 use ark_core::server::BatchTreeEventType;
 use ark_core::server::RoundStreamEvent;
 use ark_core::ArkAddress;
+use ark_core::ArkNote;
 use ark_core::TxGraph;
 use backon::ExponentialBuilder;
 use backon::Retryable;
@@ -71,6 +72,7 @@ where
                 &mut rng.clone(),
                 boarding_inputs.clone(),
                 vtxo_inputs.clone(),
+                &[],
                 RoundOutputType::Board {
                     to_address,
                     to_amount: total_amount,
@@ -130,6 +132,7 @@ where
                 &mut rng.clone(),
                 boarding_inputs.clone(),
                 vtxo_inputs.clone(),
+                &vec![],
                 RoundOutputType::OffBoard {
                     to_address: to_address.clone(),
                     to_amount,
@@ -158,7 +161,7 @@ where
 
     /// Get all the [`round::OnChainInput`]s and [`round::VtxoInput`]s that can be used to join an
     /// upcoming round.
-    async fn fetch_round_transaction_inputs(
+    pub async fn fetch_round_transaction_inputs(
         &self,
         select_recoverable_vtxos: bool,
     ) -> Result<(Vec<round::OnChainInput>, Vec<round::VtxoInput>, Amount), Error> {
@@ -240,17 +243,21 @@ where
         Ok((boarding_inputs, vtxo_inputs, total_amount))
     }
 
-    async fn join_next_ark_round<R>(
+    pub async fn join_next_ark_round<R>(
         &self,
         rng: &mut R,
+        // Boarding inputs
         onchain_inputs: Vec<round::OnChainInput>,
+        // VTXO inputs
         vtxo_inputs: Vec<round::VtxoInput>,
+        // Arknote inputs
+        notes: &[ArkNote],
         output_type: RoundOutputType,
     ) -> Result<Txid, Error>
     where
         R: Rng + CryptoRng,
     {
-        if onchain_inputs.is_empty() && vtxo_inputs.is_empty() {
+        if onchain_inputs.is_empty() && vtxo_inputs.is_empty() && notes.is_empty() {
             return Err(Error::ad_hoc("cannot join round without inputs"));
         }
 
@@ -296,7 +303,15 @@ where
                 )
             });
 
-            boarding_inputs.chain(vtxo_inputs).collect::<Vec<_>>()
+            let notes = notes
+                .into_iter()
+                .map(|n| n.into())
+                .collect::<Vec<proof_of_funds::Input>>();
+
+            boarding_inputs
+                .chain(vtxo_inputs)
+                .chain(notes)
+                .collect::<Vec<_>>()
         };
 
         let mut outputs = vec![];
@@ -732,7 +747,8 @@ where
     }
 }
 
-enum RoundOutputType {
+#[derive(Debug, Clone)]
+pub enum RoundOutputType {
     Board {
         to_address: ArkAddress,
         to_amount: Amount,

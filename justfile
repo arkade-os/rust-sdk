@@ -158,7 +158,7 @@ arkd-wallet-run:
 
     set -euxo pipefail
 
-    make run-bitcoind -C $ARKD_WALLET_DIR run &> {{ arkd_wallet_logs }} &
+    make run-wallet-bitcoind -C $ARKD_DIR &> {{ arkd_wallet_logs }} &
 
     just _create-arkd-wallet
 
@@ -314,6 +314,20 @@ mod ark-sample 'ark-sample/justfile'
 test:
     @echo running all tests
     cargo test -- --nocapture
+
+integration-tests:
+    @echo running integration tests
+    nigiri stop --delete
+    nigiri start
+    sleep 1
+    rm -rf $ARKD_DIR
+    just arkd-checkout master
+    just arkd-redis-run
+    just arkd-wallet-run
+    just arkd-build
+    just arkd-run
+    just arkd-fund 20
+    just e2e-tests
 
 e2e-tests:
     @echo running e2e tests
