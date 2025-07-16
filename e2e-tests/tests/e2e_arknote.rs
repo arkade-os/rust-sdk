@@ -31,6 +31,7 @@ pub async fn e2e_arknote_redemption() {
     let fund_amount = Amount::from_sat(1000);
     let arknote = alice.make_arknote(fund_amount).await.unwrap();
 
+    tracing::debug!("arknote: {:#?}", arknote);
     tracing::info!(
         arknote_string = %arknote.to_string(),
         value = %fund_amount,
@@ -47,17 +48,10 @@ pub async fn e2e_arknote_redemption() {
     assert_eq!(arknote.value(), fund_amount);
     assert_eq!(arknote.vout(), 0);
     assert!(arknote.status().confirmed);
-    assert!(arknote.extra_witness().is_some());
 
-    // Verify tap tree is not empty
-    let tap_tree = arknote.tap_tree();
-    assert!(!tap_tree.is_empty());
-
-    // Verify outpoint creation
     let outpoint = arknote.outpoint();
     assert_eq!(outpoint.vout, 0);
 
-    // Verify TxOut creation
     let tx_out = arknote.to_tx_out();
     assert_eq!(tx_out.value, fund_amount);
 

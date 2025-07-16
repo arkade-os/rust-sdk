@@ -1,4 +1,3 @@
-use crate::proof_of_funds;
 use crate::Error;
 use crate::VirtualUtxoScript;
 use bitcoin::hashes::sha256;
@@ -8,8 +7,8 @@ use bitcoin::opcodes::all::*;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
 use bitcoin::ScriptBuf;
-use bitcoin::Sequence;
 use bitcoin::TxOut;
+use bitcoin::Txid;
 use serde::Deserialize;
 use serde::Serialize;
 use std::fmt;
@@ -28,6 +27,18 @@ pub const ARKNOTE_LENGTH: usize = PREIMAGE_LENGTH + VALUE_LENGTH;
 
 /// Fake outpoint index used for ArkNotes
 pub const FAKE_OUTPOINT_INDEX: u32 = 0;
+
+/// Macro to create a note tapscript that checks the preimage hash
+#[macro_export]
+macro_rules! note_tapscript {
+    ($preimage_hash:expr) => {{
+        ::bitcoin::ScriptBuf::builder()
+            .push_opcode(::bitcoin::opcodes::all::OP_SHA256)
+            .push_slice($preimage_hash.as_byte_array())
+            .push_opcode(::bitcoin::opcodes::all::OP_EQUAL)
+            .into_script()
+    }};
+}
 
 /// Status of a coin/VTXO
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,11 +61,14 @@ pub struct ArkNote {
     value: Amount,
     hrp: String,
     // Computed fields
-    txid: String,
+    txid: Txid,
     vtxo_script: VirtualUtxoScript,
     tap_tree_bytes: Vec<String>, // Cache for tap_tree() method
     status: Status,
+    // FIXME: this is necessary?
     extra_witness: Vec<Vec<u8>>,
+
+    pub note_script: ScriptBuf,
 }
 
 impl ArkNote {
@@ -67,22 +81,17 @@ impl ArkNote {
     pub fn new_with_hrp(preimage: [u8; PREIMAGE_LENGTH], value: Amount, hrp: String) -> Self {
         let preimage_hash = sha256::Hash::hash(&preimage);
 
-        // Create the note tapscript
-        let note_script = Self::note_tapscript(&preimage_hash);
+        let note_script = note_tapscript!(&preimage_hash);
 
         // Create the VTXO script structure using VirtualUtxoScript
         let secp = Secp256k1::new();
-        let vtxo_script = VirtualUtxoScript::new(&secp, vec![note_script])
+        let vtxo_script = VirtualUtxoScript::new(&secp, vec![note_script.clone()])
             .expect("failed to create VirtualUtxoScript");
 
-        // Create fake txid from reversed preimage hash
-        let mut txid_bytes = preimage_hash.to_byte_array();
-        txid_bytes.reverse();
-        let txid = hex::encode(txid_bytes);
+        let txid = bitcoin::Txid::from_slice(preimage_hash.as_byte_array()).expect("valid txid");
 
         // Convert the encoded hex strings to bytes for tap_tree_bytes
         let encoded_scripts = vtxo_script.encode();
-
         ArkNote {
             preimage,
             value,
@@ -92,6 +101,7 @@ impl ArkNote {
             tap_tree_bytes: encoded_scripts,
             status: Status { confirmed: true },
             extra_witness: vec![preimage.to_vec()],
+            note_script,
         }
     }
 
@@ -111,8 +121,8 @@ impl ArkNote {
     }
 
     /// Get the txid
-    pub fn txid(&self) -> &str {
-        &self.txid
+    pub fn txid(&self) -> Txid {
+        self.txid
     }
 
     /// Get the vout (always returns FAKE_OUTPOINT_INDEX)
@@ -223,9 +233,7 @@ impl ArkNote {
 
     /// Get the outpoint for this ArkNote
     pub fn outpoint(&self) -> OutPoint {
-        let txid = bitcoin::Txid::from_slice(&hex::decode(&self.txid).expect("valid hex string"))
-            .expect("valid txid");
-        OutPoint::new(txid, FAKE_OUTPOINT_INDEX)
+        OutPoint::new(self.txid, FAKE_OUTPOINT_INDEX)
     }
 
     /// Convert to a TxOut
@@ -235,15 +243,6 @@ impl ArkNote {
             value: self.value,
             script_pubkey,
         }
-    }
-
-    /// Create a note tapscript that checks the preimage hash
-    pub fn note_tapscript(preimage_hash: &sha256::Hash) -> ScriptBuf {
-        ScriptBuf::builder()
-            .push_opcode(OP_SHA256)
-            .push_slice(preimage_hash.as_byte_array())
-            .push_opcode(OP_EQUAL)
-            .into_script()
     }
 }
 

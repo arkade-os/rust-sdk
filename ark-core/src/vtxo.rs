@@ -330,8 +330,7 @@ pub struct VirtualUtxoScript {
     scripts: Vec<ScriptBuf>,
     /// The taproot spend info containing the merkle tree and keys
     spend_info: TaprootSpendInfo,
-    /// The tweaked public key
-    tweaked_public_key: bitcoin::key::TweakedPublicKey,
+    pub unspendable_key: XOnlyPublicKey,
 }
 
 impl VirtualUtxoScript {
@@ -366,12 +365,10 @@ impl VirtualUtxoScript {
             .finalize(secp, unspendable_key)
             .map_err(|e| Error::ad_hoc(format!("failed to finalize taproot tree: {:?}", e)))?;
 
-        let tweaked_public_key = spend_info.output_key();
-
         Ok(Self {
             scripts,
             spend_info,
-            tweaked_public_key,
+            unspendable_key,
         })
     }
 
@@ -413,12 +410,12 @@ impl VirtualUtxoScript {
 
     /// Get the tweaked public key
     pub fn tweaked_public_key(&self) -> bitcoin::key::TweakedPublicKey {
-        self.tweaked_public_key
+        self.spend_info.output_key()
     }
 
     /// Get the X-only public key from the tweaked public key
     pub fn x_only_public_key(&self) -> XOnlyPublicKey {
-        self.tweaked_public_key.to_x_only_public_key()
+        self.tweaked_public_key().to_x_only_public_key()
     }
 
     /// Get the script pubkey (P2TR output script)
@@ -428,7 +425,7 @@ impl VirtualUtxoScript {
 
     /// Create an ArkAddress from this script
     pub fn ark_address(&self, network: Network, server_pubkey: XOnlyPublicKey) -> ArkAddress {
-        ArkAddress::new(network, server_pubkey, self.tweaked_public_key)
+        ArkAddress::new(network, server_pubkey, self.tweaked_public_key())
     }
 
     /// Get the on-chain address for this script
