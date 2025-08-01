@@ -1,0 +1,15 @@
+[package]
+name = "ark_flutter_example"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ark-client = { path = "../../ark-client" }
+ark-bdk-wallet = { path = "../../ark-bdk-wallet" }
+ark-core = { path = "../../ark-core" }
+bitcoin = "0.30"
+async-trait = "0.1"
+tokio = { version = "1.41", features = ["rt", "macros"] }
