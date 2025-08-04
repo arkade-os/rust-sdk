@@ -351,19 +351,19 @@ impl VirtualUtxoScript {
             // Single script case
             builder = builder
                 .add_leaf(0, scripts[0].clone())
-                .map_err(|e| Error::ad_hoc(format!("failed to add leaf: {:?}", e)))?;
+                .map_err(|e| Error::ad_hoc(format!("failed to add leaf: {e:?}")))?;
         } else {
             // Multiple scripts case - use balanced tree
             for script in &scripts {
                 builder = builder
                     .add_leaf(1, script.clone())
-                    .map_err(|e| Error::ad_hoc(format!("failed to add leaf: {:?}", e)))?;
+                    .map_err(|e| Error::ad_hoc(format!("failed to add leaf: {e:?}")))?;
             }
         }
 
         let spend_info = builder
             .finalize(secp, unspendable_key)
-            .map_err(|e| Error::ad_hoc(format!("failed to finalize taproot tree: {:?}", e)))?;
+            .map_err(|e| Error::ad_hoc(format!("failed to finalize taproot tree: {e:?}")))?;
 
         let tweaked_public_key = spend_info.output_key();
 
@@ -383,7 +383,7 @@ impl VirtualUtxoScript {
             .into_iter()
             .map(|hex_script| {
                 let bytes = hex::decode(hex_script)
-                    .map_err(|e| Error::ad_hoc(format!("failed to decode hex: {}", e)))?;
+                    .map_err(|e| Error::ad_hoc(format!("failed to decode hex: {e}")))?;
                 Ok(ScriptBuf::from_bytes(bytes))
             })
             .collect();
@@ -439,7 +439,7 @@ impl VirtualUtxoScript {
     pub fn find_leaf(&self, script_hex: &str) -> Result<(ScriptBuf, taproot::ControlBlock), Error> {
         let target_script = ScriptBuf::from_bytes(
             hex::decode(script_hex)
-                .map_err(|e| Error::ad_hoc(format!("failed to decode script hex: {}", e)))?,
+                .map_err(|e| Error::ad_hoc(format!("failed to decode script hex: {e}")))?,
         );
 
         for script in &self.scripts {
@@ -453,7 +453,7 @@ impl VirtualUtxoScript {
             }
         }
 
-        Err(Error::ad_hoc(format!("leaf '{}' not found", script_hex)))
+        Err(Error::ad_hoc(format!("leaf '{script_hex}' not found")))
     }
 
     /// Get control block for a specific script

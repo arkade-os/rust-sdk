@@ -338,8 +338,8 @@ integration-tests:
     rm -rf $ARKD_DIR
     just arkd-checkout master
     just arkd-redis-run
-    just arkd-wallet-run
     just arkd-build
+    just arkd-wallet-run
     just arkd-run
     just arkd-fund 20
     just e2e-tests

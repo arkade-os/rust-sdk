@@ -557,11 +557,25 @@ where
     }
 
     pub async fn create_arknote(&self, amount: Amount) -> Result<ArkNote, Error> {
-        let note = self
-            .network_client()
+        let notes = self
+            .inner
+            .network_client
+            .clone()
             .create_arknote(amount.to_sat() as u32, 1)
-            .await?;
-        let note = ArkNote::from_string(&note[0])?;
+            .await
+            .map_err(Error::ad_hoc)?;
+
+        if notes.is_empty() {
+            return Err(Error::ad_hoc("No notes returned from server"));
+        }
+
+        let note_str = notes
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::ad_hoc("No note in response"))?;
+
+        tracing::info!(note = %note_str, "Created ArkNote");
+        let note = ArkNote::from_string(&note_str).map_err(Error::ad_hoc)?;
         Ok(note)
     }
 

@@ -205,15 +205,14 @@ impl ArkNote {
         let note_str = note_str.trim();
         if !note_str.starts_with(hrp) {
             return Err(Error::ad_hoc(format!(
-                "invalid human-readable part: expected {} prefix (note '{}')",
-                hrp, note_str
+                "invalid human-readable part: expected {hrp} prefix (note '{note_str}')"
             )));
         }
 
         let encoded = &note_str[hrp.len()..];
         let decoded = bs58::decode(encoded)
             .into_vec()
-            .map_err(|e| Error::ad_hoc(format!("failed to decode base58: {}", e)))?;
+            .map_err(|e| Error::ad_hoc(format!("failed to decode base58: {e}")))?;
 
         if decoded.is_empty() {
             return Err(Error::ad_hoc("failed to decode base58 string".to_string()));

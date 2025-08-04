@@ -257,6 +257,9 @@ where
     where
         R: Rng + CryptoRng,
     {
+        // the go implementation is taking the selected boarding coins & selected coins and the
+        // notes and then build the bip322 inputs.
+
         // For ArkNotes, we need to create special VtxoInputs that have the proper scripts
         // ArkNotes have a single script that checks SHA256(preimage) == hash
         let server_info = &self.server_info;
