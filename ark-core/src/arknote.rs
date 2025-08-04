@@ -33,7 +33,6 @@ pub struct Status {
     pub confirmed: bool,
 }
 
-
 impl fmt::Display for ArkNote {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = self.to_encoded_string();
@@ -318,7 +317,6 @@ impl ArkNote {
             .into_script()
     }
 }
-
 
 #[cfg(test)]
 mod tests {

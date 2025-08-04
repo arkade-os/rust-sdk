@@ -556,6 +556,15 @@ where
         self.redeem_notes(rng, vec![arknote]).await
     }
 
+    pub async fn create_arknote(&self, amount: Amount) -> Result<ArkNote, Error> {
+        let note = self
+            .network_client()
+            .create_arknote(amount.to_sat() as u32, 1)
+            .await?;
+        let note = ArkNote::from_string(&note[0])?;
+        Ok(note)
+    }
+
     pub async fn transaction_history(&self) -> Result<Vec<history::Transaction>, Error> {
         let mut boarding_transactions = Vec::new();
         let mut boarding_commitment_transactions = Vec::new();
