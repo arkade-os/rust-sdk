@@ -24,9 +24,9 @@ tokio = { version = "1.41.0", features = ["sync", "rt-multi-thread"] }
 tracing = "0.1.37"
 
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
-ark-grpc = { path = "../ark-grpc", version = "0.7.0" }
+ark-grpc = { path = "../ark-grpc", version = "0.7.0", default-features = false }
 backon = { version = "1", features = ["tokio-sleep"] }
-tonic = { version = "0.12", features = ["tls-native-roots"] }
+tonic = "0.12"
 
 # TODO: We do not yet support WASM in `ark-client`. To support WASM in this high level crate, we
 # will need to make it possible to use either `ark-grpc` or `ark-rest`. The current default is
@@ -44,3 +44,8 @@ tonic-build = { version = "0.12.3" }
 
 [dev-dependencies]
 tokio = { version = "1.41.0", features = ["macros", "rt"] }
+
+[features]
+default = ["tls-native-roots"]
+tls-native-roots = ["tonic/tls-native-roots", "ark-grpc/tls-native-roots"]
+tls-webpki-roots = ["tonic/tls-webpki-roots", "ark-grpc/tls-webpki-roots"]

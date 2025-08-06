@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
-ark-client = { path = "../ark-client" }
+ark-client = { path = "../ark-client", default-features = false }
 ark-core = { path = "../ark-core" }
 async-stream = "0.3"
 bdk_wallet = "1.0.0"
