@@ -1,9 +1,11 @@
 use crate::generated;
+use crate::generated::ark::v1::admin_service_client::AdminServiceClient;
 use crate::generated::ark::v1::ark_service_client::ArkServiceClient;
 use crate::generated::ark::v1::indexer_service_client::IndexerServiceClient;
 use crate::generated::ark::v1::indexer_tx_history_record::Key;
 use crate::generated::ark::v1::Bip322Signature;
 use crate::generated::ark::v1::ConfirmRegistrationRequest;
+use crate::generated::ark::v1::CreateNoteRequest;
 use crate::generated::ark::v1::GetEventStreamRequest;
 use crate::generated::ark::v1::GetInfoRequest;
 use crate::generated::ark::v1::GetTransactionsStreamRequest;
@@ -63,6 +65,7 @@ pub struct Client {
     url: String,
     ark_client: Option<ArkServiceClient<tonic::transport::Channel>>,
     indexer_client: Option<IndexerServiceClient<tonic::transport::Channel>>,
+    admin_client: Option<AdminServiceClient<tonic::transport::Channel>>,
 }
 
 impl Client {
@@ -71,6 +74,7 @@ impl Client {
             url,
             ark_client: None,
             indexer_client: None,
+            admin_client: None,
         }
     }
 
@@ -81,9 +85,13 @@ impl Client {
         let indexer_client = IndexerServiceClient::connect(self.url.clone())
             .await
             .map_err(Error::connect)?;
+        let admin_client = AdminServiceClient::connect(self.url.clone())
+            .await
+            .map_err(Error::connect)?;
 
         self.ark_client = Some(ark_service_client);
         self.indexer_client = Some(indexer_client);
+        self.admin_client = Some(admin_client);
         Ok(())
     }
 
@@ -454,12 +462,25 @@ impl Client {
         Ok(result)
     }
 
+    pub async fn create_arknote(&self, amount: u32, quantity: u32) -> Result<Vec<String>, Error> {
+        let mut client = self.admin_client()?;
+
+        let request = CreateNoteRequest { amount, quantity };
+
+        let response = client.create_note(request).await.map_err(Error::request)?;
+
+        Ok(response.into_inner().notes)
+    }
+
     fn ark_client(&self) -> Result<ArkServiceClient<tonic::transport::Channel>, Error> {
         // Cloning an `ArkServiceClient<Channel>` is cheap.
         self.ark_client.clone().ok_or(Error::not_connected())
     }
     fn indexer_client(&self) -> Result<IndexerServiceClient<tonic::transport::Channel>, Error> {
         self.indexer_client.clone().ok_or(Error::not_connected())
+    }
+    fn admin_client(&self) -> Result<AdminServiceClient<tonic::transport::Channel>, Error> {
+        self.admin_client.clone().ok_or(Error::not_connected())
     }
 }
 

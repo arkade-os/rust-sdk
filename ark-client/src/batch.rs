@@ -16,7 +16,9 @@ use ark_core::proof_of_funds;
 use ark_core::server::BatchTreeEventType;
 use ark_core::server::StreamEvent;
 use ark_core::ArkAddress;
+use ark_core::ArkNote;
 use ark_core::TxGraph;
+use ark_core::Vtxo;
 use backon::ExponentialBuilder;
 use backon::Retryable;
 use bitcoin::hashes::sha256;
@@ -243,6 +245,56 @@ where
             .collect::<Vec<_>>();
 
         Ok((boarding_inputs, vtxo_inputs, total_amount))
+    }
+
+    /// Join the next batch with ArkNotes as inputs
+    pub(crate) async fn join_next_batch_with_notes<R>(
+        &self,
+        rng: &mut R,
+        arknotes: Vec<ArkNote>,
+        output_type: BatchOutputType,
+    ) -> Result<Txid, Error>
+    where
+        R: Rng + CryptoRng,
+    {
+        // the go implementation is taking the selected boarding coins & selected coins and the
+        // notes and then build the bip322 inputs.
+
+        // For ArkNotes, we need to create special VtxoInputs that have the proper scripts
+        // ArkNotes have a single script that checks SHA256(preimage) == hash
+        let server_info = &self.server_info;
+
+        // For ArkNotes, we need to create special inputs that use the note's script directly
+        // without trying to create a regular VTXO (which has forfeit/redeem paths that notes don't
+        // have)
+        let vtxo_inputs: Vec<batch::VtxoInput> = arknotes
+            .into_iter()
+            .map(|note| {
+                // ArkNotes only have a single script (SHA256 hash check)
+                let note_script = &note.vtxo_script().scripts()[0];
+
+                // Create a special VTXO that only contains the note script
+                let vtxo = Vtxo::from_arknote_script(
+                    self.secp(),
+                    note_script.clone(),
+                    server_info.network,
+                )
+                .expect("failed to create VTXO from ArkNote script");
+
+                batch::VtxoInput::new(
+                    vtxo,
+                    note.value(),
+                    note.outpoint(),
+                    false, // ArkNotes are not recoverable
+                )
+            })
+            .collect();
+
+        // No onchain inputs for ArkNote redemption
+        let onchain_inputs = Vec::new();
+
+        self.join_next_batch(rng, onchain_inputs, vtxo_inputs, output_type)
+            .await
     }
 
     async fn join_next_batch<R>(
@@ -743,7 +795,7 @@ where
     }
 }
 
-enum BatchOutputType {
+pub(crate) enum BatchOutputType {
     Board {
         to_address: ArkAddress,
         to_amount: Amount,
