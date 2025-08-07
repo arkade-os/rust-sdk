@@ -23,6 +23,10 @@ offchain-address actor:
 send actor address amount:
     cargo run -p ark-sample -- --config ./{{actor}}/ark.config.toml --seed ./{{actor}}/ark.seed send-to-ark-address {{address}} {{amount}}
 
+# Send coins to an Ark address from a given actor
+batch-send actor addresses_and_amounts:
+    cargo run -p ark-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed batch-send {{ addresses_and_amounts }}
+
 # Transform boarding outputs and VTXOs into fresh, confirmed VTXOs for a given actor
 settle actor:
     cargo run -p ark-sample -- --config ./{{actor}}/ark.config.toml --seed ./{{actor}}/ark.seed settle

@@ -43,6 +43,7 @@ use bitcoin::secp256k1::schnorr;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::secp256k1::SecretKey;
 use bitcoin::Amount;
+use bitcoin::Denomination;
 use bitcoin::OutPoint;
 use bitcoin::TxOut;
 use bitcoin::Txid;
@@ -86,10 +87,15 @@ enum Commands {
     OffchainAddress,
     /// Send coins to an Ark address.
     SendToArkAddress {
-        /// Where to send the coins too.
+        /// Where to send the coins to.
         address: ArkAddressCli,
         /// How many sats to send.
         amount: u64,
+    },
+    /// Send coins to an Ark address.
+    BatchSend {
+        /// Where to send the coins to.
+        addresses_and_amounts: AddressesAndAmounts,
     },
     /// Transform boarding outputs and VTXOs into fresh, confirmed VTXOs.
     Settle,
@@ -105,6 +111,33 @@ impl FromStr for ArkAddressCli {
         let address = ArkAddress::decode(s)?;
 
         Ok(Self(address))
+    }
+}
+#[derive(Clone)]
+struct AddressesAndAmounts(Vec<(ArkAddress, Amount)>);
+
+impl FromStr for AddressesAndAmounts {
+    type Err = anyhow::Error;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        let parts: Vec<&str> = input.split(',').collect();
+
+        if parts.len() % 2 != 0 {
+            bail!("invalid input: expected comma-separated pairs of <address,amount in sats>");
+        }
+
+        let mut addresses_and_amounts = Vec::with_capacity(parts.len() / 2);
+        for pair in parts.chunks(2) {
+            let addr_raw = pair[0];
+            let amt_raw = pair[1];
+            let addr = ArkAddress::decode(addr_raw)
+                .with_context(|| format!("failed to decode Ark address: {addr_raw}"))?;
+            let amount = Amount::from_str_in(amt_raw, Denomination::Satoshi)
+                .with_context(|| format!("failed to parse amount (sats): {amt_raw}"))?;
+            addresses_and_amounts.push((addr, amount));
+        }
+
+        Ok(Self(addresses_and_amounts))
     }
 }
 
@@ -362,6 +395,128 @@ async fn main() -> Result<()> {
                     println!("Failed to settle boarding outputs and VTXOs: {e:#}");
                 }
             }
+        }
+        Commands::BatchSend {
+            addresses_and_amounts,
+        } => {
+            let addresses_and_amounts = addresses_and_amounts.0.clone();
+
+            let total_amount = addresses_and_amounts
+                .iter()
+                .map(|(_, amount)| *amount)
+                .sum();
+
+            let virtual_tx_outpoints = {
+                let spendable_vtxos = spendable_vtxos(&grpc_client, &[vtxo.clone()], false).await?;
+                list_virtual_tx_outpoints(find_outpoints_fn, spendable_vtxos)?
+            };
+
+            let selected_outpoints = {
+                let virtual_tx_outpoints = virtual_tx_outpoints
+                    .spendable
+                    .iter()
+                    .map(|(outpoint, _)| ark_core::coin_select::VirtualTxOutPoint {
+                        outpoint: outpoint.outpoint,
+                        expire_at: outpoint.expires_at,
+                        amount: outpoint.amount,
+                    })
+                    .collect::<Vec<_>>();
+
+                select_vtxos(virtual_tx_outpoints, total_amount, server_info.dust, true)?
+            };
+
+            let vtxo_inputs = virtual_tx_outpoints
+                .spendable
+                .into_iter()
+                .filter(|(outpoint, _)| {
+                    selected_outpoints
+                        .iter()
+                        .any(|o| o.outpoint == outpoint.outpoint)
+                })
+                .map(|(outpoint, vtxo)| {
+                    send::VtxoInput::new(vtxo, outpoint.amount, outpoint.outpoint)
+                })
+                .collect::<Vec<_>>();
+
+            let change_address = vtxo.to_ark_address();
+
+            let secp = Secp256k1::new();
+            let kp = Keypair::from_secret_key(&secp, &sk);
+
+            let outputs = addresses_and_amounts
+                .iter()
+                .map(|(address, amount)| (address, *amount))
+                .collect::<Vec<_>>();
+
+            let OffchainTransactions {
+                mut ark_tx,
+                checkpoint_txs,
+            } = build_offchain_transactions(
+                outputs.as_slice(),
+                Some(&change_address),
+                &vtxo_inputs,
+                server_info.dust,
+            )?;
+
+            let sign_fn =
+                |msg: secp256k1::Message| -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+                    let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &kp);
+                    let pk = kp.x_only_public_key().0;
+
+                    Ok((sig, pk))
+                };
+
+            for i in 0..checkpoint_txs.len() {
+                sign_ark_transaction(
+                    sign_fn,
+                    &mut ark_tx,
+                    &checkpoint_txs
+                        .iter()
+                        .map(|(_, output, outpoint, _)| (output.clone(), *outpoint))
+                        .collect::<Vec<_>>(),
+                    i,
+                )?;
+            }
+
+            let ark_txid = ark_tx.unsigned_tx.compute_txid();
+
+            let mut res = grpc_client
+                .submit_offchain_transaction_request(
+                    ark_tx,
+                    checkpoint_txs
+                        .into_iter()
+                        .map(|(psbt, _, _, _)| psbt)
+                        .collect(),
+                )
+                .await
+                .context("failed to submit offchain transaction request")?;
+
+            for checkpoint_psbt in res.signed_checkpoint_txs.iter_mut() {
+                let vtxo_input = vtxo_inputs
+                    .iter()
+                    .find(|input| {
+                        checkpoint_psbt.unsigned_tx.input[0].previous_output == input.outpoint()
+                    })
+                    .with_context(|| {
+                        format!(
+                            "could not find VTXO input for checkpoint transaction {}",
+                            checkpoint_psbt.unsigned_tx.compute_txid(),
+                        )
+                    })?;
+
+                sign_checkpoint_transaction(sign_fn, checkpoint_psbt, vtxo_input)?;
+            }
+
+            grpc_client
+                .finalize_offchain_transaction(ark_txid, res.signed_checkpoint_txs)
+                .await
+                .context("failed to finalize offchain transaction")?;
+
+            let all_addresses = addresses_and_amounts
+                .iter()
+                .map(|(address, _)| address.encode())
+                .collect::<Vec<_>>();
+            println!("Sent {total_amount} to {all_addresses:?} in transaction {ark_txid}",);
         }
     }
 
