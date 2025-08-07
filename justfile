@@ -329,3 +329,16 @@ test:
 e2e-tests:
     @echo running e2e tests
     cargo test -p e2e-tests -- --ignored --nocapture
+
+integration-tests:
+    @echo running integration tests
+    nigiri stop --delete && just arkd-kill arkd-wipe arkd-wallet-kill arkd-wallet-wipe
+    nigiri start
+    sleep 1
+    rm -rf $ARKD_DIR
+    just arkd-checkout master
+    just arkd-build
+    just arkd-setup
+    just arkd-run
+    just arkd-fund 20
+    just e2e-tests
