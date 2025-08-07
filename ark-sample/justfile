@@ -5,23 +5,23 @@ default:
 
 # Show the balance for a given actor (e.g., alice, bob)
 balance actor:
-    cargo run -p ark-sample -- --config ./{{actor}}/ark.config.toml --seed ./{{actor}}/ark.seed balance
+    cargo run -p ark-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed balance
 
 # Show the transaction history for a given actor
 transaction-history actor:
-    cargo run -p ark-sample -- --config ./{{actor}}/ark.config.toml --seed ./{{actor}}/ark.seed transaction-history
+    cargo run -p ark-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed transaction-history
 
 # Generate a boarding address for a given actor
 boarding-address actor:
-    cargo run -p ark-sample -- --config ./{{actor}}/ark.config.toml --seed ./{{actor}}/ark.seed boarding-address
+    cargo run -p ark-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed boarding-address
 
 # Generate an Ark address for a given actor
 offchain-address actor:
-    cargo run -p ark-sample -- --config ./{{actor}}/ark.config.toml --seed ./{{actor}}/ark.seed offchain-address
+    cargo run -p ark-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed offchain-address
 
 # Send coins to an Ark address from a given actor
 send actor address amount:
-    cargo run -p ark-sample -- --config ./{{actor}}/ark.config.toml --seed ./{{actor}}/ark.seed send-to-ark-address {{address}} {{amount}}
+    cargo run -p ark-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed send-to-ark-address {{ address }} {{ amount }}
 
 # Send coins to an Ark address from a given actor
 batch-send actor addresses_and_amounts:
@@ -29,4 +29,8 @@ batch-send actor addresses_and_amounts:
 
 # Transform boarding outputs and VTXOs into fresh, confirmed VTXOs for a given actor
 settle actor:
-    cargo run -p ark-sample -- --config ./{{actor}}/ark.config.toml --seed ./{{actor}}/ark.seed settle
+    cargo run -p ark-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed settle
+
+# Subscribe to an address
+subscribe actor address:
+    cargo run -p ark-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed subscribe {{ address }}

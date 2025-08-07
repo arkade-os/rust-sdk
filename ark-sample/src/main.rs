@@ -99,6 +99,11 @@ enum Commands {
     },
     /// Transform boarding outputs and VTXOs into fresh, confirmed VTXOs.
     Settle,
+    /// Subscribe to notifications for an Ark address.
+    Subscribe {
+        /// The Ark address to subscribe to.
+        address: ArkAddressCli,
+    },
 }
 
 #[derive(Clone)]
@@ -517,6 +522,62 @@ async fn main() -> Result<()> {
                 .map(|(address, _)| address.encode())
                 .collect::<Vec<_>>();
             println!("Sent {total_amount} to {all_addresses:?} in transaction {ark_txid}",);
+        }
+        Commands::Subscribe { address } => {
+            println!("Subscribing to address: {}", address.0);
+
+            // First subscribe to the address to get a subscription ID
+            let subscription_id = grpc_client
+                .subscribe_to_scripts(vec![address.0], None)
+                .await?;
+
+            println!("Subscription ID: {subscription_id}",);
+
+            // Now get the subscription stream
+            let mut subscription_stream = grpc_client.get_subscription(subscription_id).await?;
+
+            println!("Listening for notifications... Press Ctrl+C to stop");
+
+            // Process subscription responses as they come in
+            while let Some(result) = subscription_stream.next().await {
+                match result {
+                    Ok(response) => {
+                        let response = grpc_client
+                            .get_virtual_txs(vec![response.txid.to_string()], None)
+                            .await?;
+                        let psbt = response.txs.first().context("no txs")?;
+                        let tx = &psbt.unsigned_tx;
+                        let output = tx.output.to_vec().iter().find_map(|out| {
+                            if out.script_pubkey == address.0.to_p2tr_script_pubkey() {
+                                Some(out.clone())
+                            } else {
+                                None
+                            }
+                        });
+                        match output {
+                            None => {
+                                println!(
+                                    "Received subscription response did not include our address"
+                                );
+                            }
+                            Some(output) => {
+                                println!("Received subscription response:");
+                                println!("  TXID: {}", tx.compute_txid());
+                                println!("  Output Value: {:?}", output.value);
+                                println!("  Output Address: {:?}", address.0.encode());
+                            }
+                        }
+
+                        println!("---");
+                    }
+                    Err(e) => {
+                        println!("Error receiving subscription response: {e}");
+                        break;
+                    }
+                }
+            }
+
+            println!("Subscription stream ended");
         }
     }
 
