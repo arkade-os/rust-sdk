@@ -367,6 +367,16 @@ pub struct CommitmentTransaction {
     pub spendable_vtxos: Vec<VirtualTxOutPoint>,
 }
 
+#[derive(Clone, Debug)]
+pub struct SubscriptionResponse {
+    pub txid: Txid,
+    pub scripts: Vec<String>,
+    pub new_vtxos: Vec<VirtualTxOutPoint>,
+    pub spent_vtxos: Vec<VirtualTxOutPoint>,
+    pub tx: Option<Psbt>,
+    pub checkpoint_txs: HashMap<String, Txid>,
+}
+
 pub struct VtxoChains {
     pub inner: Vec<VtxoChain>,
 }

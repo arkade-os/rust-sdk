@@ -6,6 +6,7 @@ use crate::generated::ark::v1::Bip322Signature;
 use crate::generated::ark::v1::ConfirmRegistrationRequest;
 use crate::generated::ark::v1::GetEventStreamRequest;
 use crate::generated::ark::v1::GetInfoRequest;
+use crate::generated::ark::v1::GetSubscriptionRequest;
 use crate::generated::ark::v1::GetTransactionsStreamRequest;
 use crate::generated::ark::v1::IndexerChainedTxType;
 use crate::generated::ark::v1::Outpoint;
@@ -13,6 +14,8 @@ use crate::generated::ark::v1::RegisterIntentRequest;
 use crate::generated::ark::v1::SubmitSignedForfeitTxsRequest;
 use crate::generated::ark::v1::SubmitTreeNoncesRequest;
 use crate::generated::ark::v1::SubmitTreeSignaturesRequest;
+use crate::generated::ark::v1::SubscribeForScriptsRequest;
+use crate::generated::ark::v1::UnsubscribeForScriptsRequest;
 use crate::Error;
 use ark_core::history;
 use ark_core::proof_of_funds;
@@ -35,6 +38,7 @@ use ark_core::server::PartialSigTree;
 use ark_core::server::StreamEvent;
 use ark_core::server::StreamTransaction;
 use ark_core::server::SubmitOffchainTxResponse;
+use ark_core::server::SubscriptionResponse;
 use ark_core::server::TreeNoncesAggregatedEvent;
 use ark_core::server::TreeSignatureEvent;
 use ark_core::server::TreeSigningStartedEvent;
@@ -42,6 +46,7 @@ use ark_core::server::TreeTxEvent;
 use ark_core::server::VirtualTxOutPoint;
 use ark_core::server::VtxoChain;
 use ark_core::server::VtxoChains;
+use ark_core::ArkAddress;
 use ark_core::TxGraphChunk;
 use async_stream::stream;
 use base64::Engine;
@@ -452,6 +457,103 @@ impl Client {
         let response = response.into_inner();
         let result = response.try_into()?;
         Ok(result)
+    }
+
+    /// Allows to subscribe for tx notifications related to the provided
+    /// vtxo scripts.
+    ///
+    /// It can also be used to update an existing subscribtion by adding
+    /// new scripts to it.
+    ///
+    /// Returns the subscription id if successful
+    pub async fn subscribe_to_scripts(
+        &self,
+        scripts: Vec<ArkAddress>,
+        subscription_id: String,
+    ) -> Result<String, Error> {
+        let mut client = self.indexer_client()?;
+        let scripts = scripts
+            .iter()
+            .map(|address| address.to_p2tr_script_pubkey().to_hex_string())
+            .collect::<Vec<_>>();
+
+        let response = client
+            .subscribe_for_scripts(SubscribeForScriptsRequest {
+                scripts,
+                subscription_id,
+            })
+            .await
+            .map_err(Error::request)?;
+
+        let response = response.into_inner();
+
+        Ok(response.subscription_id)
+    }
+
+    /// Allows to remove scripts from an existing subscription.
+    pub async fn unsubscribe_to_scripts(
+        &self,
+        scripts: Vec<ArkAddress>,
+        subscription_id: String,
+    ) -> Result<(), Error> {
+        let mut client = self.indexer_client()?;
+        let scripts = scripts
+            .iter()
+            .map(|address| address.to_p2tr_script_pubkey().to_hex_string())
+            .collect::<Vec<_>>();
+
+        let _ = client
+            .unsubscribe_for_scripts(UnsubscribeForScriptsRequest {
+                subscription_id,
+                scripts,
+            })
+            .await
+            .map_err(Error::request)?;
+
+        Ok(())
+    }
+
+    /// Gets a subscription stream that returns subscription responses.
+    pub async fn get_subscription(
+        &self,
+        subscription_id: String,
+    ) -> Result<impl Stream<Item = Result<SubscriptionResponse, Error>> + Unpin, Error> {
+        let mut client = self.indexer_client()?;
+
+        log::info!("Gettung started");
+
+        let response = client
+            .get_subscription(GetSubscriptionRequest { subscription_id })
+            .await
+            .map_err(Error::request)?;
+        log::info!("Got subscription: {:?}", response);
+
+        let mut stream = response.into_inner();
+
+        let stream = stream! {
+            loop {
+                match stream.try_next().await {
+                    Ok(Some(response)) => {
+                        match SubscriptionResponse::try_from(response) {
+                            Ok(subscription_response) => {
+                                yield Ok(subscription_response);
+                            }
+                            Err(e) => {
+                                yield Err(e);
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        break;
+                    }
+                    Err(e) => {
+                        yield Err(Error::event_stream(e));
+                    }
+                }
+            }
+        };
+
+        Ok(stream.boxed())
     }
 
     fn ark_client(&self) -> Result<ArkServiceClient<tonic::transport::Channel>, Error> {
@@ -875,6 +977,52 @@ impl TryFrom<&generated::ark::v1::IndexerTxHistoryRecord> for history::Transacti
         };
 
         Ok(tx)
+    }
+}
+
+impl TryFrom<generated::ark::v1::GetSubscriptionResponse> for SubscriptionResponse {
+    type Error = Error;
+
+    fn try_from(value: generated::ark::v1::GetSubscriptionResponse) -> Result<Self, Self::Error> {
+        let txid = value.txid.parse().map_err(Error::conversion)?;
+
+        let new_vtxos = value
+            .new_vtxos
+            .iter()
+            .map(VirtualTxOutPoint::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let spent_vtxos = value
+            .spent_vtxos
+            .iter()
+            .map(VirtualTxOutPoint::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let tx = if value.tx.is_empty() {
+            None
+        } else {
+            let base64 = base64::engine::GeneralPurpose::new(
+                &base64::alphabet::STANDARD,
+                base64::engine::GeneralPurposeConfig::new(),
+            );
+            let bytes = base64.decode(&value.tx).map_err(Error::conversion)?;
+            Some(Psbt::deserialize(&bytes).map_err(Error::conversion)?)
+        };
+
+        let checkpoint_txs = value
+            .checkpoint_txs
+            .into_iter()
+            .map(|(k, v)| Ok((k, v.txid.parse().map_err(Error::conversion)?)))
+            .collect::<Result<HashMap<_, _>, Error>>()?;
+
+        Ok(SubscriptionResponse {
+            txid,
+            scripts: value.scripts,
+            new_vtxos,
+            spent_vtxos,
+            tx,
+            checkpoint_txs,
+        })
     }
 }
 
