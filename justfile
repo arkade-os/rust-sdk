@@ -107,10 +107,6 @@ arkd-setup:
 
     set -euxo pipefail
 
-    echo "Starting redis"
-
-    just arkd-redis-run
-
     echo "Running arkd from $ARKD_DIR"
 
     just arkd-wallet-run
