@@ -263,26 +263,23 @@ where
         // For ArkNotes, we need to create special VtxoInputs that have the proper scripts
         // ArkNotes have a single script that checks SHA256(preimage) == hash
         let server_info = &self.server_info;
-        let (server_pk, _) = server_info.pk.x_only_public_key();
-        let (owner_pk, _) = self.inner.kp.public_key().x_only_public_key();
 
+        // For ArkNotes, we need to create special inputs that use the note's script directly
+        // without trying to create a regular VTXO (which has forfeit/redeem paths that notes don't
+        // have)
         let vtxo_inputs: Vec<batch::VtxoInput> = arknotes
             .into_iter()
             .map(|note| {
-                // Get the scripts from the ArkNote's VirtualUtxoScript
-                let note_scripts = note.vtxo_script().scripts().to_vec();
+                // ArkNotes only have a single script (SHA256 hash check)
+                let note_script = &note.vtxo_script().scripts()[0];
 
-                // Create a Vtxo with the note's scripts
-                // The note script is the only script (no forfeit/redeem paths like regular VTXOs)
-                let vtxo = Vtxo::new(
+                // Create a special VTXO that only contains the note script
+                let vtxo = Vtxo::from_arknote_script(
                     self.secp(),
-                    server_pk,
-                    owner_pk,
-                    note_scripts, // Pass the note scripts as extra scripts
-                    server_info.unilateral_exit_delay,
+                    note_script.clone(),
                     server_info.network,
                 )
-                .expect("failed to create Vtxo from ArkNote");
+                .expect("failed to create VTXO from ArkNote script");
 
                 batch::VtxoInput::new(
                     vtxo,
