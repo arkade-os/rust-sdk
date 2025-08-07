@@ -93,8 +93,8 @@ impl Bip322Proof {
 }
 
 pub fn make_bip322_signature<F>(
-    signing_kps: &[Keypair],
-    sign_for_onchain_pk_fn: F,
+    signing_kps: &[Keypair], // This is to sign VTXOs in the `inputs` argument.
+    sign_for_onchain_pk_fn: F, // This is to sign boarding outputs in the `inputs` argument.
     inputs: Vec<Input>,
     outputs: Vec<Output>,
     own_cosigner_pks: Vec<PublicKey>,
@@ -230,13 +230,21 @@ where
 
                 sig
             }
+            // We need to branch here once more to handle "signing" (satisfying) the Note script.
         };
 
+        // This is different for the Note script!
         let witness = Witness::from_slice(&[
             &sig.signature[..],
             exit_script.as_bytes(),
             &exit_control_block.serialize(),
         ]);
+
+        // let witness = Witness::from_slice(&[
+        //    preimage,
+        //    note_script.as_bytes(),
+        //    &control_block.serialize(),
+        // ]);
 
         proof_input.final_script_witness = Some(witness);
     }

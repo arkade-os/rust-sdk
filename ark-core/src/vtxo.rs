@@ -139,7 +139,7 @@ impl Vtxo {
 
         // For ArkNotes, we only have the note script, no forfeit/redeem scripts
         let spend_info = TaprootBuilder::new()
-            .add_leaf(1, note_script.clone())
+            .add_leaf(0, note_script.clone())
             .expect("valid note leaf")
             .finalize(secp, unspendable_key)
             .expect("can be finalized");
