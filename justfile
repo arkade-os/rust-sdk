@@ -341,6 +341,23 @@ e2e-full:
     just arkd-setup
     just e2e-tests
 
+integration-tests:
+    @echo running integration tests
+    nigiri stop --delete && just arkd-kill arkd-wipe arkd-wallet-kill arkd-wallet-wipe
+    nigiri start
+    sleep 1
+    if [ -z "$ARKD_DIR" ] || [ "$ARKD_DIR" = "/" ] || [ "$ARKD_DIR" = "$HOME" ]; then \
+        echo "Error: ARKD_DIR is not set or is set to a dangerous value ('$ARKD_DIR'). Aborting rm -rf." >&2; \
+        exit 1; \
+    fi
+    rm -rf "$ARKD_DIR"
+    just arkd-checkout master
+    just arkd-build
+    just arkd-setup
+    just arkd-run
+    just arkd-fund 20
+    just e2e-tests
+
 # Test WASM functionality (requires wasm-pack and running Ark server on localhost:7070).
 wasm-test:
     #!/usr/bin/env bash

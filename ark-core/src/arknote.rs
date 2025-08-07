@@ -405,6 +405,257 @@ mod tests {
     }
 
     #[test]
+    fn test_arknote_boundary_cases() {
+        // Test zero-value note
+        let zero_preimage = [0u8; PREIMAGE_LENGTH];
+        let zero_value = Amount::from_sat(0);
+        let zero_note = ArkNote::new(zero_preimage, zero_value);
+
+        assert_eq!(
+            zero_note.value(),
+            zero_value,
+            "Zero value should be preserved"
+        );
+        assert_eq!(
+            zero_note.preimage(),
+            &zero_preimage,
+            "Zero preimage should be preserved"
+        );
+
+        // Encode and decode zero-value note
+        let encoded = zero_note.encode();
+        let decoded = ArkNote::decode(&encoded).expect("Should decode zero-value note");
+        assert_eq!(
+            decoded.value(),
+            zero_value,
+            "Zero value should survive round-trip"
+        );
+        assert_eq!(
+            decoded.preimage(),
+            &zero_preimage,
+            "Zero preimage should survive round-trip"
+        );
+
+        // Test maximum supported value (u32::MAX as satoshis)
+        let max_preimage = [0xFFu8; PREIMAGE_LENGTH];
+        let max_value = Amount::from_sat(u32::MAX as u64);
+        let max_note = ArkNote::new(max_preimage, max_value);
+
+        assert_eq!(max_note.value(), max_value, "Max value should be preserved");
+        assert_eq!(
+            max_note.preimage(),
+            &max_preimage,
+            "Max preimage should be preserved"
+        );
+
+        // Encode and decode max-value note
+        let encoded = max_note.encode();
+        let decoded = ArkNote::decode(&encoded).expect("Should decode max-value note");
+        assert_eq!(
+            decoded.value(),
+            max_value,
+            "Max value should survive round-trip"
+        );
+        assert_eq!(
+            decoded.preimage(),
+            &max_preimage,
+            "Max preimage should survive round-trip"
+        );
+
+        // Test mixed-case HRP (should be case-sensitive)
+        let mixed_hrp = "ArkNote";
+        let preimage = [0x42u8; PREIMAGE_LENGTH];
+        let value = Amount::from_sat(1000);
+        let mixed_note = ArkNote::new_with_hrp(preimage, value, mixed_hrp.to_string());
+
+        assert_eq!(
+            mixed_note.hrp(),
+            mixed_hrp,
+            "Mixed-case HRP should be preserved"
+        );
+
+        // Test that mixed-case HRP is handled correctly in string format
+        let note_string = mixed_note.to_string();
+        assert!(
+            note_string.starts_with(mixed_hrp),
+            "String should start with mixed-case HRP"
+        );
+
+        // Parse with correct case should work
+        let parsed = ArkNote::from_string_with_hrp(&note_string, mixed_hrp)
+            .expect("Should parse with matching HRP");
+        assert_eq!(parsed.hrp(), mixed_hrp, "HRP should match after parsing");
+
+        // Parse with wrong case should fail
+        let wrong_case_result = ArkNote::from_string_with_hrp(&note_string, "arknote");
+        assert!(
+            wrong_case_result.is_err(),
+            "Should fail with mismatched HRP case"
+        );
+    }
+
+    #[test]
+    fn test_arknote_round_trip_equality() {
+        // Test multiple round-trips with different values
+        let test_cases = vec![
+            ([0x01u8; PREIMAGE_LENGTH], 1),
+            ([0x42u8; PREIMAGE_LENGTH], 42),
+            ([0xAAu8; PREIMAGE_LENGTH], 1000),
+            ([0xFFu8; PREIMAGE_LENGTH], u32::MAX as u64),
+            ([0x00u8; PREIMAGE_LENGTH], 0),
+        ];
+
+        for (preimage, sats) in test_cases {
+            let value = Amount::from_sat(sats);
+
+            // Create original note
+            let original = ArkNote::new(preimage, value);
+
+            // First round-trip: encode -> decode
+            let encoded1 = original.encode();
+            let decoded1 = ArkNote::decode(&encoded1).expect("First decode should succeed");
+
+            // Second round-trip: encode -> decode again
+            let encoded2 = decoded1.encode();
+            let decoded2 = ArkNote::decode(&encoded2).expect("Second decode should succeed");
+
+            // Verify all encodings are identical
+            assert_eq!(encoded1, encoded2, "Encodings should be identical");
+
+            // Verify all properties are preserved
+            assert_eq!(
+                decoded1.preimage(),
+                original.preimage(),
+                "Preimage should be preserved after first round-trip"
+            );
+            assert_eq!(
+                decoded2.preimage(),
+                original.preimage(),
+                "Preimage should be preserved after second round-trip"
+            );
+            assert_eq!(
+                decoded1.value(),
+                original.value(),
+                "Value should be preserved after first round-trip"
+            );
+            assert_eq!(
+                decoded2.value(),
+                original.value(),
+                "Value should be preserved after second round-trip"
+            );
+
+            // String round-trip: to_string -> from_string
+            let string1 = original.to_string();
+            let parsed1 = ArkNote::from_string(&string1).expect("First parse should succeed");
+            let string2 = parsed1.to_string();
+
+            // Verify string representations are identical
+            assert_eq!(
+                string1, string2,
+                "String representations should be identical"
+            );
+
+            // Verify parsed note matches original
+            assert_eq!(
+                parsed1.preimage(),
+                original.preimage(),
+                "Preimage should be preserved in string round-trip"
+            );
+            assert_eq!(
+                parsed1.value(),
+                original.value(),
+                "Value should be preserved in string round-trip"
+            );
+        }
+    }
+
+    #[test]
+    fn test_arknote_invalid_formats() {
+        // Test invalid data length (too short)
+        let short_data = vec![0u8; ARKNOTE_LENGTH - 1];
+        let result = ArkNote::decode(&short_data);
+        assert!(result.is_err(), "Should fail with short data");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid data length"),
+            "Should report invalid data length for short data"
+        );
+
+        // Test invalid data length (too long)
+        let long_data = vec![0u8; ARKNOTE_LENGTH + 1];
+        let result = ArkNote::decode(&long_data);
+        assert!(result.is_err(), "Should fail with long data");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid data length"),
+            "Should report invalid data length for long data"
+        );
+
+        // Test empty data
+        let empty_data = vec![];
+        let result = ArkNote::decode(&empty_data);
+        assert!(result.is_err(), "Should fail with empty data");
+
+        // Test invalid base58 string
+        let invalid_base58 = "arknote!!!INVALID!!!";
+        let result = ArkNote::from_string(invalid_base58);
+        assert!(result.is_err(), "Should fail with invalid base58");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("failed to decode base58"),
+            "Should report base58 decode error"
+        );
+
+        // Test string with wrong HRP
+        let wrong_hrp_string = "wrongprefixABCDEF123456";
+        let result = ArkNote::from_string(wrong_hrp_string);
+        assert!(result.is_err(), "Should fail with wrong HRP");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid human-readable part"),
+            "Should report invalid HRP"
+        );
+
+        // Test valid HRP with wrong length payload
+        // Create a valid note first to get proper base58
+        let valid_note = ArkNote::new([0x42u8; PREIMAGE_LENGTH], Amount::from_sat(1000));
+        let valid_string = valid_note.to_string();
+
+        // Manipulate the string to have wrong length
+        let truncated_string = &valid_string[..valid_string.len() - 5];
+        let result = ArkNote::from_string(truncated_string);
+        assert!(result.is_err(), "Should fail with truncated string");
+
+        // Test string with extra characters
+        let extra_chars_string = format!("{}EXTRA", valid_string);
+        let result = ArkNote::from_string(&extra_chars_string);
+        assert!(result.is_err(), "Should fail with extra characters");
+
+        // Test empty string after HRP
+        let empty_after_hrp = "arknote";
+        let result = ArkNote::from_string(empty_after_hrp);
+        assert!(result.is_err(), "Should fail with empty payload after HRP");
+
+        // Test whitespace handling
+        let whitespace_string = format!("  {}  ", valid_string);
+        let result = ArkNote::from_string(&whitespace_string);
+        assert!(result.is_ok(), "Should handle leading/trailing whitespace");
+        assert_eq!(
+            result.unwrap().value(),
+            valid_note.value(),
+            "Should correctly parse after trimming whitespace"
+        );
+    }
+
+    #[test]
     fn test_arknote_test_vectors_from_json() {
         // Try to load test vectors from JSON file, skip test if file not found
         let test_vectors_result = std::fs::read_to_string("test_vectors.json");
