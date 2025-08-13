@@ -199,7 +199,7 @@ async fn main() -> Result<()> {
             (&bob_payout_vtxo.to_ark_address(), bob_refund_payout),
         ],
         None,
-        &[dlc_vtxo_input.clone()],
+        std::slice::from_ref(&dlc_vtxo_input),
         server_info.dust,
     )
     .context("building refund TX")?;
@@ -213,7 +213,7 @@ async fn main() -> Result<()> {
             (&bob_payout_vtxo.to_ark_address(), bob_heads_payout),
         ],
         None,
-        &[dlc_vtxo_input.clone()],
+        std::slice::from_ref(&dlc_vtxo_input),
         server_info.dust,
     )
     .context("building heads CET")?;
@@ -226,7 +226,7 @@ async fn main() -> Result<()> {
             (&bob_payout_vtxo.to_ark_address(), bob_tails_payout),
         ],
         None,
-        &[dlc_vtxo_input.clone()],
+        std::slice::from_ref(&dlc_vtxo_input),
         server_info.dust,
     )
     .context("building tails CET")?;
