@@ -8,6 +8,8 @@ description = "Core types and utilities for Ark"
 [dependencies]
 bech32 = "0.11"
 bitcoin = { version = "0.32.4", features = ["base64", "rand", "serde"] }
+bs58 = "0.5"
+hex = "0.4"
 musig = { package = "ark-secp256k1", path = "../ark-rust-secp256k1", features = ["serde", "rand"] }
 rand = "0.8"
 serde = { version = "1.0", features = ["derive"] }
