@@ -536,8 +536,10 @@ where
         );
 
         // Join the next batch with the ArkNotes as inputs
-        self.join_next_batch_with_notes(
+        self.join_next_batch(
             rng,
+            vec![],
+            vec![],
             arknotes,
             BatchOutputType::Board {
                 to_address,

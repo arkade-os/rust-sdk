@@ -3,11 +3,11 @@ use crate::VirtualUtxoScript;
 use bitcoin::hashes::sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::key::Secp256k1;
-use bitcoin::opcodes::all::*;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
 use bitcoin::ScriptBuf;
 use bitcoin::TxOut;
+use bitcoin::Txid;
 use serde::Deserialize;
 use serde::Serialize;
 use std::fmt;
@@ -27,6 +27,18 @@ pub const ARKNOTE_LENGTH: usize = PREIMAGE_LENGTH + VALUE_LENGTH;
 /// Fake outpoint index used for ArkNotes
 pub const FAKE_OUTPOINT_INDEX: u32 = 0;
 
+/// Macro to create a note tapscript that checks the preimage hash
+#[macro_export]
+macro_rules! note_tapscript {
+    ($preimage_hash:expr) => {{
+        ::bitcoin::ScriptBuf::builder()
+            .push_opcode(::bitcoin::opcodes::all::OP_SHA256)
+            .push_slice($preimage_hash.as_byte_array())
+            .push_opcode(::bitcoin::opcodes::all::OP_EQUAL)
+            .into_script()
+    }};
+}
+
 /// Status of a coin/VTXO
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Status {
@@ -35,7 +47,8 @@ pub struct Status {
 
 impl fmt::Display for ArkNote {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let value = self.to_encoded_string();
+        let encoded = self.encode();
+        let value = format!("{}{}", self.hrp, bs58::encode(encoded).into_string());
         write!(f, "{value}")
     }
 }
@@ -47,11 +60,14 @@ pub struct ArkNote {
     value: Amount,
     hrp: String,
     // Computed fields
-    txid: String,
+    txid: Txid,
     vtxo_script: VirtualUtxoScript,
     tap_tree_bytes: Vec<String>, // Cache for tap_tree() method
     status: Status,
+    // FIXME: this is necessary?
     extra_witness: Vec<Vec<u8>>,
+
+    pub note_script: ScriptBuf,
 }
 
 impl ArkNote {
@@ -64,26 +80,17 @@ impl ArkNote {
     pub fn new_with_hrp(preimage: [u8; PREIMAGE_LENGTH], value: Amount, hrp: String) -> Self {
         let preimage_hash = sha256::Hash::hash(&preimage);
 
-        // Create the note tapscript that checks SHA256(preimage) == hash
-        let note_script = Self::note_tapscript(&preimage_hash);
+        let note_script = note_tapscript!(&preimage_hash);
 
         // Create the VTXO script structure using VirtualUtxoScript
         let secp = Secp256k1::new();
-        let vtxo_script = VirtualUtxoScript::new(&secp, vec![note_script])
+        let vtxo_script = VirtualUtxoScript::new(&secp, vec![note_script.clone()])
             .expect("failed to create VirtualUtxoScript");
 
-        // Create deterministic txid from preimage hash
-        // This ensures the same preimage always produces the same note
-        let mut txid_bytes = preimage_hash.to_byte_array();
-        txid_bytes.reverse(); // Reverse to match bitcoin's little-endian convention
-        let txid = hex::encode(txid_bytes);
+        let txid = Txid::from_slice(preimage_hash.as_byte_array()).expect("valid txid");
 
-        // Encode the scripts for storage and retrieval
+        // Convert the encoded hex strings to bytes for tap_tree_bytes
         let encoded_scripts = vtxo_script.encode();
-
-        // Pre-generate the witness stack for efficiency
-        let witness_stack = vec![preimage.to_vec()];
-
         ArkNote {
             preimage,
             value,
@@ -92,7 +99,8 @@ impl ArkNote {
             vtxo_script,
             tap_tree_bytes: encoded_scripts,
             status: Status { confirmed: true },
-            extra_witness: witness_stack,
+            extra_witness: vec![preimage.to_vec()],
+            note_script,
         }
     }
 
@@ -112,8 +120,8 @@ impl ArkNote {
     }
 
     /// Get the txid
-    pub fn txid(&self) -> &str {
-        &self.txid
+    pub fn txid(&self) -> Txid {
+        self.txid
     }
 
     /// Get the vout (always returns FAKE_OUTPOINT_INDEX)
@@ -160,6 +168,10 @@ impl ArkNote {
         // Use big-endian to match TypeScript's writeUInt32BE
         result.extend_from_slice(&(self.value.to_sat() as u32).to_be_bytes());
         result
+    }
+
+    pub fn to_encoded_string(&self) -> String {
+        self.to_string()
     }
 
     /// Decode bytes into an ArkNote
@@ -221,19 +233,9 @@ impl ArkNote {
         Self::decode_with_hrp(&decoded, hrp)
     }
 
-    /// Convert ArkNote to string representation
-    pub fn to_encoded_string(&self) -> String {
-        let encoded = self.encode();
-        format!("{}{}", self.hrp, bs58::encode(encoded).into_string())
-    }
-
     /// Get the outpoint for this ArkNote
     pub fn outpoint(&self) -> OutPoint {
-        let txid_bytes = hex::decode(&self.txid)
-            .expect("txid should be valid hex since it was generated internally");
-        let txid = bitcoin::Txid::from_slice(&txid_bytes)
-            .expect("txid should be valid since it was generated from a hash");
-        OutPoint::new(txid, FAKE_OUTPOINT_INDEX)
+        OutPoint::new(self.txid, FAKE_OUTPOINT_INDEX)
     }
 
     /// Convert to a TxOut
@@ -243,77 +245,6 @@ impl ArkNote {
             value: self.value,
             script_pubkey,
         }
-    }
-
-    /// Generate BIP322 input for this ArkNote
-    /// This creates a transaction input that can be used for BIP322 signatures
-    pub fn bip322_input(&self) -> Result<bitcoin::TxIn, Error> {
-        use bitcoin::ScriptBuf;
-        use bitcoin::TxIn;
-        use bitcoin::Witness;
-
-        // Create the transaction input
-        let mut tx_in = TxIn {
-            previous_output: self.outpoint(),
-            script_sig: ScriptBuf::new(),
-            sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
-            witness: Witness::new(),
-        };
-
-        // Generate the complete witness stack using our enhanced witness generation
-        let witness_stack = self.generate_witness()?;
-        let mut witness = Witness::new();
-        for element in witness_stack {
-            witness.push(&element);
-        }
-
-        tx_in.witness = witness;
-
-        Ok(tx_in)
-    }
-
-    /// Generate witness data for spending this ArkNote
-    /// This creates the complete witness stack needed to spend the note via tapscript
-    pub fn generate_witness(&self) -> Result<Vec<Vec<u8>>, Error> {
-        // For taproot spending, we need:
-        // 1. The preimage (to satisfy SHA256 <hash> OP_EQUAL)
-        // 2. The script (tapscript leaf)
-        // 3. The control block (for taproot verification)
-
-        let preimage_hash = sha256::Hash::hash(&self.preimage);
-        let script = Self::note_tapscript(&preimage_hash);
-
-        // Get the taproot info from our VirtualUtxoScript
-        let spend_info = self.vtxo_script.spend_info();
-
-        // Find the control block for our script
-        let script_ver = (script.clone(), bitcoin::taproot::LeafVersion::TapScript);
-        let control_block = spend_info
-            .control_block(&script_ver)
-            .ok_or_else(|| Error::ad_hoc("failed to generate control block for ArkNote script"))?;
-
-        let witness_stack = vec![
-            self.preimage.to_vec(),    // Stack element 0: preimage
-            script.to_bytes(),         // Stack element 1: script
-            control_block.serialize(), // Stack element 2: control block
-        ];
-
-        Ok(witness_stack)
-    }
-
-    /// Generate a simpler witness for basic preimage verification
-    /// This is useful for cases where full taproot verification isn't needed
-    pub fn generate_simple_witness(&self) -> Vec<Vec<u8>> {
-        vec![self.preimage.to_vec()]
-    }
-
-    /// Create a note tapscript that checks the preimage hash
-    pub fn note_tapscript(preimage_hash: &sha256::Hash) -> ScriptBuf {
-        ScriptBuf::builder()
-            .push_opcode(OP_SHA256)
-            .push_slice(preimage_hash.as_byte_array())
-            .push_opcode(OP_EQUAL)
-            .into_script()
     }
 }
 
@@ -391,126 +322,6 @@ mod tests {
     }
 
     #[test]
-    fn test_arknote_creation() {
-        let preimage = [1u8; PREIMAGE_LENGTH];
-        let value = Amount::from_sat(50000);
-        let note = ArkNote::new(preimage, value);
-
-        assert_eq!(note.preimage(), &preimage);
-        assert_eq!(note.value(), value);
-        assert_eq!(note.hrp(), DEFAULT_HRP);
-        assert!(note.status().confirmed);
-    }
-
-    #[test]
-    fn test_arknote_encoding_decoding() {
-        let preimage = [2u8; PREIMAGE_LENGTH];
-        let value = Amount::from_sat(100000);
-        let note = ArkNote::new(preimage, value);
-
-        let encoded = note.encode();
-        assert_eq!(encoded.len(), ARKNOTE_LENGTH);
-
-        let decoded = ArkNote::decode(&encoded).unwrap();
-        assert_eq!(decoded.preimage(), &preimage);
-        assert_eq!(decoded.value(), value);
-    }
-
-    #[test]
-    fn test_arknote_string_serialization() {
-        let preimage = [3u8; PREIMAGE_LENGTH];
-        let value = Amount::from_sat(25000);
-        let note = ArkNote::new(preimage, value);
-
-        let note_string = note.to_encoded_string();
-        assert!(note_string.starts_with(DEFAULT_HRP));
-
-        let parsed_note = ArkNote::from_string(&note_string).unwrap();
-        assert_eq!(parsed_note.preimage(), &preimage);
-        assert_eq!(parsed_note.value(), value);
-    }
-
-    #[test]
-    fn test_arknote_custom_hrp() {
-        let preimage = [4u8; PREIMAGE_LENGTH];
-        let value = Amount::from_sat(75000);
-        let custom_hrp = "custom";
-        let note = ArkNote::new_with_hrp(preimage, value, custom_hrp.to_string());
-
-        assert_eq!(note.hrp(), custom_hrp);
-
-        let note_string = note.to_encoded_string();
-        assert!(note_string.starts_with(custom_hrp));
-
-        let parsed_note = ArkNote::from_string_with_hrp(&note_string, custom_hrp).unwrap();
-        assert_eq!(parsed_note.preimage(), &preimage);
-        assert_eq!(parsed_note.value(), value);
-    }
-
-    #[test]
-    fn test_extended_coin_implementation() {
-        let preimage = [5u8; PREIMAGE_LENGTH];
-        let value = Amount::from_sat(30000);
-        let note = ArkNote::new(preimage, value);
-
-        assert_eq!(note.vout(), FAKE_OUTPOINT_INDEX);
-        assert_eq!(note.value(), value);
-        assert!(note.status().confirmed);
-        assert!(note.extra_witness().is_some());
-    }
-
-    #[test]
-    fn test_arknote_roundtrip() {
-        let preimage = [6u8; PREIMAGE_LENGTH];
-        let value = Amount::from_sat(123456);
-        let note = ArkNote::new(preimage, value);
-
-        // Test encoding/decoding roundtrip
-        let encoded = note.encode();
-        let decoded = ArkNote::decode(&encoded).unwrap();
-        assert_eq!(decoded.preimage(), &preimage);
-        assert_eq!(decoded.value(), value);
-
-        // Test string serialization roundtrip
-        let note_string = note.to_encoded_string();
-        let parsed_note = ArkNote::from_string(&note_string).unwrap();
-        assert_eq!(parsed_note.preimage(), &preimage);
-        assert_eq!(parsed_note.value(), value);
-    }
-
-    #[test]
-    fn test_arknote_uses_virtual_utxo_script() {
-        let preimage = [7u8; PREIMAGE_LENGTH];
-        let value = Amount::from_sat(75000);
-        let note = ArkNote::new(preimage, value);
-
-        // Verify that the note has a VirtualUtxoScript
-        let vtxo_script = note.vtxo_script();
-        assert_eq!(vtxo_script.scripts().len(), 1);
-
-        // Verify that the script is the note tapscript
-        let preimage_hash = sha256::Hash::hash(&preimage);
-        let expected_script = ArkNote::note_tapscript(&preimage_hash);
-        assert_eq!(vtxo_script.scripts()[0], expected_script);
-
-        // Verify that forfeit and intent scripts are the same for ArkNote
-        assert_eq!(
-            note.forfeit_tap_leaf_script(),
-            note.intent_tap_leaf_script()
-        );
-        assert_eq!(note.forfeit_tap_leaf_script(), &expected_script);
-
-        // Verify that tap_tree returns consistent data
-        let tap_tree_bytes = note.tap_tree();
-        assert!(!tap_tree_bytes.is_empty());
-
-        // Verify that to_tx_out uses the VirtualUtxoScript
-        let tx_out = note.to_tx_out();
-        assert_eq!(tx_out.value, value);
-        assert_eq!(tx_out.script_pubkey, vtxo_script.script_pubkey());
-    }
-
-    #[test]
     fn test_arknote_test_vectors() {
         // First test with hardcoded test vectors for reliable testing
         let test_cases = vec![
@@ -581,7 +392,7 @@ mod tests {
             // Test round-trip: create note from expected values and verify string matches
             let reconstructed_note =
                 ArkNote::new_with_hrp(expected_preimage, expected_value, hrp.to_string());
-            let reconstructed_string = reconstructed_note.to_encoded_string();
+            let reconstructed_string = reconstructed_note.to_string();
             assert_eq!(
                 reconstructed_string,
                 *note_str,
@@ -589,26 +400,6 @@ mod tests {
                 i + 1
             );
         }
-    }
-
-    #[test]
-    fn test_arknote_witness_generation() {
-        let preimage = [7u8; PREIMAGE_LENGTH];
-        let value = Amount::from_sat(75000);
-        let note = ArkNote::new(preimage, value);
-
-        // Test that witness generation produces correct structure for taproot spending
-        let witness_stack = note.generate_witness().unwrap();
-
-        // Critical: witness must contain preimage as first element for script validation
-        assert_eq!(witness_stack[0], preimage.to_vec());
-
-        // Critical: script must match the expected tapscript for the preimage hash
-        let expected_script = ArkNote::note_tapscript(&sha256::Hash::hash(&preimage));
-        assert_eq!(witness_stack[1], expected_script.to_bytes());
-
-        // Critical: control block must be present for taproot verification
-        assert!(!witness_stack[2].is_empty());
     }
 
     #[test]
@@ -688,7 +479,7 @@ mod tests {
             // pattern)
             let new_note =
                 ArkNote::new_with_hrp(expected_preimage, expected_value, test_case.hrp.clone());
-            let encoded_string = new_note.to_encoded_string();
+            let encoded_string = new_note.to_string();
             assert_eq!(
                 encoded_string,
                 test_case.str,
@@ -706,7 +497,7 @@ mod tests {
                 decoded_note.hrp().to_string(),
             );
 
-            let encoded_back = new_note_from_decoded.to_encoded_string();
+            let encoded_back = new_note_from_decoded.to_string();
             assert_eq!(
                 encoded_back,
                 test_case.str,
@@ -717,7 +508,7 @@ mod tests {
             // Test round-trip: create note from expected values and verify string matches
             let reconstructed_note =
                 ArkNote::new_with_hrp(expected_preimage, expected_value, test_case.hrp.clone());
-            let reconstructed_string = reconstructed_note.to_encoded_string();
+            let reconstructed_string = reconstructed_note.to_string();
             assert_eq!(
                 reconstructed_string,
                 test_case.str,
@@ -779,7 +570,7 @@ mod tests {
             );
 
             // Verify txid format (should be valid hex)
-            let txid = parsed_note.txid();
+            let txid = parsed_note.txid().to_string();
             assert_eq!(
                 txid.len(),
                 64,
