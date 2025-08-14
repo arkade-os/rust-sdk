@@ -229,7 +229,8 @@ async fn main() -> Result<()> {
             let amount = Amount::from_sat(*amount);
 
             let virtual_tx_outpoints = {
-                let spendable_vtxos = spendable_vtxos(&grpc_client, &[vtxo.clone()], false).await?;
+                let spendable_vtxos =
+                    spendable_vtxos(&grpc_client, std::slice::from_ref(&vtxo), false).await?;
                 list_virtual_tx_outpoints(find_outpoints_fn, spendable_vtxos)?
             };
 
@@ -333,7 +334,8 @@ async fn main() -> Result<()> {
         }
         Commands::Settle => {
             let virtual_tx_outpoints = {
-                let spendable_vtxos = spendable_vtxos(&grpc_client, &[vtxo.clone()], true).await?;
+                let spendable_vtxos =
+                    spendable_vtxos(&grpc_client, std::slice::from_ref(&vtxo), true).await?;
                 list_virtual_tx_outpoints(find_outpoints_fn, spendable_vtxos)?
             };
             let boarding_outpoints =
@@ -814,8 +816,6 @@ async fn transaction_history(
         }
     }
 
-    let runtime = tokio::runtime::Handle::current();
-
     let mut incoming_transactions = Vec::new();
     let mut outgoing_transactions = Vec::new();
     for vtxo in vtxos.iter() {
@@ -830,25 +830,25 @@ async fn transaction_history(
 
         incoming_transactions.append(&mut new_incoming_transactions);
 
-        let mut new_outgoing_transactions = generate_outgoing_vtxo_transaction_history(
-            vtxo_list.spent(),
-            vtxo_list.spendable(),
-            |outpoint: OutPoint| {
-                block_in_place(|| {
-                    runtime.block_on(async {
-                        let request = GetVtxosRequest::new_for_outpoints(&[outpoint]);
-                        let list = grpc_client
-                            .list_vtxos(request)
-                            .await
-                            .map_err(ark_core::Error::ad_hoc)?;
+        let mut relevant_txs =
+            generate_outgoing_vtxo_transaction_history(vtxo_list.spent(), vtxo_list.spendable())?;
+        for relevant_tx in &mut relevant_txs {
+            match relevant_tx {
+                history::RelevantTransaction::Transaction(tx) => outgoing_transactions.push(tx),
+                history::RelevantTransaction::MissingSpendTxVtxo(vtxo) => {
+                    let request = GetVtxosRequest::new_for_outpoints(&[vtxo.spend_tx_outpoint()]);
+                    let list = grpc_client
+                        .list_vtxos(request)
+                        .await
+                        .map_err(ark_core::Error::ad_hoc)?;
 
-                        Ok(list.all().first().cloned())
-                    })
-                })
-            },
-        )?;
-
-        outgoing_transactions.append(&mut new_outgoing_transactions);
+                    if let Some(spend_tx_vtxo) = list.all().first() {
+                        let tx = vtxo.build_tx(spend_tx_vtxo);
+                        outgoing_transactions.push(tx);
+                    }
+                }
+            }
+        }
     }
 
     let mut txs = [
