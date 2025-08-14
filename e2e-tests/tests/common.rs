@@ -368,7 +368,7 @@ pub async fn set_up_client(
         wallet.clone(),
         "http://localhost:7070".to_string(),
     )
-    .connect()
+    .connect(Duration::from_secs(30))
     .await
     .unwrap();
 

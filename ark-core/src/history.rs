@@ -191,16 +191,10 @@ pub fn generate_incoming_vtxo_transaction_history(
 /// Generate a list of _relevant_ transactions where we send VTXOs.
 ///
 /// By relevant transactions we mean everything except for settlements.
-pub fn generate_outgoing_vtxo_transaction_history<F>(
+pub fn generate_outgoing_vtxo_transaction_history(
     spent_vtxos: &[VirtualTxOutPoint],
     spendable_vtxos: &[VirtualTxOutPoint],
-    fetch_vtxo_by_outpoint: F,
-) -> Result<Vec<Transaction>, Error>
-where
-    F: Fn(bitcoin::OutPoint) -> Result<Option<VirtualTxOutPoint>, Error>,
-{
-    let mut txs = Vec::new();
-
+) -> Result<impl Iterator<Item = RelevantTransaction>, Error> {
     let all_vtxos = [spent_vtxos, spendable_vtxos].concat();
 
     // We collect all the transactions where one or more VTXOs of ours are spent.
@@ -228,6 +222,7 @@ where
     // An outgoing VTXO that warrants an entry in the transaction history is the input to an
     // outgoing payment. We may send a VTXO as part of a commitment transaction or through an Ark
     // transaction.
+    let mut relevant_txs = Vec::<(Txid, Option<VirtualTxOutPoint>, SignedAmount)>::new();
 
     for (spend_txid, spent_vtxos) in vtxos_by_spent_by.iter() {
         let spent_amount = spent_vtxos
@@ -254,65 +249,112 @@ where
             continue;
         }
 
-        let (created_at, is_preconfirmed, outpoint_txid, commitment_txids) =
-            match produced_vtxos.first() {
-                // We (arbitrarily) take the first of our produced VTXOs in this transaction.
-                Some(produced_vtxo) => (
-                    produced_vtxo.created_at,
-                    produced_vtxo.is_preconfirmed,
-                    produced_vtxo.outpoint.txid,
-                    produced_vtxo.commitment_txids.clone(),
-                ),
-                // If we did not produce any change outputs, we need to use the receiver's VTXO as a
-                // reference point.
-                None => {
-                    // The spend transaction must have an output in the first position.
-                    let spend_tx_outpoint = bitcoin::OutPoint {
-                        txid: *spend_txid,
-                        vout: 0,
-                    };
-                    match fetch_vtxo_by_outpoint(spend_tx_outpoint)? {
-                        Some(spend_tx_vtxo) => (
-                            spend_tx_vtxo.created_at,
-                            spend_tx_vtxo.is_preconfirmed,
-                            spend_tx_vtxo.outpoint.txid,
-                            spend_tx_vtxo.commitment_txids.clone(),
-                        ),
-                        None => {
-                            // If we can't find a spend transaction output, skip this spend
-                            // transaction.
+        relevant_txs.push((
+            *spend_txid,
+            // We (arbitrarily) take the first (if any) of our produced VTXOs in this transaction.
+            produced_vtxos.first().cloned().cloned(),
+            net_amount,
+        ));
+    }
 
-                            tracing::warn!(
-                                %spend_tx_outpoint,
-                                "Could not find spend TX output, skipping TX"
-                            );
+    Ok(RelevantTransactionIter::new(relevant_txs))
+}
 
-                            continue;
-                        }
-                    }
-                }
-            };
+/// A pending VTXO output of a transaction that we have sent.
+/// If we did not produce any change outputs in a VTXO, we need to use the
+/// receiver's VTXO as a reference point. This struct holds that reference
+/// point to then build the transaction once the VTXO is made available by the caller.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VtxoOutpoint {
+    spend_tx_outpoint: bitcoin::OutPoint,
+    net_amount: SignedAmount,
+}
 
-        match is_preconfirmed {
-            true => {
-                txs.push(Transaction::Ark {
-                    txid: outpoint_txid,
-                    amount: net_amount,
-                    // I believe this always set to settled, because there is not settling to be
-                    // done for a VTXO from the perspective of the sender!
-                    is_settled: true,
-                    created_at,
-                })
-            }
-            false => txs.push(Transaction::Commitment {
-                txid: commitment_txids[0],
-                amount: net_amount,
-                created_at,
-            }),
+impl VtxoOutpoint {
+    pub fn new(spend_tx_outpoint: bitcoin::OutPoint, net_amount: SignedAmount) -> Self {
+        Self {
+            spend_tx_outpoint,
+            net_amount,
         }
     }
 
-    Ok(txs)
+    pub fn spend_tx_outpoint(&self) -> bitcoin::OutPoint {
+        self.spend_tx_outpoint
+    }
+
+    pub fn build_tx(self, spend_tx_vtxo: &VirtualTxOutPoint) -> Transaction {
+        build_tx(spend_tx_vtxo, self.net_amount)
+    }
+}
+
+/// Transactions where we send VTXOs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RelevantTransaction {
+    Transaction(Transaction),
+    MissingSpendTxVtxo(VtxoOutpoint),
+}
+
+pub struct RelevantTransactionIter {
+    inner: std::vec::IntoIter<(Txid, Option<VirtualTxOutPoint>, SignedAmount)>,
+}
+
+impl RelevantTransactionIter {
+    pub fn new(vtxos_by_spent_by: Vec<(Txid, Option<VirtualTxOutPoint>, SignedAmount)>) -> Self {
+        Self {
+            inner: vtxos_by_spent_by.into_iter(),
+        }
+    }
+}
+
+impl Iterator for RelevantTransactionIter {
+    type Item = RelevantTransaction;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner
+            .next()
+            .map(|(spend_txid, produced_vtxo, net_amount)| {
+                match produced_vtxo {
+                    Some(produced_vtxo) => {
+                        RelevantTransaction::Transaction(build_tx(&produced_vtxo, net_amount))
+                    }
+                    // If we did not produce any change outputs, we need to use the
+                    // receiver's VTXO as a reference point.
+                    None => {
+                        // The spend transaction must have an output in the first position.
+                        let spend_tx_outpoint = bitcoin::OutPoint {
+                            txid: spend_txid,
+                            vout: 0,
+                        };
+                        RelevantTransaction::MissingSpendTxVtxo(VtxoOutpoint::new(
+                            spend_tx_outpoint,
+                            net_amount,
+                        ))
+                    }
+                }
+            })
+    }
+}
+
+// Helper function to build a Transaction from a VirtualTxOutPoint and a net amount.
+fn build_tx(vtxo_outpoint: &VirtualTxOutPoint, net_amount: SignedAmount) -> Transaction {
+    let created_at = vtxo_outpoint.created_at;
+    match vtxo_outpoint.is_preconfirmed {
+        true => {
+            Transaction::Ark {
+                txid: vtxo_outpoint.outpoint.txid,
+                amount: net_amount,
+                // I believe this always set to settled, because there is not settling to be
+                // done for a VTXO from the perspective of the sender!
+                is_settled: true,
+                created_at,
+            }
+        }
+        false => Transaction::Commitment {
+            txid: vtxo_outpoint.commitment_txids[0],
+            amount: net_amount,
+            created_at,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -364,9 +406,9 @@ mod tests {
         )
         .unwrap();
 
-        let out_txs =
-            generate_outgoing_vtxo_transaction_history(&[], &spendable_vtxos, |_| Ok(None))
-                .unwrap();
+        let out_txs = generate_outgoing_vtxo_transaction_history(&[], &spendable_vtxos)
+            .unwrap()
+            .collect::<Vec<_>>();
 
         assert!(inc_txs.is_empty());
         assert!(out_txs.is_empty());
@@ -445,11 +487,16 @@ mod tests {
         )
         .unwrap();
 
-        let out_txs =
-            generate_outgoing_vtxo_transaction_history(&spent_vtxos, &spendable_vtxos, |_| {
-                Ok(None)
+        let out_txs = generate_outgoing_vtxo_transaction_history(&spent_vtxos, &spendable_vtxos)
+            .unwrap()
+            .filter_map(|relevant_tx| {
+                if let RelevantTransaction::Transaction(tx) = relevant_tx {
+                    Some(tx)
+                } else {
+                    None
+                }
             })
-            .unwrap();
+            .collect::<Vec<_>>();
 
         assert!(inc_txs.is_empty());
 
@@ -527,11 +574,9 @@ mod tests {
 
         sort_transactions_by_created_at(&mut inc_txs);
 
-        let out_txs =
-            generate_outgoing_vtxo_transaction_history(&spent_vtxos, &spendable_vtxos, |_| {
-                Ok(None)
-            })
-            .unwrap();
+        let out_txs = generate_outgoing_vtxo_transaction_history(&spent_vtxos, &spendable_vtxos)
+            .unwrap()
+            .collect::<Vec<_>>();
 
         assert_eq!(
             inc_txs,
@@ -658,11 +703,9 @@ mod tests {
 
         sort_transactions_by_created_at(&mut inc_txs);
 
-        let out_txs =
-            generate_outgoing_vtxo_transaction_history(&spent_vtxos, &spendable_vtxos, |_| {
-                Ok(None)
-            })
-            .unwrap();
+        let out_txs = generate_outgoing_vtxo_transaction_history(&spent_vtxos, &spendable_vtxos)
+            .unwrap()
+            .collect::<Vec<_>>();
 
         assert_eq!(
             inc_txs,
@@ -819,11 +862,16 @@ mod tests {
             generate_incoming_vtxo_transaction_history(&spent_vtxos, &spendable_vtxos, &[])
                 .unwrap();
 
-        let out_txs =
-            generate_outgoing_vtxo_transaction_history(&spent_vtxos, &spendable_vtxos, |_| {
-                Ok(None)
+        let out_txs = generate_outgoing_vtxo_transaction_history(&spent_vtxos, &spendable_vtxos)
+            .unwrap()
+            .filter_map(|relevant_tx| {
+                if let RelevantTransaction::Transaction(tx) = relevant_tx {
+                    Some(tx)
+                } else {
+                    None
+                }
             })
-            .unwrap();
+            .collect::<Vec<_>>();
 
         let mut txs = [inc_txs, out_txs].concat();
         sort_transactions_by_created_at(&mut txs);
