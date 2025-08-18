@@ -373,7 +373,8 @@ async fn main() -> Result<()> {
         }
         Commands::Settle => {
             let virtual_tx_outpoints = {
-                let spendable_vtxos = spendable_vtxos(&grpc_client, std::slice::from_ref(&vtxo), true).await?;
+                let spendable_vtxos =
+                    spendable_vtxos(&grpc_client, std::slice::from_ref(&vtxo), true).await?;
                 list_virtual_tx_outpoints(find_outpoints_fn, spendable_vtxos)?
             };
             let boarding_outpoints =
