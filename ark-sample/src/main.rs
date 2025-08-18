@@ -214,7 +214,8 @@ async fn main() -> Result<()> {
     match &cli.command {
         Commands::Balance => {
             let virtual_tx_outpoints = {
-                let spendable_vtxos = spendable_vtxos(&grpc_client, &[vtxo], false).await?;
+                let spendable_vtxos =
+                    spendable_vtxos(&grpc_client, std::slice::from_ref(&vtxo), false).await?;
                 list_virtual_tx_outpoints(find_outpoints_fn, spendable_vtxos)?
             };
             let boarding_outpoints =
@@ -267,7 +268,8 @@ async fn main() -> Result<()> {
             let amount = Amount::from_sat(*amount);
 
             let virtual_tx_outpoints = {
-                let spendable_vtxos = spendable_vtxos(&grpc_client, std::slice::from_ref(&vtxo), false).await?;
+                let spendable_vtxos =
+                    spendable_vtxos(&grpc_client, std::slice::from_ref(&vtxo), false).await?;
                 list_virtual_tx_outpoints(find_outpoints_fn, spendable_vtxos)?
             };
 
@@ -404,7 +406,7 @@ async fn main() -> Result<()> {
         Commands::BatchSend {
             addresses_and_amounts,
         } => {
-            let addresses_and_amounts = addresses_and_amounts.0.clone();
+            let addresses_and_amounts = &addresses_and_amounts.0;
 
             let total_amount = addresses_and_amounts
                 .iter()
@@ -412,7 +414,8 @@ async fn main() -> Result<()> {
                 .sum();
 
             let virtual_tx_outpoints = {
-                let spendable_vtxos = spendable_vtxos(&grpc_client, &[vtxo.clone()], false).await?;
+                let spendable_vtxos =
+                    spendable_vtxos(&grpc_client, std::slice::from_ref(&vtxo), false).await?;
                 list_virtual_tx_outpoints(find_outpoints_fn, spendable_vtxos)?
             };
 
@@ -542,10 +545,14 @@ async fn main() -> Result<()> {
             while let Some(result) = subscription_stream.next().await {
                 match result {
                     Ok(response) => {
-                        let response = grpc_client
-                            .get_virtual_txs(vec![response.txid.to_string()], None)
-                            .await?;
-                        let psbt = response.txs.first().context("no txs")?;
+                        let psbt = if let Some(psbt) = response.tx {
+                            psbt
+                        } else {
+                            let fetched = grpc_client
+                                .get_virtual_txs(vec![response.txid.to_string()], None)
+                                .await?;
+                            fetched.txs.into_iter().next().context("no txs")?
+                        };
                         let tx = &psbt.unsigned_tx;
                         let output = tx.output.to_vec().iter().find_map(|out| {
                             if out.script_pubkey == address.0.to_p2tr_script_pubkey() {
