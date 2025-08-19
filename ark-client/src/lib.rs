@@ -6,6 +6,7 @@ use ark_core::history;
 use ark_core::history::generate_incoming_vtxo_transaction_history;
 use ark_core::history::generate_outgoing_vtxo_transaction_history;
 use ark_core::history::sort_transactions_by_created_at;
+use ark_core::history::OutgoingTransaction;
 use ark_core::server;
 use ark_core::server::GetVtxosRequest;
 use ark_core::server::SubscriptionResponse;
@@ -26,7 +27,6 @@ use futures::Future;
 use futures::Stream;
 use jiff::Timestamp;
 use std::sync::Arc;
-use tokio::task::block_in_place;
 
 pub mod error;
 pub mod wallet;
@@ -544,25 +544,47 @@ where
             &boarding_commitment_transactions,
         )?;
 
-        let runtime = tokio::runtime::Handle::current();
-        let outgoing_transactions = generate_outgoing_vtxo_transaction_history(
+        let mut outgoing_txs = generate_outgoing_vtxo_transaction_history(
             &vtxos.spent_outpoints(),
             &vtxos.spendable_outpoints(),
-            |outpoint: OutPoint| {
-                block_in_place(|| {
-                    runtime.block_on(async {
-                        let request = GetVtxosRequest::new_for_outpoints(&[outpoint]);
-                        let list = self
-                            .network_client()
-                            .list_vtxos(request)
-                            .await
-                            .map_err(ark_core::Error::ad_hoc)?;
-
-                        Ok(list.all().first().cloned())
-                    })
-                })
-            },
         )?;
+
+        let mut outgoing_transactions = vec![];
+        for tx in &mut outgoing_txs {
+            let tx = match tx {
+                OutgoingTransaction::Complete(tx) => tx,
+                OutgoingTransaction::Incomplete(incomplete_tx) => {
+                    let first_outpoint = incomplete_tx.first_outpoint();
+
+                    let request = GetVtxosRequest::new_for_outpoints(&[first_outpoint]);
+                    let list = self.network_client().list_vtxos(request).await?;
+
+                    match list.all().first() {
+                        Some(virtual_tx_outpoint) => {
+                            match incomplete_tx.finish(virtual_tx_outpoint) {
+                                Ok(tx) => tx,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        %first_outpoint,
+                                        "Could not finish outgoing TX, skipping: {e}"
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
+                        None => {
+                            tracing::warn!(
+                                %first_outpoint,
+                                "Could not find virtual TX outpoint for outgoing TX, skipping"
+                            );
+                            continue;
+                        }
+                    }
+                }
+            };
+
+            outgoing_transactions.push(tx);
+        }
 
         let mut txs = [
             boarding_transactions,
