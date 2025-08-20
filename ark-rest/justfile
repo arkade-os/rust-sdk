@@ -1,0 +1,103 @@
+# Ark REST Client - Build Tasks
+#
+# This justfile provides tasks for generating and building the Ark REST client
+
+# Default task - show available commands
+default:
+    @just --list
+
+# Merge the swagger files into a single specification
+merge-swagger:
+    #!/usr/bin/env python3
+    exec python3 merge_swagger.py
+
+# Generate the Rust client from merged swagger spec
+generate:
+    #!/usr/bin/env bash
+    echo "🔧 Generating Rust client from OpenAPI specification..."
+
+    # Generate the client directly in the current directory
+    npx @openapitools/openapi-generator-cli generate \
+        -i swagger/merged.swagger.json \
+        -g rust \
+        -o . \
+        -c openapi-config.yaml \
+        --skip-validate-spec
+
+    echo "✅ Code generation completed"
+
+# Full regeneration - merge, generate, and fix
+regen: generate
+    echo "🎉 Full regeneration completed successfully!"
+
+# Build the project
+build:
+    cargo build
+
+# Test the project
+test: build
+    cargo test
+
+# Test WASM functionality (requires wasm-pack and running Ark server on localhost:7070)
+test-wasm:
+    #!/usr/bin/env bash
+    echo "Running WASM tests..."
+    echo "Note: Requires Ark server running on http://localhost:7070"
+
+    # Check if wasm-pack is installed
+    if ! command -v wasm-pack &> /dev/null; then
+        echo "wasm-pack not found."
+        exit 1
+    fi
+
+    # Run WASM tests with Firefox (headless)
+    wasm-pack test --headless --firefox -- --test wasm
+
+    echo "✅ WASM tests completed"
+
+# Test WASM with Chrome instead of Firefox
+test-wasm-chrome:
+    #!/usr/bin/env bash
+    echo "Running WASM tests with Chrome..."
+    echo "Note: Requires Ark server running on http://localhost:7070"
+
+    # Check if wasm-pack is installed
+    if ! command -v wasm-pack &> /dev/null; then
+        echo "wasm-pack not found."
+        exit 1
+    fi
+
+    # Run WASM tests with Chrome (headless)
+    wasm-pack test --headless --chrome -- --test wasm
+
+    echo "✅ WASM tests completed"
+
+# Check for compilation errors
+check:
+    cargo check
+
+# Run clippy (auto-generated files are ignored via #![allow(clippy::all)])
+clippy:
+    #!/usr/bin/env bash
+    echo "🔍 Running clippy on custom code..."
+    echo "Note: Auto-generated files have clippy disabled via attributes"
+
+    # Run clippy on all targets
+    cargo clippy --all-targets --all-features -- -D warnings
+
+    echo "✅ Clippy checks completed"
+
+# Clean all generated files (but keep custom wrapper files)
+clean:
+    rm -rf src/apis src/models docs/*.md
+    # Keep: src/client_wrapper.rs, src/error_wrapper.rs, src/lib_wrapper.rs
+    cargo clean
+
+# Development workflow - regenerate and build
+dev: regen build
+    echo "🚀 Development build ready!"
+
+# Show the structure of generated files
+show-structure:
+    @echo "📁 Generated file structure:"
+    @find src -name "*.rs" -path "*/apis/*" -o -path "*/models/*" 2>/dev/null | head -20

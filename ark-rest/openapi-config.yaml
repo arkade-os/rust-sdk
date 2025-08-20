@@ -1,0 +1,18 @@
+generatorName: rust
+outputDir: .
+library: reqwest
+inputSpec: swagger/merged.swagger.json
+additionalProperties:
+  # Generate separate API clients per tag (ArkService, IndexerService)
+  topLevelApiClient: false
+  avoidBoxedModels: true
+  packageName: ark-rest
+  packageVersion: "0.7.0"
+  mockall: false
+  skipValidateSpec: true
+  # Use async/await
+  supportAsync: true
+  # Use the latest reqwest version
+  reqwestVersion: "^0.11"
+  # Generate models for all schemas
+  generateAliasAsModel: true
