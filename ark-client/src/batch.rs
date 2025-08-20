@@ -14,6 +14,7 @@ use ark_core::batch::sign_batch_tree;
 use ark_core::batch::sign_commitment_psbt;
 use ark_core::batch::NonceKps;
 use ark_core::proof_of_funds;
+use ark_core::proof_of_funds::IntentMessageType;
 use ark_core::server::BatchTreeEventType;
 use ark_core::server::StreamEvent;
 use ark_core::ArkAddress;
@@ -359,6 +360,7 @@ where
             inputs,
             outputs.clone(),
             own_cosigner_pks.clone(),
+            IntentMessageType::Register,
         )?;
 
         let intent_id = timeout_op(

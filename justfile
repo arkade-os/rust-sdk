@@ -317,6 +317,8 @@ nigiri-wipe:
 ## -------------------------
 
 mod ark-sample 'ark-sample/justfile'
+mod ark-rest-sample 'ark-rest-sample/justfile'
+mod ark-rest
 
 ## -------------------------
 ## Running tests
