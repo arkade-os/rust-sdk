@@ -8,6 +8,7 @@ use ark_core::history::generate_outgoing_vtxo_transaction_history;
 use ark_core::history::sort_transactions_by_created_at;
 use ark_core::server;
 use ark_core::server::GetVtxosRequest;
+use ark_core::server::SubscriptionResponse;
 use ark_core::server::VirtualTxOutPoint;
 use ark_core::ArkAddress;
 use ark_core::UtxoCoinSelection;
@@ -22,6 +23,7 @@ use bitcoin::OutPoint;
 use bitcoin::Transaction;
 use bitcoin::Txid;
 use futures::Future;
+use futures::Stream;
 use jiff::Timestamp;
 use std::sync::Arc;
 use tokio::task::block_in_place;
@@ -659,5 +661,74 @@ where
         let tx = psbt.extract_tx().map_err(Error::ad_hoc)?;
 
         Ok(tx)
+    }
+
+    /// Subscribe to receive transaction notifications for specific VTXO scripts
+    ///
+    /// This method allows you to subscribe to get notified about transactions
+    /// affecting the provided VTXO addresses. It can also be used to update an
+    /// existing subscription by adding new scripts to it.
+    ///
+    /// # Arguments
+    ///
+    /// * `scripts` - Vector of ArkAddress to subscribe to
+    /// * `subscription_id` - Unique identifier for the subscription. Use the same ID to update an
+    ///   existing subscription. Use None for new subscriptions
+    ///
+    /// # Returns
+    ///
+    /// Returns the subscription ID if successful
+    pub async fn subscribe_to_scripts(
+        &self,
+        scripts: Vec<ArkAddress>,
+        subscription_id: Option<String>,
+    ) -> Result<String, Error> {
+        self.network_client()
+            .subscribe_to_scripts(scripts, subscription_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Remove scripts from an existing subscription
+    ///
+    /// This method allows you to unsubscribe from receiving notifications for
+    /// specific VTXO scripts while keeping the subscription active for other scripts.
+    ///
+    /// # Arguments
+    ///
+    /// * `scripts` - Vector of ArkAddress to unsubscribe from
+    /// * `subscription_id` - The subscription ID to update
+    pub async fn unsubscribe_from_scripts(
+        &self,
+        scripts: Vec<ArkAddress>,
+        subscription_id: String,
+    ) -> Result<(), Error> {
+        self.network_client()
+            .unsubscribe_from_scripts(scripts, subscription_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Get a subscription stream that returns subscription responses
+    ///
+    /// This method returns a stream that yields SubscriptionResponse messages
+    /// containing information about new and spent VTXOs for the subscribed scripts.
+    ///
+    /// # Arguments
+    ///
+    /// * `subscription_id` - The subscription ID to get the stream for
+    ///
+    /// # Returns
+    ///
+    /// Returns a Stream of SubscriptionResponse messages
+    pub async fn get_subscription(
+        &self,
+        subscription_id: String,
+    ) -> Result<impl Stream<Item = Result<SubscriptionResponse, ark_grpc::Error>> + Unpin, Error>
+    {
+        self.network_client()
+            .get_subscription(subscription_id)
+            .await
+            .map_err(Into::into)
     }
 }

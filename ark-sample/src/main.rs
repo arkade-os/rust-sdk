@@ -43,6 +43,7 @@ use bitcoin::secp256k1::schnorr;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::secp256k1::SecretKey;
 use bitcoin::Amount;
+use bitcoin::Denomination;
 use bitcoin::OutPoint;
 use bitcoin::TxOut;
 use bitcoin::Txid;
@@ -84,15 +85,18 @@ enum Commands {
     BoardingAddress,
     /// Generate an Ark address.
     OffchainAddress,
-    /// Send coins to an Ark address.
-    SendToArkAddress {
-        /// Where to send the coins too.
-        address: ArkAddressCli,
-        /// How many sats to send.
-        amount: u64,
+    /// Send coins to one or multiple Ark addresses.
+    SendToArkAddresses {
+        /// Where to send the coins to.
+        addresses_and_amounts: AddressesAndAmounts,
     },
     /// Transform boarding outputs and VTXOs into fresh, confirmed VTXOs.
     Settle,
+    /// Subscribe to notifications for an Ark address.
+    Subscribe {
+        /// The Ark address to subscribe to.
+        address: ArkAddressCli,
+    },
 }
 
 #[derive(Clone)]
@@ -105,6 +109,33 @@ impl FromStr for ArkAddressCli {
         let address = ArkAddress::decode(s)?;
 
         Ok(Self(address))
+    }
+}
+#[derive(Clone)]
+struct AddressesAndAmounts(Vec<(ArkAddress, Amount)>);
+
+impl FromStr for AddressesAndAmounts {
+    type Err = anyhow::Error;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        let parts: Vec<&str> = input.split(',').collect();
+
+        if parts.len() % 2 != 0 {
+            bail!("invalid input: expected comma-separated pairs of <address,amount in sats>");
+        }
+
+        let mut addresses_and_amounts = Vec::with_capacity(parts.len() / 2);
+        for pair in parts.chunks(2) {
+            let addr_raw = pair[0];
+            let amt_raw = pair[1];
+            let addr = ArkAddress::decode(addr_raw)
+                .with_context(|| format!("failed to decode Ark address: {addr_raw}"))?;
+            let amount = Amount::from_str_in(amt_raw, Denomination::Satoshi)
+                .with_context(|| format!("failed to parse amount (sats): {amt_raw}"))?;
+            addresses_and_amounts.push((addr, amount));
+        }
+
+        Ok(Self(addresses_and_amounts))
     }
 }
 
@@ -176,7 +207,8 @@ async fn main() -> Result<()> {
     match &cli.command {
         Commands::Balance => {
             let virtual_tx_outpoints = {
-                let spendable_vtxos = spendable_vtxos(&grpc_client, &[vtxo], false).await?;
+                let spendable_vtxos =
+                    spendable_vtxos(&grpc_client, std::slice::from_ref(&vtxo), false).await?;
                 list_virtual_tx_outpoints(find_outpoints_fn, spendable_vtxos)?
             };
             let boarding_outpoints =
@@ -225,11 +257,52 @@ async fn main() -> Result<()> {
 
             println!("Send VTXOs to this offchain address: {offchain_address}\n");
         }
-        Commands::SendToArkAddress { address, amount } => {
-            let amount = Amount::from_sat(*amount);
+        Commands::Settle => {
+            let virtual_tx_outpoints = {
+                let spendable_vtxos =
+                    spendable_vtxos(&grpc_client, std::slice::from_ref(&vtxo), true).await?;
+                list_virtual_tx_outpoints(find_outpoints_fn, spendable_vtxos)?
+            };
+            let boarding_outpoints =
+                list_boarding_outpoints(find_outpoints_fn, &[boarding_output])?;
+
+            let res = settle(
+                &grpc_client,
+                &server_info,
+                sk,
+                virtual_tx_outpoints,
+                boarding_outpoints,
+                vtxo.to_ark_address(),
+            )
+            .await;
+
+            match res {
+                Ok(Some(txid)) => {
+                    println!(
+                        "Settled boarding outputs and VTXOs into new VTXOs.\n\n Batch TXID: {txid}\n"
+                    );
+                }
+                Ok(None) => {
+                    println!("No boarding outputs or VTXOs can be settled at the moment.");
+                }
+                Err(e) => {
+                    println!("Failed to settle boarding outputs and VTXOs: {e:#}");
+                }
+            }
+        }
+        Commands::SendToArkAddresses {
+            addresses_and_amounts,
+        } => {
+            let addresses_and_amounts = &addresses_and_amounts.0;
+
+            let total_amount = addresses_and_amounts
+                .iter()
+                .map(|(_, amount)| *amount)
+                .sum();
 
             let virtual_tx_outpoints = {
-                let spendable_vtxos = spendable_vtxos(&grpc_client, std::slice::from_ref(&vtxo), false).await?;
+                let spendable_vtxos =
+                    spendable_vtxos(&grpc_client, std::slice::from_ref(&vtxo), false).await?;
                 list_virtual_tx_outpoints(find_outpoints_fn, spendable_vtxos)?
             };
 
@@ -244,7 +317,7 @@ async fn main() -> Result<()> {
                     })
                     .collect::<Vec<_>>();
 
-                select_vtxos(virtual_tx_outpoints, amount, server_info.dust, true)?
+                select_vtxos(virtual_tx_outpoints, total_amount, server_info.dust, true)?
             };
 
             let vtxo_inputs = virtual_tx_outpoints
@@ -265,11 +338,16 @@ async fn main() -> Result<()> {
             let secp = Secp256k1::new();
             let kp = Keypair::from_secret_key(&secp, &sk);
 
+            let outputs = addresses_and_amounts
+                .iter()
+                .map(|(address, amount)| (address, *amount))
+                .collect::<Vec<_>>();
+
             let OffchainTransactions {
                 mut ark_tx,
                 checkpoint_txs,
             } = build_offchain_transactions(
-                &[(&address.0, amount)],
+                outputs.as_slice(),
                 Some(&change_address),
                 &vtxo_inputs,
                 server_info.dust,
@@ -329,39 +407,71 @@ async fn main() -> Result<()> {
                 .await
                 .context("failed to finalize offchain transaction")?;
 
-            println!("Sent {amount} to {} in transaction {ark_txid}", address.0);
+            let all_addresses = addresses_and_amounts
+                .iter()
+                .map(|(address, _)| address.encode())
+                .collect::<Vec<_>>();
+            println!("Sent {total_amount} to {all_addresses:?} in transaction {ark_txid}",);
         }
-        Commands::Settle => {
-            let virtual_tx_outpoints = {
-                let spendable_vtxos = spendable_vtxos(&grpc_client, std::slice::from_ref(&vtxo), true).await?;
-                list_virtual_tx_outpoints(find_outpoints_fn, spendable_vtxos)?
-            };
-            let boarding_outpoints =
-                list_boarding_outpoints(find_outpoints_fn, &[boarding_output])?;
+        Commands::Subscribe { address } => {
+            println!("Subscribing to address: {}", address.0);
 
-            let res = settle(
-                &grpc_client,
-                &server_info,
-                sk,
-                virtual_tx_outpoints,
-                boarding_outpoints,
-                vtxo.to_ark_address(),
-            )
-            .await;
+            // First subscribe to the address to get a subscription ID
+            let subscription_id = grpc_client
+                .subscribe_to_scripts(vec![address.0], None)
+                .await?;
 
-            match res {
-                Ok(Some(txid)) => {
-                    println!(
-                        "Settled boarding outputs and VTXOs into new VTXOs.\n\n Batch TXID: {txid}\n"
-                    );
-                }
-                Ok(None) => {
-                    println!("No boarding outputs or VTXOs can be settled at the moment.");
-                }
-                Err(e) => {
-                    println!("Failed to settle boarding outputs and VTXOs: {e:#}");
+            println!("Subscription ID: {subscription_id}",);
+
+            // Now get the subscription stream
+            let mut subscription_stream = grpc_client.get_subscription(subscription_id).await?;
+
+            println!("Listening for notifications... Press Ctrl+C to stop");
+
+            // Process subscription responses as they come in
+            while let Some(result) = subscription_stream.next().await {
+                match result {
+                    Ok(response) => {
+                        let psbt = if let Some(psbt) = response.tx {
+                            psbt
+                        } else {
+                            let fetched = grpc_client
+                                .get_virtual_txs(vec![response.txid.to_string()], None)
+                                .await?;
+                            fetched.txs.into_iter().next().context("no txs")?
+                        };
+                        let tx = &psbt.unsigned_tx;
+                        let output = tx.output.to_vec().iter().find_map(|out| {
+                            if out.script_pubkey == address.0.to_p2tr_script_pubkey() {
+                                Some(out.clone())
+                            } else {
+                                None
+                            }
+                        });
+                        match output {
+                            None => {
+                                println!(
+                                    "Received subscription response did not include our address"
+                                );
+                            }
+                            Some(output) => {
+                                println!("Received subscription response:");
+                                println!("  TXID: {}", tx.compute_txid());
+                                println!("  Output Value: {:?}", output.value);
+                                println!("  Output Address: {:?}", address.0.encode());
+                            }
+                        }
+
+                        println!("---");
+                    }
+                    Err(e) => {
+                        println!("Error receiving subscription response: {e}");
+                        break;
+                    }
                 }
             }
+
+            println!("Subscription stream ended");
         }
     }
 
