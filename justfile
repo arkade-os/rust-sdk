@@ -6,6 +6,8 @@ arkd_wallet_url := "http://localhost:" + arkd_wallet_port
 arkd_logs := "$PWD/arkd.log"
 arkd_wallet_logs := "$PWD/arkd-wallet.log"
 
+mod ark-rest
+
 ## ------------------------
 ## Code quality functions
 ## ------------------------
@@ -317,8 +319,6 @@ nigiri-wipe:
 ## -------------------------
 
 mod ark-sample 'ark-sample/justfile'
-mod ark-rest-sample 'ark-rest-sample/justfile'
-mod ark-rest
 
 ## -------------------------
 ## Running tests

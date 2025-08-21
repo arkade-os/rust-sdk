@@ -163,11 +163,23 @@ async fn main() -> Result<()> {
     let pk = PublicKey::from_secret_key(&secp, &sk);
 
     let ark_server_url = config.ark_server_url;
-    let mut grpc_client = ark_grpc::Client::new(ark_server_url);
 
-    grpc_client.connect().await?;
+    // Create and connect the appropriate client based on feature flags
+    #[cfg(feature = "rest-client")]
+    let client = {
+        tracing::info!("Starting Ark sample with rest client");
+        ark_rest::Client::new(ark_server_url)
+    };
 
-    let server_info = grpc_client.get_info().await?;
+    #[cfg(not(feature = "rest-client"))]
+    let mut client = {
+        tracing::info!("Starting Ark sample with grpc client");
+        let mut grpc_client = ark_grpc::Client::new(ark_server_url);
+        grpc_client.connect().await?;
+        grpc_client
+    };
+
+    let server_info = client.get_info().await?;
 
     let esplora_client = EsploraClient::new(&config.esplora_url)?;
 
@@ -209,7 +221,7 @@ async fn main() -> Result<()> {
         Commands::Balance => {
             let virtual_tx_outpoints = {
                 let spendable_vtxos =
-                    spendable_vtxos(&grpc_client, std::slice::from_ref(&vtxo), false).await?;
+                    spendable_vtxos(&client, std::slice::from_ref(&vtxo), false).await?;
                 list_virtual_tx_outpoints(find_outpoints_fn, spendable_vtxos)?
             };
             let boarding_outpoints =
@@ -229,7 +241,7 @@ async fn main() -> Result<()> {
         }
         Commands::TransactionHistory => {
             let txs: Vec<history::Transaction> = transaction_history(
-                &grpc_client,
+                &client,
                 &esplora_client,
                 &[boarding_output.address().clone()],
                 &[vtxo],
@@ -261,14 +273,14 @@ async fn main() -> Result<()> {
         Commands::Settle => {
             let virtual_tx_outpoints = {
                 let spendable_vtxos =
-                    spendable_vtxos(&grpc_client, std::slice::from_ref(&vtxo), true).await?;
+                    spendable_vtxos(&client, std::slice::from_ref(&vtxo), true).await?;
                 list_virtual_tx_outpoints(find_outpoints_fn, spendable_vtxos)?
             };
             let boarding_outpoints =
                 list_boarding_outpoints(find_outpoints_fn, &[boarding_output])?;
 
             let res = settle(
-                &grpc_client,
+                &client,
                 &server_info,
                 sk,
                 virtual_tx_outpoints,
@@ -303,7 +315,7 @@ async fn main() -> Result<()> {
 
             let virtual_tx_outpoints = {
                 let spendable_vtxos =
-                    spendable_vtxos(&grpc_client, std::slice::from_ref(&vtxo), false).await?;
+                    spendable_vtxos(&client, std::slice::from_ref(&vtxo), false).await?;
                 list_virtual_tx_outpoints(find_outpoints_fn, spendable_vtxos)?
             };
 
@@ -376,7 +388,7 @@ async fn main() -> Result<()> {
 
             let ark_txid = ark_tx.unsigned_tx.compute_txid();
 
-            let mut res = grpc_client
+            let mut res = client
                 .submit_offchain_transaction_request(
                     ark_tx,
                     checkpoint_txs
@@ -403,7 +415,7 @@ async fn main() -> Result<()> {
                 sign_checkpoint_transaction(sign_fn, checkpoint_psbt, vtxo_input)?;
             }
 
-            grpc_client
+            client
                 .finalize_offchain_transaction(ark_txid, res.signed_checkpoint_txs)
                 .await
                 .context("failed to finalize offchain transaction")?;
@@ -417,62 +429,68 @@ async fn main() -> Result<()> {
         Commands::Subscribe { address } => {
             println!("Subscribing to address: {}", address.0);
 
-            // First subscribe to the address to get a subscription ID
-            let subscription_id = grpc_client
-                .subscribe_to_scripts(vec![address.0], None)
-                .await?;
-
-            println!("Subscription ID: {subscription_id}",);
-
-            // Now get the subscription stream
-            let mut subscription_stream = grpc_client.get_subscription(subscription_id).await?;
-
-            println!("Listening for notifications... Press Ctrl+C to stop");
-
-            // Process subscription responses as they come in
-            while let Some(result) = subscription_stream.next().await {
-                match result {
-                    Ok(response) => {
-                        let psbt = if let Some(psbt) = response.tx {
-                            psbt
-                        } else {
-                            let fetched = grpc_client
-                                .get_virtual_txs(vec![response.txid.to_string()], None)
-                                .await?;
-                            fetched.txs.into_iter().next().context("no txs")?
-                        };
-                        let tx = &psbt.unsigned_tx;
-                        let output = tx.output.to_vec().iter().find_map(|out| {
-                            if out.script_pubkey == address.0.to_p2tr_script_pubkey() {
-                                Some(out.clone())
-                            } else {
-                                None
-                            }
-                        });
-                        match output {
-                            None => {
-                                println!(
-                                    "Received subscription response did not include our address"
-                                );
-                            }
-                            Some(output) => {
-                                println!("Received subscription response:");
-                                println!("  TXID: {}", tx.compute_txid());
-                                println!("  Output Value: {:?}", output.value);
-                                println!("  Output Address: {:?}", address.0.encode());
-                            }
-                        }
-
-                        println!("---");
-                    }
-                    Err(e) => {
-                        println!("Error receiving subscription response: {e}");
-                        break;
-                    }
-                }
+            #[cfg(feature = "rest-client")]
+            {
+                unimplemented!("Rest client doesn't implement subscribe to address yet")
             }
 
-            println!("Subscription stream ended");
+            #[cfg(not(feature = "rest-client"))]
+            {
+                // First subscribe to the address to get a subscription ID
+                let subscription_id = client.subscribe_to_scripts(vec![address.0], None).await?;
+
+                println!("Subscription ID: {subscription_id}",);
+
+                // Now get the subscription stream
+                let mut subscription_stream = client.get_subscription(subscription_id).await?;
+
+                println!("Listening for notifications... Press Ctrl+C to stop");
+
+                // Process subscription responses as they come in
+                while let Some(result) = subscription_stream.next().await {
+                    match result {
+                        Ok(response) => {
+                            let psbt = if let Some(psbt) = response.tx {
+                                psbt
+                            } else {
+                                let fetched = client
+                                    .get_virtual_txs(vec![response.txid.to_string()], None)
+                                    .await?;
+                                fetched.txs.into_iter().next().context("no txs")?
+                            };
+                            let tx = &psbt.unsigned_tx;
+                            let output = tx.output.to_vec().iter().find_map(|out| {
+                                if out.script_pubkey == address.0.to_p2tr_script_pubkey() {
+                                    Some(out.clone())
+                                } else {
+                                    None
+                                }
+                            });
+                            match output {
+                                None => {
+                                    println!(
+                                        "Received subscription response did not include our address"
+                                    );
+                                }
+                                Some(output) => {
+                                    println!("Received subscription response:");
+                                    println!("  TXID: {}", tx.compute_txid());
+                                    println!("  Output Value: {:?}", output.value);
+                                    println!("  Output Address: {:?}", address.0.encode());
+                                }
+                            }
+
+                            println!("---");
+                        }
+                        Err(e) => {
+                            println!("Error receiving subscription response: {e}");
+                            break;
+                        }
+                    }
+                }
+
+                println!("Subscription stream ended");
+            }
         }
     }
 
@@ -480,7 +498,8 @@ async fn main() -> Result<()> {
 }
 
 async fn spendable_vtxos(
-    grpc_client: &ark_grpc::Client,
+    #[cfg(feature = "rest-client")] client: &ark_rest::Client,
+    #[cfg(not(feature = "rest-client"))] client: &ark_grpc::Client,
     vtxos: &[Vtxo],
     include_recoverable_vtxos: bool,
 ) -> Result<HashMap<Vtxo, Vec<VirtualTxOutPoint>>> {
@@ -489,7 +508,7 @@ async fn spendable_vtxos(
         let request = GetVtxosRequest::new_for_addresses(&[vtxo.to_ark_address()]);
 
         // The VTXOs for the given Ark address that the Ark server tells us about.
-        let list = grpc_client.list_vtxos(request).await?;
+        let list = client.list_vtxos(request).await?;
 
         let spendable = if include_recoverable_vtxos {
             list.spendable_with_recoverable()
@@ -504,7 +523,8 @@ async fn spendable_vtxos(
 }
 
 async fn settle(
-    grpc_client: &ark_grpc::Client,
+    #[cfg(feature = "rest-client")] client: &ark_rest::Client,
+    #[cfg(not(feature = "rest-client"))] client: &ark_grpc::Client,
     server_info: &ark_core::server::Info,
     sk: SecretKey,
     vtxos: VirtualTxOutPoints,
@@ -590,7 +610,7 @@ async fn settle(
         IntentMessageType::Register,
     )?;
 
-    let intent_id = grpc_client
+    let intent_id = client
         .register_intent(&intent_message, &bip322_proof)
         .await?;
 
@@ -607,7 +627,7 @@ async fn settle(
         )
         .collect();
 
-    let mut event_stream = grpc_client.get_event_stream(topics).await?;
+    let mut event_stream = client.get_event_stream(topics).await?;
 
     let mut vtxo_graph_chunks = Vec::new();
 
@@ -624,7 +644,7 @@ async fn settle(
         .iter()
         .any(|h| h == &hash)
     {
-        grpc_client.confirm_registration(intent_id.clone()).await?;
+        client.confirm_registration(intent_id.clone()).await?;
     } else {
         bail!(
             "Did not find intent ID {} in batch: {}",
@@ -662,7 +682,7 @@ async fn settle(
         &batch_signing_event.unsigned_commitment_tx,
     )?;
 
-    grpc_client
+    client
         .submit_tree_nonces(
             &batch_id,
             cosigner_kp.public_key(),
@@ -691,7 +711,7 @@ async fn settle(
         &agg_pub_nonce_tree,
     )?;
 
-    grpc_client
+    client
         .submit_tree_signatures(&batch_id, cosigner_kp.public_key(), partial_sig_tree)
         .await?;
 
@@ -791,7 +811,7 @@ async fn settle(
         Some(commitment_psbt)
     };
 
-    grpc_client
+    client
         .submit_signed_forfeit_txs(signed_forfeit_psbts, commitment_psbt)
         .await?;
 
@@ -890,7 +910,8 @@ impl EsploraClient {
 }
 
 async fn transaction_history(
-    grpc_client: &ark_grpc::Client,
+    #[cfg(feature = "rest-client")] client: &ark_rest::Client,
+    #[cfg(not(feature = "rest-client"))] client: &ark_grpc::Client,
     onchain_explorer: &EsploraClient,
     boarding_addresses: &[bitcoin::Address],
     vtxos: &[Vtxo],
@@ -930,7 +951,7 @@ async fn transaction_history(
     let mut outgoing_transactions = Vec::new();
     for vtxo in vtxos.iter() {
         let request = GetVtxosRequest::new_for_addresses(&[vtxo.to_ark_address()]);
-        let vtxo_list = grpc_client.list_vtxos(request).await?;
+        let vtxo_list = client.list_vtxos(request).await?;
 
         let mut new_incoming_transactions = generate_incoming_vtxo_transaction_history(
             vtxo_list.spent(),
@@ -948,7 +969,7 @@ async fn transaction_history(
                 history::OutgoingTransaction::Incomplete(incomplete_tx) => {
                     let request =
                         GetVtxosRequest::new_for_outpoints(&[incomplete_tx.first_outpoint()]);
-                    let list = grpc_client.list_vtxos(request).await?;
+                    let list = client.list_vtxos(request).await?;
 
                     if let Some(spend_tx_vtxo) = list.all().first() {
                         let tx = incomplete_tx.finish(spend_tx_vtxo)?;
