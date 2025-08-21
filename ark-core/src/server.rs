@@ -374,7 +374,7 @@ pub struct SubscriptionResponse {
     pub new_vtxos: Vec<VirtualTxOutPoint>,
     pub spent_vtxos: Vec<VirtualTxOutPoint>,
     pub tx: Option<Psbt>,
-    pub checkpoint_txs: HashMap<String, Txid>,
+    pub checkpoint_txs: HashMap<OutPoint, Txid>,
 }
 
 pub struct VtxoChains {

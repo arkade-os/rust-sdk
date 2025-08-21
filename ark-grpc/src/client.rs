@@ -1015,7 +1015,11 @@ impl TryFrom<generated::ark::v1::GetSubscriptionResponse> for SubscriptionRespon
         let checkpoint_txs = value
             .checkpoint_txs
             .into_iter()
-            .map(|(k, v)| Ok((k, v.txid.parse().map_err(Error::conversion)?)))
+            .map(|(k, v)| {
+                let out_point = OutPoint::from_str(k.as_str()).map_err(Error::conversion)?;
+                let txid = v.txid.parse().map_err(Error::conversion)?;
+                Ok((out_point, txid))
+            })
             .collect::<Result<HashMap<_, _>, Error>>()?;
 
         let scripts = value
