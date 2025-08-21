@@ -38,7 +38,10 @@ async fn test_get_offchain_address() {
 
     let client = Client::new(server_url);
 
-    let server_info = client.get_info().await.unwrap();
+    let server_info = client
+        .get_info()
+        .await
+        .expect("to be able to retrieve server info");
 
     let vtxo = Vtxo::new(
         &secp,
@@ -48,7 +51,7 @@ async fn test_get_offchain_address() {
         server_info.unilateral_exit_delay,
         server_info.network,
     )
-    .unwrap();
+    .expect("to be able to create a vtxo");
 
     let ark_address = vtxo.to_ark_address();
     let address_string = ark_address.encode();

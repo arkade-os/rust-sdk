@@ -319,7 +319,7 @@ impl Client {
                                             models::StreamResultOfV1GetEventStreamResponse,
                                         >(&event)
                                     {
-                                        match StreamEvent::try_from(response.result.unwrap()) {
+                                        match StreamEvent::try_from(response.result?) {
                                             Ok(stream_event) => Ok(stream_event),
                                             Err(e) => Err(Error::conversion(e)),
                                         }
