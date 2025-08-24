@@ -938,9 +938,9 @@ async fn transaction_history(
 
         incoming_transactions.append(&mut new_incoming_transactions);
 
-        let mut relevant_txs =
+        let relevant_txs =
             generate_outgoing_vtxo_transaction_history(vtxo_list.spent(), vtxo_list.spendable())?;
-        for relevant_tx in &mut relevant_txs {
+        for relevant_tx in relevant_txs {
             match relevant_tx {
                 history::OutgoingTransaction::Complete(tx) => outgoing_transactions.push(tx),
                 history::OutgoingTransaction::Incomplete(incomplete_tx) => {

@@ -367,6 +367,7 @@ pub async fn set_up_client(
         nigiri,
         wallet.clone(),
         "http://localhost:7070".to_string(),
+        Duration::from_secs(30),
     )
     .connect()
     .await

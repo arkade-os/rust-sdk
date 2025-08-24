@@ -1,4 +1,5 @@
 use crate::error::ErrorContext;
+use crate::utils::timeout_op;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use ark_core::build_anchor_tx;
@@ -27,6 +28,7 @@ use futures::Future;
 use futures::Stream;
 use jiff::Timestamp;
 use std::sync::Arc;
+use std::time::Duration;
 
 pub mod error;
 pub mod wallet;
@@ -46,6 +48,7 @@ pub use error::Error;
 /// ```rust
 /// # use std::future::Future;
 /// # use std::str::FromStr;
+/// # use std::time::Duration;
 /// # use ark_client::{Blockchain, Client, Error, ExplorerUtxo, SpendStatus};
 /// # use ark_client::OfflineClient;
 /// # use bitcoin::key::Keypair;
@@ -173,6 +176,7 @@ pub use error::Error;
 ///     // Initialize blockchain and wallet implementations
 ///     let blockchain = Arc::new(MyBlockchain::new("https://esplora.example.com"));
 ///     let wallet = Arc::new(MyWallet {});
+///     let timeout = Duration::from_secs(30);
 ///
 ///     // Create the offline client
 ///     let offline_client = OfflineClient::new(
@@ -181,6 +185,7 @@ pub use error::Error;
 ///         blockchain,
 ///         wallet,
 ///         "https://ark-server.example.com".to_string(),
+///         timeout
 ///     );
 ///
 ///     // Connect to the Ark server and get server info
@@ -197,6 +202,7 @@ pub struct OfflineClient<B, W> {
     blockchain: Arc<B>,
     secp: Secp256k1<All>,
     wallet: Arc<W>,
+    timeout: Duration,
 }
 
 /// A client to interact with Ark server
@@ -296,6 +302,7 @@ where
         blockchain: Arc<B>,
         wallet: Arc<W>,
         ark_server_url: String,
+        timeout: Duration,
     ) -> Self {
         let secp = Secp256k1::new();
 
@@ -308,13 +315,22 @@ where
             blockchain,
             secp,
             wallet,
+            timeout,
         }
     }
 
-    // TODO: Add a timeout here. Maybe more generally.
+    /// Connects to the Ark server and retrieves server information.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connection fails or times out.
     pub async fn connect(mut self) -> Result<Client<B, W>, Error> {
-        self.network_client.connect().await?;
-        let server_info = self.network_client.get_info().await?;
+        timeout_op(self.timeout, self.network_client.connect())
+            .await
+            .context("Failed to connect to Ark server")??;
+        let server_info = timeout_op(self.timeout, self.network_client.get_info())
+            .await
+            .context("Failed to get Ark server info")??;
 
         tracing::debug!(
             name = self.name,
@@ -395,7 +411,12 @@ where
         for (address, vtxo) in addresses.into_iter() {
             let request = GetVtxosRequest::new_for_addresses(&[address]);
 
-            let list = self.network_client().list_vtxos(request).await?;
+            let list = timeout_op(
+                self.inner.timeout,
+                self.network_client().list_vtxos(request),
+            )
+            .await
+            .context("Failed to fetch list of VTXOs")??;
 
             if include_recoverable_vtxos {
                 vtxos
@@ -423,10 +444,13 @@ where
         size: i32,
         index: i32,
     ) -> Result<Option<VtxoChainResponse>, Error> {
-        let vtxo_chain = self
-            .network_client()
-            .get_vtxo_chain(Some(out_point), Some((size, index)))
-            .await?;
+        let vtxo_chain = timeout_op(
+            self.inner.timeout,
+            self.network_client()
+                .get_vtxo_chain(Some(out_point), Some((size, index))),
+        )
+        .await
+        .context("Failed to fetch VTXO chain")??;
 
         Ok(Some(vtxo_chain))
     }
@@ -442,7 +466,12 @@ where
         let vtxos = self.list_vtxos(include_recoverable_vtxos).await?;
 
         for (virtual_tx_outpoints, vtxo) in vtxos.spendable {
-            let explorer_utxos = self.blockchain().find_outpoints(vtxo.address()).await?;
+            let explorer_utxos = timeout_op(
+                self.inner.timeout,
+                self.blockchain().find_outpoints(vtxo.address()),
+            )
+            .await
+            .context("Failed to find outpoints")??;
 
             let mut spendable_outpoints = Vec::new();
             for virtual_tx_outpoint in virtual_tx_outpoints {
@@ -457,7 +486,7 @@ where
                         ..
                     }) if !vtxo.can_be_claimed_unilaterally_by_owner(
                         now.as_duration().try_into().map_err(Error::ad_hoc)?,
-                        std::time::Duration::from_secs(*confirmation_blocktime),
+                        Duration::from_secs(*confirmation_blocktime),
                     ) =>
                     {
                         spendable_outpoints.push(virtual_tx_outpoint);
@@ -508,7 +537,12 @@ where
 
         let boarding_addresses = self.get_boarding_addresses()?;
         for boarding_address in boarding_addresses.iter() {
-            let outpoints = self.blockchain().find_outpoints(boarding_address).await?;
+            let outpoints = timeout_op(
+                self.inner.timeout,
+                self.blockchain().find_outpoints(boarding_address),
+            )
+            .await
+            .context("Failed to find outpoints")??;
 
             for ExplorerUtxo {
                 outpoint,
@@ -525,10 +559,13 @@ where
                     confirmed_at,
                 });
 
-                let status = self
-                    .blockchain()
-                    .get_output_status(&outpoint.txid, outpoint.vout)
-                    .await?;
+                let status = timeout_op(
+                    self.inner.timeout,
+                    self.blockchain()
+                        .get_output_status(&outpoint.txid, outpoint.vout),
+                )
+                .await
+                .context("Failed to get Tx output status")??;
 
                 if let Some(spend_txid) = status.spend_txid {
                     boarding_commitment_transactions.push(spend_txid);
@@ -544,20 +581,25 @@ where
             &boarding_commitment_transactions,
         )?;
 
-        let mut outgoing_txs = generate_outgoing_vtxo_transaction_history(
+        let outgoing_txs = generate_outgoing_vtxo_transaction_history(
             &vtxos.spent_outpoints(),
             &vtxos.spendable_outpoints(),
         )?;
 
         let mut outgoing_transactions = vec![];
-        for tx in &mut outgoing_txs {
+        for tx in outgoing_txs {
             let tx = match tx {
                 OutgoingTransaction::Complete(tx) => tx,
                 OutgoingTransaction::Incomplete(incomplete_tx) => {
                     let first_outpoint = incomplete_tx.first_outpoint();
 
                     let request = GetVtxosRequest::new_for_outpoints(&[first_outpoint]);
-                    let list = self.network_client().list_vtxos(request).await?;
+                    let list = timeout_op(
+                        self.inner.timeout,
+                        self.network_client().list_vtxos(request),
+                    )
+                    .await
+                    .context("Failed to fetch list of VTXOs")??;
 
                     match list.all().first() {
                         Some(virtual_tx_outpoint) => {
@@ -658,7 +700,10 @@ where
 
     /// Use the P2A output of a transaction to bump its transaction fee with a child transaction.
     pub async fn bump_tx(&self, parent: &Transaction) -> Result<Transaction, Error> {
-        let fee_rate = self.blockchain().get_fee_rate().await?;
+        let fee_rate = timeout_op(self.inner.timeout, self.blockchain().get_fee_rate())
+            .await
+            .context("Failed to retrieve fee rate")??;
+
         let change_address = self.inner.wallet.get_onchain_address()?;
 
         // Create a closure that converts CoinSelectionResult to UtxoCoinSelection
