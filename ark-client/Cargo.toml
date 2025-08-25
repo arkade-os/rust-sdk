@@ -26,7 +26,7 @@ tracing = "0.1.37"
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
 ark-grpc = { path = "../ark-grpc", version = "0.7.0", default-features = false }
 backon = { version = "1", features = ["tokio-sleep"] }
-tonic = "0.12"
+tonic = "0.14"
 
 # TODO: We do not yet support WASM in `ark-client`. To support WASM in this high level crate, we
 # will need to make it possible to use either `ark-grpc` or `ark-rest`. The current default is
@@ -36,12 +36,13 @@ backon = { version = "1", features = ["gloo-timers-sleep"] }
 futures-util = { version = "0.3.31", default-features = false, features = ["alloc"] }
 getrandom = { version = "0.2", features = ["wasm-bindgen", "js"] }
 gloo-timers = { version = "0.3.0", features = ["futures"] }
-tonic = { version = "0.12", default-features = false, features = ["prost", "codegen"] }
+tonic = { version = "0.14", default-features = false, features = ["codegen"] }
+tonic-prost = "0.14"
 tonic-web-wasm-client = { version = "0.6", default-features = false }
 wasm-bindgen-futures = { version = "0.4" }
 
 [target.'cfg(genproto)'.build-dependencies]
-tonic-build = { version = "0.12.3" }
+tonic-build = { version = "0.14" }
 
 [dev-dependencies]
 tokio = { version = "1.41.0", features = ["macros", "rt"] }

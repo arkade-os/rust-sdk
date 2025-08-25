@@ -15,21 +15,15 @@ base64 = { version = "0.22", default-features = false }
 bitcoin = { version = "0.32", default-features = false }
 futures = { version = "0.3", default-features = false }
 log = "0.4"
-musig = { package = "ark-secp256k1", path = "../ark-rust-secp256k1", features = ["serde"] }
-prost = { version = "0.13", default-features = false }
-prost-types = { version = "0.13", default-features = false }
+prost = { version = "0.14", default-features = false, features = ["std"] }
 serde_json = "1.0"
-tonic = { version = "0.12", default-features = false, features = ["transport", "codegen", "prost"] }
+tonic = { version = "0.14", default-features = false, features = ["transport", "codegen"] }
+tonic-prost = "0.14"
 
-[target.'cfg(genproto)'.build-dependencies]
-tonic-build = { version = "0.12" }
+[build-dependencies]
+tonic-prost-build = "0.14"
 
 [features]
 default = ["tls-webpki-roots"]
 tls-native-roots = ["tonic/tls-native-roots"]
 tls-webpki-roots = ["tonic/tls-webpki-roots"]
-
-[dev-dependencies]
-console_log = "1"
-tokio = { version = "1.41", features = ["macros", "rt"] }
-wasm-bindgen-test = "0.3"

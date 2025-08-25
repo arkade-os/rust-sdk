@@ -8,7 +8,7 @@ fn main() -> std::io::Result<()> {
 
 #[cfg(genproto)]
 fn generate_protos() -> std::io::Result<()> {
-    tonic_build::configure()
+    tonic_prost_build::configure()
         .build_server(false)
         .build_client(true)
         .out_dir("src/generated")
