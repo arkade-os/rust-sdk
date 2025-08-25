@@ -2,6 +2,7 @@ use crate::coin_select::coin_select_for_onchain;
 use crate::error::Error;
 use crate::error::ErrorContext;
 use crate::utils::sleep;
+use crate::utils::timeout_op;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use crate::Blockchain;
@@ -48,17 +49,16 @@ where
         // For each spendable VTXO, generate its unilateral exit tree.
         for (virtual_tx_outpoints, _) in spendable_vtxos {
             for virtual_tx_outpoint in virtual_tx_outpoints {
-                let vtxo_chain_response = self
-                    .network_client()
-                    .get_vtxo_chain(Some(virtual_tx_outpoint.outpoint), None)
-                    .await
-                    .map_err(Error::ad_hoc)
-                    .with_context(|| {
-                        format!(
-                            "failed to get VTXO chain for outpoint {}",
-                            virtual_tx_outpoint.outpoint
-                        )
-                    })?;
+                let vtxo_chain_response = timeout_op(
+                    self.inner.timeout,
+                    self.network_client()
+                        .get_vtxo_chain(Some(virtual_tx_outpoint.outpoint), None),
+                )
+                .await
+                .context(format!(
+                    "failed to get VTXO chain for outpoint {}",
+                    virtual_tx_outpoint.outpoint
+                ))??;
 
                 let paths = build_unilateral_exit_tree_txids(
                     &vtxo_chain_response.chains,
@@ -68,12 +68,13 @@ where
                 // We don't want to fetch transactions more than once.
                 let txs = HashSet::<Txid>::from_iter(paths.concat().into_iter());
 
-                let virtual_txs_response = self
-                    .network_client()
-                    .get_virtual_txs(txs.iter().map(|tx| tx.to_string()).collect(), None)
-                    .await
-                    .map_err(Error::ad_hoc)
-                    .context("failed to get virtual TXs")?;
+                let virtual_txs_response = timeout_op(
+                    self.inner.timeout,
+                    self.network_client()
+                        .get_virtual_txs(txs.iter().map(|tx| tx.to_string()).collect(), None),
+                )
+                .await
+                .context("failed to get virtual TXs")??;
 
                 let paths = paths
                     .into_iter()
@@ -108,13 +109,14 @@ where
 
             let mut commitment_txs = Vec::new();
             for commitment_txid in commitment_txids.iter() {
-                let commitment_tx = self
-                    .blockchain()
-                    .find_tx(commitment_txid)
-                    .await?
-                    .ok_or_else(|| {
-                        Error::ad_hoc(format!("could not find commitment TX {commitment_txid}"))
-                    })?;
+                let commitment_tx = timeout_op(
+                    self.inner.timeout,
+                    self.blockchain().find_tx(commitment_txid),
+                )
+                .await??
+                .ok_or_else(|| {
+                    Error::ad_hoc(format!("could not find commitment TX {commitment_txid}"))
+                })?;
 
                 commitment_txs.push(commitment_tx);
             }
@@ -207,10 +209,9 @@ where
             "Broadcasting transaction sending Ark outputs onchain"
         );
 
-        self.blockchain()
-            .broadcast(&tx)
+        timeout_op(self.inner.timeout, self.blockchain().broadcast(&tx))
             .await
-            .context("failed to broadcast transaction {tx}")?;
+            .with_context(|| format!("failed to broadcast transaction {txid}"))??;
 
         Ok(txid)
     }

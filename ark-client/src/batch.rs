@@ -1,5 +1,6 @@
 use crate::error::ErrorContext;
 use crate::utils::sleep;
+use crate::utils::timeout_op;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use crate::Blockchain;
@@ -180,10 +181,12 @@ where
 
         // Find outpoints for each boarding output.
         for boarding_output in boarding_outputs {
-            let outpoints = self
-                .blockchain()
-                .find_outpoints(boarding_output.address())
-                .await?;
+            let outpoints = timeout_op(
+                self.inner.timeout,
+                self.blockchain().find_outpoints(boarding_output.address()),
+            )
+            .await
+            .context("failed to find outpoints")??;
 
             for o in outpoints.iter() {
                 if let ExplorerUtxo {
@@ -356,10 +359,13 @@ where
             own_cosigner_pks.clone(),
         )?;
 
-        let intent_id = self
-            .network_client()
-            .register_intent(&intent_message, &bip322_proof)
-            .await?;
+        let intent_id = timeout_op(
+            self.inner.timeout,
+            self.network_client()
+                .register_intent(&intent_message, &bip322_proof),
+        )
+        .await
+        .context("failed to register intent")??;
 
         tracing::debug!(
             intent_id,
@@ -407,9 +413,13 @@ where
                         let hash = hash.as_byte_array().to_vec().to_lower_hex_string();
 
                         if e.intent_id_hashes.iter().any(|h| h == &hash) {
-                            self.network_client()
-                                .confirm_registration(intent_id.clone())
-                                .await?;
+                            timeout_op(
+                                self.inner.timeout,
+                                self.network_client()
+                                    .confirm_registration(intent_id.clone()),
+                            )
+                            .await
+                            .context("failed to confirm intent registration")??;
 
                             tracing::info!(batch_id = e.id, intent_id, "Intent ID found for batch");
 

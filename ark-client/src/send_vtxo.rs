@@ -1,4 +1,5 @@
 use crate::error::ErrorContext;
+use crate::utils::timeout_op;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use crate::Blockchain;
@@ -148,11 +149,14 @@ where
             sign_checkpoint_transaction(sign_fn, checkpoint_psbt, vtxo_input)?;
         }
 
-        self.network_client()
-            .finalize_offchain_transaction(ark_txid, res.signed_checkpoint_txs)
-            .await
-            .map_err(Error::ark_server)
-            .context("failed to finalize offchain transaction")?;
+        timeout_op(
+            self.inner.timeout,
+            self.network_client()
+                .finalize_offchain_transaction(ark_txid, res.signed_checkpoint_txs),
+        )
+        .await?
+        .map_err(Error::ark_server)
+        .context("failed to finalize offchain transaction")?;
 
         Ok(ark_txid)
     }
