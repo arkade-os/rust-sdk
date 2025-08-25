@@ -1,17 +1,19 @@
-#![allow(unused_imports)]
-#![allow(clippy::too_many_arguments)]
-
 extern crate reqwest;
 extern crate serde;
 extern crate serde_json;
 extern crate serde_repr;
 extern crate url;
 
-mod client;
-
-// TODO: Should not need to expose these modules once every method is implemented in `client`.
+#[allow(clippy::all, unused, warnings)]
 pub mod apis;
+
+#[allow(clippy::all, unused, warnings)]
 pub mod models;
 
+mod client;
+mod conversions;
+mod error;
+
 pub use client::Client;
-pub use client::Error;
+pub use conversions::ConversionError;
+pub use error::Error;
