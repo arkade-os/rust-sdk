@@ -30,3 +30,7 @@ settle actor:
 # Subscribe to an address
 subscribe actor address:
     cargo run -p ark-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed subscribe {{ address }}
+
+# Send money onchain
+send-onchain actor address amount:
+    cargo run -p ark-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed send-onchain {{ address }} {{ amount }} 

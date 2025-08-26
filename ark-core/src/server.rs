@@ -350,6 +350,23 @@ pub enum StreamEvent {
     TreeSignature(TreeSignatureEvent),
 }
 
+impl StreamEvent {
+    pub fn name(&self) -> String {
+        let s = match self {
+            StreamEvent::BatchStarted(_) => "BatchStarted",
+            StreamEvent::BatchFinalization(_) => "BatchFinalization",
+            StreamEvent::BatchFinalized(_) => "BatchFinalized",
+            StreamEvent::BatchFailed(_) => "BatchFailed",
+            StreamEvent::TreeSigningStarted(_) => "TreeSigningStarted",
+            StreamEvent::TreeNoncesAggregated(_) => "TreeNoncesAggregated",
+            StreamEvent::TreeTx(_) => "TreeTx",
+            StreamEvent::TreeSignature(_) => "TreeSignature",
+        };
+
+        s.to_string()
+    }
+}
+
 pub enum StreamTransaction {
     Commitment(CommitmentTransaction),
     Ark(ArkTransaction),
