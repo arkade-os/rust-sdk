@@ -13,6 +13,7 @@ use ark_core::server::GetVtxosRequest;
 use ark_core::server::SubscriptionResponse;
 use ark_core::server::VirtualTxOutPoint;
 use ark_core::ArkAddress;
+use ark_core::ArkNote;
 use ark_core::UtxoCoinSelection;
 use ark_core::Vtxo;
 use ark_grpc::VtxoChainResponse;
@@ -27,6 +28,8 @@ use bitcoin::Txid;
 use futures::Future;
 use futures::Stream;
 use jiff::Timestamp;
+use rand::CryptoRng;
+use rand::Rng;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -39,6 +42,7 @@ mod send_vtxo;
 mod unilateral_exit;
 mod utils;
 
+use batch::BatchOutputType;
 pub use error::Error;
 
 /// A client to interact with Ark Server
@@ -525,6 +529,83 @@ where
                 });
 
         Ok(sum)
+    }
+
+    /// Redeem multiple ArkNotes by settling them into new VTXOs
+    ///
+    /// This method takes ArkNote objects and creates a batch transaction to convert
+    /// them into spendable VTXOs at the user's offchain address.
+    pub async fn redeem_notes<R>(
+        &self,
+        rng: &mut R,
+        arknotes: Vec<ArkNote>,
+    ) -> Result<Option<Txid>, Error>
+    where
+        R: CryptoRng + Rng + Clone,
+    {
+        if arknotes.is_empty() {
+            return Ok(None);
+        }
+
+        // Calculate total amount from all notes
+        let total_amount = arknotes
+            .iter()
+            .fold(Amount::ZERO, |acc, note| acc + note.value());
+
+        // Get user's offchain address to send the redeemed funds
+        let (to_address, _) = self.get_offchain_address()?;
+
+        tracing::info!(
+            note_count = arknotes.len(),
+            total_amount = %total_amount,
+            to_address = %to_address.encode(),
+            "Redeeming ArkNotes"
+        );
+
+        // Join the next batch with the ArkNotes as inputs
+        self.join_next_batch(
+            rng,
+            vec![],
+            vec![],
+            arknotes,
+            BatchOutputType::Board {
+                to_address,
+                to_amount: total_amount,
+            },
+        )
+        .await
+        .map(Some)
+    }
+
+    /// Redeem a single ArkNote
+    pub async fn redeem_note<R>(&self, rng: &mut R, arknote: ArkNote) -> Result<Option<Txid>, Error>
+    where
+        R: CryptoRng + Rng + Clone,
+    {
+        self.redeem_notes(rng, vec![arknote]).await
+    }
+
+    pub async fn create_arknote(&self, amount: Amount) -> Result<ArkNote, Error> {
+        let notes = self
+            .inner
+            .network_client
+            .clone()
+            .create_arknote(amount.to_sat() as u32, 1)
+            .await
+            .map_err(Error::ad_hoc)?;
+
+        if notes.is_empty() {
+            return Err(Error::ad_hoc("No notes returned from server"));
+        }
+
+        let note_str = notes
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::ad_hoc("No note in response"))?;
+
+        tracing::info!(note = %note_str, "Created ArkNote");
+        let note = ArkNote::from_string(&note_str).map_err(Error::ad_hoc)?;
+        Ok(note)
     }
 
     pub async fn transaction_history(&self) -> Result<Vec<history::Transaction>, Error> {

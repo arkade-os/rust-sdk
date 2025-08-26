@@ -66,7 +66,6 @@ jobs:
         run: RUST_BACKTRACE=1 cargo test --workspace --exclude ark-secp256k1
 
   e2e-tests:
-    needs: [ clippy ]
     strategy:
       fail-fast: false
       matrix:
