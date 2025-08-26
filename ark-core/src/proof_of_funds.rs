@@ -1,3 +1,4 @@
+use crate::arknote::PREIMAGE_LENGTH;
 use crate::ArkNote;
 use crate::Error;
 use crate::ErrorContext;
@@ -52,7 +53,8 @@ pub struct Input {
     pk: XOnlyPublicKey,
     spend_info: (ScriptBuf, taproot::ControlBlock),
     is_onchain: bool,
-    preimage: Option<[u8; 32]>,
+    // FIXME: make the input type an enum based on the input type.
+    preimage: Option<[u8; PREIMAGE_LENGTH]>,
 }
 
 impl Input {
@@ -83,7 +85,7 @@ impl From<&ArkNote> for Input {
         let spending_info = value.vtxo_script().spend_info();
 
         // this is inside the taproot script path
-        let node_script = value.note_script().clone();
+        let node_script = value.note_script.clone();
         let Some(control_block) =
             spending_info.control_block(&(node_script.clone(), LeafVersion::TapScript))
         else {
@@ -133,8 +135,8 @@ impl Bip322Proof {
 }
 
 pub fn make_bip322_signature<F>(
-    signing_kps: &[Keypair],
-    sign_for_onchain_pk_fn: F,
+    signing_kps: &[Keypair],   // This is to sign VTXOs in the `inputs` argument.
+    sign_for_onchain_pk_fn: F, // This is to sign boarding outputs in the `inputs` argument.
     inputs: Vec<Input>,
     outputs: Vec<Output>,
     own_cosigner_pks: Vec<PublicKey>,
@@ -193,7 +195,7 @@ where
 
         proof_input.tap_scripts = BTreeMap::from_iter([(
             leaf_proof.1.clone(),
-            (leaf_proof.0.clone(), taproot::LeafVersion::TapScript),
+            (leaf_proof.0.clone(), LeafVersion::TapScript),
         )]);
     }
 
@@ -229,7 +231,7 @@ where
 
         let pk = input.pk;
 
-        let sig = match input.is_onchain {
+        let sig: Vec<u8> = match input.is_onchain {
             true => {
                 let sig = sign_for_onchain_pk_fn(&pk, &msg)?;
 
@@ -244,39 +246,51 @@ where
 
                 proof_input.tap_script_sigs = BTreeMap::from_iter([((pk, leaf_hash), sig)]);
 
-                sig
+                sig.signature.serialize().to_vec()
             }
             false => {
-                let signing_kp = signing_kps
-                    .iter()
-                    .find(|kp| {
-                        let (xonly_ok, _) = kp.x_only_public_key();
-                        xonly_ok == pk
-                    })
-                    .ok_or_else(|| Error::ad_hoc("Could not find suitable kp for pk"))?;
+                // FIXME: this is an horrible hack to handle arknotes.
+                if let Some(preimage) = input.preimage {
+                    preimage.to_vec()
+                } else {
+                    let signing_kp = signing_kps
+                        .iter()
+                        .find(|kp| {
+                            let (xonly_ok, _) = kp.x_only_public_key();
+                            xonly_ok == pk
+                        })
+                        .ok_or_else(|| Error::ad_hoc("Could not find suitable kp for pk"))?;
 
-                let sig = secp.sign_schnorr_no_aux_rand(&msg, signing_kp);
+                    let sig = secp.sign_schnorr_no_aux_rand(&msg, signing_kp);
 
-                secp.verify_schnorr(&sig, &msg, &pk)
-                    .map_err(Error::crypto)
-                    .context("failed to verify own proof of funds vtxo signature")?;
+                    secp.verify_schnorr(&sig, &msg, &pk)
+                        .map_err(Error::crypto)
+                        .context("failed to verify own proof of funds vtxo signature")?;
 
-                let sig = taproot::Signature {
-                    signature: sig,
-                    sighash_type: TapSighashType::Default,
-                };
+                    let sig = taproot::Signature {
+                        signature: sig,
+                        sighash_type: TapSighashType::Default,
+                    };
 
-                proof_input.tap_script_sigs = BTreeMap::from_iter([((pk, leaf_hash), sig)]);
+                    proof_input.tap_script_sigs = BTreeMap::from_iter([((pk, leaf_hash), sig)]);
 
-                sig
-            }
+                    sig.signature.serialize().to_vec()
+                }
+            } // We need to branch here once more to handle "signing" (satisfying) the Note script.
         };
 
+        // This is different for the Note script!
         let witness = Witness::from_slice(&[
-            &sig.signature[..],
+            sig.as_slice(),
             exit_script.as_bytes(),
             &exit_control_block.serialize(),
         ]);
+
+        // let witness = Witness::from_slice(&[
+        //    preimage,
+        //    note_script.as_bytes(),
+        //    &control_block.serialize(),
+        // ]);
 
         proof_input.final_script_witness = Some(witness);
     }
