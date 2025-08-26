@@ -479,20 +479,16 @@ where
                     .iter()
                     .find(|explorer_utxo| explorer_utxo.outpoint == virtual_tx_outpoint.outpoint)
                 {
-                    // Include VTXOs that have been confirmed on the blockchain, but whose
-                    // exit path is still _inactive_.
+                    // Exclude VTXOs that have been confirmed on the blockchain, but whose exit path
+                    // is now _active_. These should be claimed unilaterally instead.
                     Some(ExplorerUtxo {
                         confirmation_blocktime: Some(confirmation_blocktime),
                         ..
-                    }) if !vtxo.can_be_claimed_unilaterally_by_owner(
+                    }) if vtxo.can_be_claimed_unilaterally_by_owner(
                         now.as_duration().try_into().map_err(Error::ad_hoc)?,
                         Duration::from_secs(*confirmation_blocktime),
-                    ) =>
-                    {
-                        spendable_outpoints.push(virtual_tx_outpoint);
-                    }
-                    // The VTXO has not been confirmed on the blockchain yet. Therefore, it
-                    // cannot have expired.
+                    ) => {}
+                    // All other VTXOs are spendable.
                     _ => {
                         spendable_outpoints.push(virtual_tx_outpoint);
                     }
