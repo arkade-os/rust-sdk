@@ -1,3 +1,4 @@
+use crate::ArkNote;
 use crate::Error;
 use crate::ErrorContext;
 use bitcoin::absolute::LockTime;
@@ -16,6 +17,7 @@ use bitcoin::secp256k1::PublicKey;
 use bitcoin::sighash::Prevouts;
 use bitcoin::sighash::SighashCache;
 use bitcoin::taproot;
+use bitcoin::taproot::LeafVersion;
 use bitcoin::transaction::Version;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
@@ -50,6 +52,7 @@ pub struct Input {
     pk: XOnlyPublicKey,
     spend_info: (ScriptBuf, taproot::ControlBlock),
     is_onchain: bool,
+    preimage: Option<[u8; 32]>,
 }
 
 impl Input {
@@ -70,6 +73,39 @@ impl Input {
             pk,
             spend_info,
             is_onchain,
+            preimage: None,
+        }
+    }
+}
+
+impl From<&ArkNote> for Input {
+    fn from(value: &ArkNote) -> Self {
+        let spending_info = value.vtxo_script().spend_info();
+
+        // this is inside the taproot script path
+        let node_script = value.note_script().clone();
+        let Some(control_block) =
+            spending_info.control_block(&(node_script.clone(), LeafVersion::TapScript))
+        else {
+            // FIXME: probably we need a tryfrom?
+            panic!("no control block found");
+        };
+
+        Self {
+            outpoint: value.outpoint(),
+            sequence: Sequence::MAX,
+            witness_utxo: TxOut {
+                value: value.value(),
+                // This should be unspendable script?
+                script_pubkey: value.vtxo_script().script_pubkey(),
+            },
+            // This should be empty?
+            tapscripts: vec![],
+            pk: value.vtxo_script().x_only_public_key(),
+            // This contains the extra info to spend the note, right?
+            spend_info: (node_script, control_block),
+            is_onchain: false,
+            preimage: Some(*value.preimage()),
         }
     }
 }
