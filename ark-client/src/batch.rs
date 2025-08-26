@@ -327,10 +327,12 @@ where
                     value: to_amount,
                     script_pubkey: to_address.script_pubkey(),
                 }));
-                outputs.push(proof_of_funds::Output::Offchain(TxOut {
-                    value: change_amount,
-                    script_pubkey: change_address.to_p2tr_script_pubkey(),
-                }));
+                if change_amount > self.server_info.dust {
+                    outputs.push(proof_of_funds::Output::Offchain(TxOut {
+                        value: change_amount,
+                        script_pubkey: change_address.to_p2tr_script_pubkey(),
+                    }));
+                }
             }
         }
 
