@@ -1,14 +1,20 @@
 //! Type conversions between generated API types and ark-core types
 
 use crate::models::V1GetInfoResponse;
+use crate::models::V1GetSubscriptionResponse;
 use crate::models::V1IndexerVtxo;
+use bitcoin::base64;
+use bitcoin::base64::Engine;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Amount;
 use bitcoin::Network;
 use bitcoin::OutPoint;
+use bitcoin::Psbt;
 use bitcoin::ScriptBuf;
 use bitcoin::Txid;
+use std::collections::HashMap;
 use std::error::Error as StdError;
+use std::str::FromStr;
 
 pub mod stream;
 
@@ -315,4 +321,83 @@ fn parse_sequence_number(value: i64) -> Result<bitcoin::Sequence, ConversionErro
     };
 
     Ok(sequence)
+}
+
+impl TryFrom<V1GetSubscriptionResponse> for ark_core::server::SubscriptionResponse {
+    type Error = ConversionError;
+
+    fn try_from(value: V1GetSubscriptionResponse) -> Result<Self, Self::Error> {
+        let txid = value
+            .txid
+            .ok_or_else(|| ConversionError("Missing txid".to_string()))?
+            .parse()
+            .map_err(|e| ConversionError(format!("Invalid txid: {}", e)))?;
+
+        let new_vtxos = value
+            .new_vtxos
+            .unwrap_or_default()
+            .into_iter()
+            .map(ark_core::server::VirtualTxOutPoint::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| ConversionError(format!("Invalid new_vtxos: {}", e)))?;
+
+        let spent_vtxos = value
+            .spent_vtxos
+            .unwrap_or_default()
+            .into_iter()
+            .map(ark_core::server::VirtualTxOutPoint::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| ConversionError(format!("Invalid spent_vtxos: {}", e)))?;
+
+        let tx = if let Some(tx_str) = value.tx.filter(|s| !s.is_empty()) {
+            let base64 = base64::engine::GeneralPurpose::new(
+                &base64::alphabet::STANDARD,
+                base64::engine::GeneralPurposeConfig::new(),
+            );
+            let bytes = base64
+                .decode(&tx_str)
+                .map_err(|e| ConversionError(format!("Invalid tx base64: {}", e)))?;
+            Some(
+                Psbt::deserialize(&bytes)
+                    .map_err(|e| ConversionError(format!("Invalid tx psbt: {}", e)))?,
+            )
+        } else {
+            None
+        };
+
+        let checkpoint_txs = value
+            .checkpoint_txs
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(k, v)| {
+                let out_point = OutPoint::from_str(&k)
+                    .map_err(|e| ConversionError(format!("Invalid checkpoint outpoint: {}", e)))?;
+                let txid = v
+                    .txid
+                    .ok_or_else(|| ConversionError("Missing checkpoint txid".to_string()))?
+                    .parse()
+                    .map_err(|e| ConversionError(format!("Invalid checkpoint txid: {}", e)))?;
+                Ok((out_point, txid))
+            })
+            .collect::<Result<HashMap<_, _>, ConversionError>>()?;
+
+        let scripts = value
+            .scripts
+            .unwrap_or_default()
+            .iter()
+            .map(|h| {
+                ScriptBuf::from_hex(h)
+                    .map_err(|e| ConversionError(format!("Invalid script hex: {}", e)))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(ark_core::server::SubscriptionResponse {
+            txid,
+            scripts,
+            new_vtxos,
+            spent_vtxos,
+            tx,
+            checkpoint_txs,
+        })
+    }
 }

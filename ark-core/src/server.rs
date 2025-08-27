@@ -422,6 +422,19 @@ pub struct SubmitOffchainTxResponse {
 #[derive(Debug, Clone)]
 pub struct FinalizeOffchainTxResponse {}
 
+#[derive(Debug)]
+pub struct VirtualTxsResponse {
+    pub txs: Vec<Psbt>,
+    pub page: Option<IndexerPage>,
+}
+
+#[derive(Debug)]
+pub struct IndexerPage {
+    pub current: i32,
+    pub next: i32,
+    pub total: i32,
+}
+
 mod serde {
     use super::*;
     use ::serde::de;

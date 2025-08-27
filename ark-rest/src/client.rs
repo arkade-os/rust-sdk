@@ -8,25 +8,34 @@ use crate::apis::ark_service_api::ark_service_submit_signed_forfeit_txs;
 use crate::apis::ark_service_api::ark_service_submit_tree_nonces;
 use crate::apis::ark_service_api::ark_service_submit_tree_signatures;
 use crate::apis::ark_service_api::ark_service_submit_tx;
+use crate::apis::indexer_service_api::indexer_service_get_virtual_txs;
 use crate::apis::indexer_service_api::indexer_service_get_vtxos;
+use crate::apis::indexer_service_api::indexer_service_subscribe_for_scripts;
+use crate::apis::indexer_service_api::indexer_service_unsubscribe_for_scripts;
 use crate::models;
 use crate::models::V1Bip322Signature;
 use crate::models::V1ConfirmRegistrationRequest;
 use crate::models::V1SubmitSignedForfeitTxsRequest;
 use crate::models::V1SubmitTreeNoncesRequest;
 use crate::models::V1SubmitTreeSignaturesRequest;
+use crate::models::V1SubscribeForScriptsRequest;
+use crate::models::V1UnsubscribeForScriptsRequest;
 use crate::Error;
 use ark_core::proof_of_funds;
 use ark_core::server::FinalizeOffchainTxResponse;
 use ark_core::server::GetVtxosRequest;
 use ark_core::server::GetVtxosRequestFilter;
 use ark_core::server::GetVtxosRequestReference;
+use ark_core::server::IndexerPage;
 use ark_core::server::ListVtxo;
 use ark_core::server::NoncePks;
 use ark_core::server::PartialSigTree;
 use ark_core::server::StreamEvent;
 use ark_core::server::SubmitOffchainTxResponse;
+use ark_core::server::SubscriptionResponse;
 use ark_core::server::VirtualTxOutPoint;
+use ark_core::server::VirtualTxsResponse;
+use ark_core::ArkAddress;
 use bitcoin::base64;
 use bitcoin::base64::Engine;
 use bitcoin::secp256k1::PublicKey;
@@ -427,5 +436,184 @@ impl Client {
         .map_err(Error::request)?;
 
         Ok(())
+    }
+
+    /// Allows to subscribe for tx notifications related to the provided
+    /// vtxo scripts.
+    ///
+    /// It can also be used to update an existing subscriptions by adding
+    /// new scripts to it.
+    ///
+    /// Note: for new subscriptions, don't provide a `subscription_id`
+    ///
+    /// Returns the subscription id if successful
+    pub async fn subscribe_to_scripts(
+        &self,
+        scripts: Vec<ArkAddress>,
+        subscription_id: Option<String>,
+    ) -> Result<String, Error> {
+        let scripts = scripts
+            .iter()
+            .map(|address| address.to_p2tr_script_pubkey().to_hex_string())
+            .collect::<Vec<_>>();
+
+        // For new subscription we expect empty string ("") here
+        let subscription_id = subscription_id.unwrap_or_default();
+
+        let response = indexer_service_subscribe_for_scripts(
+            &self.configuration,
+            V1SubscribeForScriptsRequest {
+                scripts: Some(scripts),
+                subscription_id: Some(subscription_id),
+            },
+        )
+        .await
+        .map_err(Error::request)?;
+
+        let subscription_id = response
+            .subscription_id
+            .ok_or(Error::request("No subscription id"))?;
+
+        Ok(subscription_id)
+    }
+
+    /// Allows to remove scripts from an existing subscription.
+    pub async fn unsubscribe_from_scripts(
+        &self,
+        scripts: Vec<ArkAddress>,
+        subscription_id: String,
+    ) -> Result<(), Error> {
+        let scripts = scripts
+            .iter()
+            .map(|address| address.to_p2tr_script_pubkey().to_hex_string())
+            .collect::<Vec<_>>();
+
+        let _ = indexer_service_unsubscribe_for_scripts(
+            &self.configuration,
+            V1UnsubscribeForScriptsRequest {
+                subscription_id: Some(subscription_id),
+                scripts: Some(scripts),
+            },
+        )
+        .await
+        .map_err(Error::request)?;
+
+        Ok(())
+    }
+
+    pub async fn get_subscription(
+        &self,
+        subscription_id: String,
+    ) -> Result<impl Stream<Item = Result<SubscriptionResponse, Error>> + Unpin, Error> {
+        // Build the URL with subscription_id parameter
+        let url = format!(
+            "{}/v1/script/subscription/{subscription_id}",
+            self.configuration.base_path,
+        );
+
+        // Create the request for SSE
+        let client = &self.configuration.client;
+        let request = client
+            .get(&url)
+            .header("Accept", "text/event-stream")
+            .send()
+            .await
+            .map_err(Error::request)?;
+
+        // Check if the request was successful
+        if !request.status().is_success() {
+            return Err(Error::request(format!(
+                "Subscription stream request failed with status: {}",
+                request.status()
+            )));
+        }
+
+        // Convert the response into a byte stream using async chunks
+        let byte_stream = request.bytes_stream();
+
+        // Create the SSE event stream
+        let stream = stream::unfold(byte_stream, |mut byte_stream| async move {
+            loop {
+                match byte_stream.next().await {
+                    Some(chunk_result) => {
+                        let result = match chunk_result {
+                            Ok(bytes) => {
+                                let event = String::from_utf8(bytes.to_vec());
+                                match event {
+                                    Ok(event) if !event.trim().is_empty() => {
+                                        if let Ok(response) =
+                                            serde_json::from_str::<
+                                                models::StreamResultOfV1GetSubscriptionResponse,
+                                            >(&event)
+                                        {
+                                            match SubscriptionResponse::try_from(response.result?) {
+                                                Ok(subscription_response) => {
+                                                    Ok(subscription_response)
+                                                }
+                                                Err(e) => Err(Error::conversion(e)),
+                                            }
+                                        } else {
+                                            // Handle parse error
+                                            Err(Error::conversion("Failed to parse JSON"))
+                                        }
+                                    }
+                                    Ok(_) => {
+                                        // Handle empty string case - skip and continue to next
+                                        // iteration
+                                        tracing::trace!("Ignoring empty response");
+                                        continue;
+                                    }
+                                    Err(error) => Err(Error::conversion(error)),
+                                }
+                            }
+                            Err(e) => Err(Error::request(e)),
+                        };
+                        return Some((result, byte_stream));
+                    }
+                    None => return None,
+                }
+            }
+        });
+
+        Ok(Box::pin(stream))
+    }
+
+    pub async fn get_virtual_txs(
+        &self,
+        txids: Vec<String>,
+        size_and_index: Option<(i32, i32)>,
+    ) -> Result<VirtualTxsResponse, Error> {
+        let (size, index) = size_and_index
+            .map(|(sz, indx)| (Some(sz), Some(indx)))
+            .unwrap_or_default();
+        let response = indexer_service_get_virtual_txs(&self.configuration, txids, size, index)
+            .await
+            .map_err(Error::request)?;
+
+        let base64 = &base64::engine::GeneralPurpose::new(
+            &base64::alphabet::STANDARD,
+            base64::engine::GeneralPurposeConfig::new(),
+        );
+
+        let txs = response
+            .txs
+            .unwrap_or_default()
+            .into_iter()
+            .map(|tx| {
+                let bytes = base64.decode(&tx).map_err(Error::conversion)?;
+                let psbt = Psbt::deserialize(&bytes).map_err(Error::conversion)?;
+
+                Ok(psbt)
+            })
+            .collect::<Result<Vec<Psbt>, Error>>()?;
+
+        Ok(VirtualTxsResponse {
+            txs,
+            page: response.page.map(|a| IndexerPage {
+                current: a.current.unwrap_or_default(),
+                next: a.next.unwrap_or_default(),
+                total: a.total.unwrap_or_default(),
+            }),
+        })
     }
 }

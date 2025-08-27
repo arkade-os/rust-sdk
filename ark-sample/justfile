@@ -20,8 +20,8 @@ offchain-address actor *features="":
     cargo run -p ark-sample {{ if features != "" { "--features " + features } else { "" } }} -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed offchain-address
 
 # Send coins to an Ark address from a given actor
-send actor address amount *features="":
-    cargo run -p ark-sample {{ if features != "" { "--features " + features } else { "" } }} -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed send-to-ark-address {{ address }} {{ amount }}
+send actor address_and_amount *features="":
+    cargo run -p ark-sample {{ if features != "" { "--features " + features } else { "" } }} -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed send-to-ark-addresses {{ address_and_amount }}
 
 # Transform boarding outputs and VTXOs into fresh, confirmed VTXOs for a given actor
 settle actor *features="":
