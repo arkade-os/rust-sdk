@@ -172,5 +172,5 @@ pub async fn e2e() {
         send_to_bob_vtxo_amount / 2
     );
 
-    tracing::info!(?txid, "Collaboratively offboarded from Bob");
+    tracing::info!(?txid, "Collaboratively redeemed from Bob");
 }

@@ -485,7 +485,7 @@ async fn main() -> Result<()> {
             let address = address.clone().assume_checked();
             let address_string = address.to_string();
             let amount = Amount::from_sat(*amount);
-            println!("Offboarding {amount} to {address_string}");
+            println!("Collaboratively redeeming {amount} to {address_string}");
 
             let change_address = vtxo.to_ark_address();
             let virtual_tx_outpoints = {
@@ -494,7 +494,7 @@ async fn main() -> Result<()> {
                 list_virtual_tx_outpoints(find_outpoints_fn, spendable_vtxos)?
             };
 
-            let res = collaboratively_offboard(
+            let res = collaboratively_redeem(
                 &grpc_client,
                 &server_info,
                 sk,
@@ -521,7 +521,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn collaboratively_offboard(
+async fn collaboratively_redeem(
     grpc_client: &ark_grpc::Client,
     server_info: &ark_core::server::Info,
     sk: SecretKey,
@@ -554,7 +554,10 @@ async fn collaboratively_offboard(
         })
         .collect::<Vec<_>>();
 
-    let change_amount = vtxos.spendable_balance() - amount;
+    let change_amount = vtxos
+        .spendable_balance()
+        .checked_sub(amount)
+        .context("Not enough spendable balance")?;
     let mut batch_outputs = Vec::new();
     batch_outputs.push(proof_of_funds::Output::Onchain(TxOut {
         value: amount,
