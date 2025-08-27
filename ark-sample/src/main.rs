@@ -17,7 +17,6 @@ use ark_core::history::generate_incoming_vtxo_transaction_history;
 use ark_core::history::generate_outgoing_vtxo_transaction_history;
 use ark_core::history::sort_transactions_by_created_at;
 use ark_core::proof_of_funds;
-use ark_core::proof_of_funds::IntentMessageType;
 use ark_core::send;
 use ark_core::send::build_offchain_transactions;
 use ark_core::send::sign_ark_transaction;
@@ -1032,7 +1031,6 @@ async fn execute_batch(
         batch_inputs,
         batch_outputs,
         own_cosigner_pks.clone(),
-        IntentMessageType::Register,
     )?;
 
     let intent_id = client

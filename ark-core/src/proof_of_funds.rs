@@ -98,7 +98,6 @@ pub fn make_bip322_signature<F>(
     inputs: Vec<Input>,
     outputs: Vec<Output>,
     own_cosigner_pks: Vec<PublicKey>,
-    intent_message_type: IntentMessageType,
 ) -> Result<(Bip322Proof, IntentMessage), Error>
 where
     F: Fn(&XOnlyPublicKey, &secp256k1::Message) -> Result<schnorr::Signature, Error>,
@@ -135,7 +134,7 @@ where
     let expire_at = now + (2 * 60);
 
     let intent_message = IntentMessage {
-        intent_message_type,
+        intent_message_type: IntentMessageType::Register,
         input_tap_trees,
         onchain_output_indexes,
         valid_at: now,
@@ -395,13 +394,6 @@ impl IntentMessage {
         serde_json::to_string(self)
             .map_err(Error::ad_hoc)
             .context("failed to serialize intent message to JSON")
-    }
-
-    pub fn to_delete(self) -> Self {
-        Self {
-            intent_message_type: IntentMessageType::Delete,
-            ..self
-        }
     }
 }
 

@@ -10,7 +10,6 @@ use ark_core::batch::sign_commitment_psbt;
 use ark_core::boarding_output::list_boarding_outpoints;
 use ark_core::boarding_output::BoardingOutpoints;
 use ark_core::proof_of_funds;
-use ark_core::proof_of_funds::IntentMessageType;
 use ark_core::send;
 use ark_core::send::build_offchain_transactions;
 use ark_core::send::sign_ark_transaction;
@@ -1217,7 +1216,6 @@ async fn settle(
         batch_inputs,
         batch_outputs,
         own_cosigner_pks.clone(),
-        IntentMessageType::Register,
     )?;
 
     let intent_id = grpc_client
