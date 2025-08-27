@@ -564,11 +564,17 @@ async fn collaboratively_redeem(
         script_pubkey: address.script_pubkey(),
     }));
 
-    if change_amount > Amount::ZERO {
+    if change_amount > server_info.dust {
         batch_outputs.push(proof_of_funds::Output::Offchain(TxOut {
             value: change_amount,
             script_pubkey: change_address.to_p2tr_script_pubkey(),
         }))
+    } else if change_amount > Amount::ZERO {
+        tracing::info!(
+            "omitting offchain change {} as it is <= dust {}",
+            change_amount,
+            server_info.dust
+        );
     }
 
     let vtxo_inputs = vtxos
