@@ -33,6 +33,7 @@ use ark_core::BoardingOutput;
 use ark_core::ExplorerUtxo;
 use ark_core::TxGraph;
 use ark_core::Vtxo;
+use bitcoin::address::NetworkUnchecked;
 use bitcoin::hashes::sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::hex::DisplayHex;
@@ -96,6 +97,13 @@ enum Commands {
     Subscribe {
         /// The Ark address to subscribe to.
         address: ArkAddressCli,
+    },
+    /// Send on-chain to address
+    SendOnchain {
+        /// Where to send the funds to
+        address: bitcoin::Address<NetworkUnchecked>,
+        /// How many sats to send.
+        amount: u64,
     },
 }
 
@@ -473,9 +481,133 @@ async fn main() -> Result<()> {
 
             println!("Subscription stream ended");
         }
+        Commands::SendOnchain { address, amount } => {
+            let address = address.clone().assume_checked();
+            let address_string = address.to_string();
+            let amount = Amount::from_sat(*amount);
+            println!("Collaboratively redeeming {amount} to {address_string}");
+
+            let change_address = vtxo.to_ark_address();
+            let virtual_tx_outpoints = {
+                let spendable_vtxos =
+                    spendable_vtxos(&grpc_client, std::slice::from_ref(&vtxo), true).await?;
+                list_virtual_tx_outpoints(find_outpoints_fn, spendable_vtxos)?
+            };
+
+            let res = collaboratively_redeem(
+                &grpc_client,
+                &server_info,
+                sk,
+                address,
+                change_address,
+                amount,
+                virtual_tx_outpoints,
+            )
+            .await;
+            match res {
+                Ok(Some(txid)) => {
+                    println!("Sending onchain successful.\n\n Batch TXID: {txid}\n");
+                }
+                Ok(None) => {
+                    println!("No boarding outputs or VTXOs can be settled at the moment.");
+                }
+                Err(e) => {
+                    println!("Failed to send onchain: {e:#}");
+                }
+            }
+        }
     }
 
     Ok(())
+}
+
+async fn collaboratively_redeem(
+    grpc_client: &ark_grpc::Client,
+    server_info: &ark_core::server::Info,
+    sk: SecretKey,
+    address: bitcoin::Address,
+    change_address: ArkAddress,
+    amount: Amount,
+    vtxos: VirtualTxOutPoints,
+) -> Result<Option<Txid>> {
+    if vtxos.spendable.is_empty() {
+        bail!("No spendable vtxos found");
+    }
+
+    let batch_inputs = vtxos
+        .spendable
+        .clone()
+        .into_iter()
+        .map(|(virtual_tx_outpoint, vtxo)| {
+            proof_of_funds::Input::new(
+                virtual_tx_outpoint.outpoint,
+                vtxo.exit_delay(),
+                TxOut {
+                    value: virtual_tx_outpoint.amount,
+                    script_pubkey: vtxo.script_pubkey(),
+                },
+                vtxo.tapscripts(),
+                vtxo.owner_pk(),
+                vtxo.exit_spend_info(),
+                false,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let change_amount = vtxos
+        .spendable_balance()
+        .checked_sub(amount)
+        .context("Not enough spendable balance")?;
+    let mut batch_outputs = Vec::new();
+    batch_outputs.push(proof_of_funds::Output::Onchain(TxOut {
+        value: amount,
+        script_pubkey: address.script_pubkey(),
+    }));
+
+    if change_amount > server_info.dust {
+        batch_outputs.push(proof_of_funds::Output::Offchain(TxOut {
+            value: change_amount,
+            script_pubkey: change_address.to_p2tr_script_pubkey(),
+        }))
+    } else if change_amount > Amount::ZERO {
+        tracing::info!(
+            "omitting offchain change {} as it is <= dust {}",
+            change_amount,
+            server_info.dust
+        );
+    }
+
+    let vtxo_inputs = vtxos
+        .spendable
+        .clone()
+        .into_iter()
+        .map(|(outpoint, vtxo)| {
+            batch::VtxoInput::new(
+                vtxo,
+                outpoint.amount,
+                outpoint.outpoint,
+                outpoint.is_recoverable(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let topics = vtxos
+        .spendable
+        .iter()
+        .map(|(o, _)| o.outpoint.to_string())
+        .collect();
+
+    execute_batch(
+        grpc_client,
+        server_info,
+        sk,
+        batch_inputs,
+        batch_outputs,
+        vtxo_inputs,
+        vec![],
+        topics,
+    )
+    .await
 }
 
 async fn spendable_vtxos(
@@ -510,14 +642,9 @@ async fn settle(
     boarding_outputs: BoardingOutpoints,
     to_address: ArkAddress,
 ) -> Result<Option<Txid>> {
-    let secp = Secp256k1::new();
-    let mut rng = thread_rng();
-
     if vtxos.spendable.is_empty() && boarding_outputs.spendable.is_empty() {
         return Ok(None);
     }
-
-    let cosigner_kp = Keypair::new(&secp, &mut rng);
 
     let batch_inputs = {
         let boarding_inputs = boarding_outputs.spendable.clone().into_iter().map(
@@ -558,7 +685,6 @@ async fn settle(
 
         boarding_inputs.chain(vtxo_inputs).collect::<Vec<_>>()
     };
-    let n_batch_inputs = batch_inputs.len();
 
     let spendable_amount = boarding_outputs.spendable_balance() + vtxos.spendable_balance();
     let batch_outputs = vec![proof_of_funds::Output::Offchain(TxOut {
@@ -566,176 +692,9 @@ async fn settle(
         script_pubkey: to_address.to_p2tr_script_pubkey(),
     })];
 
-    let own_cosigner_kps = [cosigner_kp];
-    let own_cosigner_pks = own_cosigner_kps
-        .iter()
-        .map(|k| k.public_key())
-        .collect::<Vec<_>>();
-
-    let signing_kp = Keypair::from_secret_key(&secp, &sk);
-    let sign_for_onchain_pk_fn = |_: &XOnlyPublicKey,
-                                  msg: &secp256k1::Message|
-     -> Result<schnorr::Signature, ark_core::Error> {
-        Ok(secp.sign_schnorr_no_aux_rand(msg, &signing_kp))
-    };
-
-    let signing_kp = Keypair::from_secret_key(&secp, &sk);
-    let (bip322_proof, intent_message) = proof_of_funds::make_bip322_signature(
-        &[signing_kp],
-        sign_for_onchain_pk_fn,
-        batch_inputs,
-        batch_outputs,
-        own_cosigner_pks.clone(),
-    )?;
-
-    let intent_id = grpc_client
-        .register_intent(&intent_message, &bip322_proof)
-        .await?;
-
-    tracing::info!(intent_id, "Registered intent");
-
-    let topics = vtxos
-        .spendable
-        .iter()
-        .map(|(o, _)| o.outpoint.to_string())
-        .chain(
-            own_cosigner_pks
-                .iter()
-                .map(|pk| pk.serialize().to_lower_hex_string()),
-        )
-        .collect();
-
-    let mut event_stream = grpc_client.get_event_stream(topics).await?;
-
-    let mut vtxo_graph_chunks = Vec::new();
-
-    let batch_started_event = match event_stream.next().await {
-        Some(Ok(StreamEvent::BatchStarted(e))) => e,
-        other => bail!("Did not get batch signing event: {other:?}"),
-    };
-
-    let hash = sha256::Hash::hash(intent_id.as_bytes());
-    let hash = hash.as_byte_array().to_vec().to_lower_hex_string();
-
-    if batch_started_event
-        .intent_id_hashes
-        .iter()
-        .any(|h| h == &hash)
-    {
-        grpc_client.confirm_registration(intent_id.clone()).await?;
-    } else {
-        bail!(
-            "Did not find intent ID {} in batch: {}",
-            intent_id,
-            batch_started_event.id
-        )
-    }
-
-    let batch_signing_event;
-    loop {
-        match event_stream.next().await {
-            Some(Ok(StreamEvent::TreeTx(e))) => match e.batch_tree_event_type {
-                BatchTreeEventType::Vtxo => vtxo_graph_chunks.push(e.tx_graph_chunk),
-                BatchTreeEventType::Connector => {
-                    bail!("Unexpected connector batch tree event");
-                }
-            },
-            Some(Ok(StreamEvent::TreeSigningStarted(e))) => {
-                batch_signing_event = e;
-                break;
-            }
-            other => bail!("Unexpected event while waiting for batch signing: {other:?}"),
-        }
-    }
-
-    let mut vtxo_graph = TxGraph::new(vtxo_graph_chunks)?;
-
-    let batch_id = batch_signing_event.id;
-    tracing::info!(batch_id, "Batch signing started");
-
-    let nonce_tree = generate_nonce_tree(
-        &mut rng,
-        &vtxo_graph,
-        cosigner_kp.public_key(),
-        &batch_signing_event.unsigned_commitment_tx,
-    )?;
-
-    grpc_client
-        .submit_tree_nonces(
-            &batch_id,
-            cosigner_kp.public_key(),
-            nonce_tree.to_nonce_pks(),
-        )
-        .await?;
-
-    let batch_signing_nonces_generated_event = match event_stream.next().await {
-        Some(Ok(StreamEvent::TreeNoncesAggregated(e))) => e,
-        other => bail!("Did not get batch signing nonces generated event: {other:?}"),
-    };
-
-    let batch_id = batch_signing_nonces_generated_event.id;
-
-    let agg_pub_nonce_tree = batch_signing_nonces_generated_event.tree_nonces;
-
-    tracing::info!(batch_id, "Batch combined nonces generated");
-
-    let partial_sig_tree = sign_batch_tree(
-        server_info.vtxo_tree_expiry,
-        server_info.pk.x_only_public_key().0,
-        &cosigner_kp,
-        &vtxo_graph,
-        &batch_signing_event.unsigned_commitment_tx,
-        nonce_tree,
-        &agg_pub_nonce_tree,
-    )?;
-
-    grpc_client
-        .submit_tree_signatures(&batch_id, cosigner_kp.public_key(), partial_sig_tree)
-        .await?;
-
-    let mut connectors_graph_chunks = Vec::new();
-
-    let batch_finalization_event;
-    loop {
-        match event_stream.next().await {
-            Some(Ok(StreamEvent::TreeTx(e))) => match e.batch_tree_event_type {
-                BatchTreeEventType::Vtxo => {
-                    bail!("Unexpected VTXO batch tree event");
-                }
-                BatchTreeEventType::Connector => {
-                    connectors_graph_chunks.push(e.tx_graph_chunk);
-                }
-            },
-            Some(Ok(StreamEvent::TreeSignature(e))) => match e.batch_tree_event_type {
-                BatchTreeEventType::Vtxo => {
-                    vtxo_graph.apply(|graph| {
-                        if graph.root().unsigned_tx.compute_txid() != e.txid {
-                            Ok(true)
-                        } else {
-                            graph.set_signature(e.signature);
-
-                            Ok(false)
-                        }
-                    })?;
-                }
-                BatchTreeEventType::Connector => {
-                    bail!("received batch tree signature for connectors tree");
-                }
-            },
-            Some(Ok(StreamEvent::BatchFinalization(e))) => {
-                batch_finalization_event = e;
-                break;
-            }
-            other => bail!("Unexpected event while waiting for batch finalization: {other:?}"),
-        }
-    }
-
-    let batch_id = batch_finalization_event.id;
-
-    tracing::info!(batch_id, "Batch finalization started");
-
     let vtxo_inputs = vtxos
         .spendable
+        .clone()
         .into_iter()
         .map(|(outpoint, vtxo)| {
             batch::VtxoInput::new(
@@ -747,24 +706,6 @@ async fn settle(
         })
         .collect::<Vec<_>>();
 
-    let signed_forfeit_psbts = if !vtxo_inputs.is_empty() {
-        let connectors_graph = TxGraph::new(connectors_graph_chunks)?;
-
-        create_and_sign_forfeit_txs(
-            vtxo_inputs.as_slice(),
-            &connectors_graph.leaves(),
-            &server_info.forfeit_address,
-            server_info.dust,
-            |msg, _vtxo| {
-                let sig = secp.sign_schnorr_no_aux_rand(msg, &signing_kp);
-                let pk = signing_kp.x_only_public_key().0;
-                (sig, pk)
-            },
-        )?
-    } else {
-        Vec::new()
-    };
-
     let onchain_inputs = boarding_outputs
         .spendable
         .into_iter()
@@ -773,36 +714,23 @@ async fn settle(
         })
         .collect::<Vec<_>>();
 
-    let commitment_psbt = if n_batch_inputs == 0 {
-        None
-    } else {
-        let mut commitment_psbt = batch_finalization_event.commitment_tx;
+    let topics = vtxos
+        .spendable
+        .iter()
+        .map(|(o, _)| o.outpoint.to_string())
+        .collect();
 
-        let sign_for_pk_fn = |_: &XOnlyPublicKey,
-                              msg: &secp256k1::Message|
-         -> Result<schnorr::Signature, ark_core::Error> {
-            Ok(secp.sign_schnorr_no_aux_rand(msg, &signing_kp))
-        };
-
-        sign_commitment_psbt(sign_for_pk_fn, &mut commitment_psbt, &onchain_inputs)?;
-
-        Some(commitment_psbt)
-    };
-
-    grpc_client
-        .submit_signed_forfeit_txs(signed_forfeit_psbts, commitment_psbt)
-        .await?;
-
-    let batch_finalized_event = match event_stream.next().await {
-        Some(Ok(StreamEvent::BatchFinalized(e))) => e,
-        other => bail!("Did not get batch finalized event: {other:?}"),
-    };
-
-    let batch_id = batch_finalized_event.id;
-
-    tracing::info!(batch_id, "Batch finalized");
-
-    Ok(Some(batch_finalized_event.commitment_txid))
+    execute_batch(
+        grpc_client,
+        server_info,
+        sk,
+        batch_inputs,
+        batch_outputs,
+        vtxo_inputs,
+        onchain_inputs,
+        topics,
+    )
+    .await
 }
 
 pub struct EsploraClient {
@@ -1043,6 +971,251 @@ fn pretty_print_transaction(tx: &history::Transaction) -> Result<String> {
     };
 
     Ok(print_str)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_batch(
+    grpc_client: &ark_grpc::Client,
+    server_info: &ark_core::server::Info,
+    sk: SecretKey,
+    batch_inputs: Vec<proof_of_funds::Input>,
+    batch_outputs: Vec<proof_of_funds::Output>,
+    vtxo_inputs: Vec<batch::VtxoInput>,
+    onchain_inputs: Vec<batch::OnChainInput>,
+    topics: Vec<String>,
+) -> Result<Option<Txid>> {
+    let secp = Secp256k1::new();
+    let mut rng = thread_rng();
+
+    let n_batch_inputs = batch_inputs.len();
+    if n_batch_inputs == 0 {
+        return Ok(None);
+    }
+
+    let cosigner_kp = Keypair::new(&secp, &mut rng);
+    let own_cosigner_kps = [cosigner_kp];
+    let own_cosigner_pks = own_cosigner_kps
+        .iter()
+        .map(|k| k.public_key())
+        .collect::<Vec<_>>();
+
+    let signing_kp = Keypair::from_secret_key(&secp, &sk);
+    let sign_for_onchain_pk_fn = |_: &XOnlyPublicKey,
+                                  msg: &secp256k1::Message|
+     -> Result<schnorr::Signature, ark_core::Error> {
+        Ok(secp.sign_schnorr_no_aux_rand(msg, &signing_kp))
+    };
+
+    let has_offchain_outputs = batch_outputs
+        .iter()
+        .any(|o| matches!(o, proof_of_funds::Output::Offchain(_)));
+
+    let (bip322_proof, intent_message) = proof_of_funds::make_bip322_signature(
+        &[signing_kp],
+        sign_for_onchain_pk_fn,
+        batch_inputs,
+        batch_outputs,
+        own_cosigner_pks.clone(),
+    )?;
+
+    let intent_id = grpc_client
+        .register_intent(&intent_message, &bip322_proof)
+        .await?;
+
+    tracing::info!(intent_id, "Registered intent");
+
+    let topics = topics
+        .into_iter()
+        .chain(
+            own_cosigner_pks
+                .iter()
+                .map(|pk| pk.serialize().to_lower_hex_string()),
+        )
+        .collect();
+
+    let mut event_stream = grpc_client.get_event_stream(topics).await?;
+
+    let mut vtxo_graph_chunks = Vec::new();
+
+    let batch_started_event = match event_stream.next().await {
+        Some(Ok(StreamEvent::BatchStarted(e))) => e,
+        other => bail!("Did not get batch signing event: {other:?}"),
+    };
+
+    let hash = sha256::Hash::hash(intent_id.as_bytes());
+    let hash = hash.as_byte_array().to_vec().to_lower_hex_string();
+
+    if batch_started_event
+        .intent_id_hashes
+        .iter()
+        .any(|h| h == &hash)
+    {
+        grpc_client.confirm_registration(intent_id.clone()).await?;
+    } else {
+        bail!(
+            "Did not find intent ID {} in batch: {}",
+            intent_id,
+            batch_started_event.id
+        )
+    }
+
+    let mut vtxo_graph = None;
+
+    if has_offchain_outputs {
+        let batch_signing_event;
+        loop {
+            match event_stream.next().await {
+                Some(Ok(StreamEvent::TreeTx(e))) => match e.batch_tree_event_type {
+                    BatchTreeEventType::Vtxo => vtxo_graph_chunks.push(e.tx_graph_chunk),
+                    BatchTreeEventType::Connector => {
+                        bail!("Unexpected connector batch tree event");
+                    }
+                },
+                Some(Ok(StreamEvent::TreeSigningStarted(e))) => {
+                    batch_signing_event = e;
+                    break;
+                }
+                other => bail!("Unexpected event while waiting for batch signing: {other:?}"),
+            }
+        }
+
+        let vtxo_graph_inner = TxGraph::new(vtxo_graph_chunks)?;
+
+        let batch_id = batch_signing_event.id;
+        tracing::info!(batch_id, "Batch signing started");
+
+        let nonce_tree = generate_nonce_tree(
+            &mut rng,
+            &vtxo_graph_inner,
+            cosigner_kp.public_key(),
+            &batch_signing_event.unsigned_commitment_tx,
+        )?;
+
+        grpc_client
+            .submit_tree_nonces(
+                &batch_id,
+                cosigner_kp.public_key(),
+                nonce_tree.to_nonce_pks(),
+            )
+            .await?;
+
+        let batch_signing_nonces_generated_event = match event_stream.next().await {
+            Some(Ok(StreamEvent::TreeNoncesAggregated(e))) => e,
+            other => bail!("Did not get batch signing nonces generated event: {other:?}"),
+        };
+
+        let batch_id = batch_signing_nonces_generated_event.id;
+
+        let agg_pub_nonce_tree = batch_signing_nonces_generated_event.tree_nonces;
+
+        tracing::info!(batch_id, "Batch combined nonces generated");
+
+        let partial_sig_tree = sign_batch_tree(
+            server_info.vtxo_tree_expiry,
+            server_info.pk.x_only_public_key().0,
+            &cosigner_kp,
+            &vtxo_graph_inner,
+            &batch_signing_event.unsigned_commitment_tx,
+            nonce_tree,
+            &agg_pub_nonce_tree,
+        )?;
+
+        grpc_client
+            .submit_tree_signatures(&batch_id, cosigner_kp.public_key(), partial_sig_tree)
+            .await?;
+
+        vtxo_graph = Some(vtxo_graph_inner);
+    }
+
+    let mut connectors_graph_chunks = Vec::new();
+
+    let batch_finalization_event;
+    loop {
+        match event_stream.next().await {
+            Some(Ok(StreamEvent::TreeTx(e))) => match e.batch_tree_event_type {
+                BatchTreeEventType::Vtxo => {
+                    bail!("Unexpected VTXO batch tree event");
+                }
+                BatchTreeEventType::Connector => {
+                    connectors_graph_chunks.push(e.tx_graph_chunk);
+                }
+            },
+            Some(Ok(StreamEvent::TreeSignature(e))) => match e.batch_tree_event_type {
+                BatchTreeEventType::Vtxo => {
+                    let vtxo_graph = vtxo_graph.as_mut().context("missing VTXO graph")?;
+
+                    vtxo_graph.apply(|graph| {
+                        if graph.root().unsigned_tx.compute_txid() != e.txid {
+                            Ok(true)
+                        } else {
+                            graph.set_signature(e.signature);
+
+                            Ok(false)
+                        }
+                    })?;
+                }
+                BatchTreeEventType::Connector => {
+                    bail!("received batch tree signature for connectors tree");
+                }
+            },
+            Some(Ok(StreamEvent::BatchFinalization(e))) => {
+                batch_finalization_event = e;
+                break;
+            }
+            other => bail!("Unexpected event while waiting for batch finalization: {other:?}"),
+        }
+    }
+
+    let batch_id = batch_finalization_event.id;
+
+    tracing::info!(batch_id, "Batch finalization started");
+
+    let signed_forfeit_psbts = if !vtxo_inputs.is_empty() {
+        let connectors_graph = TxGraph::new(connectors_graph_chunks)?;
+
+        create_and_sign_forfeit_txs(
+            vtxo_inputs.as_slice(),
+            &connectors_graph.leaves(),
+            &server_info.forfeit_address,
+            server_info.dust,
+            |msg, _vtxo| {
+                let sig = secp.sign_schnorr_no_aux_rand(msg, &signing_kp);
+                let pk = signing_kp.x_only_public_key().0;
+                (sig, pk)
+            },
+        )?
+    } else {
+        Vec::new()
+    };
+
+    let commitment_psbt = {
+        let mut commitment_psbt = batch_finalization_event.commitment_tx;
+
+        let sign_for_pk_fn = |_: &XOnlyPublicKey,
+                              msg: &secp256k1::Message|
+         -> Result<schnorr::Signature, ark_core::Error> {
+            Ok(secp.sign_schnorr_no_aux_rand(msg, &signing_kp))
+        };
+
+        sign_commitment_psbt(sign_for_pk_fn, &mut commitment_psbt, &onchain_inputs)?;
+
+        Some(commitment_psbt)
+    };
+
+    grpc_client
+        .submit_signed_forfeit_txs(signed_forfeit_psbts, commitment_psbt)
+        .await?;
+
+    let batch_finalized_event = match event_stream.next().await {
+        Some(Ok(StreamEvent::BatchFinalized(e))) => e,
+        other => bail!("Did not get batch finalized event: {other:?}"),
+    };
+
+    let batch_id = batch_finalized_event.id;
+
+    tracing::info!(batch_id, "Batch finalized");
+
+    Ok(Some(batch_finalized_event.commitment_txid))
 }
 
 pub fn init_tracing() {

@@ -7,6 +7,7 @@ use common::init_tracing;
 use common::set_up_client;
 use common::Nigiri;
 use rand::thread_rng;
+use std::str::FromStr;
 use std::sync::Arc;
 
 mod common;
@@ -148,4 +149,28 @@ pub async fn e2e() {
     assert_eq!(alice_offchain_balance.pending(), Amount::ZERO);
     assert_eq!(bob_offchain_balance.confirmed(), send_to_bob_vtxo_amount);
     assert_eq!(bob_offchain_balance.pending(), Amount::ZERO);
+
+    let address = bitcoin::Address::from_str(
+        "bcrt1puq2gdfn97qd0ep0m335gc7r7uh0hpyhjhnmy90tklyywkdpcdd9sfag5y0",
+    )
+    .unwrap();
+
+    let txid = bob
+        .collaborative_redeem(
+            &mut rng,
+            address.assume_checked(),
+            send_to_bob_vtxo_amount / 2,
+            false,
+        )
+        .await
+        .unwrap();
+
+    let bob_offchain_balance = bob.offchain_balance().await.unwrap();
+
+    assert_eq!(
+        bob_offchain_balance.confirmed(),
+        send_to_bob_vtxo_amount / 2
+    );
+
+    tracing::info!(?txid, "Collaboratively redeemed from Bob");
 }
