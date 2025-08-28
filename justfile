@@ -109,10 +109,6 @@ arkd-setup:
 
     set -euxo pipefail
 
-    echo "Starting redis"
-
-    just arkd-redis-run
-
     echo "Running arkd from $ARKD_DIR"
 
     just arkd-wallet-run
@@ -324,15 +320,29 @@ mod ark-sample 'ark-sample/justfile'
 ## Running tests
 ## -------------------------
 
+# Run all unit tests.
 test:
     @echo running all tests
     cargo test -- --nocapture
 
+# Run all e2e tests (arkd must be running locally).
 e2e-tests:
     @echo running e2e tests
     cargo test -p e2e-tests -- --ignored --nocapture
 
-# Test WASM functionality (requires wasm-pack and running Ark server on localhost:7070)
+# Restart e2e test environment (arkd master) and run all e2e tests.
+e2e-full:
+    @echo running integration tests
+    nigiri stop --delete && just arkd-kill arkd-wipe arkd-wallet-kill arkd-wallet-wipe
+    nigiri start
+    sleep 1
+    just arkd-build
+    just arkd-setup
+    just arkd-run
+    just arkd-fund 20
+    just e2e-tests
+
+# Test WASM functionality (requires wasm-pack and running Ark server on localhost:7070).
 wasm-test:
     #!/usr/bin/env bash
     cd ark-rest
