@@ -65,7 +65,7 @@ impl TryFrom<models::V1BatchStartedEvent> for BatchStartedEvent {
                 .batch_expiry
                 .ok_or_else(|| ConversionError("Missing batch_expiry".to_string()))?
                 .parse::<i64>()
-                .map_err(|e| ConversionError(format!("Invalid batch_expiry: {}", e)))?,
+                .map_err(|e| ConversionError(format!("Invalid batch_expiry: {e}")))?,
         })
     }
 }
@@ -108,7 +108,7 @@ impl TryFrom<models::V1BatchFinalizedEvent> for BatchFinalizedEvent {
             .commitment_txid
             .ok_or_else(|| ConversionError("Missing commitment_txid".to_string()))?;
         let commitment_txid = Txid::from_str(&commitment_txid_str)
-            .map_err(|e| ConversionError(format!("Invalid commitment_txid: {}", e)))?;
+            .map_err(|e| ConversionError(format!("Invalid commitment_txid: {e}")))?;
 
         Ok(BatchFinalizedEvent {
             id,
@@ -147,7 +147,7 @@ impl TryFrom<models::V1TreeSigningStartedEvent> for TreeSigningStartedEvent {
             .into_iter()
             .map(|pk_str| pk_str.parse::<PublicKey>())
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| ConversionError(format!("Invalid cosigner pubkey: {}", e)))?;
+            .map_err(|e| ConversionError(format!("Invalid cosigner pubkey: {e}")))?;
 
         let unsigned_commitment_tx_hex = event
             .unsigned_commitment_tx
@@ -187,7 +187,7 @@ impl TryFrom<models::V1TreeNoncesAggregatedEvent> for TreeNoncesAggregatedEvent 
 
         // Parse the tree_nonces JSON string into NoncePks
         let tree_nonces = serde_json::from_str::<ark_core::server::NoncePks>(&tree_nonces_str)
-            .map_err(|e| ConversionError(format!("Invalid tree_nonces JSON: {}", e)))?;
+            .map_err(|e| ConversionError(format!("Invalid tree_nonces JSON: {e}")))?;
 
         Ok(TreeNoncesAggregatedEvent { id, tree_nonces })
     }
@@ -217,9 +217,8 @@ impl TryFrom<models::V1TreeTxEvent> for TreeTxEvent {
         let txid = if txid_str.is_empty() {
             None
         } else {
-            let txid = Txid::from_str(&txid_str).map_err(|e| {
-                ConversionError(format!("Invalid txid: {} but was {}", e, txid_str))
-            })?;
+            let txid = Txid::from_str(&txid_str)
+                .map_err(|e| ConversionError(format!("Invalid txid: {e} but was {txid_str}")))?;
             Some(txid)
         };
 
@@ -243,10 +242,10 @@ impl TryFrom<models::V1TreeTxEvent> for TreeTxEvent {
         let mut children = std::collections::HashMap::new();
         for (output_idx_str, child_txid_str) in children_str {
             let output_idx = output_idx_str.parse::<u32>().map_err(|e| {
-                ConversionError(format!("Invalid output index '{}': {}", output_idx_str, e))
+                ConversionError(format!("Invalid output index '{output_idx_str}': {e}"))
             })?;
             let child_txid = Txid::from_str(&child_txid_str).map_err(|e| {
-                ConversionError(format!("Invalid child txid '{}': {}", child_txid_str, e))
+                ConversionError(format!("Invalid child txid '{child_txid_str}': {e}"))
             })?;
             children.insert(output_idx, child_txid);
         }
@@ -282,17 +281,17 @@ impl TryFrom<models::V1TreeSignatureEvent> for TreeSignatureEvent {
         let txid_str = event
             .txid
             .ok_or_else(|| ConversionError("Missing txid".to_string()))?;
-        let txid = Txid::from_str(&txid_str)
-            .map_err(|e| ConversionError(format!("Invalid txid: {}", e)))?;
+        let txid =
+            Txid::from_str(&txid_str).map_err(|e| ConversionError(format!("Invalid txid: {e}")))?;
 
         // Parse signature
         let signature_hex = event
             .signature
             .ok_or_else(|| ConversionError("Missing signature".to_string()))?;
         let signature_bytes = Vec::from_hex(&signature_hex)
-            .map_err(|e| ConversionError(format!("Invalid signature hex: {}", e)))?;
+            .map_err(|e| ConversionError(format!("Invalid signature hex: {e}")))?;
         let signature = Signature::from_slice(&signature_bytes)
-            .map_err(|e| ConversionError(format!("Invalid signature: {}", e)))?;
+            .map_err(|e| ConversionError(format!("Invalid signature: {e}")))?;
 
         Ok(TreeSignatureEvent {
             id,

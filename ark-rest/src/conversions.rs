@@ -37,10 +37,7 @@ impl TryFrom<V1GetInfoResponse> for ark_core::server::Info {
             .signer_pubkey
             .ok_or_else(|| ConversionError("Missing signer_pubkey".to_string()))?;
         let pk = signer_pubkey_str.parse::<PublicKey>().map_err(|e| {
-            ConversionError(format!(
-                "Invalid signer_pubkey '{}': {}",
-                signer_pubkey_str, e
-            ))
+            ConversionError(format!("Invalid signer_pubkey '{signer_pubkey_str}': {e}",))
         })?;
 
         let vtxo_tree_expiry_str = response
@@ -48,8 +45,7 @@ impl TryFrom<V1GetInfoResponse> for ark_core::server::Info {
             .ok_or_else(|| ConversionError("Missing vtxo_tree_expiry".to_string()))?;
         let vtxo_tree_expiry_val = vtxo_tree_expiry_str.parse::<i64>().map_err(|e| {
             ConversionError(format!(
-                "Invalid vtxo_tree_expiry '{}': {}",
-                vtxo_tree_expiry_str, e
+                "Invalid vtxo_tree_expiry '{vtxo_tree_expiry_str}': {e}",
             ))
         })?;
         let vtxo_tree_expiry = parse_sequence_number(vtxo_tree_expiry_val)?;
@@ -59,8 +55,7 @@ impl TryFrom<V1GetInfoResponse> for ark_core::server::Info {
             .ok_or_else(|| ConversionError("Missing unilateral_exit_delay".to_string()))?;
         let unilateral_exit_delay_val = unilateral_exit_delay_str.parse::<i64>().map_err(|e| {
             ConversionError(format!(
-                "Invalid unilateral_exit_delay '{}': {}",
-                unilateral_exit_delay_str, e
+                "Invalid unilateral_exit_delay '{unilateral_exit_delay_str}': {e}",
             ))
         })?;
         let unilateral_exit_delay = parse_sequence_number(unilateral_exit_delay_val)?;
@@ -70,8 +65,7 @@ impl TryFrom<V1GetInfoResponse> for ark_core::server::Info {
             .ok_or_else(|| ConversionError("Missing boarding_exit_delay".to_string()))?;
         let boarding_exit_delay_val = boarding_exit_delay_str.parse::<i64>().map_err(|e| {
             ConversionError(format!(
-                "Invalid boarding_exit_delay '{}': {}",
-                boarding_exit_delay_str, e
+                "Invalid boarding_exit_delay '{boarding_exit_delay_str}': {e}",
             ))
         })?;
         let boarding_exit_delay = parse_sequence_number(boarding_exit_delay_val)?;
@@ -81,8 +75,7 @@ impl TryFrom<V1GetInfoResponse> for ark_core::server::Info {
             .ok_or_else(|| ConversionError("Missing round_interval".to_string()))?;
         let round_interval = round_interval_str.parse::<i64>().map_err(|e| {
             ConversionError(format!(
-                "Invalid round_interval '{}': {}",
-                round_interval_str, e
+                "Invalid round_interval '{round_interval_str}': {e}",
             ))
         })?;
 
@@ -91,14 +84,14 @@ impl TryFrom<V1GetInfoResponse> for ark_core::server::Info {
             .ok_or_else(|| ConversionError("Missing network".to_string()))?;
         let network = network_str
             .parse::<Network>()
-            .map_err(|e| ConversionError(format!("Invalid network '{}': {}", network_str, e)))?;
+            .map_err(|e| ConversionError(format!("Invalid network '{network_str}': {e}")))?;
 
         let dust_str = response
             .dust
             .ok_or_else(|| ConversionError("Missing dust".to_string()))?;
         let dust = dust_str
             .parse::<u64>()
-            .map_err(|e| ConversionError(format!("Invalid dust '{}': {}", dust_str, e)))
+            .map_err(|e| ConversionError(format!("Invalid dust '{dust_str}': {e}")))
             .map(Amount::from_sat)?;
 
         let forfeit_address_str = response
@@ -108,15 +101,13 @@ impl TryFrom<V1GetInfoResponse> for ark_core::server::Info {
             .parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
             .map_err(|e| {
                 ConversionError(format!(
-                    "Invalid forfeit_address '{}': {}",
-                    forfeit_address_str, e
+                    "Invalid forfeit_address '{forfeit_address_str}': {e}",
                 ))
             })?
             .require_network(network)
             .map_err(|e| {
                 ConversionError(format!(
-                    "Address network mismatch for '{}': {}",
-                    forfeit_address_str, e
+                    "Address network mismatch for '{forfeit_address_str}': {e}",
                 ))
             })?;
 
@@ -126,9 +117,9 @@ impl TryFrom<V1GetInfoResponse> for ark_core::server::Info {
 
         let utxo_min_amount = match response.utxo_min_amount {
             Some(s) => {
-                let val = s.parse::<i64>().map_err(|e| {
-                    ConversionError(format!("Invalid utxo_min_amount '{}': {}", s, e))
-                })?;
+                let val = s
+                    .parse::<i64>()
+                    .map_err(|e| ConversionError(format!("Invalid utxo_min_amount '{s}': {e}")))?;
                 if val < 0 {
                     None
                 } else {
@@ -140,9 +131,9 @@ impl TryFrom<V1GetInfoResponse> for ark_core::server::Info {
 
         let utxo_max_amount = match response.utxo_max_amount {
             Some(s) => {
-                let val = s.parse::<i64>().map_err(|e| {
-                    ConversionError(format!("Invalid utxo_max_amount '{}': {}", s, e))
-                })?;
+                let val = s
+                    .parse::<i64>()
+                    .map_err(|e| ConversionError(format!("Invalid utxo_max_amount '{s}': {e}")))?;
                 if val < 0 {
                     None
                 } else {
@@ -154,9 +145,9 @@ impl TryFrom<V1GetInfoResponse> for ark_core::server::Info {
 
         let vtxo_min_amount = match response.vtxo_min_amount {
             Some(s) => {
-                let val = s.parse::<i64>().map_err(|e| {
-                    ConversionError(format!("Invalid vtxo_min_amount '{}': {}", s, e))
-                })?;
+                let val = s
+                    .parse::<i64>()
+                    .map_err(|e| ConversionError(format!("Invalid vtxo_min_amount '{s}': {e}")))?;
                 if val < 0 {
                     None
                 } else {
@@ -168,9 +159,9 @@ impl TryFrom<V1GetInfoResponse> for ark_core::server::Info {
 
         let vtxo_max_amount = match response.vtxo_max_amount {
             Some(s) => {
-                let val = s.parse::<i64>().map_err(|e| {
-                    ConversionError(format!("Invalid vtxo_max_amount '{}': {}", s, e))
-                })?;
+                let val = s
+                    .parse::<i64>()
+                    .map_err(|e| ConversionError(format!("Invalid vtxo_max_amount '{s}': {e}")))?;
                 if val < 0 {
                     None
                 } else {
@@ -212,7 +203,7 @@ impl TryFrom<V1IndexerVtxo> for ark_core::server::VirtualTxOutPoint {
             .ok_or_else(|| ConversionError("Missing outpoint txid".to_string()))?;
         let txid = txid_str
             .parse::<Txid>()
-            .map_err(|e| ConversionError(format!("Invalid outpoint txid '{}': {}", txid_str, e)))?;
+            .map_err(|e| ConversionError(format!("Invalid outpoint txid '{txid_str}': {e}")))?;
 
         let vout = outpoint_data
             .vout
@@ -225,16 +216,16 @@ impl TryFrom<V1IndexerVtxo> for ark_core::server::VirtualTxOutPoint {
         let created_at_str = value
             .created_at
             .ok_or_else(|| ConversionError("Missing created_at".to_string()))?;
-        let created_at = created_at_str.parse::<i64>().map_err(|e| {
-            ConversionError(format!("Invalid created_at '{}': {}", created_at_str, e))
-        })?;
+        let created_at = created_at_str
+            .parse::<i64>()
+            .map_err(|e| ConversionError(format!("Invalid created_at '{created_at_str}': {e}")))?;
 
         let expires_at_str = value
             .expires_at
             .ok_or_else(|| ConversionError("Missing expires_at".to_string()))?;
-        let expires_at = expires_at_str.parse::<i64>().map_err(|e| {
-            ConversionError(format!("Invalid expires_at '{}': {}", expires_at_str, e))
-        })?;
+        let expires_at = expires_at_str
+            .parse::<i64>()
+            .map_err(|e| ConversionError(format!("Invalid expires_at '{expires_at_str}': {e}")))?;
 
         // Parse amount
         let amount_str = value
@@ -242,7 +233,7 @@ impl TryFrom<V1IndexerVtxo> for ark_core::server::VirtualTxOutPoint {
             .ok_or_else(|| ConversionError("Missing amount".to_string()))?;
         let amount_val = amount_str
             .parse::<u64>()
-            .map_err(|e| ConversionError(format!("Invalid amount '{}': {}", amount_str, e)))?;
+            .map_err(|e| ConversionError(format!("Invalid amount '{amount_str}': {e}")))?;
         let amount = Amount::from_sat(amount_val);
 
         // Parse script
@@ -250,7 +241,7 @@ impl TryFrom<V1IndexerVtxo> for ark_core::server::VirtualTxOutPoint {
             .script
             .ok_or_else(|| ConversionError("Missing script".to_string()))?;
         let script = ScriptBuf::from_hex(&script_str)
-            .map_err(|e| ConversionError(format!("Invalid script hex '{}': {}", script_str, e)))?;
+            .map_err(|e| ConversionError(format!("Invalid script hex '{script_str}': {e}")))?;
 
         // Parse optional spent_by
         let spent_by = value
@@ -258,7 +249,7 @@ impl TryFrom<V1IndexerVtxo> for ark_core::server::VirtualTxOutPoint {
             .filter(|s| !s.is_empty())
             .map(|s| s.parse::<Txid>())
             .transpose()
-            .map_err(|e| ConversionError(format!("Invalid spent_by txid: {}", e)))?;
+            .map_err(|e| ConversionError(format!("Invalid spent_by txid: {e}")))?;
 
         // Parse commitment_txids
         let commitment_txids = value
@@ -267,7 +258,7 @@ impl TryFrom<V1IndexerVtxo> for ark_core::server::VirtualTxOutPoint {
             .into_iter()
             .map(|s| s.parse::<Txid>())
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| ConversionError(format!("Invalid commitment_txid: {}", e)))?;
+            .map_err(|e| ConversionError(format!("Invalid commitment_txid: {e}")))?;
 
         // Parse optional settled_by
         let settled_by = value
@@ -275,7 +266,7 @@ impl TryFrom<V1IndexerVtxo> for ark_core::server::VirtualTxOutPoint {
             .filter(|s| !s.is_empty())
             .map(|s| s.parse::<Txid>())
             .transpose()
-            .map_err(|e| ConversionError(format!("Invalid settled_by txid: {}", e)))?;
+            .map_err(|e| ConversionError(format!("Invalid settled_by txid: {e}")))?;
 
         // Parse optional ark_txid
         let ark_txid = value
@@ -283,7 +274,7 @@ impl TryFrom<V1IndexerVtxo> for ark_core::server::VirtualTxOutPoint {
             .filter(|s| !s.is_empty())
             .map(|s| s.parse::<Txid>())
             .transpose()
-            .map_err(|e| ConversionError(format!("Invalid ark_txid: {}", e)))?;
+            .map_err(|e| ConversionError(format!("Invalid ark_txid: {e}")))?;
 
         Ok(ark_core::server::VirtualTxOutPoint {
             outpoint,
@@ -331,7 +322,7 @@ impl TryFrom<V1GetSubscriptionResponse> for ark_core::server::SubscriptionRespon
             .txid
             .ok_or_else(|| ConversionError("Missing txid".to_string()))?
             .parse()
-            .map_err(|e| ConversionError(format!("Invalid txid: {}", e)))?;
+            .map_err(|e| ConversionError(format!("Invalid txid: {e}")))?;
 
         let new_vtxos = value
             .new_vtxos
@@ -339,7 +330,7 @@ impl TryFrom<V1GetSubscriptionResponse> for ark_core::server::SubscriptionRespon
             .into_iter()
             .map(ark_core::server::VirtualTxOutPoint::try_from)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| ConversionError(format!("Invalid new_vtxos: {}", e)))?;
+            .map_err(|e| ConversionError(format!("Invalid new_vtxos: {e}")))?;
 
         let spent_vtxos = value
             .spent_vtxos
@@ -347,7 +338,7 @@ impl TryFrom<V1GetSubscriptionResponse> for ark_core::server::SubscriptionRespon
             .into_iter()
             .map(ark_core::server::VirtualTxOutPoint::try_from)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| ConversionError(format!("Invalid spent_vtxos: {}", e)))?;
+            .map_err(|e| ConversionError(format!("Invalid spent_vtxos: {e}")))?;
 
         let tx = if let Some(tx_str) = value.tx.filter(|s| !s.is_empty()) {
             let base64 = base64::engine::GeneralPurpose::new(
@@ -356,10 +347,10 @@ impl TryFrom<V1GetSubscriptionResponse> for ark_core::server::SubscriptionRespon
             );
             let bytes = base64
                 .decode(&tx_str)
-                .map_err(|e| ConversionError(format!("Invalid tx base64: {}", e)))?;
+                .map_err(|e| ConversionError(format!("Invalid tx base64: {e}")))?;
             Some(
                 Psbt::deserialize(&bytes)
-                    .map_err(|e| ConversionError(format!("Invalid tx psbt: {}", e)))?,
+                    .map_err(|e| ConversionError(format!("Invalid tx psbt: {e}")))?,
             )
         } else {
             None
@@ -371,12 +362,12 @@ impl TryFrom<V1GetSubscriptionResponse> for ark_core::server::SubscriptionRespon
             .into_iter()
             .map(|(k, v)| {
                 let out_point = OutPoint::from_str(&k)
-                    .map_err(|e| ConversionError(format!("Invalid checkpoint outpoint: {}", e)))?;
+                    .map_err(|e| ConversionError(format!("Invalid checkpoint outpoint: {e}")))?;
                 let txid = v
                     .txid
                     .ok_or_else(|| ConversionError("Missing checkpoint txid".to_string()))?
                     .parse()
-                    .map_err(|e| ConversionError(format!("Invalid checkpoint txid: {}", e)))?;
+                    .map_err(|e| ConversionError(format!("Invalid checkpoint txid: {e}")))?;
                 Ok((out_point, txid))
             })
             .collect::<Result<HashMap<_, _>, ConversionError>>()?;
@@ -387,7 +378,7 @@ impl TryFrom<V1GetSubscriptionResponse> for ark_core::server::SubscriptionRespon
             .iter()
             .map(|h| {
                 ScriptBuf::from_hex(h)
-                    .map_err(|e| ConversionError(format!("Invalid script hex: {}", e)))
+                    .map_err(|e| ConversionError(format!("Invalid script hex: {e}")))
             })
             .collect::<Result<Vec<_>, _>>()?;
 
