@@ -369,7 +369,7 @@ pub async fn set_up_client(
         "http://localhost:7070".to_string(),
         Duration::from_secs(30),
     )
-    .connect()
+    .connect_with_retries(5)
     .await
     .unwrap();
 
