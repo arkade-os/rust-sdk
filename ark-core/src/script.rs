@@ -16,6 +16,7 @@ pub fn multisig_script(pk_0: XOnlyPublicKey, pk_1: XOnlyPublicKey) -> ScriptBuf 
 
 /// A [`ScriptBuf`] allowing the owner of `pk` to spend after `locktime_seconds` have passed from
 /// the time the corresponding output was included in a block.
+// TODO: Should support multisig.
 pub fn csv_sig_script(locktime: bitcoin::Sequence, pk: XOnlyPublicKey) -> ScriptBuf {
     ScriptBuf::builder()
         .push_int(locktime.to_consensus_u32() as i64)

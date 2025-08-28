@@ -10,6 +10,8 @@ use ark_core::batch::sign_commitment_psbt;
 use ark_core::boarding_output::list_boarding_outpoints;
 use ark_core::boarding_output::BoardingOutpoints;
 use ark_core::proof_of_funds;
+use ark_core::script::csv_sig_script;
+use ark_core::script::multisig_script;
 use ark_core::send;
 use ark_core::send::build_offchain_transactions;
 use ark_core::send::sign_ark_transaction;
@@ -36,6 +38,7 @@ use bitcoin::opcodes::all::OP_CHECKSIG;
 use bitcoin::opcodes::all::OP_CHECKSIGVERIFY;
 use bitcoin::opcodes::all::OP_CLTV;
 use bitcoin::opcodes::all::OP_DROP;
+use bitcoin::psbt;
 use bitcoin::secp256k1;
 use bitcoin::secp256k1::schnorr;
 use bitcoin::secp256k1::SecretKey;
@@ -139,14 +142,24 @@ async fn main() -> Result<()> {
         .push_opcode(OP_CHECKSIG)
         .into_script();
 
-    let dlc_vtxo = Vtxo::new(
-        &secp,
-        server_info.pk.x_only_public_key().0,
-        shared_pk,
-        vec![dlc_refund_script],
-        server_info.unilateral_exit_delay,
-        server_info.network,
-    )?;
+    let dlc_multisig_script = multisig_script(server_pk, shared_pk);
+
+    let dlc_vtxo = {
+        let redeem_script = csv_sig_script(server_info.unilateral_exit_delay, shared_pk);
+
+        Vtxo::new_with_custom_scripts(
+            &secp,
+            server_info.pk.into(),
+            shared_pk,
+            vec![
+                dlc_multisig_script.clone(),
+                redeem_script,
+                dlc_refund_script.clone(),
+            ],
+            server_info.unilateral_exit_delay,
+            server_info.network,
+        )?
+    };
 
     // We build the DLC funding transaction, but we don't "broadcast" it yet. We use it as a
     // reference point to build the rest of the DLC.
@@ -160,7 +173,7 @@ async fn main() -> Result<()> {
         )],
         None,
         &[alice_dlc_input.clone(), bob_dlc_input.clone()],
-        server_info.dust,
+        &server_info,
     )
     .context("building DLC TX")?;
 
@@ -188,7 +201,17 @@ async fn main() -> Result<()> {
         server_info.network,
     )?;
 
-    let dlc_vtxo_input = send::VtxoInput::new(dlc_vtxo, dlc_output.value, dlc_outpoint);
+    let control_block = dlc_vtxo.get_spend_info(dlc_refund_script.clone())?;
+
+    let refund_dlc_vtxo_input = send::VtxoInput::new(
+        dlc_refund_script,
+        Some(refund_locktime),
+        control_block,
+        dlc_vtxo.tapscripts(),
+        dlc_vtxo.script_pubkey(),
+        dlc_output.value,
+        dlc_outpoint,
+    );
 
     // We build a refund transaction spending from the DLC VTXO.
     let alice_refund_payout = alice_fund_amount;
@@ -199,10 +222,22 @@ async fn main() -> Result<()> {
             (&bob_payout_vtxo.to_ark_address(), bob_refund_payout),
         ],
         None,
-        std::slice::from_ref(&dlc_vtxo_input),
-        server_info.dust,
+        std::slice::from_ref(&refund_dlc_vtxo_input),
+        &server_info,
     )
     .context("building refund TX")?;
+
+    let control_block = dlc_vtxo.get_spend_info(dlc_multisig_script.clone())?;
+
+    let cet_dlc_vtxo_input = send::VtxoInput::new(
+        dlc_multisig_script,
+        None,
+        control_block,
+        dlc_vtxo.tapscripts(),
+        dlc_vtxo.script_pubkey(),
+        dlc_output.value,
+        dlc_outpoint,
+    );
 
     // We build CETs spending from the DLC VTXO.
     let alice_heads_payout = Amount::from_sat(70_000_000);
@@ -213,8 +248,8 @@ async fn main() -> Result<()> {
             (&bob_payout_vtxo.to_ark_address(), bob_heads_payout),
         ],
         None,
-        std::slice::from_ref(&dlc_vtxo_input),
-        server_info.dust,
+        std::slice::from_ref(&cet_dlc_vtxo_input),
+        &server_info,
     )
     .context("building heads CET")?;
 
@@ -226,8 +261,8 @@ async fn main() -> Result<()> {
             (&bob_payout_vtxo.to_ark_address(), bob_tails_payout),
         ],
         None,
-        std::slice::from_ref(&dlc_vtxo_input),
-        server_info.dust,
+        std::slice::from_ref(&cet_dlc_vtxo_input),
+        &server_info,
     )
     .context("building tails CET")?;
 
@@ -241,7 +276,7 @@ async fn main() -> Result<()> {
         &alice_kp,
         &bob_kp,
         &musig_key_agg_cache,
-        &dlc_vtxo_input,
+        &refund_dlc_vtxo_input,
     )
     .context("signing refund offchain TXs")?;
 
@@ -275,7 +310,7 @@ async fn main() -> Result<()> {
         &bob_kp,
         &musig_key_agg_cache,
         heads_adaptor_pk,
-        &dlc_vtxo_input,
+        &cet_dlc_vtxo_input,
     )
     .context("signing heads CET offchain TXs")?;
 
@@ -290,14 +325,16 @@ async fn main() -> Result<()> {
         &bob_kp,
         &musig_key_agg_cache,
         tails_adaptor_pk,
-        &dlc_vtxo_input,
+        &cet_dlc_vtxo_input,
     )
     .context("signing tails CET offchain TXs")?;
 
     // Finally, Alice and Bob sign the DLC funding transaction.
 
     sign_ark_transaction(
-        |msg: secp256k1::Message| -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+        |_,
+         msg: secp256k1::Message|
+         -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
             let sig = secp.sign_schnorr_no_aux_rand(&msg, &alice_kp);
 
             Ok((sig, alice_xonly_pk))
@@ -312,7 +349,9 @@ async fn main() -> Result<()> {
     .context("failed to sign DLC-funding virtual TX as Alice")?;
 
     sign_ark_transaction(
-        |msg: secp256k1::Message| -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+        |_,
+         msg: secp256k1::Message|
+         -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
             let sig = secp.sign_schnorr_no_aux_rand(&msg, &bob_kp);
 
             Ok((sig, bob_xonly_pk))
@@ -342,7 +381,9 @@ async fn main() -> Result<()> {
 
     let mut alice_signed_checkpoint_psbt = res.signed_checkpoint_txs[0].clone();
     sign_checkpoint_transaction(
-        |msg: secp256k1::Message| -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+        |_,
+         msg: secp256k1::Message|
+         -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
             let sig = secp.sign_schnorr_no_aux_rand(&msg, &alice_kp);
 
             Ok((sig, alice_xonly_pk))
@@ -354,7 +395,9 @@ async fn main() -> Result<()> {
 
     let mut bob_signed_checkpoint_psbt = res.signed_checkpoint_txs[1].clone();
     sign_checkpoint_transaction(
-        |msg: secp256k1::Message| -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+        |_,
+         msg: secp256k1::Message|
+         -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
             let sig = secp.sign_schnorr_no_aux_rand(&msg, &bob_kp);
 
             Ok((sig, bob_xonly_pk))
@@ -641,8 +684,15 @@ async fn fund_vtxo(
         .iter()
         .find(|v| v.commitment_txids[0] == commitment_txid)
         .ok_or(anyhow!("could not find input in batch"))?;
+
+    let (forfeit_script, control_block) = vtxo.forfeit_spend_info()?;
+
     let vtxo_input = send::VtxoInput::new(
-        vtxo,
+        forfeit_script,
+        None,
+        control_block,
+        vtxo.tapscripts(),
+        vtxo.script_pubkey(),
         virtual_tx_outpoint.amount,
         virtual_tx_outpoint.outpoint,
     );
@@ -717,8 +767,9 @@ fn sign_refund_offchain_transactions(
             )?
         };
 
-        let sign_fn =
-        |msg: secp256k1::Message| -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+        let sign_fn = |_: &mut psbt::Input,
+                       msg: secp256k1::Message|
+         -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
             let musig_agg_nonce =
                 MusigAggNonce::new(&zkp, &[alice_musig_pub_nonce, bob_musig_pub_nonce]);
             let msg =
@@ -792,8 +843,9 @@ fn sign_refund_offchain_transactions(
             )?
         };
 
-        let sign_fn =
-        |msg: secp256k1::Message| -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+        let sign_fn = |_: &mut psbt::Input,
+                       msg: secp256k1::Message|
+         -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
             let musig_agg_nonce =
                 MusigAggNonce::new(&zkp, &[alice_musig_pub_nonce, bob_musig_pub_nonce]);
             let msg =
@@ -908,8 +960,9 @@ fn sign_cet_offchain_txs(
         };
 
         let mut musig_nonce_parity = None;
-        let sign_fn =
-        |msg: secp256k1::Message| -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+        let sign_fn = |_: &mut psbt::Input,
+                       msg: secp256k1::Message|
+         -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
             let musig_agg_nonce =
                 MusigAggNonce::new(&zkp, &[alice_musig_pub_nonce, bob_musig_pub_nonce]);
             let msg =
@@ -994,8 +1047,9 @@ fn sign_cet_offchain_txs(
         };
 
         let mut musig_nonce_parity = None;
-        let sign_fn =
-        |msg: secp256k1::Message| -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+        let sign_fn = |_: &mut psbt::Input,
+                       msg: secp256k1::Message|
+         -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
             let musig_agg_nonce =
                 MusigAggNonce::new(&zkp, &[alice_musig_pub_nonce, bob_musig_pub_nonce]);
             let msg =
@@ -1168,9 +1222,12 @@ async fn settle(
             },
         );
 
-        let vtxo_inputs = virtual_tx_outpoints.spendable.clone().into_iter().map(
-            |(virtual_tx_outpoint, vtxo)| {
-                proof_of_funds::Input::new(
+        let vtxo_inputs = virtual_tx_outpoints
+            .spendable
+            .clone()
+            .into_iter()
+            .map(|(virtual_tx_outpoint, vtxo)| {
+                anyhow::Ok(proof_of_funds::Input::new(
                     virtual_tx_outpoint.outpoint,
                     vtxo.exit_delay(),
                     TxOut {
@@ -1179,11 +1236,11 @@ async fn settle(
                     },
                     vtxo.tapscripts(),
                     vtxo.owner_pk(),
-                    vtxo.exit_spend_info(),
+                    vtxo.exit_spend_info()?,
                     false,
-                )
-            },
-        );
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         boarding_inputs.chain(vtxo_inputs).collect::<Vec<_>>()
     };

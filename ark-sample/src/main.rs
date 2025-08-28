@@ -39,6 +39,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::hex::DisplayHex;
 use bitcoin::key::Keypair;
 use bitcoin::key::Secp256k1;
+use bitcoin::psbt;
 use bitcoin::secp256k1;
 use bitcoin::secp256k1::schnorr;
 use bitcoin::secp256k1::PublicKey;
@@ -195,11 +196,10 @@ async fn main() -> Result<()> {
     let esplora_client = EsploraClient::new(&config.esplora_url)?;
 
     // In this example we use the same script for all VTXOs.
-    let vtxo = Vtxo::new(
+    let vtxo = Vtxo::new_default(
         &secp,
-        server_info.pk.x_only_public_key().0,
-        pk.x_only_public_key().0,
-        vec![],
+        server_info.pk.into(),
+        pk.into(),
         server_info.unilateral_exit_delay,
         server_info.network,
     )?;
@@ -353,9 +353,19 @@ async fn main() -> Result<()> {
                         .any(|o| o.outpoint == outpoint.outpoint)
                 })
                 .map(|(outpoint, vtxo)| {
-                    send::VtxoInput::new(vtxo, outpoint.amount, outpoint.outpoint)
+                    let (forfeit_script, control_block) = vtxo.forfeit_spend_info()?;
+
+                    anyhow::Ok(send::VtxoInput::new(
+                        forfeit_script,
+                        None,
+                        control_block,
+                        vtxo.tapscripts(),
+                        vtxo.script_pubkey(),
+                        outpoint.amount,
+                        outpoint.outpoint,
+                    ))
                 })
-                .collect::<Vec<_>>();
+                .collect::<Result<Vec<_>, _>>()?;
 
             let change_address = vtxo.to_ark_address();
 
@@ -374,11 +384,13 @@ async fn main() -> Result<()> {
                 outputs.as_slice(),
                 Some(&change_address),
                 &vtxo_inputs,
-                server_info.dust,
+                &server_info,
             )?;
 
             let sign_fn =
-                |msg: secp256k1::Message| -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+                |_: &mut psbt::Input,
+                 msg: secp256k1::Message|
+                 -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
                     let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &kp);
                     let pk = kp.x_only_public_key().0;
 
@@ -554,7 +566,7 @@ async fn collaboratively_redeem(
         .clone()
         .into_iter()
         .map(|(virtual_tx_outpoint, vtxo)| {
-            proof_of_funds::Input::new(
+            anyhow::Ok(proof_of_funds::Input::new(
                 virtual_tx_outpoint.outpoint,
                 vtxo.exit_delay(),
                 TxOut {
@@ -563,11 +575,11 @@ async fn collaboratively_redeem(
                 },
                 vtxo.tapscripts(),
                 vtxo.owner_pk(),
-                vtxo.exit_spend_info(),
+                vtxo.exit_spend_info()?,
                 false,
-            )
+            ))
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()?;
 
     let change_amount = vtxos
         .spendable_balance()
@@ -686,7 +698,7 @@ async fn settle(
             .clone()
             .into_iter()
             .map(|(virtual_tx_outpoint, vtxo)| {
-                proof_of_funds::Input::new(
+                anyhow::Ok(proof_of_funds::Input::new(
                     virtual_tx_outpoint.outpoint,
                     vtxo.exit_delay(),
                     TxOut {
@@ -695,10 +707,11 @@ async fn settle(
                     },
                     vtxo.tapscripts(),
                     vtxo.owner_pk(),
-                    vtxo.exit_spend_info(),
+                    vtxo.exit_spend_info()?,
                     false,
-                )
-            });
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         boarding_inputs.chain(vtxo_inputs).collect::<Vec<_>>()
     };

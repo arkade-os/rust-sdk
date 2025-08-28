@@ -431,7 +431,7 @@ where
         forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX].sighash_type =
             Some(TapSighashType::Default.into());
 
-        let (forfeit_script, forfeit_control_block) = vtxo.forfeit_spend_info();
+        let (forfeit_script, forfeit_control_block) = vtxo.forfeit_spend_info()?;
 
         let leaf_version = forfeit_control_block.leaf_version;
         forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX].tap_scripts = BTreeMap::from_iter([(

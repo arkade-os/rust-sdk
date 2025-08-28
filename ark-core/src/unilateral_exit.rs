@@ -197,13 +197,14 @@ pub fn create_unilateral_exit_transaction(
 
         let (exit_script, exit_control_block) = onchain_inputs
             .iter()
-            .find_map(|b| (b.outpoint == outpoint).then(|| b.boarding_output.exit_spend_info()))
+            .find_map(|b| (b.outpoint == outpoint).then(|| Ok(b.boarding_output.exit_spend_info())))
             .or_else(|| {
                 vtxo_inputs
                     .iter()
                     .find_map(|v| (v.outpoint == outpoint).then(|| v.vtxo.exit_spend_info()))
             })
-            .expect("spend info for input");
+            .expect("spend info for input")
+            .context("failed to get exit script for input")?;
 
         let leaf_version = exit_control_block.leaf_version;
         let leaf_hash = TapLeafHash::from_script(&exit_script, leaf_version);

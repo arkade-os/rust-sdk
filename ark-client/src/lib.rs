@@ -32,15 +32,21 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub mod error;
+pub mod swap_storage;
 pub mod wallet;
 
 mod batch;
+mod boltz;
 mod coin_select;
 mod send_vtxo;
 mod unilateral_exit;
 mod utils;
 
 pub use error::Error;
+pub use lightning_invoice;
+pub use swap_storage::InMemorySwapStorage;
+pub use swap_storage::SqliteSwapStorage;
+pub use swap_storage::SwapStorage;
 
 /// A client to interact with Ark Server
 ///
@@ -58,6 +64,7 @@ pub use error::Error;
 /// # use bitcoin::{Address, Amount, FeeRate, Network, Psbt, Transaction, Txid, XOnlyPublicKey};
 /// # use bitcoin::secp256k1::schnorr::Signature;
 /// # use ark_client::wallet::{Balance, BoardingWallet, OnchainWallet, Persistence};
+/// # use ark_client::InMemorySwapStorage;
 /// # use ark_core::{BoardingOutput, UtxoCoinSelection};
 ///
 /// struct MyBlockchain {}
@@ -168,7 +175,7 @@ pub use error::Error;
 /// # }
 /// #
 /// // Initialize the client
-/// async fn init_client() -> Result<Client<MyBlockchain, MyWallet>, ark_client::Error> {
+/// async fn init_client() -> Result<Client<MyBlockchain, MyWallet, InMemorySwapStorage>, ark_client::Error> {
 ///     // Create a keypair for signing transactions
 ///     let secp = bitcoin::key::Secp256k1::new();
 ///     let secret_key = SecretKey::from_str("your_private_key_here").unwrap();
@@ -186,6 +193,8 @@ pub use error::Error;
 ///         blockchain,
 ///         wallet,
 ///         "https://ark-server.example.com".to_string(),
+///         Arc::new(InMemorySwapStorage::default()),
+///         "http://boltz.example.com".to_string(),
 ///         timeout
 ///     );
 ///
@@ -195,7 +204,7 @@ pub use error::Error;
 ///     Ok(client)
 /// }
 /// ```
-pub struct OfflineClient<B, W> {
+pub struct OfflineClient<B, W, S> {
     // TODO: We could introduce a generic interface so that consumers can use either GRPC or REST.
     network_client: ark_grpc::Client,
     pub name: String,
@@ -203,14 +212,16 @@ pub struct OfflineClient<B, W> {
     blockchain: Arc<B>,
     secp: Secp256k1<All>,
     wallet: Arc<W>,
+    swap_storage: Arc<S>,
+    boltz_url: String,
     timeout: Duration,
 }
 
 /// A client to interact with Ark server
 ///
 /// See [`OfflineClient`] docs for details.
-pub struct Client<B, W> {
-    inner: OfflineClient<B, W>,
+pub struct Client<B, W, S> {
+    inner: OfflineClient<B, W, S>,
     pub server_info: server::Info,
 }
 
@@ -292,17 +303,21 @@ pub trait Blockchain {
     ) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
-impl<B, W> OfflineClient<B, W>
+impl<B, W, S> OfflineClient<B, W, S>
 where
     B: Blockchain,
     W: BoardingWallet + OnchainWallet,
+    S: SwapStorage,
 {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: String,
         kp: Keypair,
         blockchain: Arc<B>,
         wallet: Arc<W>,
         ark_server_url: String,
+        swap_storage: Arc<S>,
+        boltz_url: String,
         timeout: Duration,
     ) -> Self {
         let secp = Secp256k1::new();
@@ -316,6 +331,8 @@ where
             blockchain,
             secp,
             wallet,
+            swap_storage,
+            boltz_url,
             timeout,
         }
     }
@@ -325,7 +342,7 @@ where
     /// # Errors
     ///
     /// Returns an error if the connection fails or times out.
-    pub async fn connect(mut self) -> Result<Client<B, W>, Error> {
+    pub async fn connect(mut self) -> Result<Client<B, W, S>, Error> {
         timeout_op(self.timeout, self.network_client.connect())
             .await
             .context("Failed to connect to Ark server")??;
@@ -352,7 +369,10 @@ where
     /// # Errors
     ///
     /// Returns an error if the connection fails or times out.
-    pub async fn connect_with_retries(mut self, max_retries: usize) -> Result<Client<B, W>, Error> {
+    pub async fn connect_with_retries(
+        mut self,
+        max_retries: usize,
+    ) -> Result<Client<B, W, S>, Error> {
         let mut n_retries = 0;
         while n_retries < max_retries {
             let res = timeout_op(self.timeout, self.network_client.connect())
@@ -390,10 +410,11 @@ where
     }
 }
 
-impl<B, W> Client<B, W>
+impl<B, W, S> Client<B, W, S>
 where
     B: Blockchain,
     W: BoardingWallet + OnchainWallet,
+    S: SwapStorage + 'static,
 {
     // At the moment we are always generating the same address.
     pub fn get_offchain_address(&self) -> Result<(ArkAddress, Vtxo), Error> {
@@ -402,11 +423,10 @@ where
         let (server, _) = server_info.pk.x_only_public_key();
         let (owner, _) = self.inner.kp.public_key().x_only_public_key();
 
-        let vtxo = Vtxo::new(
+        let vtxo = Vtxo::new_default(
             self.secp(),
             server,
             owner,
-            vec![],
             server_info.unilateral_exit_delay,
             server_info.network,
         )?;
@@ -737,6 +757,10 @@ where
 
     fn blockchain(&self) -> &B {
         &self.inner.blockchain
+    }
+
+    fn swap_storage(&self) -> &S {
+        &self.inner.swap_storage
     }
 
     /// Use the P2A output of a transaction to bump its transaction fee with a child transaction.

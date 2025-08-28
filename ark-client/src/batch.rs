@@ -1,4 +1,5 @@
-use crate::error::ErrorContext;
+use crate::error::ErrorContext as _;
+use crate::swap_storage::SwapStorage;
 use crate::utils::sleep;
 use crate::utils::timeout_op;
 use crate::wallet::BoardingWallet;
@@ -17,6 +18,7 @@ use ark_core::proof_of_funds;
 use ark_core::server::BatchTreeEventType;
 use ark_core::server::StreamEvent;
 use ark_core::ArkAddress;
+use ark_core::ErrorContext as _;
 use ark_core::TxGraph;
 use backon::ExponentialBuilder;
 use backon::Retryable;
@@ -37,10 +39,11 @@ use rand::CryptoRng;
 use rand::Rng;
 use std::collections::HashMap;
 
-impl<B, W> Client<B, W>
+impl<B, W, S> Client<B, W, S>
 where
     B: Blockchain,
     W: BoardingWallet + OnchainWallet,
+    S: SwapStorage + 'static,
 {
     /// Settle _all_ prior VTXOs and boarding outputs into the next batch, generating new confirmed
     /// VTXOs.
@@ -289,20 +292,26 @@ where
                 )
             });
 
-            let vtxo_inputs = vtxo_inputs.clone().into_iter().map(|v| {
-                proof_of_funds::Input::new(
-                    v.outpoint(),
-                    v.vtxo().exit_delay(),
-                    TxOut {
-                        value: v.amount(),
-                        script_pubkey: v.vtxo().script_pubkey(),
-                    },
-                    v.vtxo().tapscripts(),
-                    v.vtxo().owner_pk(),
-                    v.vtxo().exit_spend_info(),
-                    false,
-                )
-            });
+            let vtxo_inputs = vtxo_inputs
+                .clone()
+                .into_iter()
+                .map(|v| {
+                    Ok(proof_of_funds::Input::new(
+                        v.outpoint(),
+                        v.vtxo().exit_delay(),
+                        TxOut {
+                            value: v.amount(),
+                            script_pubkey: v.vtxo().script_pubkey(),
+                        },
+                        v.vtxo().tapscripts(),
+                        v.vtxo().owner_pk(),
+                        v.vtxo()
+                            .exit_spend_info()
+                            .context("failed to get exit spend info")?,
+                        false,
+                    ))
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
 
             boarding_inputs.chain(vtxo_inputs).collect::<Vec<_>>()
         };

@@ -9,9 +9,11 @@ use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use ark_bdk_wallet::Wallet;
+use ark_client::lightning_invoice::Bolt11Invoice;
 use ark_client::Blockchain;
 use ark_client::Error;
 use ark_client::OfflineClient;
+use ark_client::SqliteSwapStorage;
 use ark_core::history;
 use ark_core::ArkAddress;
 use bitcoin::address::NetworkUnchecked;
@@ -81,6 +83,20 @@ enum Commands {
         /// How many sats to send.
         amount: u64,
     },
+    /// Generate a BOLT11 invoice to receive payment via a Boltz reverse submarine swap.
+    LightningInvoice {
+        /// How many sats to receive.
+        amount: u64,
+    },
+    /// Pay a BOLT11 invoice via a Boltz submarine swap.
+    PayInvoice {
+        /// A BOLT11 invoice.
+        invoice: String,
+    },
+    /// Attempt to refund a past swap collaboratively.
+    RefundSwap { swap_id: String },
+    /// Attempt to refund a past swap without the receiver's signature.
+    RefundSwapWithoutReceiver { swap_id: String },
 }
 
 #[derive(Clone)]
@@ -127,6 +143,8 @@ impl FromStr for AddressesAndAmounts {
 struct Config {
     ark_server_url: String,
     esplora_url: String,
+    swap_storage_path: String,
+    boltz_url: String,
 }
 
 #[tokio::main]
@@ -154,12 +172,19 @@ async fn main() -> Result<()> {
     let esplora_client = EsploraClient::new(&config.esplora_url)?;
     let esplora_client = Arc::new(esplora_client);
 
+    let storage = Arc::new(
+        SqliteSwapStorage::new(&config.swap_storage_path)
+            .await
+            .map_err(|e| anyhow!(e))?,
+    );
     let client = OfflineClient::new(
         "sample-client".to_string(),
         kp,
         esplora_client.clone(),
         wallet,
         config.ark_server_url,
+        storage,
+        config.boltz_url,
         Duration::from_secs(30),
     )
     .connect()
@@ -321,6 +346,60 @@ async fn main() -> Result<()> {
                 txid = txid.to_string(),
                 "Sent funds on-chain"
             );
+        }
+        Commands::LightningInvoice { amount } => {
+            let res = client
+                .get_ln_invoice(Amount::from_sat(*amount))
+                .await
+                .map_err(|e| anyhow!(e))?;
+
+            let invoice = res.invoice.to_string();
+            let swap_id = res.swap_id;
+
+            tracing::info!(invoice, swap_id, "Lightning invoice");
+
+            client
+                .wait_for_vhtlc(&swap_id)
+                .await
+                .map_err(|e| anyhow!(e))?;
+
+            tracing::info!(invoice, swap_id, "Lightning invoice paid");
+        }
+        Commands::PayInvoice { invoice } => {
+            let invoice = Bolt11Invoice::from_str(invoice)
+                .map_err(|e| anyhow!("failed to parse BOLT11 invoice: {e}"))?;
+
+            let result = client
+                .pay_ln_invoice(invoice)
+                .await
+                .map_err(|e| anyhow!(e))?;
+
+            let swap_id = result.swap_id;
+
+            tracing::info!(swap_id, "Payment sent, waiting for finalization");
+
+            client
+                .wait_for_invoice_paid(swap_id.as_str())
+                .await
+                .map_err(|e| anyhow!(e))?;
+
+            tracing::info!(swap_id, "Payment made");
+        }
+        Commands::RefundSwap { swap_id } => {
+            let txid = client
+                .refund_vhtlc(swap_id.as_str())
+                .await
+                .map_err(|e| anyhow!(e))?;
+
+            tracing::info!(?txid, swap_id, "Swap refunded");
+        }
+        Commands::RefundSwapWithoutReceiver { swap_id } => {
+            let txid = client
+                .refund_expired_vhtlc(swap_id.as_str())
+                .await
+                .map_err(|e| anyhow!(e))?;
+
+            tracing::info!(?txid, swap_id, "Swap refunded");
         }
     }
 
