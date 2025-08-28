@@ -338,8 +338,6 @@ e2e-full:
     sleep 1
     just arkd-build
     just arkd-setup
-    just arkd-run
-    just arkd-fund 20
     just e2e-tests
 
 # Test WASM functionality (requires wasm-pack and running Ark server on localhost:7070).
