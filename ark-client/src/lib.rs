@@ -1,4 +1,5 @@
 use crate::error::ErrorContext;
+use crate::utils::sleep;
 use crate::utils::timeout_op;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
@@ -328,6 +329,50 @@ where
         timeout_op(self.timeout, self.network_client.connect())
             .await
             .context("Failed to connect to Ark server")??;
+        let server_info = timeout_op(self.timeout, self.network_client.get_info())
+            .await
+            .context("Failed to get Ark server info")??;
+
+        tracing::debug!(
+            name = self.name,
+            ark_server_url = ?self.network_client,
+            "Connected to Ark server"
+        );
+
+        Ok(Client {
+            inner: self,
+            server_info,
+        })
+    }
+
+    /// Connects to the Ark server and retrieves server information.
+    ///
+    /// If it encounters errors, it will retry `max_retries`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connection fails or times out.
+    pub async fn connect_with_retries(mut self, max_retries: usize) -> Result<Client<B, W>, Error> {
+        let mut n_retries = 0;
+        while n_retries < max_retries {
+            let res = timeout_op(self.timeout, self.network_client.connect())
+                .await
+                .context("Failed to connect to Ark server")?;
+
+            match res {
+                Ok(()) => break,
+                Err(error) => {
+                    tracing::warn!(?error, "Failed to connect to Ark server, retrying");
+
+                    sleep(Duration::from_secs(2)).await;
+
+                    n_retries += 1;
+
+                    continue;
+                }
+            };
+        }
+
         let server_info = timeout_op(self.timeout, self.network_client.get_info())
             .await
             .context("Failed to get Ark server info")??;
