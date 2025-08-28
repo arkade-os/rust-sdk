@@ -1,0 +1,19 @@
+[package]
+name = "ark-lightning"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ark-core = { path = "../ark-core" }
+bitcoin = { version = "0.32.4", features = ["base64", "rand", "serde"] }
+musig = { package = "ark-secp256k1", path = "../ark-rust-secp256k1", features = ["serde", "rand"] }
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "1.0"
+
+[dev-dependencies]
+hex = "0.4"
+serde_json = "1.0"
+
+[[example]]
+name = "vhtlc_example"
+path = "examples/vhtlc_example.rs"
