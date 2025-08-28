@@ -7,16 +7,22 @@ description = "REST client for Ark server communication"
 
 [dependencies]
 ark-core = { path = "../ark-core", version = "0.7.0" }
+base64 = "0.22.1"
 bitcoin = { version = "0.32", default-features = false }
-reqwest = { version = "^0.12", default-features = false, features = ["json", "multipart"] }
+futures = { version = "0.3" }
+reqwest = { version = "^0.12", default-features = false, features = ["json", "multipart", "stream"] }
 serde = { version = "^1.0", features = ["derive"] }
 serde_json = "^1.0"
 serde_repr = "^0.1"
+tracing = "0.1.37"
 url = "^2.5"
+urlencoding = "^2.1"
 uuid = { version = "^1.8", default-features = false, features = ["serde", "v4", "js"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
-getrandom = { version = "0.2", features = ["js"] }
+getrandom = { version = "0.2", features = ["wasm-bindgen", "js"] }
+wasm-bindgen-futures = { version = "0.4" }
+wasm-streams = { version = "0.4" }
 
 [dev-dependencies]
 js-sys = "0.3"

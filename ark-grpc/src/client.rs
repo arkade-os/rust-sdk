@@ -31,6 +31,7 @@ use ark_core::server::FinalizeOffchainTxResponse;
 use ark_core::server::GetVtxosRequest;
 use ark_core::server::GetVtxosRequestFilter;
 use ark_core::server::GetVtxosRequestReference;
+use ark_core::server::IndexerPage;
 use ark_core::server::Info;
 use ark_core::server::ListVtxo;
 use ark_core::server::NoncePks;
@@ -44,6 +45,7 @@ use ark_core::server::TreeSignatureEvent;
 use ark_core::server::TreeSigningStartedEvent;
 use ark_core::server::TreeTxEvent;
 use ark_core::server::VirtualTxOutPoint;
+use ark_core::server::VirtualTxsResponse;
 use ark_core::server::VtxoChain;
 use ark_core::server::VtxoChains;
 use ark_core::ArkAddress;
@@ -843,19 +845,6 @@ impl TryFrom<Outpoint> for OutPoint {
 pub struct VtxoChainResponse {
     pub chains: VtxoChains,
     pub page: Option<IndexerPage>,
-}
-
-#[derive(Debug)]
-pub struct VirtualTxsResponse {
-    pub txs: Vec<Psbt>,
-    pub page: Option<IndexerPage>,
-}
-
-#[derive(Debug)]
-pub struct IndexerPage {
-    pub current: i32,
-    pub next: i32,
-    pub total: i32,
 }
 
 impl TryFrom<generated::ark::v1::GetVtxoChainResponse> for VtxoChainResponse {

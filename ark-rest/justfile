@@ -1,0 +1,23 @@
+# Default task - show available commands
+default:
+    @just --list
+
+# Merge the swagger files into a single specification
+merge-swagger:
+    #!/usr/bin/env python3
+    exec python3 merge_swagger.py
+
+# Generate the Rust client from merged swagger spec
+generate:
+    #!/usr/bin/env bash
+    echo "Generating Rust client from OpenAPI specification..."
+
+    # Generate the client directly in the current directory
+    npx @openapitools/openapi-generator-cli generate \
+        -i swagger/merged.swagger.json \
+        -g rust \
+        -o . \
+        -c openapi-config.yaml \
+        --skip-validate-spec
+
+    echo "Code generation completed"

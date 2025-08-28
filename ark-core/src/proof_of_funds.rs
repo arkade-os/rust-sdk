@@ -373,7 +373,7 @@ fn bip322_hash(message: &[u8]) -> sha256::Hash {
     sha256::Hash::hash(&v)
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct IntentMessage {
     #[serde(rename = "type")]
     intent_message_type: IntentMessageType,
@@ -397,7 +397,7 @@ impl IntentMessage {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "lowercase")]
 pub enum IntentMessageType {
     Register,

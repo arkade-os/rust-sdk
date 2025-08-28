@@ -6,6 +6,8 @@ arkd_wallet_url := "http://localhost:" + arkd_wallet_port
 arkd_logs := "$PWD/arkd.log"
 arkd_wallet_logs := "$PWD/arkd-wallet.log"
 
+mod ark-rest
+
 ## ------------------------
 ## Code quality functions
 ## ------------------------
@@ -329,3 +331,20 @@ test:
 e2e-tests:
     @echo running e2e tests
     cargo test -p e2e-tests -- --ignored --nocapture
+
+# Test WASM functionality (requires wasm-pack and running Ark server on localhost:7070)
+wasm-test:
+    #!/usr/bin/env bash
+    cd ark-rest
+
+    echo "Running WASM tests..."
+    echo "Note: Requires Ark server running on http://localhost:7070"
+
+    # Check if wasm-pack is installed
+    if ! command -v wasm-pack &> /dev/null; then
+        echo "wasm-pack not found."
+        exit 1
+    fi
+
+    # Run WASM tests with Firefox (headless)
+    wasm-pack test --headless --firefox -- --test wasm

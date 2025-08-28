@@ -4,7 +4,7 @@
 
 | Name            | Type               | Description | Notes      |
 | --------------- | ------------------ | ----------- | ---------- |
-| **round_id**    | Option<**String**> |             | [optional] |
+| **batch_id**    | Option<**String**> |             | [optional] |
 | **pubkey**      | Option<**String**> |             | [optional] |
 | **tree_nonces** | Option<**String**> |             | [optional] |
 
