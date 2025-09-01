@@ -3,6 +3,7 @@
 use crate::models::V1GetInfoResponse;
 use crate::models::V1GetSubscriptionResponse;
 use crate::models::V1IndexerVtxo;
+use ark_core::utils::parse_sequence_number;
 use bitcoin::base64;
 use bitcoin::base64::Engine;
 use bitcoin::secp256k1::PublicKey;
@@ -48,7 +49,8 @@ impl TryFrom<V1GetInfoResponse> for ark_core::server::Info {
                 "Invalid vtxo_tree_expiry '{vtxo_tree_expiry_str}': {e}",
             ))
         })?;
-        let vtxo_tree_expiry = parse_sequence_number(vtxo_tree_expiry_val)?;
+        let vtxo_tree_expiry = parse_sequence_number(vtxo_tree_expiry_val)
+            .map_err(|e| ConversionError(format!("{e:#}")))?;
 
         let unilateral_exit_delay_str = response
             .unilateral_exit_delay
@@ -58,7 +60,8 @@ impl TryFrom<V1GetInfoResponse> for ark_core::server::Info {
                 "Invalid unilateral_exit_delay '{unilateral_exit_delay_str}': {e}",
             ))
         })?;
-        let unilateral_exit_delay = parse_sequence_number(unilateral_exit_delay_val)?;
+        let unilateral_exit_delay = parse_sequence_number(unilateral_exit_delay_val)
+            .map_err(|e| ConversionError(format!("{e:#}")))?;
 
         let boarding_exit_delay_str = response
             .boarding_exit_delay
@@ -68,7 +71,8 @@ impl TryFrom<V1GetInfoResponse> for ark_core::server::Info {
                 "Invalid boarding_exit_delay '{boarding_exit_delay_str}': {e}",
             ))
         })?;
-        let boarding_exit_delay = parse_sequence_number(boarding_exit_delay_val)?;
+        let boarding_exit_delay = parse_sequence_number(boarding_exit_delay_val)
+            .map_err(|e| ConversionError(format!("{e:#}")))?;
 
         let round_interval_str = response
             .round_interval
@@ -292,26 +296,6 @@ impl TryFrom<V1IndexerVtxo> for ark_core::server::VirtualTxOutPoint {
             ark_txid,
         })
     }
-}
-
-fn parse_sequence_number(value: i64) -> Result<bitcoin::Sequence, ConversionError> {
-    /// The threshold that determines whether an expiry or exit delay should be parsed as a
-    /// number of blocks or a number of seconds.
-    ///
-    /// - A value below 512 is considered a number of blocks.
-    /// - A value over 512 is considered a number of seconds.
-    const ARBITRARY_SEQUENCE_THRESHOLD: i64 = 512;
-
-    let sequence = if value.is_negative() {
-        return Err(ConversionError(format!("invalid sequence number: {value}")));
-    } else if value < ARBITRARY_SEQUENCE_THRESHOLD {
-        bitcoin::Sequence::from_height(value as u16)
-    } else {
-        bitcoin::Sequence::from_seconds_ceil(value as u32)
-            .map_err(|e| ConversionError(format!("Failed parsing sequence number: {e}")))?
-    };
-
-    Ok(sequence)
 }
 
 impl TryFrom<V1GetSubscriptionResponse> for ark_core::server::SubscriptionResponse {
