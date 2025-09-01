@@ -424,8 +424,16 @@ where
         sighash_type: TapSighashType::Default,
     };
 
-    // FIXME(server): We were able to delete the server's signature here and it did not complain. We
-    // were then unable to perform unilateral exit (same for the server I think).
+    // FIXME(server): We are able to delete the server's signature here and it does not complain. We
+    // are then unable to perform unilateral exit.
+    //
+    // To reproduce, run (after setting up the environment using the `justfile`):
+    //
+    // `cargo test --package e2e-tests --test e2e_send_onchain_vtxo_and_boarding_output --
+    // --ignored`
+
+    psbt_input.tap_script_sigs = BTreeMap::default();
+
     psbt_input.tap_script_sigs.insert((pk, leaf_hash), sig);
 
     Ok(())
