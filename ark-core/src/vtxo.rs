@@ -435,26 +435,6 @@ impl VirtualUtxoScript {
         Address::from_script(&self.script_pubkey(), network).expect("valid taproot script")
     }
 
-    /// Find a leaf by script hex
-    pub fn find_leaf(&self, script_hex: &str) -> Result<(ScriptBuf, taproot::ControlBlock), Error> {
-        let target_script = ScriptBuf::from_bytes(
-            hex::decode(script_hex)
-                .map_err(|e| Error::ad_hoc(format!("failed to decode script hex: {e}")))?,
-        );
-
-        for script in &self.scripts {
-            if *script == target_script {
-                let control_block = self
-                    .spend_info
-                    .control_block(&(script.clone(), LeafVersion::TapScript))
-                    .ok_or_else(|| Error::ad_hoc("control block not found for script"))?;
-
-                return Ok((script.clone(), control_block));
-            }
-        }
-
-        Err(Error::ad_hoc(format!("leaf '{script_hex}' not found")))
-    }
 
     /// Get control block for a specific script
     pub fn control_block(&self, script: &ScriptBuf) -> Result<taproot::ControlBlock, Error> {
@@ -551,33 +531,6 @@ mod tests {
         assert_eq!(script_pubkey.as_bytes()[0], 0x51); // OP_1
     }
 
-    #[test]
-    fn test_virtual_utxo_script_find_leaf() {
-        let secp = Secp256k1::new();
-
-        // Create test scripts
-        let script1 = ScriptBuf::builder().push_opcode(OP_CHECKSIG).into_script();
-
-        let script2 = ScriptBuf::builder()
-            .push_opcode(OP_CHECKSIGVERIFY)
-            .into_script();
-
-        let scripts = vec![script1.clone(), script2.clone()];
-        let vtxo_script = VirtualUtxoScript::new(&secp, scripts).unwrap();
-
-        // Test finding leaf by hex
-        let script1_hex = hex::encode(script1.as_bytes());
-        let (found_script, _control_block) = vtxo_script.find_leaf(&script1_hex).unwrap();
-        assert_eq!(found_script, script1);
-
-        // Test control block
-        let control_block2 = vtxo_script.control_block(&script2).unwrap();
-        assert!(!control_block2.serialize().is_empty());
-
-        // Test tap leaves
-        let tap_leaves = vtxo_script.tap_leaves();
-        assert_eq!(tap_leaves.len(), 2);
-    }
 
     #[test]
     fn test_virtual_utxo_script_empty_scripts() {
