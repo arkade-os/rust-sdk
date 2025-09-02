@@ -26,6 +26,8 @@ use ark_core::server::BatchTreeEventType;
 use ark_core::server::GetVtxosRequest;
 use ark_core::server::StreamEvent;
 use ark_core::server::VirtualTxOutPoint;
+use ark_core::unilateral_exit;
+use ark_core::unilateral_exit::create_unilateral_exit_transaction;
 use ark_core::vtxo::list_virtual_tx_outpoints;
 use ark_core::vtxo::VirtualTxOutPoints;
 use ark_core::ArkAddress;
@@ -104,6 +106,11 @@ enum Commands {
         address: bitcoin::Address<NetworkUnchecked>,
         /// How many sats to send.
         amount: u64,
+    },
+    /// Exit expired boarding outputs unilaterally to an on-chain address.
+    ExitBoarding {
+        /// Where to send the funds to.
+        address: bitcoin::Address<NetworkUnchecked>,
     },
 }
 
@@ -527,6 +534,70 @@ async fn main() -> Result<()> {
                 }
                 Err(e) => {
                     println!("Failed to send onchain: {e:#}");
+                }
+            }
+        }
+        Commands::ExitBoarding { address } => {
+            let address = address.clone().assume_checked();
+
+            let boarding_outpoints =
+                list_boarding_outpoints(find_outpoints_fn, &[boarding_output.clone()])?;
+
+            if boarding_outpoints.expired.is_empty() {
+                println!("No expired boarding outputs found");
+                return Ok(());
+            }
+
+            let onchain_inputs = boarding_outpoints
+                .expired
+                .into_iter()
+                .map(|(outpoint, amt, boarding_output)| {
+                    unilateral_exit::OnChainInput::new(boarding_output, amt, outpoint)
+                })
+                .collect::<Vec<_>>();
+
+            let expired_amount: Amount = onchain_inputs
+                .iter()
+                .map(|input| input.previous_output().value)
+                .sum();
+
+            // TODO: Do not use an arbitrary fee.
+            let fee = Amount::from_sat(1_000);
+
+            println!("Unilaterally exiting {expired_amount} from boarding outputs to {address}");
+
+            // This address won't be used because we are draining all expired boarding outputs.
+            let dummy_change_address = boarding_output.address().clone();
+
+            // Create keypair for signing
+            let secp = Secp256k1::new();
+            let kp = Keypair::from_secret_key(&secp, &sk);
+
+            // Create the unilateral exit transaction
+            let tx = create_unilateral_exit_transaction(
+                &kp,
+                address.clone(),
+                expired_amount - fee,
+                fee,
+                dummy_change_address,
+                &onchain_inputs,
+                &[], // No VTXO inputs for boarding output exit.
+            )?;
+
+            let txid = tx.compute_txid();
+
+            let broadcast_result = esplora_client.esplora_client.broadcast(&tx).await;
+
+            match broadcast_result {
+                Ok(()) => {
+                    println!("Broadcast unilateral exit transaction for expired boarding outputs");
+                    println!("TXID: {txid}");
+                    println!("Amount sent: {expired_amount}");
+                    println!("TX fee: {fee}");
+                    println!("Destination: {address}");
+                }
+                Err(e) => {
+                    println!("Failed to broadcast transaction: {e:#}");
                 }
             }
         }

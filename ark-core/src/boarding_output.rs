@@ -212,6 +212,9 @@ where
                     amount,
                     is_spent: false,
                 } => {
+                    // NOTE: We should really be using the blockchain as the source for this
+                    // timestamp. This is usually good enough, but it may lead to some transient
+                    // errors, particularly on regtest, where blocks may be mined irregularly.
                     let now = std::time::UNIX_EPOCH.elapsed().map_err(Error::ad_hoc)?;
 
                     // If the boarding output is on-chain can be spent unilaterally, it has expired.

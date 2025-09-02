@@ -99,6 +99,7 @@ pub fn create_unilateral_exit_transaction(
     kp: &Keypair,
     to_address: Address,
     to_amount: Amount,
+    fee_amount: Amount,
     change_address: Address,
     onchain_inputs: &[OnChainInput],
     vtxo_inputs: &[VtxoInput],
@@ -116,17 +117,19 @@ pub fn create_unilateral_exit_transaction(
         script_pubkey: to_address.script_pubkey(),
     }];
 
-    let total_amount: Amount = onchain_inputs
+    let total_input_amount: Amount = onchain_inputs
         .iter()
         .map(|o| o.amount)
         .chain(vtxo_inputs.iter().map(|v| v.amount))
         .sum();
 
-    let change_amount = total_amount.checked_sub(to_amount).ok_or_else(|| {
-        Error::transaction(format!(
-            "cannot cover to_amount ({to_amount}) with total input amount ({total_amount})"
+    let change_amount = total_input_amount
+        .checked_sub(to_amount + fee_amount)
+        .ok_or_else(|| {
+            Error::transaction(format!(
+                "cannot cover to_amount ({to_amount}) and ({fee_amount}) with total input amount ({total_input_amount})"
         ))
-    })?;
+        })?;
 
     if change_amount > Amount::ZERO {
         output.push(TxOut {

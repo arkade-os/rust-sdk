@@ -245,6 +245,7 @@ where
             self.kp(),
             to_address,
             to_amount,
+            fee,
             change_address,
             &onchain_inputs,
             &vtxo_inputs,
