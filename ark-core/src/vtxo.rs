@@ -374,24 +374,6 @@ impl VirtualUtxoScript {
         })
     }
 
-    /// Decode from a vector of hex-encoded script strings
-    pub fn decode<C>(secp: &Secp256k1<C>, scripts: Vec<String>) -> Result<Self, Error>
-    where
-        C: Verification,
-    {
-        let decoded_scripts: Result<Vec<ScriptBuf>, _> = scripts
-            .into_iter()
-            .map(|hex_script| {
-                let bytes = hex::decode(hex_script)
-                    .map_err(|e| Error::ad_hoc(format!("failed to decode hex: {e}")))?;
-                Ok(ScriptBuf::from_bytes(bytes))
-            })
-            .collect();
-
-        let scripts = decoded_scripts?;
-        Self::new(secp, scripts)
-    }
-
     /// Encode the scripts to a vector of hex strings
     pub fn encode(&self) -> Vec<String> {
         self.scripts
@@ -429,45 +411,6 @@ impl VirtualUtxoScript {
     pub fn ark_address(&self, network: Network, server_pubkey: XOnlyPublicKey) -> ArkAddress {
         ArkAddress::new(network, server_pubkey, self.tweaked_public_key)
     }
-
-    /// Get the on-chain address for this script
-    pub fn onchain_address(&self, network: Network) -> Address {
-        Address::from_script(&self.script_pubkey(), network).expect("valid taproot script")
-    }
-
-
-    /// Get control block for a specific script
-    pub fn control_block(&self, script: &ScriptBuf) -> Result<taproot::ControlBlock, Error> {
-        self.spend_info
-            .control_block(&(script.clone(), LeafVersion::TapScript))
-            .ok_or_else(|| Error::ad_hoc("control block not found for script"))
-    }
-
-    /// Get all tap leaves with their control blocks
-    pub fn tap_leaves(&self) -> Vec<(ScriptBuf, taproot::ControlBlock)> {
-        self.scripts
-            .iter()
-            .filter_map(|script| {
-                self.spend_info
-                    .control_block(&(script.clone(), LeafVersion::TapScript))
-                    .map(|control_block| (script.clone(), control_block))
-            })
-            .collect()
-    }
-}
-
-/// Encoded representation of a VirtualUtxoScript
-#[derive(Debug, Clone)]
-pub struct EncodedVirtualUtxoScript {
-    pub scripts: Vec<String>,
-}
-
-impl From<&VirtualUtxoScript> for EncodedVirtualUtxoScript {
-    fn from(vtxo_script: &VirtualUtxoScript) -> Self {
-        Self {
-            scripts: vtxo_script.encode(),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -497,14 +440,9 @@ mod tests {
         assert_eq!(vtxo_script.scripts()[0], scripts[0]);
         assert_eq!(vtxo_script.scripts()[1], scripts[1]);
 
-        // Test encoding/decoding
+        // Test encoding
         let encoded = vtxo_script.encode();
         assert_eq!(encoded.len(), 2);
-
-        let decoded = VirtualUtxoScript::decode(&secp, encoded).unwrap();
-        assert_eq!(decoded.scripts().len(), 2);
-        assert_eq!(decoded.scripts()[0], scripts[0]);
-        assert_eq!(decoded.scripts()[1], scripts[1]);
     }
     #[test]
     fn test_virtual_utxo_script_addresses() {
@@ -520,17 +458,11 @@ mod tests {
         let server_key = XOnlyPublicKey::from_slice(&[2; 32]).unwrap();
         let _ark_address = vtxo_script.ark_address(Network::Regtest, server_key);
 
-        // Test on-chain address
-        let onchain_address = vtxo_script.onchain_address(Network::Regtest);
-        // Just check that the address was created successfully
-        assert!(!onchain_address.to_string().is_empty());
-
         // Test script pubkey
         let script_pubkey = vtxo_script.script_pubkey();
         assert_eq!(script_pubkey.len(), 34); // P2TR script pubkey length
         assert_eq!(script_pubkey.as_bytes()[0], 0x51); // OP_1
     }
-
 
     #[test]
     fn test_virtual_utxo_script_empty_scripts() {
@@ -543,24 +475,5 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("scripts cannot be empty"));
-    }
-
-    #[test]
-    fn test_encoded_virtual_utxo_script() {
-        let secp = Secp256k1::new();
-
-        // Create a test script
-        let script = ScriptBuf::builder().push_opcode(OP_CHECKSIG).into_script();
-
-        let scripts = vec![script];
-        let vtxo_script = VirtualUtxoScript::new(&secp, scripts).unwrap();
-
-        // Test encoded representation
-        let encoded: EncodedVirtualUtxoScript = (&vtxo_script).into();
-        assert_eq!(encoded.scripts.len(), 1);
-        assert_eq!(
-            encoded.scripts[0],
-            hex::encode(vtxo_script.scripts()[0].as_bytes())
-        );
     }
 }

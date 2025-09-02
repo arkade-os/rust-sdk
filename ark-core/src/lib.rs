@@ -34,7 +34,6 @@ pub use unilateral_exit::build_anchor_tx;
 pub use unilateral_exit::build_unilateral_exit_tree_txids;
 pub use unilateral_exit::SelectedUtxo;
 pub use unilateral_exit::UtxoCoinSelection;
-pub use vtxo::EncodedVirtualUtxoScript;
 pub use vtxo::VirtualUtxoScript;
 pub use vtxo::Vtxo;
 
