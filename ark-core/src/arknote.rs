@@ -55,7 +55,7 @@ pub struct ArkNote {
     // FIXME: this is necessary?
     extra_witness: Vec<Vec<u8>>,
 
-    pub note_script: ScriptBuf,
+    note_script: ScriptBuf,
 }
 
 impl ArkNote {
@@ -124,6 +124,11 @@ impl ArkNote {
     /// Get the vout (always returns FAKE_OUTPOINT_INDEX)
     pub fn vout(&self) -> u32 {
         FAKE_OUTPOINT_INDEX
+    }
+
+    /// Get the note script
+    pub fn note_script(&self) -> &ScriptBuf {
+        &self.note_script
     }
 
     /// Get the status

@@ -81,7 +81,7 @@ impl From<&ArkNote> for Input {
         let spending_info = value.vtxo_script().spend_info();
 
         // this is inside the taproot script path
-        let node_script = value.note_script.clone();
+        let node_script = value.note_script().clone();
         let Some(control_block) =
             spending_info.control_block(&(node_script.clone(), LeafVersion::TapScript))
         else {
