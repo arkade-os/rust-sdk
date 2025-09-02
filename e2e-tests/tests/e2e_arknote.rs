@@ -77,7 +77,7 @@ pub async fn e2e_arknote_redemption() {
         pending_balance = %balance.pending(),
         "Balance after ArkNote redemption"
     );
-    
+
     // Assert that the balance has increased by the redeemed amount
     assert!(
         balance.confirmed() >= fund_amount || balance.pending() >= fund_amount,
