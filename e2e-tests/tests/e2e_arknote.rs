@@ -29,13 +29,13 @@ pub async fn e2e_arknote_redemption() {
 
     let fund_amount = Amount::from_sat(1000);
 
-    // Create ArkNote using gRPC API
+    // Create ArkNote using client API
     let note = alice.create_arknote(fund_amount).await.unwrap();
 
     tracing::info!(
         arknote_string = %note.to_encoded_string(),
         value = %fund_amount,
-        "Created ArkNote using gRPC API for redemption test"
+        "Created ArkNote using client API for redemption test"
     );
 
     let parsed_note = ArkNote::from_string(&note.to_encoded_string()).unwrap();
