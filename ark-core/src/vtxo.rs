@@ -124,44 +124,6 @@ impl Vtxo {
         Self::new(secp, server, owner, Vec::new(), exit_delay, network)
     }
 
-    /// Build a VTXO from an ArkNote script (note-only, no forfeit/redeem scripts).
-    /// This is used for ArkNotes which only have a SHA256 hash check script.
-    pub fn from_arknote_script<C>(
-        secp: &Secp256k1<C>,
-        note_script: ScriptBuf,
-        network: Network,
-    ) -> Result<Self, Error>
-    where
-        C: Verification,
-    {
-        let unspendable_key: PublicKey = UNSPENDABLE_KEY.parse().expect("valid key");
-        let (unspendable_key, _) = unspendable_key.inner.x_only_public_key();
-
-        // For ArkNotes, we only have the note script, no forfeit/redeem scripts
-        let spend_info = TaprootBuilder::new()
-            .add_leaf(0, note_script.clone())
-            .expect("valid note leaf")
-            .finalize(secp, unspendable_key)
-            .expect("can be finalized");
-
-        let script_pubkey = tr_script_pubkey(&spend_info);
-        let address = Address::from_script(&script_pubkey, network).expect("valid script");
-
-        // ArkNotes don't have server/owner keys in the traditional sense, using dummy keys
-        let dummy_key = unspendable_key;
-
-        Ok(Self {
-            server: dummy_key,
-            owner: dummy_key,
-            spend_info,
-            extra_scripts: vec![note_script],
-            address,
-            exit_delay: bitcoin::Sequence::ZERO, // ArkNotes don't have exit delays
-            exit_delay_seconds: 0,
-            network,
-        })
-    }
-
     pub fn spend_info(&self) -> &TaprootSpendInfo {
         &self.spend_info
     }
