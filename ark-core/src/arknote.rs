@@ -27,18 +27,6 @@ pub const ARKNOTE_LENGTH: usize = PREIMAGE_LENGTH + VALUE_LENGTH;
 /// Fake outpoint index used for ArkNotes
 pub const FAKE_OUTPOINT_INDEX: u32 = 0;
 
-/// Macro to create a note tapscript that checks the preimage hash
-#[macro_export]
-macro_rules! note_tapscript {
-    ($preimage_hash:expr) => {{
-        ::bitcoin::ScriptBuf::builder()
-            .push_opcode(::bitcoin::opcodes::all::OP_SHA256)
-            .push_slice($preimage_hash.as_byte_array())
-            .push_opcode(::bitcoin::opcodes::all::OP_EQUAL)
-            .into_script()
-    }};
-}
-
 /// Status of a coin/VTXO
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Status {
@@ -71,6 +59,15 @@ pub struct ArkNote {
 }
 
 impl ArkNote {
+    /// Create a note tapscript that checks the preimage hash
+    fn note_tapscript(preimage_hash: &sha256::Hash) -> ScriptBuf {
+        ScriptBuf::builder()
+            .push_opcode(bitcoin::opcodes::all::OP_SHA256)
+            .push_slice(preimage_hash.as_byte_array())
+            .push_opcode(bitcoin::opcodes::all::OP_EQUAL)
+            .into_script()
+    }
+
     /// Create a new ArkNote with the given preimage and value
     pub fn new(preimage: [u8; PREIMAGE_LENGTH], value: Amount) -> Self {
         Self::new_with_hrp(preimage, value, DEFAULT_HRP.to_string())
@@ -80,7 +77,7 @@ impl ArkNote {
     pub fn new_with_hrp(preimage: [u8; PREIMAGE_LENGTH], value: Amount, hrp: String) -> Self {
         let preimage_hash = sha256::Hash::hash(&preimage);
 
-        let note_script = note_tapscript!(&preimage_hash);
+        let note_script = Self::note_tapscript(&preimage_hash);
 
         // Create the VTXO script structure using VirtualUtxoScript
         let secp = Secp256k1::new();
