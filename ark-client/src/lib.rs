@@ -35,6 +35,7 @@ pub mod error;
 pub mod wallet;
 
 mod batch;
+mod boltz;
 mod coin_select;
 mod send_vtxo;
 mod unilateral_exit;

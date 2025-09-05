@@ -113,7 +113,7 @@ pub struct Nigiri {
 
 impl Nigiri {
     pub fn new() -> Self {
-        let esplora_url = "http://localhost:30000";
+        let esplora_url = "https://mutinynet.com/api";
         let bitcoin_rpc = BitcoinRpc::new(
             "http://localhost:18443".to_string(),
             "admin1".to_string(),
