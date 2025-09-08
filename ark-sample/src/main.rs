@@ -157,6 +157,10 @@ struct Config {
 async fn main() -> Result<()> {
     init_tracing();
 
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     let cli = Cli::parse();
 
     let seed = fs::read_to_string(cli.seed)?;
