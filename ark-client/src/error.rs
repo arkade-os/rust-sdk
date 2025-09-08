@@ -26,6 +26,8 @@ enum Kind {
     CoinSelect(CoinSelectError),
     /// An error related to actions within the wallet.
     Wallet(WalletError),
+    /// An error thrown by a user of this library
+    Consumer(ConsumerError),
 }
 
 #[derive(Debug)]
@@ -50,6 +52,11 @@ struct CoinSelectError {
 
 #[derive(Debug)]
 struct WalletError {
+    source: Source,
+}
+
+#[derive(Debug)]
+struct ConsumerError {
     source: Source,
 }
 
@@ -83,6 +90,12 @@ impl Error {
             source: source.into(),
         }))
     }
+
+    pub fn consumer(source: impl Into<Source>) -> Self {
+        Error::new(Kind::Consumer(ConsumerError {
+            source: source.into(),
+        }))
+    }
 }
 
 impl fmt::Display for Error {
@@ -108,6 +121,7 @@ impl fmt::Display for Kind {
             Kind::Core(ref err) => err.fmt(f),
             Kind::CoinSelect(ref err) => err.fmt(f),
             Kind::Wallet(ref err) => err.fmt(f),
+            Kind::Consumer(ref err) => err.fmt(f),
         }
     }
 }
@@ -137,6 +151,12 @@ impl fmt::Display for CoinSelectError {
 }
 
 impl fmt::Display for WalletError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.source.fmt(f)
+    }
+}
+
+impl fmt::Display for ConsumerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.source.fmt(f)
     }

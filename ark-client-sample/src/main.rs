@@ -313,7 +313,7 @@ impl Blockchain for EsploraClient {
             .esplora_client
             .scripthash_txs(&script_pubkey, None)
             .await
-            .unwrap();
+            .map_err(Error::consumer)?;
 
         let outputs = txs
             .into_iter()
@@ -344,7 +344,7 @@ impl Blockchain for EsploraClient {
                 .esplora_client
                 .get_output_status(&outpoint.txid, outpoint.vout as u64)
                 .await
-                .unwrap();
+                .map_err(Error::consumer)?;
 
             match status {
                 Some(OutputStatus { spent: false, .. }) | None => {
@@ -363,7 +363,11 @@ impl Blockchain for EsploraClient {
     }
 
     async fn find_tx(&self, txid: &Txid) -> Result<Option<Transaction>, Error> {
-        let option = self.esplora_client.get_tx(txid).await.unwrap();
+        let option = self
+            .esplora_client
+            .get_tx(txid)
+            .await
+            .map_err(Error::consumer)?;
         Ok(option)
     }
 
@@ -376,7 +380,7 @@ impl Blockchain for EsploraClient {
             .esplora_client
             .get_output_status(txid, vout as u64)
             .await
-            .unwrap();
+            .map_err(Error::consumer)?;
 
         Ok(ark_client::SpendStatus {
             spend_txid: status.and_then(|s| s.txid),
@@ -384,7 +388,10 @@ impl Blockchain for EsploraClient {
     }
 
     async fn broadcast(&self, tx: &Transaction) -> Result<(), Error> {
-        self.esplora_client.broadcast(tx).await.unwrap();
+        self.esplora_client
+            .broadcast(tx)
+            .await
+            .map_err(Error::consumer)?;
         Ok(())
     }
 
