@@ -1,0 +1,24 @@
+[package]
+name = "ark-client-sample"
+version = "0.7.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+ark-bdk-wallet = { path = "../ark-bdk-wallet" }
+ark-client = { path = "../ark-client", features = ["default"] }
+ark-core = { path = "../ark-core" }
+async-trait = "0.1"
+bitcoin = { version = "0.32" }
+clap = { version = "4", features = ["derive"] }
+esplora-client = { version = "0.10", features = ["async-https"] }
+futures = "0.3"
+jiff = "0.2.1"
+rand = "0.8"
+rustls = { version = "0.23", features = ["ring"] }
+serde = { version = "1", features = ["derive"] }
+serde_derive = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+toml = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi", "env-filter", "time", "tracing-log", "json"] }
