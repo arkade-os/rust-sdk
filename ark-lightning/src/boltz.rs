@@ -2,8 +2,9 @@
 //!
 //! Author: Vincenzo Palazzo <vincenzopalazzodev@gmail.com>
 
-use crate::arkln::GetPayOptions;
 use crate::arkln::Lightning;
+use crate::arkln::RcvOptions;
+use crate::arkln::SentOptions;
 use crate::ldk::bolt11_invoice as invoice;
 use crate::ldk::offers;
 use anyhow::Ok;
@@ -52,15 +53,9 @@ pub enum SwapType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateSubmarineSwapRequest {
-    pub from: String,
-    pub to: String,
     pub invoice: String,
     #[serde(rename = "refundPublicKey")]
     pub refund_public_key: String,
-    #[serde(rename = "pairHash", skip_serializing_if = "Option::is_none")]
-    pub pair_hash: Option<String>,
-    #[serde(rename = "referralId", skip_serializing_if = "Option::is_none")]
-    pub referral_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -279,7 +274,7 @@ impl BoltzLightning {
 impl Lightning for BoltzLightning {
     fn get_invoice(
         &self,
-        opts: GetPayOptions,
+        opts: RcvOptions,
     ) -> impl Future<Output = Result<invoice::Bolt11Invoice>> + Send {
         async move {
             // create the random number called preimage!
@@ -301,25 +296,35 @@ impl Lightning for BoltzLightning {
                 .map_err(|err| anyhow::anyhow!("Parsing invoice `{err}`"))?;
             // we should monitor it somehow probably by payment_hash!
             // See https://github.com/arkade-os/boltz-swap/blob/master/src/arkade-lightning.ts#L239
+            // TODO: this need be claim but we need to make an event base system!
             Ok(invoice)
         }
     }
 
     fn get_offer(
         &self,
-        opts: GetPayOptions,
+        opts: RcvOptions,
     ) -> impl Future<Output = Result<offers::offer::Offer>> + Send {
         async { unimplemented!() }
     }
 
-    fn pay_invoice(
-        &self,
-        _invoice: &invoice::Bolt11Invoice,
-    ) -> impl Future<Output = Result<()>> + Send {
-        async { unimplemented!() }
+    fn pay_invoice(&self, opts: SentOptions) -> impl Future<Output = Result<()>> + Send {
+        async move {
+            let request = CreateSubmarineSwapRequest {
+                invoice: opts.invoice.to_string(),
+                refund_public_key: opts.refund_public_key.to_string(),
+            };
+
+            let response = self.create_submarine_swap(request).await?;
+            // We should make stuff persistant to track the swap!!
+            // TODO: make a wallet call to brodcast the transaction!
+            // - we need to wait for settlement
+            // - we need to refund hltcs https://github.com/arkade-os/boltz-swap/blob/master/src/arkade-lightning.ts#L159
+            Ok(())
+        }
     }
 
-    fn pay_offer(&self, _offer: &offers::offer::Offer) -> impl Future<Output = Result<()>> + Send {
+    fn pay_offer(&self, opts: SentOptions) -> impl Future<Output = Result<()>> + Send {
         async { unimplemented!() }
     }
 
