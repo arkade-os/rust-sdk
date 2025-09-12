@@ -1,12 +1,15 @@
 //! Lightning Network Module for the Ark Lightning Swap
 //!
 //! Vincenzo Palazzo <vincenzopalazzodev@gmail.com>
-use crate::ldk::bolt11_invoice as invoice;
-use crate::ldk::offers;
+use ark_core::ArkAddress;
 use bitcoin::Amount;
+use bitcoin::Transaction;
+use bitcoin::XOnlyPublicKey;
 use lightning::bolt11_invoice::Bolt11Invoice;
 use lightning::offers::invoice::Bolt12Invoice;
 use lightning::offers::offer::Offer;
+use std::future::Future;
+use std::pin::Pin;
 
 #[derive(Debug, Clone)]
 pub struct RcvOptions {
@@ -17,7 +20,7 @@ pub struct RcvOptions {
 
 #[derive(Debug, Clone)]
 pub struct SentOptions {
-    pub invoice: invoice::Bolt11Invoice,
+    pub invoice: Bolt11Invoice,
     pub refund_public_key: String,
 }
 
@@ -58,13 +61,13 @@ pub trait Lightning {
     fn get_invoice(
         &self,
         opts: RcvOptions,
-    ) -> impl Future<Output = anyhow::Result<invoice::Bolt11Invoice>> + Send;
+    ) -> impl Future<Output = anyhow::Result<Bolt11Invoice>> + Send;
 
     /// Get an bolt12 offer!
     fn get_offer(
         &self,
         offer: RcvOptions,
-    ) -> impl Future<Output = anyhow::Result<offers::offer::Offer>> + Send;
+    ) -> impl Future<Output = anyhow::Result<Offer>> + Send;
 
     /// Pay a bolt11 invoice!
     fn pay_invoice(&self, opts: SentOptions) -> impl Future<Output = anyhow::Result<()>> + Send;
@@ -75,4 +78,40 @@ pub trait Lightning {
     /// Pay a BIP321 payment request!
     fn pay_bip321(&self, bip321: &str) -> impl Future<Output = anyhow::Result<()>> + Send;
     // TODO: add the bip 353 support!
+}
+
+pub trait ArkWallet {
+    /// Send funds on a specific address
+    fn send_bitcoin(&self, address: ArkAddress, amount: Amount) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>;
+
+    // Extract the xpub from the wallet
+    fn get_xpub(&self) -> XOnlyPublicKey;
+
+    // Sign a transaction with the wallet or something that can sign!
+    fn sign_tx(&self, tx: &Transaction) -> Pin<Box<dyn Future<Output = anyhow::Result<Transaction>> + Send>>;
+}
+
+/// Dummy wallet implementation for testing
+pub struct DummyWallet;
+
+impl DummyWallet {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl ArkWallet for DummyWallet {
+    fn send_bitcoin(&self, _address: ArkAddress, _amount: Amount) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn get_xpub(&self) -> XOnlyPublicKey {
+        // Return a dummy public key
+        XOnlyPublicKey::from_slice(&[0u8; 32]).unwrap()
+    }
+
+    fn sign_tx(&self, tx: &Transaction) -> Pin<Box<dyn Future<Output = anyhow::Result<Transaction>> + Send>> {
+        let tx = tx.clone();
+        Box::pin(async move { Ok(tx) })
+    }
 }
