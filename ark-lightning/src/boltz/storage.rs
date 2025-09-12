@@ -16,7 +16,6 @@ pub struct SwapStorageOptions {
 }
 
 pub struct SwapStorageData {
-    pub key: String,
     pub value: PersistedSwap,
 }
 
@@ -34,11 +33,6 @@ pub trait SwapStorage: Sync {
         &self,
         swap_id: &str,
     ) -> impl Future<Output = anyhow::Result<Option<PersistedSwap>>> + Send;
-
-    /// Pending Swaps
-    ///
-    /// Fixme: this should implement the paginator!
-    fn pending_swaps(&self) -> impl Future<Output = anyhow::Result<Vec<SwapStorageData>>> + Send;
 
     fn get_swap(
         &self,
@@ -95,7 +89,7 @@ impl SwapStorage for NoSqlStorage {
             let data = serde_json::to_string(&swap)
                 .map_err(|e| anyhow::anyhow!("Failed to serialize swap: {}", e))?;
             db.put(&key, &data)?;
-            Ok(SwapStorageData { key, value: swap })
+            Ok(SwapStorageData { value: swap })
         }
     }
 
@@ -113,25 +107,6 @@ impl SwapStorage for NoSqlStorage {
                 None
             };
             Ok(data)
-        }
-    }
-
-    fn pending_swaps(&self) -> impl Future<Output = anyhow::Result<Vec<SwapStorageData>>> + Send {
-        let db = self.inner.clone();
-        async move {
-            let keys = db.keys();
-            let swaps = keys
-                .into_iter()
-                .filter_map(|k| {
-                    let data = db.get(&k).ok()?;
-                    let swap = serde_json::from_str::<PersistedSwap>(&data).ok()?;
-                    Some(SwapStorageData {
-                        key: k,
-                        value: swap,
-                    })
-                })
-                .collect::<Vec<_>>();
-            Ok(swaps)
         }
     }
 

@@ -15,6 +15,8 @@ use super::model::CreateSubmarineSwapResponse;
 use super::model::GetSwapPreimageResponse;
 use super::model::GetSwapStatusResponse;
 use super::model::PairLimits;
+use crate::arkln::ArkWallet;
+use crate::arkln::DummyWallet;
 use crate::arkln::DummyEventHandler;
 use crate::arkln::EventHandle;
 use crate::arkln::Lightning;
@@ -23,11 +25,9 @@ use crate::arkln::SentOptions;
 use crate::boltz::boltz_ws::SwapUpdate;
 use crate::ldk::bolt11_invoice as invoice;
 use crate::ldk::offers;
-use anyhow::Ok;
 use anyhow::Result;
 use bitcoin::hashes::sha256;
 use futures_util::lock::Mutex;
-use lightning::events::EventHandler;
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
@@ -58,6 +58,8 @@ pub struct BoltzLightning {
     api_url: String,
     ws_client: Arc<RwLock<BoltzWebSocketClient>>,
 
+    wallet: Arc<Mutex<dyn ArkWallet + Send + Sync>>,
+
     receiver: lampo_common::event::Subscriber<SwapUpdate>,
 
     handler: Mutex<Arc<dyn EventHandle + Send + Sync>>,
@@ -77,6 +79,7 @@ impl BoltzLightning {
             _network: network,
             api_url,
             ws_client: Arc::new(RwLock::new(ws_client)),
+            wallet: Arc::new(Mutex::new(DummyWallet::new())),
             receiver,
 
             handler: Mutex::new(Arc::new(DummyEventHandler)),
@@ -107,11 +110,6 @@ impl BoltzLightning {
         unimplemented!()
     }
 
-    /// See https://github.com/arkade-os/boltz-swap/blob/d7b321840e8f90d70ab8d74990c61bb25aa92dc1/src/arkade-lightning.ts#L373C9-L373C20
-    pub(crate) async fn refund_vhtlc(&self, _swap: &PersistedSwap) -> Result<()> {
-        unimplemented!()
-    }
-
     pub async fn spawn(self: Arc<Self>) {
         let this = self.clone();
         tokio::spawn(async move {
@@ -126,31 +124,52 @@ impl BoltzLightning {
 
                 let handler = this.handler.lock().await;
                 let handler = handler.clone();
+
+
+                let swap = ws.get_swap(&id).await;
+                assert!(swap.is_some());
+                // SAFETY: it should be never None here
+                let swap = swap.unwrap();
                 match status {
                     SwapStatus::Created => {
                         let status = ws.get_swap(&id).await;
                         assert!(status.is_some(), "Swap with id `{}` must exist", id);
                     }
-                    SwapStatus::TransactionMempool => {
-                        // Log it
-                        println!("Swap {} transaction in mempool!", id);
-                    }
-                    SwapStatus::TransactionConfirmed => {
+                    SwapStatus::TransactionMempool | SwapStatus::TransactionConfirmed => {
                         // make a double check with what we see on chain or in the virtual mempool
                         println!("Swap {} failed!", id);
+                        let Err(err) = self.claim_htlc(&swap).await else {
+                            continue;
+                        };
+                        eprintln!("Failed to claim HTLC for swap {}: {}", id, err);
                     }
+                    // Ark -> lightning
                     SwapStatus::InvoiceSet => {
                         println!("Swap {} invoice settled!", id);
-                        // FIXME: https://github.com/arkade-os/boltz-swap/blob/master/src/arkade-lightning.ts#L498
+                        let status_response = self.get_swap_status(&swap.id).await;
+                        match status_response {
+                            Ok(fresh_swap_status) => {
+                                println!("Fresh swap status for {}: {:?}", id, fresh_swap_status);
+                                if let Some(tx_info) = &fresh_swap_status.transaction {
+                                    let txid = tx_info.id.clone();
+                                    // TODO: emit and event for the called!
+                                    println!("Transaction ID: {}", txid);
+                                }
+                            }
+                            Err(_) => {
+                                println!("Failed to get fresh swap status for {}", id);
+                            }
+                        }
+                        // FIXME: we should pass more information in here!
+                        handler.on_payment_received(swap.metadata.amount());
                     }
                     SwapStatus::InvoicePending => {
                         println!("Swap {} invoice pending!", id);
-                        handler.on_payment_pending(bitcoin::Amount::from_sat(0));
+                        handler.on_payment_pending(swap.metadata.amount());
                     }
                     SwapStatus::InvoicePaid => {
                         println!("Swap {} invoice paid!", id);
-                        // TODO: we should claim vthlc here!
-                        handler.on_payment_received(bitcoin::Amount::from_sat(0));
+                        handler.on_invoice_paid(swap.metadata.invoice().unwrap(), swap.metadata.amount(), hex::decode(swap.metadata.get_preimage().unwrap()).unwrap());
                     }
                     SwapStatus::InvoiceFailedToPay => {
                         println!("Swap {} invoice failed to pay!", id);
@@ -158,23 +177,30 @@ impl BoltzLightning {
                         // somehow in the failure
                         handler.on_payment_failed(bitcoin::Amount::from_sat(0));
                     }
+                    SwapStatus::TransactionRefunded => {
+                        println!("Swap {} transaction refunded!", id);
+
+                        // We should drop the swap from the storage, and probably keep track
+                        // somehow in the failure
+                        handler.on_payment_failed(bitcoin::Amount::from_sat(0));
+                    }
+                    SwapStatus::TransactionFailed => {
+                        println!("Swap {} transaction failed!", id);
+
+                        // We should drop the swap from the storage, and probably keep track
+                        // somehow in the failure
+                        handler.on_payment_failed(bitcoin::Amount::from_sat(0));
+                    }
                     SwapStatus::TransactionClaimed => {
                         println!("Swap {} transaction claimed!", id);
-
-                        let swap = ws.get_swap(&id).await;
-                        assert!(swap.is_some());
-                        // SAFETY: it should be never None here
-                        let swap = swap.unwrap();
-                        if let Err(err) = self.claim_htlc(&swap).await {
-                            eprintln!("Failed to claim htlc: {}", err);
-                        }
-
                         handler.on_payment_received(bitcoin::Amount::from_sat(0));
+                    }
+                    SwapStatus::InvoiceExpired => {
+                        println!("Swap {} invoice expired!", id);
+                        handler.on_payment_failed(bitcoin::Amount::from_sat(0));
                     }
                     SwapStatus::SwapExpired => {
                         println!("Swap {} expired!", id);
-                        // We should drop the swap from the storage, and probably keep track
-                        // somehow in the failure
                         handler.on_payment_failed(bitcoin::Amount::from_sat(0));
                     }
                     SwapStatus::Error { error } => {
@@ -312,10 +338,11 @@ impl Lightning for BoltzLightning {
             let preimage: [u8; 32] = musig::rand::random();
             let preimage_hash = sha256::Hash::const_hash(&preimage).to_string();
 
+            let claim_public_key = self.wallet.lock().await.get_xpub();
             let request = CreateReverseSwapRequest {
                 invoice_amount: opts.invoice_amount.to_sat() as u64,
                 // FIXME: this need to came from the wallet!
-                claim_public_key: opts.claim_public_key.to_string(),
+                claim_public_key: claim_public_key.to_string(),
                 preimage_hash: preimage_hash.clone(),
                 description: opts.description,
             };
@@ -389,7 +416,11 @@ impl Lightning for BoltzLightning {
                 },
             };
 
-            // TODO: The actual wallet transaction broadcast should happen here
+            let wallet = self.wallet.lock().await;
+            wallet.send_bitcoin(
+                response.address.parse().unwrap(),
+                bitcoin::Amount::from_sat(response.expected_amount),
+            ).await?;
             let ws_client = self.ws_client.read().await;
             ws_client.persist_swap(swap).await?;
 

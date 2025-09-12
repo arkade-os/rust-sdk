@@ -41,6 +41,7 @@ use crate::boltz::storage::SwapStorage;
 use crate::boltz::storage::SwapStorageOptions;
 use crate::boltz::Network;
 use anyhow::Result;
+use bitcoin::Amount;
 use core::fmt;
 use futures_util::SinkExt;
 use futures_util::StreamExt;
@@ -122,6 +123,12 @@ pub enum SwapStatus {
     TransactionMempool,
     /// Lockup transaction confirmed on-chain
     TransactionConfirmed,
+    /// Transaction Refunded
+    TransactionRefunded,
+    /// Transaction Failed
+    TransactionFailed,
+    /// Transaction Claimed
+    TransactionClaimed,
     /// Lightning invoice has been set
     InvoiceSet,
     /// Waiting for Lightning invoice payment
@@ -130,8 +137,8 @@ pub enum SwapStatus {
     InvoicePaid,
     /// Lightning invoice payment failed
     InvoiceFailedToPay,
-    /// Swap completed - funds claimed
-    TransactionClaimed,
+    /// Invoice Expired
+    InvoiceExpired,
     /// Swap expired - can be refunded
     SwapExpired,
     /// Swap failed with error
@@ -147,11 +154,14 @@ impl fmt::Display for SwapStatus {
             SwapStatus::Created => write!(f, "created"),
             SwapStatus::TransactionMempool => write!(f, "transaction_mempool"),
             SwapStatus::TransactionConfirmed => write!(f, "transaction_confirmed"),
+            SwapStatus::TransactionRefunded => write!(f, "transaction_refunded"),
+            SwapStatus::TransactionFailed => write!(f, "transaction_failed"),
+            SwapStatus::TransactionClaimed => write!(f, "transaction_claimed"),
             SwapStatus::InvoiceSet => write!(f, "invoice_set"),
             SwapStatus::InvoicePending => write!(f, "invoice_pending"),
             SwapStatus::InvoicePaid => write!(f, "invoice_paid"),
             SwapStatus::InvoiceFailedToPay => write!(f, "invoice_failed_to_pay"),
-            SwapStatus::TransactionClaimed => write!(f, "transaction_claimed"),
+            SwapStatus::InvoiceExpired => write!(f, "invoice_expired"),
             SwapStatus::SwapExpired => write!(f, "swap_expired"),
             SwapStatus::Error { error } => write!(f, "error: {}", error),
         }
@@ -202,6 +212,40 @@ pub enum SwapMetadata {
     },
 }
 
+impl SwapMetadata {
+    /// Retrieves the preimage if available
+    ///
+    /// # Returns
+    /// - `Some(String)` containing the preimage for reverse swaps
+    /// - `None` for submarine swaps
+    pub fn get_preimage(&self) -> Option<String> {
+        match self {
+            SwapMetadata::Reverse { preimage, .. } => Some(preimage.clone()),
+            SwapMetadata::Submarine { .. } => None,
+        }
+    }
+
+    pub fn amount(&self) -> Amount {
+        let amount = match self {
+            SwapMetadata::Reverse { onchain_amount, .. } => *onchain_amount,
+            SwapMetadata::Submarine { expected_amount, .. } => *expected_amount,
+        };
+        Amount::from_sat(amount)
+    }
+
+    pub fn invoice(&self) -> Option<Bolt11Invoice> {
+        match self {
+            SwapMetadata::Reverse { invoice, .. } => {
+                let invoice = invoice.parse::<Bolt11Invoice>().unwrap();
+                Some(invoice)
+            }
+            SwapMetadata::Submarine { .. } => {
+                None
+            }
+        }
+    }
+}
+
 /// Persistent swap data
 ///
 /// This structure maintains swap state.
@@ -237,11 +281,6 @@ impl fmt::Display for SwapType {
         }
     }
 }
-
-/// Type alias for swap status update callbacks
-///
-/// Callbacks are invoked whenever a monitored swap's status changes.
-pub type SwapStatusCallback = Arc<dyn Fn(SwapUpdate) + Send + Sync>;
 
 /// WebSocket connection states
 ///
