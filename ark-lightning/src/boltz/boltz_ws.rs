@@ -44,6 +44,8 @@ use anyhow::Result;
 use core::fmt;
 use futures_util::SinkExt;
 use futures_util::StreamExt;
+use lampo_common::event::Subscriber;
+use lightning::bolt11_invoice::Bolt11Invoice;
 use serde::Deserialize;
 use serde::Serialize;
 use std::sync::Arc;
@@ -136,6 +138,9 @@ pub enum SwapStatus {
     Error { error: String },
 }
 
+unsafe impl Send for SwapStatus {}
+unsafe impl Sync for SwapStatus {}
+
 impl fmt::Display for SwapStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -175,8 +180,10 @@ pub enum SwapMetadata {
         onchain_amount: u64,
         /// Optional blinding key for confidential transactions
         blinding_key: Option<String>,
+        /// Invoice associated with the swap
+        invoice: String,
     },
-    /// Metadata for submarine swaps (on-chain to Lightning)
+    /// Metadata for submarine swaps (ark to Lightning)
     Submarine {
         /// Address to send funds to
         address: String,
@@ -265,6 +272,11 @@ pub struct BoltzWebSocketClient {
 
     sender: Arc<Mutex<Option<mpsc::UnboundedSender<WsRequest>>>>,
     receiver: Arc<Mutex<Option<mpsc::UnboundedReceiver<WsResponse>>>>,
+
+    // Event base system, the ws when receive a new update from the
+    // `receiver` channel will emit a new event with the emitter that
+    // is the location when all the subscription are listening!
+    emitter: lampo_common::event::Emitter<SwapUpdate>,
 }
 
 impl BoltzWebSocketClient {
@@ -298,7 +310,13 @@ impl BoltzWebSocketClient {
 
             sender: Arc::new(Mutex::new(None)),
             receiver: Arc::new(Mutex::new(None)),
+
+            emitter: lampo_common::event::Emitter::default(),
         }
+    }
+
+    pub fn subscribe(&self) -> Subscriber<SwapUpdate> {
+        self.emitter.subscriber()
     }
 
     /// Establishes WebSocket connection to the Boltz server
@@ -346,12 +364,24 @@ impl BoltzWebSocketClient {
         });
 
         // Spawn task to handle incoming messages
+        let emitter_clone = self.emitter.clone();
         tokio::spawn(async move {
             while let Some(msg) = read.next().await {
                 match msg {
                     Ok(Message::Text(text)) => {
-                        if let Ok(_response) = serde_json::from_str::<WsResponse>(&text) {
+                        if let Ok(response) = serde_json::from_str::<WsResponse>(&text) {
                             // FIXME: emit a new event here for the end user!
+                            match response {
+                                WsResponse::Update { args, .. } => {
+                                    for update in args {
+                                        // Emit event for each swap update
+                                        emitter_clone.emit(update.clone());
+                                    }
+                                }
+                                _ => {
+                                    println!("Received message: {:?}", response);
+                                }
+                            }
                         }
                     }
                     Ok(Message::Close(_)) => {
@@ -466,7 +496,18 @@ impl BoltzWebSocketClient {
     /// - `Some(PersistedSwap)` if the swap exists
     /// - `None` if the swap is not found
     pub async fn get_swap(&self, swap_id: &str) -> Option<PersistedSwap> {
-        self.swaps.get_swap(swap_id).await.ok().flatten()
+        self.swaps
+            .get_swap(swap_id.to_string())
+            .await
+            .ok()
+            .flatten()
+    }
+
+    pub async fn update_swap_status(&self, swap_id: String, new_status: SwapStatus) -> Result<()> {
+        self.swaps
+            .update_swap_with_status(&swap_id, new_status)
+            .await?;
+        Ok(())
     }
 
     /// Removes a swap from tracking and unsubscribes from its updates

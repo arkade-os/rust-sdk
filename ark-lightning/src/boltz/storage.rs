@@ -6,6 +6,7 @@
 //! Author: Vincenzo Palazzo <vincenzopalazzodev@gmail.com>
 
 use super::boltz_ws::PersistedSwap;
+use crate::boltz::SwapStatus;
 use nosql_db::NoSQL;
 use std::future::Future;
 use std::sync::Arc;
@@ -21,7 +22,7 @@ pub struct SwapStorageData {
 
 /// SwapStorage trait that define the API
 /// to store and swap data.
-pub trait SwapStorage {
+pub trait SwapStorage: Sync {
     /// Save the swap data
     fn save_swap(
         &self,
@@ -41,8 +42,26 @@ pub trait SwapStorage {
 
     fn get_swap(
         &self,
-        swap_id: &str,
+        swap_id: String,
     ) -> impl Future<Output = anyhow::Result<Option<PersistedSwap>>> + Send;
+
+    fn update_swap_with_status(
+        &self,
+        swap_id: &str,
+        status: SwapStatus,
+    ) -> impl Future<Output = anyhow::Result<()>> + Send {
+        let swap_id = swap_id.to_string();
+        let status = status;
+        async move {
+            if let Some(mut swap) = self.get_swap(swap_id.clone()).await? {
+                swap.status = status.clone();
+                self.save_swap(swap).await?;
+            } else {
+                return Err(anyhow::anyhow!("Swap with id `{}` not found", swap_id));
+            }
+            Ok(())
+        }
+    }
 }
 
 const SWAP_PREFIX: &str = "swap";
@@ -118,10 +137,9 @@ impl SwapStorage for NoSqlStorage {
 
     fn get_swap(
         &self,
-        swap_id: &str,
+        swap_id: String,
     ) -> impl Future<Output = anyhow::Result<Option<PersistedSwap>>> + Send {
         let db = self.inner.clone();
-        let swap_id = swap_id.to_string();
         async move {
             let data = db.get(&swap_id).ok();
             let data = if let Some(data) = data {

@@ -4,6 +4,9 @@
 use crate::ldk::bolt11_invoice as invoice;
 use crate::ldk::offers;
 use bitcoin::Amount;
+use lightning::bolt11_invoice::Bolt11Invoice;
+use lightning::offers::invoice::Bolt12Invoice;
+use lightning::offers::offer::Offer;
 
 #[derive(Debug, Clone)]
 pub struct RcvOptions {
@@ -17,6 +20,38 @@ pub struct SentOptions {
     pub invoice: invoice::Bolt11Invoice,
     pub refund_public_key: String,
 }
+
+pub trait EventHandle: Send + Sync {
+    fn on_invoice_paid(&self, invoice: Bolt11Invoice, amount: Amount, preimage: Vec<u8>);
+    fn on_offer_paid(
+        &self,
+        offer: Offer,
+        invoice: Bolt12Invoice,
+        amount: Amount,
+        preimage: Vec<u8>,
+    );
+    fn on_payment_pending(&self, amount: Amount);
+    fn on_payment_failed(&self, amount: Amount);
+    fn on_payment_received(&self, amount: Amount);
+}
+
+pub struct DummyEventHandler;
+
+impl EventHandle for DummyEventHandler {
+    fn on_invoice_paid(&self, _invoice: Bolt11Invoice, _amount: Amount, _preimage: Vec<u8>) {}
+    fn on_offer_paid(
+        &self,
+        _offer: Offer,
+        _invoice: Bolt12Invoice,
+        _amount: Amount,
+        _preimage: Vec<u8>,
+    ) {
+    }
+    fn on_payment_pending(&self, _amount: Amount) {}
+    fn on_payment_failed(&self, _amount: Amount) {}
+    fn on_payment_received(&self, _amount: Amount) {}
+}
+
 /// A struct representing the Lightning Network functionality.
 pub trait Lightning {
     /// Get a Bolt11 invoice!
