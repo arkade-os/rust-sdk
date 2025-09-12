@@ -7,6 +7,8 @@ edition = "2024"
 anyhow = "1.0"
 ark-core = { path = "../ark-core" }
 bitcoin = { version = "0.32.4", features = ["base64", "rand", "serde"] }
+futures-util = "0.3"
+hex = "0.4"
 lightning = { version = "0.1" }
 musig = { package = "ark-secp256k1", path = "../ark-rust-secp256k1", features = ["serde", "rand"] }
 reqwest = { version = "0.12", features = ["json"] }
@@ -14,6 +16,10 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
 tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+
+nosql_db = { git = "https://github.com/vincenzopalazzo/nosql-db.git" }
+nosql_sled = { git = "https://github.com/vincenzopalazzo/nosql-db.git" }
 
 [dev-dependencies]
 hex = "0.4"
@@ -22,3 +28,11 @@ serde_json = "1.0"
 [[example]]
 name = "vhtlc_example"
 path = "examples/vhtlc_example.rs"
+
+[[example]]
+name = "boltz_ws_example"
+path = "examples/boltz_ws_example.rs"
+
+[[example]]
+name = "boltz_ws_reconnect"
+path = "examples/boltz_ws_reconnect.rs"
