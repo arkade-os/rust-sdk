@@ -15,14 +15,19 @@ use super::model::CreateSubmarineSwapResponse;
 use super::model::GetSwapPreimageResponse;
 use super::model::GetSwapStatusResponse;
 use super::model::PairLimits;
+use crate::arkln::DummyEventHandler;
+use crate::arkln::EventHandle;
 use crate::arkln::Lightning;
 use crate::arkln::RcvOptions;
 use crate::arkln::SentOptions;
+use crate::boltz::boltz_ws::SwapUpdate;
 use crate::ldk::bolt11_invoice as invoice;
 use crate::ldk::offers;
 use anyhow::Ok;
 use anyhow::Result;
 use bitcoin::hashes::sha256;
+use futures_util::lock::Mutex;
+use lightning::events::EventHandler;
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
@@ -52,6 +57,10 @@ pub struct BoltzLightning {
     _network: Network,
     api_url: String,
     ws_client: Arc<RwLock<BoltzWebSocketClient>>,
+
+    receiver: lampo_common::event::Subscriber<SwapUpdate>,
+
+    handler: Mutex<Arc<dyn EventHandle + Send + Sync>>,
 }
 
 impl BoltzLightning {
@@ -62,12 +71,21 @@ impl BoltzLightning {
         let mut ws_client = BoltzWebSocketClient::new(network.clone());
         ws_client.connect().await?;
 
+        let receiver = ws_client.subscribe();
         Ok(Self {
             client,
             _network: network,
             api_url,
             ws_client: Arc::new(RwLock::new(ws_client)),
+            receiver,
+
+            handler: Mutex::new(Arc::new(DummyEventHandler)),
         })
+    }
+
+    pub async fn set_event_handler(&self, handler: Arc<dyn EventHandle + Send + Sync>) {
+        let mut guard = self.handler.lock().await;
+        *guard = handler;
     }
 
     /// Build the Boltz API from the env variables!
@@ -82,6 +100,91 @@ impl BoltzLightning {
         };
 
         Self::new(network).await
+    }
+
+    /// See: https://github.com/arkade-os/boltz-swap/blob/d7b321840e8f90d70ab8d74990c61bb25aa92dc1/src/arkade-lightning.ts#L254
+    pub(crate) async fn claim_htlc(&self, _swap: &PersistedSwap) -> Result<()> {
+        unimplemented!()
+    }
+
+    /// See https://github.com/arkade-os/boltz-swap/blob/d7b321840e8f90d70ab8d74990c61bb25aa92dc1/src/arkade-lightning.ts#L373C9-L373C20
+    pub(crate) async fn refund_vhtlc(&self, _swap: &PersistedSwap) -> Result<()> {
+        unimplemented!()
+    }
+
+    pub async fn spawn(self: Arc<Self>) {
+        let this = self.clone();
+        tokio::spawn(async move {
+            let mut receiver = this.receiver.subscribe();
+            while let Some(SwapUpdate { id, status }) = receiver.recv().await {
+                let ws = this.ws_client.read().await;
+                let result = ws.update_swap_status(id.clone(), status.clone()).await;
+                if let Err(err) = result {
+                    eprintln!("Failed to update swap status: {}", err);
+                    continue;
+                }
+
+                let handler = this.handler.lock().await;
+                let handler = handler.clone();
+                match status {
+                    SwapStatus::Created => {
+                        let status = ws.get_swap(&id).await;
+                        assert!(status.is_some(), "Swap with id `{}` must exist", id);
+                    }
+                    SwapStatus::TransactionMempool => {
+                        // Log it
+                        println!("Swap {} transaction in mempool!", id);
+                    }
+                    SwapStatus::TransactionConfirmed => {
+                        // make a double check with what we see on chain or in the virtual mempool
+                        println!("Swap {} failed!", id);
+                    }
+                    SwapStatus::InvoiceSet => {
+                        println!("Swap {} invoice settled!", id);
+                        // FIXME: https://github.com/arkade-os/boltz-swap/blob/master/src/arkade-lightning.ts#L498
+                    }
+                    SwapStatus::InvoicePending => {
+                        println!("Swap {} invoice pending!", id);
+                        handler.on_payment_pending(bitcoin::Amount::from_sat(0));
+                    }
+                    SwapStatus::InvoicePaid => {
+                        println!("Swap {} invoice paid!", id);
+                        // TODO: we should claim vthlc here!
+                        handler.on_payment_received(bitcoin::Amount::from_sat(0));
+                    }
+                    SwapStatus::InvoiceFailedToPay => {
+                        println!("Swap {} invoice failed to pay!", id);
+                        // We should drop the swap from the storage, and probably keep track
+                        // somehow in the failure
+                        handler.on_payment_failed(bitcoin::Amount::from_sat(0));
+                    }
+                    SwapStatus::TransactionClaimed => {
+                        println!("Swap {} transaction claimed!", id);
+
+                        let swap = ws.get_swap(&id).await;
+                        assert!(swap.is_some());
+                        // SAFETY: it should be never None here
+                        let swap = swap.unwrap();
+                        if let Err(err) = self.claim_htlc(&swap).await {
+                            eprintln!("Failed to claim htlc: {}", err);
+                        }
+
+                        handler.on_payment_received(bitcoin::Amount::from_sat(0));
+                    }
+                    SwapStatus::SwapExpired => {
+                        println!("Swap {} expired!", id);
+                        // We should drop the swap from the storage, and probably keep track
+                        // somehow in the failure
+                        handler.on_payment_failed(bitcoin::Amount::from_sat(0));
+                    }
+                    SwapStatus::Error { error } => {
+                        println!("Swap {} error: {}", id, error.clone());
+                        // We should drop the swap from the storage, and probably keep track
+                        // somehow in the failure
+                    }
+                }
+            }
+        });
     }
 
     pub async fn get_limits(&self) -> Result<HashMap<String, PairLimits>> {
@@ -240,6 +343,7 @@ impl Lightning for BoltzLightning {
                     timeout_block_height: response.timeout_block_height,
                     onchain_amount: response.onchain_amount,
                     blinding_key: response.blinding_key.clone(),
+                    invoice: response.invoice.clone(),
                 },
             };
 
