@@ -1,8 +1,11 @@
 //! Lightning Network Module for the Ark Lightning Swap
 //!
 //! Vincenzo Palazzo <vincenzopalazzodev@gmail.com>
+use crate::vhtlc::VhtlcScript;
+use ark_core::send::VtxoInput;
 use ark_core::ArkAddress;
 use bitcoin::Amount;
+use bitcoin::Psbt;
 use bitcoin::Transaction;
 use bitcoin::XOnlyPublicKey;
 use lightning::bolt11_invoice::Bolt11Invoice;
@@ -64,10 +67,7 @@ pub trait Lightning {
     ) -> impl Future<Output = anyhow::Result<Bolt11Invoice>> + Send;
 
     /// Get an bolt12 offer!
-    fn get_offer(
-        &self,
-        offer: RcvOptions,
-    ) -> impl Future<Output = anyhow::Result<Offer>> + Send;
+    fn get_offer(&self, offer: RcvOptions) -> impl Future<Output = anyhow::Result<Offer>> + Send;
 
     /// Pay a bolt11 invoice!
     fn pay_invoice(&self, opts: SentOptions) -> impl Future<Output = anyhow::Result<()>> + Send;
@@ -82,13 +82,32 @@ pub trait Lightning {
 
 pub trait ArkWallet {
     /// Send funds on a specific address
-    fn send_bitcoin(&self, address: ArkAddress, amount: Amount) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>;
+    fn send_bitcoin(
+        &self,
+        address: ArkAddress,
+        amount: Amount,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>;
 
     // Extract the xpub from the wallet
     fn get_xpub(&self) -> XOnlyPublicKey;
 
     // Sign a transaction with the wallet or something that can sign!
-    fn sign_tx(&self, tx: &Transaction) -> Pin<Box<dyn Future<Output = anyhow::Result<Transaction>> + Send>>;
+    fn sign_tx(&self, psbt: Psbt) -> Pin<Box<dyn Future<Output = anyhow::Result<Psbt>> + Send>>;
+
+    fn new_address(&self) -> Pin<Box<dyn Future<Output = anyhow::Result<ArkAddress>> + Send>>;
+
+    fn get_server_xpub(&self) -> XOnlyPublicKey;
+
+    // FIXME define a vtxo type
+    fn spendable_utxos(
+        &self,
+        vhtlc: &VhtlcScript,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<VtxoInput>>> + Send>>;
+
+    fn broadcast_tx(
+        &self,
+        psbt: Psbt,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Transaction>> + Send>>;
 }
 
 /// Dummy wallet implementation for testing
@@ -101,7 +120,11 @@ impl DummyWallet {
 }
 
 impl ArkWallet for DummyWallet {
-    fn send_bitcoin(&self, _address: ArkAddress, _amount: Amount) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>> {
+    fn send_bitcoin(
+        &self,
+        _address: ArkAddress,
+        _amount: Amount,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>> {
         Box::pin(async { Ok(()) })
     }
 
@@ -110,8 +133,36 @@ impl ArkWallet for DummyWallet {
         XOnlyPublicKey::from_slice(&[0u8; 32]).unwrap()
     }
 
-    fn sign_tx(&self, tx: &Transaction) -> Pin<Box<dyn Future<Output = anyhow::Result<Transaction>> + Send>> {
-        let tx = tx.clone();
+    fn sign_tx(&self, psbt: Psbt) -> Pin<Box<dyn Future<Output = anyhow::Result<Psbt>> + Send>> {
+        let psbt = psbt.clone();
+        Box::pin(async move { Ok(psbt) })
+    }
+
+    fn new_address(&self) -> Pin<Box<dyn Future<Output = anyhow::Result<ArkAddress>> + Send>> {
+        unimplemented!()
+    }
+
+    fn get_server_xpub(&self) -> XOnlyPublicKey {
+        // Return a dummy public key
+        XOnlyPublicKey::from_slice(&[0u8; 32]).unwrap()
+    }
+
+    fn spendable_utxos(
+        &self,
+        _vhtlc: &VhtlcScript,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<VtxoInput>>> + Send>> {
+        Box::pin(async { Ok(vec![]) })
+    }
+
+    fn broadcast_tx(
+        &self,
+        psbt: Psbt,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Transaction>> + Send>> {
+        let tx = psbt
+            .clone()
+            .extract_tx()
+            .map_err(|err| anyhow::anyhow!("Failed to extract tx: {}", err))
+            .unwrap();
         Box::pin(async move { Ok(tx) })
     }
 }
