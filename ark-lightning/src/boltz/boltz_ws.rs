@@ -218,17 +218,33 @@ impl SwapMetadata {
     /// # Returns
     /// - `Some(String)` containing the preimage for reverse swaps
     /// - `None` for submarine swaps
-    pub fn get_preimage(&self) -> Option<String> {
+    pub fn preimage(&self) -> Option<String> {
         match self {
             SwapMetadata::Reverse { preimage, .. } => Some(preimage.clone()),
             SwapMetadata::Submarine { .. } => None,
         }
     }
 
+    pub fn preimage_hash(&self) -> Option<String> {
+        match self {
+            SwapMetadata::Reverse { preimage_hash, .. } => Some(preimage_hash.clone()),
+            SwapMetadata::Submarine { .. } => None,
+        }
+    }
+
+    pub fn address(&self) -> String {
+        match self {
+            SwapMetadata::Reverse { lockup_address, .. } => lockup_address.clone(),
+            SwapMetadata::Submarine { address, .. } => address.clone(),
+        }
+    }
+
     pub fn amount(&self) -> Amount {
         let amount = match self {
             SwapMetadata::Reverse { onchain_amount, .. } => *onchain_amount,
-            SwapMetadata::Submarine { expected_amount, .. } => *expected_amount,
+            SwapMetadata::Submarine {
+                expected_amount, ..
+            } => *expected_amount,
         };
         Amount::from_sat(amount)
     }
@@ -239,9 +255,29 @@ impl SwapMetadata {
                 let invoice = invoice.parse::<Bolt11Invoice>().unwrap();
                 Some(invoice)
             }
-            SwapMetadata::Submarine { .. } => {
-                None
-            }
+            SwapMetadata::Submarine { .. } => None,
+        }
+    }
+
+    pub fn timeout_block_height(&self) -> u64 {
+        match self {
+            SwapMetadata::Reverse {
+                timeout_block_height,
+                ..
+            } => *timeout_block_height,
+            SwapMetadata::Submarine {
+                timeout_block_height,
+                ..
+            } => *timeout_block_height,
+        }
+    }
+
+    pub fn refund_xpub(&self) -> Option<String> {
+        match self {
+            SwapMetadata::Reverse {
+                refund_public_key, ..
+            } => Some(refund_public_key.clone()),
+            SwapMetadata::Submarine { .. } => None,
         }
     }
 }
