@@ -1,0 +1,128 @@
+//! Boltz Storage module Module
+//!
+//! This module allow to make persistance of the Boltz swap data
+//! and allow async execution of the swap
+//!
+//! Author: Vincenzo Palazzo <vincenzopalazzodev@gmail.com>
+
+use super::boltz_ws::PersistedSwap;
+use crate::boltz::SwapStatus;
+use nosql_db::NoSQL;
+use std::future::Future;
+use std::sync::Arc;
+
+pub struct SwapStorageOptions {
+    pub path: String,
+}
+
+pub struct SwapStorageData {
+    pub value: PersistedSwap,
+}
+
+/// SwapStorage trait that define the API
+/// to store and swap data.
+pub trait SwapStorage: Sync {
+    /// Save the swap data
+    fn save_swap(
+        &self,
+        swap: PersistedSwap,
+    ) -> impl Future<Output = anyhow::Result<SwapStorageData>> + Send;
+
+    /// Delete the swap data
+    fn delete_swap(
+        &self,
+        swap_id: &str,
+    ) -> impl Future<Output = anyhow::Result<Option<PersistedSwap>>> + Send;
+
+    fn get_swap(
+        &self,
+        swap_id: String,
+    ) -> impl Future<Output = anyhow::Result<Option<PersistedSwap>>> + Send;
+
+    fn update_swap_with_status(
+        &self,
+        swap_id: &str,
+        status: SwapStatus,
+    ) -> impl Future<Output = anyhow::Result<()>> + Send {
+        let swap_id = swap_id.to_string();
+        let status = status;
+        async move {
+            if let Some(mut swap) = self.get_swap(swap_id.clone()).await? {
+                swap.status = status.clone();
+                self.save_swap(swap).await?;
+            } else {
+                return Err(anyhow::anyhow!("Swap with id `{}` not found", swap_id));
+            }
+            Ok(())
+        }
+    }
+}
+
+const SWAP_PREFIX: &str = "swap";
+/// NoSql storage implementation
+pub struct NoSqlStorage {
+    inner: Arc<nosql_sled::SledDB>,
+}
+
+impl NoSqlStorage {
+    /// Create a new instance of the NoSqlStorage
+    pub fn new(opts: SwapStorageOptions) -> Result<Self, nosql_sled::Error> {
+        let db = nosql_sled::SledDB::new(&opts.path)?;
+        Ok(Self {
+            inner: Arc::new(db),
+        })
+    }
+
+    fn create_internal_key(swap: PersistedSwap) -> String {
+        format!("{SWAP_PREFIX}/{}", swap.id)
+    }
+}
+
+impl SwapStorage for NoSqlStorage {
+    fn save_swap(
+        &self,
+        swap: PersistedSwap,
+    ) -> impl Future<Output = anyhow::Result<SwapStorageData>> + Send {
+        let db = self.inner.clone();
+        let key = Self::create_internal_key(swap.clone());
+        async move {
+            let data = serde_json::to_string(&swap)
+                .map_err(|e| anyhow::anyhow!("Failed to serialize swap: {}", e))?;
+            db.put(&key, &data)?;
+            Ok(SwapStorageData { value: swap })
+        }
+    }
+
+    fn delete_swap(
+        &self,
+        swap_id: &str,
+    ) -> impl Future<Output = anyhow::Result<Option<PersistedSwap>>> + Send {
+        let db = self.inner.clone();
+        let swap_id = swap_id.to_string();
+        async move {
+            let data = nosql_sled::SledDB::drop(&db, &swap_id)?;
+            let data = if let Some(data) = data {
+                serde_json::from_str::<PersistedSwap>(&data).ok()
+            } else {
+                None
+            };
+            Ok(data)
+        }
+    }
+
+    fn get_swap(
+        &self,
+        swap_id: String,
+    ) -> impl Future<Output = anyhow::Result<Option<PersistedSwap>>> + Send {
+        let db = self.inner.clone();
+        async move {
+            let data = db.get(&swap_id).ok();
+            let data = if let Some(data) = data {
+                serde_json::from_str::<PersistedSwap>(&data).ok()
+            } else {
+                None
+            };
+            Ok(data)
+        }
+    }
+}
