@@ -20,8 +20,7 @@ use ark_core::server::BatchTreeEventType;
 use ark_core::server::GetVtxosRequest;
 use ark_core::server::StreamEvent;
 use ark_core::server::VirtualTxOutPoint;
-use ark_core::vtxo::list_virtual_tx_outpoints;
-use ark_core::vtxo::VirtualTxOutPoints;
+use ark_core::vtxo::ServerVtxoList;
 use ark_core::ArkAddress;
 use ark_core::BoardingOutput;
 use ark_core::ExplorerUtxo;
@@ -402,7 +401,7 @@ async fn main() -> Result<()> {
 
         {
             let spendable_vtxos = spendable_vtxos(&grpc_client, &[alice_payout_vtxo]).await?;
-            let virtual_tx_outpoints = list_virtual_tx_outpoints(
+            let virtual_tx_outpoints = find_expired_vtxos(
                 |address: &bitcoin::Address| -> Result<Vec<ExplorerUtxo>, ark_core::Error> {
                     find_outpoints(tokio::runtime::Handle::current(), &esplora_client, address)
                 },
@@ -413,7 +412,7 @@ async fn main() -> Result<()> {
         }
         {
             let spendable_vtxos = spendable_vtxos(&grpc_client, &[bob_payout_vtxo]).await?;
-            let virtual_tx_outpoints = list_virtual_tx_outpoints(
+            let virtual_tx_outpoints = find_expired_vtxos(
                 |address: &bitcoin::Address| -> Result<Vec<ExplorerUtxo>, ark_core::Error> {
                     find_outpoints(tokio::runtime::Handle::current(), &esplora_client, address)
                 },
@@ -522,7 +521,7 @@ async fn main() -> Result<()> {
 
     {
         let spendable_vtxos = spendable_vtxos(&grpc_client, &[alice_payout_vtxo]).await?;
-        let virtual_tx_outpoints = list_virtual_tx_outpoints(
+        let virtual_tx_outpoints = find_expired_vtxos(
             |address: &bitcoin::Address| -> Result<Vec<ExplorerUtxo>, ark_core::Error> {
                 find_outpoints(tokio::runtime::Handle::current(), &esplora_client, address)
             },
@@ -544,7 +543,7 @@ async fn main() -> Result<()> {
 
     {
         let spendable_vtxos = spendable_vtxos(&grpc_client, &[bob_payout_vtxo]).await?;
-        let virtual_tx_outpoints = list_virtual_tx_outpoints(
+        let virtual_tx_outpoints = find_expired_vtxos(
             |address: &bitcoin::Address| -> Result<Vec<ExplorerUtxo>, ark_core::Error> {
                 find_outpoints(tokio::runtime::Handle::current(), &esplora_client, address)
             },
@@ -625,7 +624,7 @@ async fn fund_vtxo(
         grpc_client,
         server_info,
         kp.secret_key(),
-        VirtualTxOutPoints::default(),
+        ServerVtxoList::default(),
         boarding_outpoints,
         vtxo.to_ark_address(),
     )
@@ -1137,7 +1136,7 @@ async fn settle(
     grpc_client: &ark_grpc::Client,
     server_info: &server::Info,
     sk: SecretKey,
-    virtual_tx_outpoints: VirtualTxOutPoints,
+    virtual_tx_outpoints: ServerVtxoList,
     boarding_outpoints: BoardingOutpoints,
     to_address: ArkAddress,
 ) -> Result<Option<Txid>> {

@@ -307,7 +307,7 @@ impl Blockchain for EsploraClient {
     async fn find_outpoints(
         &self,
         address: &Address,
-    ) -> Result<Vec<ark_client::ExplorerUtxo>, Error> {
+    ) -> Result<Vec<ark_core::ExplorerUtxo>, Error> {
         let script_pubkey = address.script_pubkey();
         let txs = self
             .esplora_client
@@ -323,7 +323,7 @@ impl Blockchain for EsploraClient {
                     .iter()
                     .enumerate()
                     .filter(|(_, v)| v.scriptpubkey == script_pubkey)
-                    .map(|(i, v)| ark_client::ExplorerUtxo {
+                    .map(|(i, v)| ark_core::ExplorerUtxo {
                         outpoint: OutPoint {
                             txid,
                             vout: i as u32,
@@ -351,7 +351,7 @@ impl Blockchain for EsploraClient {
                     utxos.push(*output);
                 }
                 Some(OutputStatus { spent: true, .. }) => {
-                    utxos.push(ark_client::ExplorerUtxo {
+                    utxos.push(ark_core::ExplorerUtxo {
                         is_spent: true,
                         ..*output
                     });

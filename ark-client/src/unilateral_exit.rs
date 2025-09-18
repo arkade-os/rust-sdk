@@ -36,18 +36,16 @@ where
     /// commitment transaction output to a spendable VTXO. Every transaction is fully signed,
     /// but requires fee bumping through a P2A output.
     pub async fn build_unilateral_exit_trees(&self) -> Result<Vec<Vec<Transaction>>, Error> {
-        // Recoverable VTXOs cannot be unilaterally claimed.
-        let select_recoverable_vtxos = false;
-
-        let spendable_vtxos = self
-            .spendable_vtxos(select_recoverable_vtxos)
+        let vtxo_list = self
+            .get_vtxos()
             .await
             .context("failed to get spendable VTXOs")?;
+        let spendable_vtxos = vtxo_list.spendable();
 
         let mut unilateral_exit_trees = Vec::new();
 
         // For each spendable VTXO, generate its unilateral exit tree.
-        for (virtual_tx_outpoints, _) in spendable_vtxos {
+        for (_, virtual_tx_outpoints) in spendable_vtxos {
             for virtual_tx_outpoint in virtual_tx_outpoints {
                 let vtxo_chain_response = timeout_op(
                     self.inner.timeout,
@@ -97,7 +95,7 @@ where
                     .collect::<Result<Vec<_>, _>>()?;
 
                 let unilateral_exit_tree =
-                    UnilateralExitTree::new(virtual_tx_outpoint.commitment_txids, paths);
+                    UnilateralExitTree::new(virtual_tx_outpoint.commitment_txids.clone(), paths);
 
                 unilateral_exit_trees.push(unilateral_exit_tree);
             }

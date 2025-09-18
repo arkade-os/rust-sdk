@@ -33,7 +33,6 @@ use ark_core::server::GetVtxosRequestFilter;
 use ark_core::server::GetVtxosRequestReference;
 use ark_core::server::IndexerPage;
 use ark_core::server::Info;
-use ark_core::server::ListVtxo;
 use ark_core::server::NoncePks;
 use ark_core::server::PartialSigTree;
 use ark_core::server::StreamEvent;
@@ -106,59 +105,63 @@ impl Client {
         response.into_inner().try_into()
     }
 
-    pub async fn list_vtxos(&self, request: GetVtxosRequest) -> Result<ListVtxo, Error> {
+    pub async fn list_vtxos(
+        &self,
+        request: GetVtxosRequest,
+    ) -> Result<Vec<VirtualTxOutPoint>, Error> {
         let mut client = self.indexer_client()?;
 
         let response = client
-            .get_vtxos(generated::ark::v1::GetVtxosRequest::from(request))
+            .get_vtxos(generated::ark::v1::GetVtxosRequest::from(request.clone()))
             .await
             .map_err(Error::request)?;
 
-        let mut spent = response
-            .get_ref()
-            .vtxos
-            .iter()
-            .filter_map(|vtxo| {
-                if vtxo.is_unrolled || vtxo.is_spent || vtxo.is_swept {
-                    Some(VirtualTxOutPoint::try_from(vtxo))
-                } else {
-                    None
+        let response = response.get_ref();
+        match response.page {
+            Some(generated::ark::v1::IndexerPageResponse { next, total, .. }) => {
+                let mut vtxos = response
+                    .vtxos
+                    .iter()
+                    .map(VirtualTxOutPoint::try_from)
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                for index in next..total {
+                    let count = response.vtxos.len();
+                    let request = generated::ark::v1::GetVtxosRequest::from(request.clone());
+                    let paged_request = generated::ark::v1::GetVtxosRequest {
+                        page: Some(generated::ark::v1::IndexerPageRequest {
+                            size: count as i32,
+                            index,
+                        }),
+                        ..request
+                    };
+
+                    client
+                        .get_vtxos(paged_request)
+                        .await
+                        .map_err(Error::request)?;
+
+                    let mut next_vtxos = response
+                        .vtxos
+                        .iter()
+                        .map(VirtualTxOutPoint::try_from)
+                        .collect::<Result<Vec<_>, _>>()?;
+
+                    vtxos.append(&mut next_vtxos);
                 }
-            })
-            .collect::<Result<Vec<_>, _>>()?;
 
-        let mut spendable = response
-            .get_ref()
-            .vtxos
-            .iter()
-            .filter_map(|vtxo| {
-                if !vtxo.is_unrolled && !vtxo.is_spent && !vtxo.is_swept {
-                    Some(VirtualTxOutPoint::try_from(vtxo))
-                } else {
-                    None
-                }
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+                Ok(vtxos)
+            }
+            None => {
+                let vtxos = response
+                    .vtxos
+                    .iter()
+                    .map(VirtualTxOutPoint::try_from)
+                    .collect::<Result<Vec<_>, _>>()?;
 
-        let mut spent_by_redeem = Vec::new();
-        for spendable_vtxo in spendable.clone() {
-            let was_spent_by_redeem = spendable.iter().any(|v| v.is_unrolled);
-
-            if was_spent_by_redeem {
-                spent_by_redeem.push(spendable_vtxo);
+                Ok(vtxos)
             }
         }
-
-        // FIXME: Maybe this is no longer necessary.
-
-        // Remove "spendable" VTXOs that were actually already spent by an Ark transaction from the
-        // list of spendable VTXOs.
-        spendable.retain(|i| !spent_by_redeem.contains(i));
-
-        // Add them to the list of spent VTXOs.
-        spent.append(&mut spent_by_redeem);
-
-        Ok(ListVtxo::new(spent, spendable))
     }
 
     pub async fn register_intent(

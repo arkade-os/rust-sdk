@@ -78,6 +78,7 @@ pub enum Output {
     Onchain(TxOut),
 }
 
+#[derive(Debug)]
 pub struct Bip322Proof(Transaction);
 
 impl Bip322Proof {
@@ -373,7 +374,7 @@ fn bip322_hash(message: &[u8]) -> sha256::Hash {
     sha256::Hash::hash(&v)
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct IntentMessage {
     #[serde(rename = "type")]
     intent_message_type: IntentMessageType,
@@ -397,7 +398,7 @@ impl IntentMessage {
     }
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum IntentMessageType {
     Register,

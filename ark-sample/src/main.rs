@@ -25,11 +25,10 @@ use ark_core::send::OffchainTransactions;
 use ark_core::server::BatchTreeEventType;
 use ark_core::server::GetVtxosRequest;
 use ark_core::server::StreamEvent;
-use ark_core::server::VirtualTxOutPoint;
 use ark_core::unilateral_exit;
 use ark_core::unilateral_exit::create_unilateral_exit_transaction;
-use ark_core::vtxo::list_virtual_tx_outpoints;
-use ark_core::vtxo::VirtualTxOutPoints;
+use ark_core::vtxo::ServerVtxoList;
+use ark_core::vtxo::VtxoList;
 use ark_core::ArkAddress;
 use ark_core::BoardingOutput;
 use ark_core::ExplorerUtxo;
@@ -237,18 +236,17 @@ async fn main() -> Result<()> {
 
     match &cli.command {
         Commands::Balance => {
-            let virtual_tx_outpoints = {
-                let spendable_vtxos =
-                    spendable_vtxos(&client, std::slice::from_ref(&vtxo), false).await?;
-                list_virtual_tx_outpoints(find_outpoints_fn, spendable_vtxos)?
-            };
+            let vtxo_list =
+                get_vtxos(&client, &esplora_client, std::slice::from_ref(&vtxo)).await?;
+
             let boarding_outpoints =
                 list_boarding_outpoints(find_outpoints_fn, &[boarding_output])?;
 
             println!(
-                "Offchain balance: spendable = {}, expired = {}",
-                virtual_tx_outpoints.spendable_balance(),
-                virtual_tx_outpoints.expired_balance()
+                "Offchain balance: spendable = {}, recoverable = {}, expired = {}",
+                vtxo_list.spendable_balance(),
+                vtxo_list.recoverable_balance(),
+                vtxo_list.expired_balance()
             );
             println!(
                 "Boarding balance: spendable = {}, expired = {}, pending = {}",
@@ -289,11 +287,8 @@ async fn main() -> Result<()> {
             println!("Send VTXOs to this offchain address: {offchain_address}\n");
         }
         Commands::Settle => {
-            let virtual_tx_outpoints = {
-                let spendable_vtxos =
-                    spendable_vtxos(&client, std::slice::from_ref(&vtxo), true).await?;
-                list_virtual_tx_outpoints(find_outpoints_fn, spendable_vtxos)?
-            };
+            let vtxo_list =
+                get_vtxos(&client, &esplora_client, std::slice::from_ref(&vtxo)).await?;
             let boarding_outpoints =
                 list_boarding_outpoints(find_outpoints_fn, &[boarding_output])?;
 
@@ -301,7 +296,7 @@ async fn main() -> Result<()> {
                 &client,
                 &server_info,
                 sk,
-                virtual_tx_outpoints,
+                vtxo_list,
                 boarding_outpoints,
                 vtxo.to_ark_address(),
             )
@@ -331,36 +326,42 @@ async fn main() -> Result<()> {
                 .map(|(_, amount)| *amount)
                 .sum();
 
-            let virtual_tx_outpoints = {
-                let spendable_vtxos =
-                    spendable_vtxos(&client, std::slice::from_ref(&vtxo), false).await?;
-                list_virtual_tx_outpoints(find_outpoints_fn, spendable_vtxos)?
-            };
+            let vtxo_list =
+                get_vtxos(&client, &esplora_client, std::slice::from_ref(&vtxo)).await?;
 
             let selected_outpoints = {
-                let virtual_tx_outpoints = virtual_tx_outpoints
-                    .spendable
+                let virtual_tx_outpoints = vtxo_list
+                    .spendable_outpoints()
                     .iter()
-                    .map(|(outpoint, _)| ark_core::coin_select::VirtualTxOutPoint {
-                        outpoint: outpoint.outpoint,
-                        expire_at: outpoint.expires_at,
-                        amount: outpoint.amount,
+                    .map(|o| ark_core::coin_select::VirtualTxOutPoint {
+                        outpoint: o.outpoint,
+                        expire_at: o.expires_at,
+                        amount: o.amount,
                     })
                     .collect::<Vec<_>>();
 
                 select_vtxos(virtual_tx_outpoints, total_amount, server_info.dust, true)?
             };
 
-            let vtxo_inputs = virtual_tx_outpoints
-                .spendable
+            let spendable_vtxos = vtxo_list.spendable();
+            let vtxo_inputs = selected_outpoints
                 .into_iter()
-                .filter(|(outpoint, _)| {
-                    selected_outpoints
+                .map(|virtual_tx_outpoint| {
+                    let vtxo = spendable_vtxos
                         .iter()
-                        .any(|o| o.outpoint == outpoint.outpoint)
-                })
-                .map(|(outpoint, vtxo)| {
-                    send::VtxoInput::new(vtxo, outpoint.amount, outpoint.outpoint)
+                        .find_map(|(vtxo, virtual_tx_outpoints)| {
+                            virtual_tx_outpoints
+                                .iter()
+                                .any(|v| v.outpoint == virtual_tx_outpoint.outpoint)
+                                .then_some(vtxo)
+                        })
+                        .expect("to find matching default VTXO");
+
+                    send::VtxoInput::new(
+                        (*vtxo).clone(),
+                        virtual_tx_outpoint.amount,
+                        virtual_tx_outpoint.outpoint,
+                    )
                 })
                 .collect::<Vec<_>>();
 
@@ -509,11 +510,8 @@ async fn main() -> Result<()> {
             println!("Collaboratively redeeming {amount} to {address_string}");
 
             let change_address = vtxo.to_ark_address();
-            let virtual_tx_outpoints = {
-                let spendable_vtxos =
-                    spendable_vtxos(&client, std::slice::from_ref(&vtxo), true).await?;
-                list_virtual_tx_outpoints(find_outpoints_fn, spendable_vtxos)?
-            };
+            let vtxo_list =
+                get_vtxos(&client, &esplora_client, std::slice::from_ref(&vtxo)).await?;
 
             let res = collaboratively_redeem(
                 &client,
@@ -522,7 +520,7 @@ async fn main() -> Result<()> {
                 address,
                 change_address,
                 amount,
-                virtual_tx_outpoints,
+                vtxo_list,
             )
             .await;
             match res {
@@ -530,7 +528,10 @@ async fn main() -> Result<()> {
                     println!("Sending onchain successful.\n\n Batch TXID: {txid}\n");
                 }
                 Ok(None) => {
-                    println!("No boarding outputs or VTXOs can be settled at the moment.");
+                    println!(
+                        "No boarding outputs or VTXOs can be sent to \
+                         an onchain address at the moment."
+                    );
                 }
                 Err(e) => {
                     println!("Failed to send onchain: {e:#}");
@@ -606,6 +607,90 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+async fn get_vtxos(
+    #[cfg(feature = "rest-client")] client: &ark_rest::Client,
+    #[cfg(not(feature = "rest-client"))] client: &ark_grpc::Client,
+    esplora_client: &EsploraClient,
+    vtxos: &[Vtxo],
+) -> Result<VtxoList> {
+    let mut all = ServerVtxoList::default();
+    for vtxo in vtxos.iter() {
+        let request = GetVtxosRequest::new_for_addresses(&[vtxo.to_ark_address()]);
+
+        // The VTXOs for the given Ark address that the Ark server tells us about.
+        let list = client.list_vtxos(request).await?;
+
+        all.merge(HashMap::from_iter([(vtxo.clone(), list)]));
+    }
+
+    let find_outpoints_fn = move |address: &bitcoin::Address| {
+        let address = address.clone();
+        async move {
+            let explorer_utxos = esplora_client
+                .find_outpoints(&address)
+                .await
+                .map_err(ark_core::Error::consumer)?;
+
+            Ok(explorer_utxos)
+        }
+    };
+
+    let vtxo_list = all.to_vtxo_list_async(find_outpoints_fn).await?;
+
+    Ok(vtxo_list)
+}
+
+async fn settle(
+    #[cfg(feature = "rest-client")] client: &ark_rest::Client,
+    #[cfg(not(feature = "rest-client"))] client: &ark_grpc::Client,
+    server_info: &ark_core::server::Info,
+    sk: SecretKey,
+    vtxo_list: VtxoList,
+    boarding_outputs: BoardingOutpoints,
+    to_address: ArkAddress,
+) -> Result<Option<Txid>> {
+    if vtxo_list.spendable_and_recoverable().is_empty() && boarding_outputs.spendable.is_empty() {
+        return Ok(None);
+    }
+
+    let spendable_amount = boarding_outputs.spendable_balance()
+        + vtxo_list.spendable_balance()
+        + vtxo_list.recoverable_balance();
+    let batch_outputs = vec![proof_of_funds::Output::Offchain(TxOut {
+        value: spendable_amount,
+        script_pubkey: to_address.to_p2tr_script_pubkey(),
+    })];
+
+    let vtxo_inputs = vtxo_list
+        .spendable_and_recoverable()
+        .clone()
+        .into_iter()
+        .flat_map(|(vtxo, os)| {
+            os.into_iter().map(|o| {
+                batch::VtxoInput::new(vtxo.clone(), o.amount, o.outpoint, o.is_recoverable())
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let onchain_inputs = boarding_outputs
+        .spendable
+        .into_iter()
+        .map(|(outpoint, amount, boarding_output)| {
+            batch::OnChainInput::new(boarding_output, amount, outpoint)
+        })
+        .collect::<Vec<_>>();
+
+    execute_batch(
+        client,
+        server_info,
+        sk,
+        vtxo_inputs,
+        onchain_inputs,
+        batch_outputs,
+    )
+    .await
+}
+
 async fn collaboratively_redeem(
     #[cfg(feature = "rest-client")] client: &ark_rest::Client,
     #[cfg(not(feature = "rest-client"))] client: &ark_grpc::Client,
@@ -614,33 +699,15 @@ async fn collaboratively_redeem(
     address: bitcoin::Address,
     change_address: ArkAddress,
     amount: Amount,
-    vtxos: VirtualTxOutPoints,
+    vtxo_list: VtxoList,
 ) -> Result<Option<Txid>> {
-    if vtxos.spendable.is_empty() {
+    let spendable_vtxos = vtxo_list.spendable();
+
+    if spendable_vtxos.is_empty() {
         bail!("No spendable vtxos found");
     }
 
-    let batch_inputs = vtxos
-        .spendable
-        .clone()
-        .into_iter()
-        .map(|(virtual_tx_outpoint, vtxo)| {
-            proof_of_funds::Input::new(
-                virtual_tx_outpoint.outpoint,
-                vtxo.exit_delay(),
-                TxOut {
-                    value: virtual_tx_outpoint.amount,
-                    script_pubkey: vtxo.script_pubkey(),
-                },
-                vtxo.tapscripts(),
-                vtxo.owner_pk(),
-                vtxo.exit_spend_info(),
-                false,
-            )
-        })
-        .collect::<Vec<_>>();
-
-    let change_amount = vtxos
+    let change_amount = vtxo_list
         .spendable_balance()
         .checked_sub(amount)
         .context("Not enough spendable balance")?;
@@ -663,162 +730,18 @@ async fn collaboratively_redeem(
         );
     }
 
-    let vtxo_inputs = vtxos
-        .spendable
+    let vtxo_inputs = vtxo_list
+        .spendable()
         .clone()
         .into_iter()
-        .map(|(outpoint, vtxo)| {
-            batch::VtxoInput::new(
-                vtxo,
-                outpoint.amount,
-                outpoint.outpoint,
-                outpoint.is_recoverable(),
-            )
+        .flat_map(|(vtxo, os)| {
+            os.into_iter().map(|o| {
+                batch::VtxoInput::new(vtxo.clone(), o.amount, o.outpoint, o.is_recoverable())
+            })
         })
         .collect::<Vec<_>>();
 
-    let topics = vtxos
-        .spendable
-        .iter()
-        .map(|(o, _)| o.outpoint.to_string())
-        .collect();
-
-    execute_batch(
-        client,
-        server_info,
-        sk,
-        batch_inputs,
-        batch_outputs,
-        vtxo_inputs,
-        vec![],
-        topics,
-    )
-    .await
-}
-
-async fn spendable_vtxos(
-    #[cfg(feature = "rest-client")] client: &ark_rest::Client,
-    #[cfg(not(feature = "rest-client"))] client: &ark_grpc::Client,
-    vtxos: &[Vtxo],
-    include_recoverable_vtxos: bool,
-) -> Result<HashMap<Vtxo, Vec<VirtualTxOutPoint>>> {
-    let mut spendable_vtxos = HashMap::new();
-    for vtxo in vtxos.iter() {
-        let request = GetVtxosRequest::new_for_addresses(&[vtxo.to_ark_address()]);
-
-        // The VTXOs for the given Ark address that the Ark server tells us about.
-        let list = client.list_vtxos(request).await?;
-
-        let spendable = if include_recoverable_vtxos {
-            list.spendable_with_recoverable()
-        } else {
-            list.spendable().to_vec()
-        };
-
-        spendable_vtxos.insert(vtxo.clone(), spendable);
-    }
-
-    Ok(spendable_vtxos)
-}
-
-async fn settle(
-    #[cfg(feature = "rest-client")] client: &ark_rest::Client,
-    #[cfg(not(feature = "rest-client"))] client: &ark_grpc::Client,
-    server_info: &ark_core::server::Info,
-    sk: SecretKey,
-    vtxos: VirtualTxOutPoints,
-    boarding_outputs: BoardingOutpoints,
-    to_address: ArkAddress,
-) -> Result<Option<Txid>> {
-    if vtxos.spendable.is_empty() && boarding_outputs.spendable.is_empty() {
-        return Ok(None);
-    }
-
-    let batch_inputs = {
-        let boarding_inputs = boarding_outputs.spendable.clone().into_iter().map(
-            |(outpoint, amount, boarding_output)| {
-                proof_of_funds::Input::new(
-                    outpoint,
-                    boarding_output.exit_delay(),
-                    TxOut {
-                        value: amount,
-                        script_pubkey: boarding_output.script_pubkey(),
-                    },
-                    boarding_output.tapscripts(),
-                    boarding_output.owner_pk(),
-                    boarding_output.exit_spend_info(),
-                    true,
-                )
-            },
-        );
-
-        let vtxo_inputs = vtxos
-            .spendable
-            .clone()
-            .into_iter()
-            .map(|(virtual_tx_outpoint, vtxo)| {
-                proof_of_funds::Input::new(
-                    virtual_tx_outpoint.outpoint,
-                    vtxo.exit_delay(),
-                    TxOut {
-                        value: virtual_tx_outpoint.amount,
-                        script_pubkey: vtxo.script_pubkey(),
-                    },
-                    vtxo.tapscripts(),
-                    vtxo.owner_pk(),
-                    vtxo.exit_spend_info(),
-                    false,
-                )
-            });
-
-        boarding_inputs.chain(vtxo_inputs).collect::<Vec<_>>()
-    };
-
-    let spendable_amount = boarding_outputs.spendable_balance() + vtxos.spendable_balance();
-    let batch_outputs = vec![proof_of_funds::Output::Offchain(TxOut {
-        value: spendable_amount,
-        script_pubkey: to_address.to_p2tr_script_pubkey(),
-    })];
-
-    let vtxo_inputs = vtxos
-        .spendable
-        .clone()
-        .into_iter()
-        .map(|(outpoint, vtxo)| {
-            batch::VtxoInput::new(
-                vtxo,
-                outpoint.amount,
-                outpoint.outpoint,
-                outpoint.is_recoverable(),
-            )
-        })
-        .collect::<Vec<_>>();
-
-    let onchain_inputs = boarding_outputs
-        .spendable
-        .into_iter()
-        .map(|(outpoint, amount, boarding_output)| {
-            batch::OnChainInput::new(boarding_output, amount, outpoint)
-        })
-        .collect::<Vec<_>>();
-
-    let topics = vtxos
-        .spendable
-        .iter()
-        .map(|(o, _)| o.outpoint.to_string())
-        .collect();
-
-    execute_batch(
-        client,
-        server_info,
-        sk,
-        batch_inputs,
-        batch_outputs,
-        vtxo_inputs,
-        onchain_inputs,
-        topics,
-    )
-    .await
+    execute_batch(client, server_info, sk, vtxo_inputs, vec![], batch_outputs).await
 }
 
 pub struct EsploraClient {
@@ -944,19 +867,22 @@ async fn transaction_history(
     let mut incoming_transactions = Vec::new();
     let mut outgoing_transactions = Vec::new();
     for vtxo in vtxos.iter() {
-        let request = GetVtxosRequest::new_for_addresses(&[vtxo.to_ark_address()]);
-        let vtxo_list = client.list_vtxos(request).await?;
+        let vtxo_list = get_vtxos(&client, onchain_explorer, std::slice::from_ref(vtxo)).await?;
+
+        // TODO: We might be filtering out too many things here.
+        let spent_outpoints = vtxo_list.spent_outpoints();
+        let spendable_outpoints = vtxo_list.spendable_outpoints();
 
         let mut new_incoming_transactions = generate_incoming_vtxo_transaction_history(
-            vtxo_list.spent(),
-            vtxo_list.spendable(),
+            &spent_outpoints,
+            &spendable_outpoints,
             &boarding_commitment_transactions,
         )?;
 
         incoming_transactions.append(&mut new_incoming_transactions);
 
         let relevant_txs =
-            generate_outgoing_vtxo_transaction_history(vtxo_list.spent(), vtxo_list.spendable())?;
+            generate_outgoing_vtxo_transaction_history(&spent_outpoints, &spendable_outpoints)?;
         for relevant_tx in relevant_txs {
             match relevant_tx {
                 history::OutgoingTransaction::Complete(tx) => outgoing_transactions.push(tx),
@@ -965,7 +891,7 @@ async fn transaction_history(
                         GetVtxosRequest::new_for_outpoints(&[incomplete_tx.first_outpoint()]);
                     let list = client.list_vtxos(request).await?;
 
-                    if let Some(spend_tx_vtxo) = list.all().first() {
+                    if let Some(spend_tx_vtxo) = list.first() {
                         let tx = incomplete_tx.finish(spend_tx_vtxo)?;
                         outgoing_transactions.push(tx);
                     }
@@ -1068,19 +994,51 @@ async fn execute_batch(
     #[cfg(not(feature = "rest-client"))] client: &ark_grpc::Client,
     server_info: &ark_core::server::Info,
     sk: SecretKey,
-    batch_inputs: Vec<proof_of_funds::Input>,
-    batch_outputs: Vec<proof_of_funds::Output>,
     vtxo_inputs: Vec<batch::VtxoInput>,
     onchain_inputs: Vec<batch::OnChainInput>,
-    topics: Vec<String>,
+    batch_outputs: Vec<proof_of_funds::Output>,
 ) -> Result<Option<Txid>> {
     let secp = Secp256k1::new();
     let mut rng = thread_rng();
 
-    let n_batch_inputs = batch_inputs.len();
+    let n_batch_inputs = vtxo_inputs.len();
     if n_batch_inputs == 0 {
         return Ok(None);
     }
+
+    let inputs = {
+        let boarding_inputs = onchain_inputs.clone().into_iter().map(|o| {
+            proof_of_funds::Input::new(
+                o.outpoint(),
+                o.boarding_output().exit_delay(),
+                TxOut {
+                    value: o.amount(),
+                    script_pubkey: o.boarding_output().script_pubkey(),
+                },
+                o.boarding_output().tapscripts(),
+                o.boarding_output().owner_pk(),
+                o.boarding_output().exit_spend_info(),
+                true,
+            )
+        });
+
+        let vtxo_inputs = vtxo_inputs.clone().into_iter().map(|v| {
+            proof_of_funds::Input::new(
+                v.outpoint(),
+                v.vtxo().exit_delay(),
+                TxOut {
+                    value: v.amount(),
+                    script_pubkey: v.vtxo().script_pubkey(),
+                },
+                v.vtxo().tapscripts(),
+                v.vtxo().owner_pk(),
+                v.vtxo().exit_spend_info(),
+                false,
+            )
+        });
+
+        boarding_inputs.chain(vtxo_inputs).collect::<Vec<_>>()
+    };
 
     let cosigner_kp = Keypair::new(&secp, &mut rng);
     let own_cosigner_kps = [cosigner_kp];
@@ -1103,7 +1061,7 @@ async fn execute_batch(
     let (bip322_proof, intent_message) = proof_of_funds::make_bip322_signature(
         &[signing_kp],
         sign_for_onchain_pk_fn,
-        batch_inputs,
+        inputs,
         batch_outputs,
         own_cosigner_pks.clone(),
     )?;
@@ -1114,8 +1072,9 @@ async fn execute_batch(
 
     tracing::info!(intent_id, "Registered intent");
 
-    let topics = topics
-        .into_iter()
+    let topics = vtxo_inputs
+        .iter()
+        .map(|v| v.outpoint().to_string())
         .chain(
             own_cosigner_pks
                 .iter()

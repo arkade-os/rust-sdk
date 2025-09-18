@@ -102,6 +102,7 @@ pub struct TxTreeNode {
 }
 
 // TODO: Implement pagination.
+#[derive(Clone)]
 pub struct GetVtxosRequest {
     reference: GetVtxosRequestReference,
     filter: Option<GetVtxosRequestFilter>,
@@ -169,11 +170,13 @@ impl GetVtxosRequest {
     }
 }
 
+#[derive(Clone)]
 pub enum GetVtxosRequestReference {
     Scripts(Vec<ScriptBuf>),
     OutPoints(Vec<OutPoint>),
 }
 
+#[derive(Clone, Copy)]
 pub enum GetVtxosRequestFilter {
     Spendable,
     Spent,
@@ -207,8 +210,16 @@ pub struct VirtualTxOutPoint {
 }
 
 impl VirtualTxOutPoint {
+    pub fn is_spendable(&self) -> bool {
+        !self.is_spent && !self.is_unrolled && !self.is_swept
+    }
+
     pub fn is_recoverable(&self) -> bool {
         self.is_swept && !self.is_spent
+    }
+
+    pub fn is_spent(&self) -> bool {
+        self.is_spent || self.is_unrolled
     }
 }
 
@@ -227,53 +238,6 @@ pub struct Info {
     pub utxo_max_amount: Option<Amount>,
     pub vtxo_min_amount: Option<Amount>,
     pub vtxo_max_amount: Option<Amount>,
-}
-
-#[derive(Clone, Debug)]
-pub struct ListVtxo {
-    spent: Vec<VirtualTxOutPoint>,
-    spendable: Vec<VirtualTxOutPoint>,
-}
-
-impl ListVtxo {
-    pub fn new(spent: Vec<VirtualTxOutPoint>, spendable: Vec<VirtualTxOutPoint>) -> Self {
-        Self { spent, spendable }
-    }
-
-    pub fn all(&self) -> Vec<VirtualTxOutPoint> {
-        [self.spent(), self.spendable()].concat()
-    }
-
-    pub fn spent(&self) -> &[VirtualTxOutPoint] {
-        &self.spent
-    }
-
-    pub fn spent_without_recoverable(&self) -> Vec<VirtualTxOutPoint> {
-        self.spent
-            .iter()
-            .filter(|v| !v.is_recoverable())
-            .cloned()
-            .collect()
-    }
-
-    pub fn spendable(&self) -> &[VirtualTxOutPoint] {
-        &self.spendable
-    }
-
-    pub fn spendable_with_recoverable(&self) -> Vec<VirtualTxOutPoint> {
-        let mut spendable = self.spendable.clone();
-
-        let mut recoverable_vtxos = Vec::new();
-        for spent_vtxo in self.spent.iter() {
-            if spent_vtxo.is_recoverable() {
-                recoverable_vtxos.push(spent_vtxo.clone());
-            }
-        }
-
-        spendable.append(&mut recoverable_vtxos);
-
-        spendable
-    }
 }
 
 #[derive(Debug, Clone)]

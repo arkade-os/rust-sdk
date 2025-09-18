@@ -26,6 +26,8 @@ enum Kind {
     CoinSelect(CoinSelectError),
     /// An error related to encoding or decoding an Ark address.
     ArkAddress(ArkAddressError),
+    /// An error thrown by a user of this library.
+    Consumer(ConsumerError),
 }
 
 #[derive(Debug)]
@@ -53,11 +55,22 @@ struct ArkAddressError {
     source: Source,
 }
 
+#[derive(Debug)]
+struct ConsumerError {
+    source: Source,
+}
+
 impl Error {
     fn new(kind: Kind) -> Self {
         Self {
             inner: Box::new(ErrorImpl { kind, cause: None }),
         }
+    }
+
+    pub fn consumer(source: impl Into<Source>) -> Self {
+        Error::new(Kind::Consumer(ConsumerError {
+            source: source.into(),
+        }))
     }
 
     pub fn ad_hoc(source: impl Into<Source>) -> Self {
@@ -114,6 +127,7 @@ impl fmt::Display for Kind {
             Kind::Transaction(ref err) => err.fmt(f),
             Kind::CoinSelect(ref err) => err.fmt(f),
             Kind::ArkAddress(ref err) => err.fmt(f),
+            Kind::Consumer(ref err) => err.fmt(f),
         }
     }
 }
@@ -143,6 +157,12 @@ impl fmt::Display for CoinSelectError {
 }
 
 impl fmt::Display for ArkAddressError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.source.fmt(f)
+    }
+}
+
+impl fmt::Display for ConsumerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.source.fmt(f)
     }

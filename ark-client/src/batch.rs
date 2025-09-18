@@ -6,7 +6,6 @@ use crate::wallet::OnchainWallet;
 use crate::Blockchain;
 use crate::Client;
 use crate::Error;
-use crate::ExplorerUtxo;
 use ark_core::batch;
 use ark_core::batch::create_and_sign_forfeit_txs;
 use ark_core::batch::generate_nonce_tree;
@@ -17,6 +16,7 @@ use ark_core::proof_of_funds;
 use ark_core::server::BatchTreeEventType;
 use ark_core::server::StreamEvent;
 use ark_core::ArkAddress;
+use ark_core::ExplorerUtxo;
 use ark_core::TxGraph;
 use backon::ExponentialBuilder;
 use backon::Retryable;
@@ -107,6 +107,7 @@ where
         rng: &mut R,
         to_address: Address,
         to_amount: Amount,
+        // FIXME: Verify that this is even possible to use.
         select_recoverable_vtxos: bool,
     ) -> Result<Txid, Error>
     where
@@ -220,17 +221,23 @@ where
             }
         }
 
-        let spendable_vtxos = self.spendable_vtxos(select_recoverable_vtxos).await?;
+        let vtxo_list = self.get_vtxos().await?;
 
-        for (virtual_tx_outpoints, _) in spendable_vtxos.iter() {
+        let vtxos = if select_recoverable_vtxos {
+            vtxo_list.spendable_and_recoverable()
+        } else {
+            vtxo_list.spendable()
+        };
+
+        for (_, virtual_tx_outpoints) in vtxos.iter() {
             total_amount += virtual_tx_outpoints
                 .iter()
                 .fold(Amount::ZERO, |acc, vtxo| acc + vtxo.amount)
         }
 
-        let vtxo_inputs = spendable_vtxos
+        let vtxo_inputs = vtxos
             .into_iter()
-            .flat_map(|(virtual_tx_outpoints, vtxo)| {
+            .flat_map(|(vtxo, virtual_tx_outpoints)| {
                 virtual_tx_outpoints
                     .into_iter()
                     .map(|virtual_tx_outpoint| {

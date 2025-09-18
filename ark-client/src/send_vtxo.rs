@@ -34,18 +34,17 @@ where
     ///
     /// The [`Txid`] of the generated Ark transaction.
     pub async fn send_vtxo(&self, address: ArkAddress, amount: Amount) -> Result<Txid, Error> {
-        // Recoverable VTXOs cannot be sent.
-        let select_recoverable_vtxos = false;
-
-        let spendable_vtxos = self
-            .spendable_vtxos(select_recoverable_vtxos)
+        let vtxo_list = self
+            .get_vtxos()
             .await
             .context("failed to get spendable VTXOs")?;
+        let spendable_vtxos = vtxo_list.spendable();
 
         // Run coin selection algorithm on candidate spendable VTXOs.
+
         let spendable_virtual_tx_outpoints = spendable_vtxos
             .iter()
-            .flat_map(|(vtxos, _)| vtxos.clone())
+            .flat_map(|(_, vtxos)| vtxos.clone())
             .map(|vtxo| ark_core::coin_select::VirtualTxOutPoint {
                 outpoint: vtxo.outpoint,
                 expire_at: vtxo.expires_at,
@@ -66,9 +65,8 @@ where
             .into_iter()
             .map(|virtual_tx_outpoint| {
                 let vtxo = spendable_vtxos
-                    .clone()
-                    .into_iter()
-                    .find_map(|(virtual_tx_outpoints, vtxo)| {
+                    .iter()
+                    .find_map(|(vtxo, virtual_tx_outpoints)| {
                         virtual_tx_outpoints
                             .iter()
                             .any(|v| v.outpoint == virtual_tx_outpoint.outpoint)
@@ -77,7 +75,7 @@ where
                     .expect("to find matching default VTXO");
 
                 send::VtxoInput::new(
-                    vtxo,
+                    (*vtxo).clone(),
                     virtual_tx_outpoint.amount,
                     virtual_tx_outpoint.outpoint,
                 )

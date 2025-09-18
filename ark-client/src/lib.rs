@@ -12,8 +12,10 @@ use ark_core::history::OutgoingTransaction;
 use ark_core::server;
 use ark_core::server::GetVtxosRequest;
 use ark_core::server::SubscriptionResponse;
-use ark_core::server::VirtualTxOutPoint;
+use ark_core::vtxo::ServerVtxoList;
+use ark_core::vtxo::VtxoList;
 use ark_core::ArkAddress;
+use ark_core::ExplorerUtxo;
 use ark_core::UtxoCoinSelection;
 use ark_core::Vtxo;
 use ark_grpc::VtxoChainResponse;
@@ -27,7 +29,7 @@ use bitcoin::Transaction;
 use bitcoin::Txid;
 use futures::Future;
 use futures::Stream;
-use jiff::Timestamp;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -215,45 +217,32 @@ pub struct Client<B, W> {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct ExplorerUtxo {
-    pub outpoint: OutPoint,
-    pub amount: Amount,
-    pub confirmation_blocktime: Option<u64>,
-    pub is_spent: bool,
-}
-
-#[derive(Clone, Copy, Debug)]
 pub struct SpendStatus {
     pub spend_txid: Option<Txid>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct ListVtxo {
-    pub spendable: Vec<(Vec<VirtualTxOutPoint>, Vtxo)>,
-    pub spent: Vec<(Vec<VirtualTxOutPoint>, Vtxo)>,
-}
-impl ListVtxo {
-    fn spendable_outpoints(&self) -> Vec<VirtualTxOutPoint> {
-        self.spendable
-            .iter()
-            .flat_map(|(os, _)| os.clone())
-            .collect()
-    }
-
-    fn spent_outpoints(&self) -> Vec<VirtualTxOutPoint> {
-        self.spent.iter().flat_map(|(os, _)| os.clone()).collect()
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct OffChainBalance {
     pending: Amount,
     confirmed: Amount,
+    recoverable: Amount,
 }
 
 impl OffChainBalance {
+    pub fn new(pending: Amount, confirmed: Amount, recoverable: Amount) -> Self {
+        Self {
+            pending,
+            confirmed,
+            recoverable,
+        }
+    }
+
     pub fn pending(&self) -> Amount {
         self.pending
+    }
+
+    pub fn recoverable(&self) -> Amount {
+        self.recoverable
     }
 
     pub fn confirmed(&self) -> Amount {
@@ -261,7 +250,7 @@ impl OffChainBalance {
     }
 
     pub fn total(&self) -> Amount {
-        self.pending + self.confirmed
+        self.pending + self.recoverable + self.confirmed
     }
 }
 
@@ -445,44 +434,6 @@ where
         Ok(vec![address])
     }
 
-    pub async fn list_vtxos(&self, include_recoverable_vtxos: bool) -> Result<ListVtxo, Error> {
-        let addresses = self.get_offchain_addresses()?;
-
-        let mut vtxos = ListVtxo {
-            spendable: Vec::new(),
-            spent: Vec::new(),
-        };
-
-        for (address, vtxo) in addresses.into_iter() {
-            let request = GetVtxosRequest::new_for_addresses(&[address]);
-
-            let list = timeout_op(
-                self.inner.timeout,
-                self.network_client().list_vtxos(request),
-            )
-            .await
-            .context("Failed to fetch list of VTXOs")??;
-
-            if include_recoverable_vtxos {
-                vtxos
-                    .spent
-                    .push((list.spent_without_recoverable().to_vec(), vtxo.clone()));
-
-                vtxos
-                    .spendable
-                    .push((list.spendable_with_recoverable().to_vec(), vtxo.clone()));
-            } else {
-                vtxos.spent.push((list.spent().to_vec(), vtxo.clone()));
-
-                vtxos
-                    .spendable
-                    .push((list.spendable().to_vec(), vtxo.clone()));
-            }
-        }
-
-        Ok(vtxos)
-    }
-
     pub async fn get_vtxo_chain(
         &self,
         out_point: OutPoint,
@@ -500,76 +451,63 @@ where
         Ok(Some(vtxo_chain))
     }
 
-    pub async fn spendable_vtxos(
-        &self,
-        include_recoverable_vtxos: bool,
-    ) -> Result<Vec<(Vec<VirtualTxOutPoint>, Vtxo)>, Error> {
-        let now = Timestamp::now();
+    pub async fn get_vtxos(&self) -> Result<VtxoList, Error> {
+        let server_vtxos = self.list_server_vtxos().await?;
 
-        let mut spendable = vec![];
+        let find_outpoints_fn = move |address: &bitcoin::Address| {
+            let address = address.clone();
+            async move {
+                let explorer_utxos = timeout_op(
+                    self.inner.timeout,
+                    self.blockchain().find_outpoints(&address),
+                )
+                .await
+                .map_err(|e| ark_core::Error::consumer(format!("failed to find outpoints: {e:?}")))?
+                .map_err(|e| {
+                    ark_core::Error::consumer(format!("failed to find outpoints: {e:?}"))
+                })?;
 
-        let vtxos = self.list_vtxos(include_recoverable_vtxos).await?;
+                Ok(explorer_utxos)
+            }
+        };
 
-        for (virtual_tx_outpoints, vtxo) in vtxos.spendable {
-            let explorer_utxos = timeout_op(
+        let vtxos = server_vtxos.to_vtxo_list_async(find_outpoints_fn).await?;
+
+        Ok(vtxos)
+    }
+
+    async fn list_server_vtxos(&self) -> Result<ServerVtxoList, Error> {
+        let addresses = self.get_offchain_addresses()?;
+
+        let mut all = ServerVtxoList::default();
+
+        for (address, vtxo) in addresses.into_iter() {
+            let request = GetVtxosRequest::new_for_addresses(&[address]);
+
+            let list = timeout_op(
                 self.inner.timeout,
-                self.blockchain().find_outpoints(vtxo.address()),
+                self.network_client().list_vtxos(request),
             )
             .await
-            .context("Failed to find outpoints")??;
+            .context("Failed to fetch list of VTXOs")??;
 
-            let mut spendable_outpoints = Vec::new();
-            for virtual_tx_outpoint in virtual_tx_outpoints {
-                match explorer_utxos
-                    .iter()
-                    .find(|explorer_utxo| explorer_utxo.outpoint == virtual_tx_outpoint.outpoint)
-                {
-                    // Exclude VTXOs that have been confirmed on the blockchain, but whose exit path
-                    // is now _active_. These should be claimed unilaterally instead.
-                    Some(ExplorerUtxo {
-                        confirmation_blocktime: Some(confirmation_blocktime),
-                        ..
-                    }) if vtxo.can_be_claimed_unilaterally_by_owner(
-                        now.as_duration().try_into().map_err(Error::ad_hoc)?,
-                        Duration::from_secs(*confirmation_blocktime),
-                    ) => {}
-                    // All other VTXOs are spendable.
-                    _ => {
-                        spendable_outpoints.push(virtual_tx_outpoint);
-                    }
-                }
-            }
-
-            spendable.push((spendable_outpoints, vtxo));
+            all.merge(HashMap::from_iter([(vtxo, list)]));
         }
 
-        Ok(spendable)
+        Ok(all)
     }
 
     pub async fn offchain_balance(&self) -> Result<OffChainBalance, Error> {
-        // We should not include recoverable VTXOS in the spendable balance because they cannot be
-        // spent until they are claimed.
         let list = self
-            .spendable_vtxos(false)
+            .get_vtxos()
             .await
             .context("failed to get spendable VTXOs")?;
-        let sum =
-            list.iter()
-                .flat_map(|(vtxos, _)| vtxos)
-                .fold(OffChainBalance::default(), |acc, x| {
-                    match x.is_preconfirmed {
-                        true => OffChainBalance {
-                            pending: acc.pending + x.amount,
-                            ..acc
-                        },
-                        false => OffChainBalance {
-                            confirmed: acc.confirmed + x.amount,
-                            ..acc
-                        },
-                    }
-                });
 
-        Ok(sum)
+        Ok(OffChainBalance::new(
+            list.pending_spendable_offchain_balance(),
+            list.confirmed_spendable_offchain_balance(),
+            list.recoverable_balance(),
+        ))
     }
 
     pub async fn transaction_history(&self) -> Result<Vec<history::Transaction>, Error> {
@@ -614,18 +552,20 @@ where
             }
         }
 
-        let vtxos = self.list_vtxos(true).await?;
+        let vtxo_list = self.get_vtxos().await?;
+
+        // TODO: We might be filtering out too many things here.
+        let spent_outpoints = vtxo_list.spent_outpoints();
+        let spendable_outpoints = vtxo_list.spendable_outpoints();
 
         let incoming_transactions = generate_incoming_vtxo_transaction_history(
-            &vtxos.spent_outpoints(),
-            &vtxos.spendable_outpoints(),
+            &spent_outpoints,
+            &spendable_outpoints,
             &boarding_commitment_transactions,
         )?;
 
-        let outgoing_txs = generate_outgoing_vtxo_transaction_history(
-            &vtxos.spent_outpoints(),
-            &vtxos.spendable_outpoints(),
-        )?;
+        let outgoing_txs =
+            generate_outgoing_vtxo_transaction_history(&spent_outpoints, &spendable_outpoints)?;
 
         let mut outgoing_transactions = vec![];
         for tx in outgoing_txs {
@@ -642,7 +582,7 @@ where
                     .await
                     .context("Failed to fetch list of VTXOs")??;
 
-                    match list.all().first() {
+                    match list.first() {
                         Some(virtual_tx_outpoint) => {
                             match incomplete_tx.finish(virtual_tx_outpoint) {
                                 Ok(tx) => tx,

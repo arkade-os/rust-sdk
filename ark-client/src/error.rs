@@ -26,7 +26,7 @@ enum Kind {
     CoinSelect(CoinSelectError),
     /// An error related to actions within the wallet.
     Wallet(WalletError),
-    /// An error thrown by a user of this library
+    /// An error thrown by a user of this library.
     Consumer(ConsumerError),
 }
 
