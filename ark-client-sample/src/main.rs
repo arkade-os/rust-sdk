@@ -14,6 +14,7 @@ use ark_client::Error;
 use ark_client::OfflineClient;
 use ark_core::history;
 use ark_core::ArkAddress;
+use bitcoin::address::NetworkUnchecked;
 use bitcoin::key::Secp256k1;
 use bitcoin::secp256k1::SecretKey;
 use bitcoin::Address;
@@ -72,6 +73,13 @@ enum Commands {
     Subscribe {
         /// The Ark address to subscribe to.
         address: ArkAddressCli,
+    },
+    /// Send on-chain to address
+    SendOnchain {
+        /// Where to send the funds to
+        address: Address<NetworkUnchecked>,
+        /// How many sats to send.
+        amount: u64,
     },
 }
 
@@ -172,7 +180,7 @@ async fn main() -> Result<()> {
                 .map_err(|e| anyhow!(e))?;
 
             tracing::info!(
-                "Offchain balance: spendable = {}, pending = {}",
+                "Offchain balance: confirmed = {}, pending = {}",
                 off_chain_balance.confirmed(),
                 off_chain_balance.pending()
             );
@@ -183,7 +191,7 @@ async fn main() -> Result<()> {
             let unspent_sum = unspent.iter().map(|u| u.amount).sum::<Amount>();
 
             tracing::info!(
-                "Onchain balance: spendable = {}, spent = {}",
+                "Onchain balance: confirmed = {}, spent = {}",
                 unspent_sum,
                 spent_sum
             );
@@ -293,6 +301,26 @@ async fn main() -> Result<()> {
             }
 
             println!("Subscription stream ended");
+        }
+        Commands::SendOnchain { address, amount } => {
+            let checked_address = address.clone().assume_checked();
+            let mut rng = thread_rng();
+            let txid = client
+                .collaborative_redeem(
+                    &mut rng,
+                    checked_address.clone(),
+                    Amount::from_sat(*amount),
+                    false,
+                )
+                .await
+                .map_err(|e| anyhow!(e))?;
+
+            tracing::info!(
+                address = checked_address.to_string(),
+                amount = amount.to_string(),
+                txid = txid.to_string(),
+                "Sent funds on-chain"
+            );
         }
     }
 
