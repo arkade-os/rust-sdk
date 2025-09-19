@@ -52,13 +52,14 @@ where
         let preimage: [u8; 32] = musig::rand::random();
         let preimage_hash = sha256::Hash::const_hash(&preimage).to_string();
 
-        let (claim_public_key, _) = self.inner.kp.x_only_public_key();
+        let claim_public_key = self.inner.kp.public_key();
 
         let request = CreateReverseSwapRequest {
+            from: Asset::Btc,
+            to: Asset::Ark,
             invoice_amount: amount.to_sat(),
             claim_public_key: claim_public_key.to_string(),
             preimage_hash: preimage_hash.clone(),
-            description: None, // TODO: Handle descriptions.
         };
 
         let url = format!("{BOLTZ_URL}/v2/swap/reverse");
@@ -108,12 +109,10 @@ where
             metadata: SwapMetadata::Reverse {
                 preimage: preimage.to_lower_hex_string(),
                 preimage_hash,
-                swap_tree: response.swap_tree,
                 refund_public_key: response.refund_public_key.clone(),
                 lockup_address: response.lockup_address.clone(),
-                timeout_block_height: response.timeout_block_height,
+                timeout_block_heights: response.timeout_block_heights,
                 onchain_amount: response.onchain_amount,
-                blinding_key: response.blinding_key.clone(),
                 invoice: response.invoice.clone(),
             },
         };
@@ -205,18 +204,14 @@ pub enum SwapMetadata {
         preimage: String,
         /// Hash of the preimage
         preimage_hash: String,
-        /// Swap tree structure
-        swap_tree: SwapTree,
         /// Public key for refund
         refund_public_key: String,
         /// Address where funds are locked
         lockup_address: String,
         /// Block height when swap times out
-        timeout_block_height: u64,
+        timeout_block_heights: TimeoutBlockHeights,
         /// Amount to be sent on-chain
         onchain_amount: u64,
-        /// Optional blinding key for confidential transactions
-        blinding_key: Option<String>,
         /// Invoice associated with the swap
         invoice: String,
     },
@@ -286,19 +281,6 @@ impl SwapMetadata {
         }
     }
 
-    pub fn timeout_block_height(&self) -> u64 {
-        match self {
-            SwapMetadata::Reverse {
-                timeout_block_height,
-                ..
-            } => *timeout_block_height,
-            SwapMetadata::Submarine {
-                timeout_block_height,
-                ..
-            } => *timeout_block_height,
-        }
-    }
-
     pub fn refund_xpub(&self) -> Option<String> {
         match self {
             SwapMetadata::Reverse {
@@ -310,32 +292,40 @@ impl SwapMetadata {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateReverseSwapRequest {
-    #[serde(rename = "invoiceAmount")]
+    pub from: Asset,
+    pub to: Asset,
     pub invoice_amount: u64,
-    #[serde(rename = "claimPublicKey")]
     pub claim_public_key: String,
-    #[serde(rename = "preimageHash")]
     pub preimage_hash: String,
-    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum Asset {
+    Btc,
+    Ark,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateReverseSwapResponse {
     pub id: String,
-    pub invoice: String,
-    #[serde(rename = "swapTree")]
-    pub swap_tree: SwapTree,
-    #[serde(rename = "refundPublicKey")]
-    pub refund_public_key: String,
-    #[serde(rename = "lockupAddress")]
     pub lockup_address: String,
-    #[serde(rename = "timeoutBlockHeight")]
-    pub timeout_block_height: u64,
-    #[serde(rename = "onchainAmount")]
+    pub refund_public_key: String,
+    pub timeout_block_heights: TimeoutBlockHeights,
+    pub invoice: String,
     pub onchain_amount: u64,
-    #[serde(rename = "blindingKey", skip_serializing_if = "Option::is_none")]
-    pub blinding_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimeoutBlockHeights {
+    pub refund: u64,
+    pub unilateral_claim: u64,
+    pub unilateral_refund: u64,
+    pub unilateral_refund_without_receiver: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
