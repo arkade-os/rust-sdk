@@ -1,3 +1,4 @@
+use crate::boltz::SwapData;
 use crate::error::ErrorContext;
 use crate::utils::sleep;
 use crate::utils::timeout_op;
@@ -28,13 +29,16 @@ use bitcoin::Txid;
 use futures::Future;
 use futures::Stream;
 use jiff::Timestamp;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 pub mod error;
 pub mod wallet;
 
 mod batch;
+mod boltz;
 mod coin_select;
 mod send_vtxo;
 mod unilateral_exit;
@@ -212,6 +216,7 @@ pub struct OfflineClient<B, W> {
 pub struct Client<B, W> {
     inner: OfflineClient<B, W>,
     pub server_info: server::Info,
+    pub swaps: Arc<Mutex<HashMap<String, SwapData>>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -339,9 +344,12 @@ where
             "Connected to Ark server"
         );
 
+        // TODO: If LN enabled: spawn task to monitor status of Boltz swaps using Boltz's API.
+
         Ok(Client {
             inner: self,
             server_info,
+            swaps: Arc::new(Mutex::new(HashMap::default())),
         })
     }
 
@@ -386,6 +394,7 @@ where
         Ok(Client {
             inner: self,
             server_info,
+            swaps: Arc::new(Mutex::new(HashMap::default())),
         })
     }
 }

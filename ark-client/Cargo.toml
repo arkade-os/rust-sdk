@@ -13,13 +13,17 @@ ark-core = { path = "../ark-core", version = "0.7.0" }
 async-stream = "0.3"
 base64 = "0.22.1"
 bech32 = "0.11"
-bitcoin = { version = "0.32.4", features = ["rand"] }
+bitcoin = { version = "0.32.4", features = ["rand", "serde"] }
 futures = "0.3.31"
 jiff = "0.2.1"
 musig = { package = "ark-secp256k1", path = "../ark-rust-secp256k1", features = ["serde"] }
+lightning-invoice = { version = "0.33.2" }
 prost = "0.13.3"
 prost-types = "0.13.3"
 rand = "0.8"
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 tokio = { version = "1.41.0", features = ["sync", "rt-multi-thread"] }
 tracing = "0.1.37"
 
