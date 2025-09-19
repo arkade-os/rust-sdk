@@ -332,7 +332,7 @@ async fn main() -> Result<()> {
                 .await
                 .map_err(|e| anyhow!(e))?;
 
-            let invoice = invoice.to_string();
+            let invoice = invoice.invoice.to_string();
             tracing::info!(invoice, "Lightning invoice")
         }
     }

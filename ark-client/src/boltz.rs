@@ -15,6 +15,11 @@ use serde::Serialize;
 
 const BOLTZ_URL: &str = "http://localhost:9001";
 
+pub struct BoltzSwapInvoice {
+    pub invoice: Bolt11Invoice,
+    pub swap_data: SwapData,
+}
+
 impl<B, W> Client<B, W>
 where
     B: Blockchain,
@@ -48,7 +53,7 @@ where
     // Returns:
     //
     // - Lightning invoice.
-    pub async fn get_ln_invoice(&self, amount: Amount) -> Result<Bolt11Invoice, Error> {
+    pub async fn get_ln_invoice(&self, amount: Amount) -> Result<BoltzSwapInvoice, Error> {
         let preimage: [u8; 32] = musig::rand::random();
         let preimage_hash = sha256::Hash::const_hash(&preimage).to_string();
 
@@ -119,10 +124,16 @@ where
 
         // TODO: Introduce SwapStorage trait.
         let mut swaps = self.swaps.lock().expect("to get lock");
-        swaps.insert(response.id, swap);
+        swaps.insert(response.id, swap.clone());
 
-        Ok(invoice)
+        Ok(BoltzSwapInvoice {
+            invoice,
+            swap_data: swap,
+        })
     }
+
+    /// Waits for a payment and settles it into our own wallet
+    pub async fn wait_for_payment(&self, swap_id: &str) -> Result<(), Error> {}
 
     // Misc (not definitive)
 
