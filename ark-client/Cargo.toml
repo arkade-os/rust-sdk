@@ -16,8 +16,8 @@ bech32 = "0.11"
 bitcoin = { version = "0.32.4", features = ["rand", "serde"] }
 futures = "0.3.31"
 jiff = "0.2.1"
-musig = { package = "ark-secp256k1", path = "../ark-rust-secp256k1", features = ["serde"] }
 lightning-invoice = { version = "0.33.2" }
+musig = { package = "ark-secp256k1", path = "../ark-rust-secp256k1", features = ["serde"] }
 prost = "0.13.3"
 prost-types = "0.13.3"
 rand = "0.8"

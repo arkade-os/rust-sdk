@@ -81,6 +81,10 @@ enum Commands {
         /// How many sats to send.
         amount: u64,
     },
+    LightningInvoice {
+        /// How many sats to receive
+        amount: u64,
+    },
 }
 
 #[derive(Clone)]
@@ -321,6 +325,15 @@ async fn main() -> Result<()> {
                 txid = txid.to_string(),
                 "Sent funds on-chain"
             );
+        }
+        Commands::LightningInvoice { amount } => {
+            let invoice = client
+                .get_ln_invoice(Amount::from_sat(*amount))
+                .await
+                .map_err(|e| anyhow!(e))?;
+
+            let invoice = invoice.to_string();
+            tracing::info!(invoice, "Lightning invoice")
         }
     }
 
