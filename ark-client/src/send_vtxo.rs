@@ -13,6 +13,7 @@ use ark_core::send::sign_checkpoint_transaction;
 use ark_core::send::OffchainTransactions;
 use ark_core::ArkAddress;
 use bitcoin::key::Secp256k1;
+use bitcoin::psbt;
 use bitcoin::secp256k1;
 use bitcoin::secp256k1::schnorr;
 use bitcoin::Amount;
@@ -76,8 +77,10 @@ where
                     })
                     .expect("to find matching default VTXO");
 
+                let vtxo_spend_script = vtxo.forfeit_script();
                 send::VtxoInput::new(
                     vtxo,
+                    vtxo_spend_script,
                     virtual_tx_outpoint.amount,
                     virtual_tx_outpoint.outpoint,
                 )
@@ -93,13 +96,15 @@ where
             &[(&address, amount)],
             Some(&change_address),
             &vtxo_inputs,
-            self.server_info.dust,
+            &self.server_info,
+            &[self.inner.kp.public_key()],
         )
         .map_err(Error::from)
         .context("failed to build offchain transactions")?;
 
-        let sign_fn =
-        |msg: secp256k1::Message| -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+        let sign_fn = |_: &mut psbt::Input,
+                       msg: secp256k1::Message|
+         -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
             let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, self.kp());
             let pk = self.kp().x_only_public_key().0;
 

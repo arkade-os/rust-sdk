@@ -1,13 +1,35 @@
 use crate::error::ErrorContext;
+use crate::timeout_op;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use crate::Blockchain;
 use crate::Client;
 use crate::Error;
+use ark_core::send::build_offchain_transactions;
+use ark_core::send::sign_ark_transaction;
+use ark_core::send::sign_checkpoint_transaction;
+use ark_core::send::OffchainTransactions;
+use ark_core::send::VtxoInput;
+use ark_core::send::VTXO_CONDITION_KEY;
+use ark_core::server::GetVtxosRequest;
+use ark_core::vhtlc::VhtlcOptions;
+use ark_core::vhtlc::VhtlcScript;
+use bitcoin::consensus::Encodable;
 use bitcoin::hashes::sha256;
+use bitcoin::hashes::Hash;
 use bitcoin::hex::DisplayHex;
+use bitcoin::io::Write;
+use bitcoin::key::Secp256k1;
+use bitcoin::psbt;
+use bitcoin::secp256k1;
+use bitcoin::secp256k1::schnorr;
 use bitcoin::Amount;
+use bitcoin::PublicKey;
+use bitcoin::ScriptBuf;
+use bitcoin::Sequence;
 use bitcoin::Txid;
+use bitcoin::VarInt;
+use bitcoin::XOnlyPublicKey;
 use lightning_invoice::Bolt11Invoice;
 use lightning_invoice::ParseOrSemanticError;
 use serde::Deserialize;
@@ -55,7 +77,7 @@ where
     // - Lightning invoice.
     pub async fn get_ln_invoice(&self, amount: Amount) -> Result<BoltzSwapInvoice, Error> {
         let preimage: [u8; 32] = musig::rand::random();
-        let preimage_hash = sha256::Hash::const_hash(&preimage).to_string();
+        let preimage_hash = sha256::Hash::hash(&preimage);
 
         let claim_public_key = self.inner.kp.public_key();
 
@@ -64,7 +86,7 @@ where
             to: Asset::Ark,
             invoice_amount: amount.to_sat(),
             claim_public_key: claim_public_key.to_string(),
-            preimage_hash: preimage_hash.clone(),
+            preimage_hash: preimage_hash.to_byte_array().to_lower_hex_string(),
         };
 
         let url = format!("{BOLTZ_URL}/v2/swap/reverse");
@@ -112,7 +134,7 @@ where
                 .unwrap()
                 .as_secs(),
             metadata: SwapMetadata::Reverse {
-                preimage: preimage.to_lower_hex_string(),
+                preimage,
                 preimage_hash,
                 refund_public_key: response.refund_public_key.clone(),
                 lockup_address: response.lockup_address.clone(),
@@ -133,7 +155,187 @@ where
     }
 
     /// Waits for a payment and settles it into our own wallet
-    pub async fn wait_for_payment(&self, swap_id: &str) -> Result<(), Error> {}
+    pub async fn wait_for_payment(&self, swap_id: &str) -> Result<(), Error> {
+        let swap = {
+            let swaps = self.swaps.lock().expect("to get lock");
+            swaps
+                .get(swap_id)
+                .ok_or_else(|| Error::ad_hoc(format!("swap data not found: {swap_id}")))?
+                .clone()
+        };
+
+        wait_until_status(
+            swap_id,
+            &[
+                SwapStatus::TransactionMempool,
+                SwapStatus::TransactionConfirmed,
+            ],
+        )
+        .await?;
+
+        tracing::debug!("Ark transaction for swap found");
+
+        let preimage = swap.metadata.preimage().expect("preimage");
+
+        let refund_pk = swap.metadata.refund_pk().expect("refund pk");
+
+        // TODO: Should probably persist or deterministically derive this.
+        let claim_pk = self.inner.kp.public_key();
+
+        // TODO: Use a different key!
+        let server_pk = self.server_info.pk.x_only_public_key().0;
+
+        let preimage_hash = swap.metadata.preimage_hash().unwrap();
+
+        let timeout_block_heights = swap.metadata.timeout_block_heights();
+
+        dbg!(&swap);
+
+        let vhtlc = VhtlcScript::new(
+            VhtlcOptions {
+                sender: refund_pk.inner.x_only_public_key().0,
+                receiver: claim_pk.x_only_public_key().0,
+                server: server_pk,
+                preimage_hash,
+                refund_locktime: timeout_block_heights.refund,
+                unilateral_claim_delay: Sequence::from_height(
+                    timeout_block_heights.unilateral_claim,
+                ),
+                unilateral_refund_delay: Sequence::from_height(
+                    timeout_block_heights.unilateral_refund,
+                ),
+                unilateral_refund_without_receiver_delay: Sequence::from_height(
+                    timeout_block_heights.unilateral_refund_without_receiver,
+                ),
+            },
+            self.server_info.network,
+        )
+        .map_err(Error::ad_hoc)?;
+
+        let vhtlc_address = vhtlc.address();
+        if vhtlc_address.to_string() != swap.metadata.address() {
+            return Err(Error::ad_hoc(format!(
+                "VHTLC address ({}) does not match swap address ({})",
+                vhtlc_address.to_string(),
+                swap.metadata.address()
+            )));
+        }
+
+        // TODO: Ideally we can skip this if the vout is always the same (probably 0).
+        let vhtlc_outpoint = {
+            let request = GetVtxosRequest::new_for_addresses(&[vhtlc_address]);
+
+            let list = timeout_op(
+                self.inner.timeout,
+                self.network_client().list_vtxos(request),
+            )
+            .await
+            .context("Failed to fetch VHTLC")??;
+
+            // We expect a single outpoint.
+            let all = list.all();
+            let vhtlc_outpoint = all.first().ok_or_else(|| {
+                Error::ad_hoc(format!("no outpoint found for address {vhtlc_address}"))
+            })?;
+
+            vhtlc_outpoint.clone()
+        };
+
+        let (claim_address, _) = self.get_offchain_address()?;
+        let claim_amount = swap.metadata.amount();
+
+        let outputs = vec![(&claim_address, claim_amount)];
+
+        // FIXME!
+        let vhtlc_input = VtxoInput::new(
+            vhtlc.into_vtxo(),
+            ScriptBuf::new(),
+            claim_amount,
+            vhtlc_outpoint.outpoint,
+        );
+
+        dbg!(&vhtlc_input);
+
+        let OffchainTransactions {
+            mut ark_tx,
+            checkpoint_txs,
+        } = build_offchain_transactions(
+            &outputs,
+            None,
+            &[vhtlc_input.clone()],
+            &self.server_info,
+            &[claim_pk],
+        )?;
+
+        let sign_fn = |input: &mut psbt::Input,
+                       msg: secp256k1::Message|
+         -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+            // Add preimage to PSBT input.
+            {
+                let mut bytes = Vec::new();
+
+                let length = VarInt::from(preimage.len() as u64);
+
+                length.consensus_encode(&mut bytes).unwrap();
+
+                bytes.write_all(&preimage).unwrap();
+
+                input.unknown.insert(
+                    psbt::raw::Key {
+                        type_value: u8::MAX,
+                        key: VTXO_CONDITION_KEY.to_vec(),
+                    },
+                    bytes,
+                );
+            }
+
+            let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, self.kp());
+            let pk = self.kp().x_only_public_key().0;
+
+            Ok((sig, pk))
+        };
+
+        // TODO: Handle error properly.
+        let checkpoint_tx = checkpoint_txs.first().expect("one");
+
+        sign_ark_transaction(
+            sign_fn,
+            &mut ark_tx,
+            &[(checkpoint_tx.1.clone(), checkpoint_tx.2)],
+            0,
+        )?;
+
+        let ark_txid = ark_tx.unsigned_tx.compute_txid();
+
+        let res = self
+            .network_client()
+            .submit_offchain_transaction_request(
+                ark_tx,
+                checkpoint_txs
+                    .into_iter()
+                    .map(|(psbt, _, _, _)| psbt)
+                    .collect(),
+            )
+            .await
+            .map_err(Error::ark_server)
+            .context("failed to submit offchain transaction request")?;
+
+        // TODO: Handle error properly.
+        let mut checkpoint_psbt = res.signed_checkpoint_txs.first().expect("one").clone();
+
+        sign_checkpoint_transaction(sign_fn, &mut checkpoint_psbt, &vhtlc_input)?;
+
+        timeout_op(
+            self.inner.timeout,
+            self.network_client()
+                .finalize_offchain_transaction(ark_txid, res.signed_checkpoint_txs),
+        )
+        .await?
+        .map_err(Error::ark_server)
+        .context("failed to finalize offchain transaction")?;
+
+        Ok(())
+    }
 
     // Misc (not definitive)
 
@@ -143,6 +345,51 @@ where
 
     pub async fn subscribe_to_swap_updates() -> Result<(), Error> {
         unimplemented!()
+    }
+}
+
+async fn wait_until_status(swap_id: &str, statuses: &[SwapStatus]) -> Result<(), Error> {
+    let url = format!("{BOLTZ_URL}/v2/swap/{swap_id}");
+
+    loop {
+        let client = reqwest::Client::new();
+        let response = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| Error::ad_hoc(e.to_string()))
+            .context("failed to send swap status request")?;
+
+        if !response.status().is_success() {
+            let error_text = response
+                .text()
+                .await
+                .map_err(|e| Error::ad_hoc(e.to_string()))
+                .context("failed to read error text")?;
+
+            return Err(Error::ad_hoc(format!(
+                "failed to get swap status: {error_text}"
+            )));
+        }
+
+        let response_text = response
+            .text()
+            .await
+            .map_err(|e| Error::ad_hoc(e.to_string()))?;
+
+        tracing::debug!("Response body: {}", response_text);
+
+        let response: SwapStatusResponse = serde_json::from_str(&response_text)
+            .map_err(|e| Error::ad_hoc(e.to_string()))
+            .context("failed to deserialize swap status response")?;
+
+        if statuses.contains(&response.status) {
+            return Ok(());
+        }
+
+        tracing::debug!(current = ?response.status, target = ?statuses, "Swap status");
+
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 }
 
@@ -175,33 +422,46 @@ pub enum SwapType {
 /// All possible states of a Boltz swap
 ///
 /// Swaps progress through these states during their lifecycle.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum SwapStatus {
     /// Initial state when swap is created
+    #[serde(rename = "swap.created")]
     Created,
     /// Lockup transaction detected in mempool
+    #[serde(rename = "transaction.mempool")]
     TransactionMempool,
     /// Lockup transaction confirmed on-chain
+    #[serde(rename = "transaction.confirmed")]
     TransactionConfirmed,
     /// Transaction Refunded
+    #[serde(rename = "transaction.refunded")]
     TransactionRefunded,
     /// Transaction Failed
+    #[serde(rename = "transaction.failed")]
     TransactionFailed,
     /// Transaction Claimed
+    #[serde(rename = "transaction.claimed")]
     TransactionClaimed,
     /// Lightning invoice has been set
+    #[serde(rename = "invoice.set")]
     InvoiceSet,
     /// Waiting for Lightning invoice payment
+    #[serde(rename = "invoice.pending")]
     InvoicePending,
     /// Lightning invoice successfully paid
+    #[serde(rename = "invoice.paid")]
     InvoicePaid,
     /// Lightning invoice payment failed
+    #[serde(rename = "invoice.failedToPay")]
     InvoiceFailedToPay,
     /// Invoice Expired
+    #[serde(rename = "invoice.expired")]
     InvoiceExpired,
     /// Swap expired - can be refunded
+    #[serde(rename = "swap.expired")]
     SwapExpired,
     /// Swap failed with error
+    #[serde(rename = "error")]
     Error { error: String },
 }
 
@@ -212,11 +472,11 @@ pub enum SwapMetadata {
     /// Metadata for reverse submarine swaps (Lightning to on-chain)
     Reverse {
         /// Preimage for the swap
-        preimage: String,
+        preimage: [u8; 32],
         /// Hash of the preimage
-        preimage_hash: String,
+        preimage_hash: sha256::Hash,
         /// Public key for refund
-        refund_public_key: String,
+        refund_public_key: PublicKey,
         /// Address where funds are locked
         lockup_address: String,
         /// Block height when swap times out
@@ -251,14 +511,14 @@ impl SwapMetadata {
     /// # Returns
     /// - `Some(String)` containing the preimage for reverse swaps
     /// - `None` for submarine swaps
-    pub fn preimage(&self) -> Option<String> {
+    pub fn preimage(&self) -> Option<[u8; 32]> {
         match self {
             SwapMetadata::Reverse { preimage, .. } => Some(preimage.clone()),
             SwapMetadata::Submarine { .. } => None,
         }
     }
 
-    pub fn preimage_hash(&self) -> Option<String> {
+    pub fn preimage_hash(&self) -> Option<sha256::Hash> {
         match self {
             SwapMetadata::Reverse { preimage_hash, .. } => Some(preimage_hash.clone()),
             SwapMetadata::Submarine { .. } => None,
@@ -292,12 +552,22 @@ impl SwapMetadata {
         }
     }
 
-    pub fn refund_xpub(&self) -> Option<String> {
+    pub fn refund_pk(&self) -> Option<PublicKey> {
         match self {
             SwapMetadata::Reverse {
                 refund_public_key, ..
             } => Some(refund_public_key.clone()),
             SwapMetadata::Submarine { .. } => None,
+        }
+    }
+
+    pub fn timeout_block_heights(&self) -> TimeoutBlockHeights {
+        match self {
+            SwapMetadata::Reverse {
+                timeout_block_heights,
+                ..
+            } => timeout_block_heights.clone(),
+            SwapMetadata::Submarine { .. } => unimplemented!(),
         }
     }
 }
@@ -324,7 +594,7 @@ pub enum Asset {
 pub struct CreateReverseSwapResponse {
     pub id: String,
     pub lockup_address: String,
-    pub refund_public_key: String,
+    pub refund_public_key: PublicKey,
     pub timeout_block_heights: TimeoutBlockHeights,
     pub invoice: String,
     pub onchain_amount: u64,
@@ -333,10 +603,10 @@ pub struct CreateReverseSwapResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimeoutBlockHeights {
-    pub refund: u64,
-    pub unilateral_claim: u64,
-    pub unilateral_refund: u64,
-    pub unilateral_refund_without_receiver: u64,
+    pub refund: u32,
+    pub unilateral_claim: u16,
+    pub unilateral_refund: u16,
+    pub unilateral_refund_without_receiver: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -351,4 +621,16 @@ pub struct SwapTree {
 pub struct TreeLeaf {
     pub version: u8,
     pub output: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwapStatusResponse {
+    status: SwapStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwapTransaction {
+    id: String,
+    hex: String,
 }

@@ -124,10 +124,6 @@ impl Vtxo {
         Self::new(secp, server, owner, Vec::new(), exit_delay, network)
     }
 
-    pub fn spend_info(&self) -> &TaprootSpendInfo {
-        &self.spend_info
-    }
-
     pub fn script_pubkey(&self) -> ScriptBuf {
         self.address.script_pubkey()
     }
@@ -162,7 +158,7 @@ impl Vtxo {
         let control_block = self
             .spend_info
             .control_block(&(script, LeafVersion::TapScript))
-            .expect("forfeit script");
+            .ok_or(Error::ad_hoc("could not build control block for script"))?;
 
         Ok(control_block)
     }
@@ -172,8 +168,7 @@ impl Vtxo {
         let forfeit_script = self.forfeit_script();
 
         let control_block = self
-            .spend_info
-            .control_block(&(forfeit_script.clone(), LeafVersion::TapScript))
+            .get_spend_info(forfeit_script.clone())
             .expect("forfeit script");
 
         (forfeit_script, control_block)
@@ -184,8 +179,7 @@ impl Vtxo {
         let exit_script = self.exit_script();
 
         let control_block = self
-            .spend_info
-            .control_block(&(exit_script.clone(), LeafVersion::TapScript))
+            .get_spend_info(exit_script.clone())
             .expect("exit script");
 
         (exit_script, control_block)
@@ -213,11 +207,11 @@ impl Vtxo {
         now > exit_path_time
     }
 
-    fn forfeit_script(&self) -> ScriptBuf {
+    pub fn forfeit_script(&self) -> ScriptBuf {
         multisig_script(self.server, self.owner)
     }
 
-    fn exit_script(&self) -> ScriptBuf {
+    pub fn exit_script(&self) -> ScriptBuf {
         csv_sig_script(self.exit_delay, self.owner)
     }
 }

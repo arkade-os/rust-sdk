@@ -189,7 +189,7 @@ impl BoltzLightning {
 
         // Build offchain transactions using ark_core
         let outputs = vec![(&claim_address, claim_amount)];
-        let dust_limit = Amount::from_sat(1000); // TODO: Get from server config
+        let dust_limit = Amount::from_sat(1_000); // TODO: Get from server config
 
         let OffchainTransactions {
             ark_tx,

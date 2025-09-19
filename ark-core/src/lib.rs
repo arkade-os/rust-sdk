@@ -12,6 +12,7 @@ pub mod proof_of_funds;
 pub mod send;
 pub mod server;
 pub mod unilateral_exit;
+pub mod vhtlc;
 pub mod vtxo;
 
 mod ark_address;

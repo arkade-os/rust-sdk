@@ -327,13 +327,20 @@ async fn main() -> Result<()> {
             );
         }
         Commands::LightningInvoice { amount } => {
-            let invoice = client
+            let res = client
                 .get_ln_invoice(Amount::from_sat(*amount))
                 .await
                 .map_err(|e| anyhow!(e))?;
 
-            let invoice = invoice.invoice.to_string();
-            tracing::info!(invoice, "Lightning invoice")
+            let invoice = res.invoice.to_string();
+            let swap_id = res.swap_data.id;
+
+            tracing::info!(invoice, swap_id, "Lightning invoice");
+
+            client
+                .wait_for_payment(&swap_id)
+                .await
+                .map_err(|e| anyhow!(e))?;
         }
     }
 
