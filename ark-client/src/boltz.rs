@@ -23,9 +23,9 @@ use bitcoin::key::Secp256k1;
 use bitcoin::psbt;
 use bitcoin::secp256k1;
 use bitcoin::secp256k1::schnorr;
+use bitcoin::taproot::LeafVersion;
 use bitcoin::Amount;
 use bitcoin::PublicKey;
-use bitcoin::ScriptBuf;
 use bitcoin::Sequence;
 use bitcoin::Txid;
 use bitcoin::VarInt;
@@ -136,7 +136,7 @@ where
             metadata: SwapMetadata::Reverse {
                 preimage,
                 preimage_hash,
-                refund_public_key: response.refund_public_key.clone(),
+                refund_public_key: response.refund_public_key,
                 lockup_address: response.lockup_address.clone(),
                 timeout_block_heights: response.timeout_block_heights,
                 onchain_amount: response.onchain_amount,
@@ -189,8 +189,6 @@ where
 
         let timeout_block_heights = swap.metadata.timeout_block_heights();
 
-        dbg!(&swap);
-
         let vhtlc = VhtlcScript::new(
             VhtlcOptions {
                 sender: refund_pk.inner.x_only_public_key().0,
@@ -215,8 +213,7 @@ where
         let vhtlc_address = vhtlc.address();
         if vhtlc_address.to_string() != swap.metadata.address() {
             return Err(Error::ad_hoc(format!(
-                "VHTLC address ({}) does not match swap address ({})",
-                vhtlc_address.to_string(),
+                "VHTLC address ({vhtlc_address}) does not match swap address ({})",
                 swap.metadata.address()
             )));
         }
@@ -246,15 +243,22 @@ where
 
         let outputs = vec![(&claim_address, claim_amount)];
 
-        // FIXME!
+        let spend_info = vhtlc.taproot_info().expect("info");
+        let script_ver = (vhtlc.claim_script(), LeafVersion::TapScript);
+        let control_block = spend_info
+            .control_block(&script_ver)
+            .ok_or(Error::ad_hoc("control block not found for claim script"))?;
+
+        let script_pubkey = vhtlc.script_pubkey().expect("script pubkey");
+
         let vhtlc_input = VtxoInput::new(
-            vhtlc.into_vtxo(),
-            ScriptBuf::new(),
+            script_ver.0,
+            control_block,
+            vhtlc.tapscripts(),
+            script_pubkey,
             claim_amount,
             vhtlc_outpoint.outpoint,
         );
-
-        dbg!(&vhtlc_input);
 
         let OffchainTransactions {
             mut ark_tx,
@@ -264,7 +268,7 @@ where
             None,
             &[vhtlc_input.clone()],
             &self.server_info,
-            &[claim_pk],
+            &[claim_pk.x_only_public_key().0],
         )?;
 
         let sign_fn = |input: &mut psbt::Input,
@@ -513,14 +517,14 @@ impl SwapMetadata {
     /// - `None` for submarine swaps
     pub fn preimage(&self) -> Option<[u8; 32]> {
         match self {
-            SwapMetadata::Reverse { preimage, .. } => Some(preimage.clone()),
+            SwapMetadata::Reverse { preimage, .. } => Some(*preimage),
             SwapMetadata::Submarine { .. } => None,
         }
     }
 
     pub fn preimage_hash(&self) -> Option<sha256::Hash> {
         match self {
-            SwapMetadata::Reverse { preimage_hash, .. } => Some(preimage_hash.clone()),
+            SwapMetadata::Reverse { preimage_hash, .. } => Some(*preimage_hash),
             SwapMetadata::Submarine { .. } => None,
         }
     }
@@ -556,7 +560,7 @@ impl SwapMetadata {
         match self {
             SwapMetadata::Reverse {
                 refund_public_key, ..
-            } => Some(refund_public_key.clone()),
+            } => Some(*refund_public_key),
             SwapMetadata::Submarine { .. } => None,
         }
     }

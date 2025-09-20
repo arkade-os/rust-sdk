@@ -195,7 +195,7 @@ async fn main() -> Result<()> {
     let esplora_client = EsploraClient::new(&config.esplora_url)?;
 
     // In this example we use the same script for all VTXOs.
-    let vtxo = Vtxo::new(
+    let vtxo = Vtxo::new_with_custom_scripts(
         &secp,
         server_info.pk.x_only_public_key().0,
         pk.x_only_public_key().0,

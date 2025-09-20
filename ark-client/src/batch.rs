@@ -299,6 +299,9 @@ where
                     },
                     v.vtxo().tapscripts(),
                     v.vtxo().owner_pk(),
+                    // FIXME: For a more general VTXO, the requirement here is that we sign a spend
+                    // path that does not involve the server (proving unilateral ownership of the
+                    // VTXO, I guess).
                     v.vtxo().exit_spend_info(),
                     false,
                 )

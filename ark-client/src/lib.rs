@@ -411,11 +411,10 @@ where
         let (server, _) = server_info.pk.x_only_public_key();
         let (owner, _) = self.inner.kp.public_key().x_only_public_key();
 
-        let vtxo = Vtxo::new(
+        let vtxo = Vtxo::new_default(
             self.secp(),
             server,
             owner,
-            vec![],
             server_info.unilateral_exit_delay,
             server_info.network,
         )?;

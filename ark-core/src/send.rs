@@ -2,7 +2,6 @@ use crate::anchor_output;
 use crate::script::csv_sig_script;
 use crate::script::tr_script_pubkey;
 use crate::server;
-use crate::vtxo::Vtxo;
 use crate::ArkAddress;
 use crate::Error;
 use crate::ErrorContext;
@@ -45,12 +44,14 @@ pub const VTXO_CONDITION_KEY: [u8; 9] = [99, 111, 110, 100, 105, 116, 105, 111, 
 /// A VTXO to be spent into an unconfirmed VTXO.
 #[derive(Debug, Clone)]
 pub struct VtxoInput {
-    /// The information needed to spend the VTXO, besides the amount.
-    vtxo: Vtxo,
     /// The script path that will be used to spend the [`Vtxo`].
     ///
     /// The very same spend path is also used when building the corresponding checkpoint output.
     spend_script: ScriptBuf,
+    control_block: ControlBlock,
+    /// All the scripts in the Taproot tree.
+    tapscripts: Vec<ScriptBuf>,
+    script_pubkey: ScriptBuf,
     /// The amount of coins locked in the VTXO.
     amount: Amount,
     /// Where the VTXO would end up on the blockchain if it were to become a UTXO.
@@ -59,14 +60,18 @@ pub struct VtxoInput {
 
 impl VtxoInput {
     pub fn new(
-        vtxo: Vtxo,
         vtxo_spend_script: ScriptBuf,
+        control_block: ControlBlock,
+        tapscripts: Vec<ScriptBuf>,
+        script_pubkey: ScriptBuf,
         amount: Amount,
         outpoint: OutPoint,
     ) -> Self {
         Self {
-            vtxo,
             spend_script: vtxo_spend_script,
+            control_block,
+            tapscripts,
+            script_pubkey,
             amount,
             outpoint,
         }
@@ -76,23 +81,15 @@ impl VtxoInput {
         self.outpoint
     }
 
-    pub fn vtxo(&self) -> &Vtxo {
-        &self.vtxo
-    }
-
-    pub fn spend_info(&self) -> Result<(ScriptBuf, ControlBlock), Error> {
-        let spend_script = &self.spend_script;
-
-        let control_block = self.vtxo.get_spend_info(spend_script.clone())?;
-
-        Ok((spend_script.clone(), control_block))
+    pub fn spend_info(&self) -> (&ScriptBuf, &ControlBlock) {
+        (&self.spend_script, &self.control_block)
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct OffchainTransactions {
     pub ark_tx: Psbt,
-    pub checkpoint_txs: Vec<(Psbt, CheckpointOutput, CheckpointOutPoint, Vtxo)>,
+    pub checkpoint_txs: Vec<(Psbt, CheckpointOutput, CheckpointOutPoint, VtxoInput)>,
 }
 
 /// Build a transaction to send VTXOs to another [`ArkAddress`].
@@ -101,7 +98,7 @@ pub fn build_offchain_transactions(
     change_address: Option<&ArkAddress>,
     vtxo_inputs: &[VtxoInput],
     server_info: &server::Info,
-    checkpoint_exit_pks: &[secp256k1::PublicKey],
+    checkpoint_exit_pks: &[XOnlyPublicKey],
 ) -> Result<OffchainTransactions, Error> {
     if vtxo_inputs.is_empty() {
         return Err(Error::transaction(
@@ -111,11 +108,7 @@ pub fn build_offchain_transactions(
 
     let checkpoint_exit_script = csv_sig_script(
         server_info.unilateral_exit_delay,
-        checkpoint_exit_pks
-            .first()
-            .expect("one")
-            .x_only_public_key()
-            .0,
+        *checkpoint_exit_pks.first().expect("one"),
     );
 
     let mut checkpoint_txs = Vec::new();
@@ -134,7 +127,7 @@ pub fn build_offchain_transactions(
             psbt,
             checkpoint_output,
             checkpoint_out_point,
-            vtxo_input.vtxo.clone(),
+            vtxo_input.clone(),
         ));
     }
 
@@ -318,11 +311,11 @@ fn build_checkpoint_psbt(
 
     let mut bytes = Vec::new();
 
-    write_compact_size_uint(&mut bytes, vtxo_input.vtxo.tapscripts().len() as u64)
+    write_compact_size_uint(&mut bytes, vtxo_input.tapscripts.len() as u64)
         .map_err(Error::transaction)?;
 
     // TODO(boltz): Every script in the right order.
-    for script in vtxo_input.vtxo.tapscripts().iter() {
+    for script in vtxo_input.tapscripts.iter() {
         // Write the depth (always 1). TODO: Support more depth.
         bytes.push(1);
 
@@ -339,8 +332,7 @@ fn build_checkpoint_psbt(
 
     unsigned_checkpoint_psbt.inputs[0].witness_utxo = Some(TxOut {
         value: vtxo_input.amount,
-        // NOTE(boltz): script_pubkey/address (easy to be generic).
-        script_pubkey: vtxo_input.vtxo.script_pubkey(),
+        script_pubkey: vtxo_input.script_pubkey.clone(),
     });
 
     // TODO(boltz): spend info for chosen spend path (MUST INVOLVE SERVER SIG!). Must be chosen from
@@ -348,11 +340,11 @@ fn build_checkpoint_psbt(
     // spending offchain
 
     // In the case of input VTXOs, we are actually using a script spend path.
-    let (vtxo_spend_script, vtxo_spend_control_block) = vtxo_input.spend_info()?;
+    let (vtxo_spend_script, vtxo_spend_control_block) = vtxo_input.spend_info();
 
     let leaf_version = vtxo_spend_control_block.leaf_version;
     unsigned_checkpoint_psbt.inputs[0].tap_scripts = BTreeMap::from_iter([(
-        vtxo_spend_control_block,
+        vtxo_spend_control_block.clone(),
         (vtxo_spend_script.clone(), leaf_version),
     )]);
 
@@ -407,16 +399,15 @@ where
     ) -> Result<(schnorr::Signature, XOnlyPublicKey), Error>,
 {
     let VtxoInput {
-        vtxo,
         amount,
         outpoint,
+        script_pubkey,
         ..
     } = vtxo_input;
 
     tracing::debug!(
         ?outpoint,
         %amount,
-        ?vtxo,
         "Attempting to sign selected VTXO for checkpoint transaction"
     );
 
@@ -430,7 +421,6 @@ where
 
     tracing::debug!(
         ?outpoint,
-        ?vtxo,
         index = input_index,
         "Signing selected VTXO for checkpoint transaction"
     );
@@ -438,17 +428,17 @@ where
     let psbt_input = psbt.inputs.get_mut(input_index).expect("input at index");
 
     // In the case of input VTXOs, we are actually using a script spend path.
-    let (vtxo_spend_script, vtxo_spend_control_block) = vtxo_input.spend_info()?;
+    let (vtxo_spend_script, vtxo_spend_control_block) = vtxo_input.spend_info();
 
     let leaf_version = vtxo_spend_control_block.leaf_version;
 
     let prevouts = [TxOut {
         value: *amount,
-        script_pubkey: vtxo.script_pubkey(),
+        script_pubkey: script_pubkey.clone(),
     }];
     let prevouts = Prevouts::All(&prevouts);
 
-    let leaf_hash = TapLeafHash::from_script(&vtxo_spend_script, leaf_version);
+    let leaf_hash = TapLeafHash::from_script(vtxo_spend_script, leaf_version);
 
     let tap_sighash = SighashCache::new(&psbt.unsigned_tx)
         .taproot_script_spend_signature_hash(

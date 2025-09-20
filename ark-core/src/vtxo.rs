@@ -28,7 +28,8 @@ pub struct Vtxo {
     server: XOnlyPublicKey,
     owner: XOnlyPublicKey,
     spend_info: TaprootSpendInfo,
-    extra_scripts: Vec<ScriptBuf>,
+    /// All the scripts in this VTXO's Taproot tree.
+    tapscripts: Vec<ScriptBuf>,
     address: Address,
     exit_delay: bitcoin::Sequence,
     exit_delay_seconds: u64,
@@ -39,16 +40,18 @@ impl Vtxo {
     /// 64 bytes per pubkey.
     pub const FORFEIT_WITNESS_SIZE: usize = 64 * 2;
 
-    /// Build a VTXO.
+    /// Build a VTXO, by providing all the scripts to be included in the Taproot tree.
     ///
-    /// The `extra_scripts` argument allows for additional spend paths. All unilateral spend paths
-    /// must be timelocked. Any other spend path must involve the Ark server.
-    pub fn new<C>(
+    /// The provided `scripts` must follow the following rules:
+    ///
+    /// - All unilateral spend paths MUST be timelocked.
+    /// - All other spend paths MUST involve the Ark server's signature.
+    pub fn new_with_custom_scripts<C>(
         secp: &Secp256k1<C>,
         server: XOnlyPublicKey,
         owner: XOnlyPublicKey,
         // TODO: Verify the validity of these scripts before constructing the `Vtxo`.
-        extra_scripts: Vec<ScriptBuf>,
+        scripts: Vec<ScriptBuf>,
         exit_delay: bitcoin::Sequence,
         network: Network,
     ) -> Result<Self, Error>
@@ -58,37 +61,18 @@ impl Vtxo {
         let unspendable_key: PublicKey = UNSPENDABLE_KEY.parse().expect("valid key");
         let (unspendable_key, _) = unspendable_key.inner.x_only_public_key();
 
-        let forfeit_script = multisig_script(server, owner);
-        let redeem_script = csv_sig_script(exit_delay, owner);
+        let leaf_distribution = calculate_leaf_depths(scripts.len());
 
-        let spend_info = if extra_scripts.is_empty() {
-            TaprootBuilder::new()
-                .add_leaf(1, forfeit_script)
-                .expect("valid forfeit leaf")
-                .add_leaf(1, redeem_script)
-                .expect("valid redeem leaf")
-                .finalize(secp, unspendable_key)
-                .expect("can be finalized")
-        } else {
-            let scripts = [vec![forfeit_script, redeem_script], extra_scripts.clone()].concat();
+        let mut builder = TaprootBuilder::new();
+        for (script, depth) in scripts.iter().zip(leaf_distribution.iter()) {
+            builder = builder
+                .add_leaf(*depth as u8, script.clone())
+                .map_err(Error::ad_hoc)?;
+        }
 
-            let leaf_distribution = calculate_leaf_depths(scripts.len());
-
-            if leaf_distribution.len() == scripts.len() {
-                return Err(Error::ad_hoc("wrong leaf distribution calculated"));
-            }
-
-            let mut builder = TaprootBuilder::new();
-            for (script, depth) in scripts.iter().zip(leaf_distribution.iter()) {
-                builder = builder
-                    .add_leaf(*depth as u8, script.clone())
-                    .map_err(Error::ad_hoc)?;
-            }
-
-            builder
-                .finalize(secp, unspendable_key)
-                .map_err(|_| Error::ad_hoc("failed to finalize Taproot tree"))?
-        };
+        let spend_info = builder
+            .finalize(secp, unspendable_key)
+            .map_err(|_| Error::ad_hoc("failed to finalize Taproot tree"))?;
 
         let exit_delay_seconds = match exit_delay.to_relative_lock_time() {
             Some(relative::LockTime::Time(time)) => time.value() as u64 * 512,
@@ -102,7 +86,7 @@ impl Vtxo {
             server,
             owner,
             spend_info,
-            extra_scripts,
+            tapscripts: scripts,
             address,
             exit_delay,
             exit_delay_seconds,
@@ -121,7 +105,17 @@ impl Vtxo {
     where
         C: Verification,
     {
-        Self::new(secp, server, owner, Vec::new(), exit_delay, network)
+        let forfeit_script = multisig_script(server, owner);
+        let redeem_script = csv_sig_script(exit_delay, owner);
+
+        Self::new_with_custom_scripts(
+            secp,
+            server,
+            owner,
+            vec![forfeit_script, redeem_script],
+            exit_delay,
+            network,
+        )
     }
 
     pub fn script_pubkey(&self) -> ScriptBuf {
@@ -186,13 +180,7 @@ impl Vtxo {
     }
 
     pub fn tapscripts(&self) -> Vec<ScriptBuf> {
-        let (exit_script, _) = self.exit_spend_info();
-        let (forfeit_script, _) = self.forfeit_spend_info();
-
-        let mut scripts = vec![exit_script, forfeit_script];
-        scripts.append(&mut self.extra_scripts.clone());
-
-        scripts
+        self.tapscripts.clone()
     }
 
     /// Whether the VTXO can be claimed unilaterally by the owner or not, given the
@@ -223,6 +211,9 @@ fn calculate_leaf_depths(n: usize) -> Vec<usize> {
     }
     if n == 1 {
         return vec![0]; // A single node has depth 0
+    }
+    if n == 2 {
+        return vec![1, 1];
     }
 
     // Calculate the minimum depth required for n leaves

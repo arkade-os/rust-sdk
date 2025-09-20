@@ -5,7 +5,6 @@
 //! different conditions and participants.
 
 use crate::ArkAddress;
-use crate::Vtxo;
 use crate::UNSPENDABLE_KEY;
 use bitcoin::hashes::ripemd160;
 use bitcoin::hashes::sha256;
@@ -418,7 +417,14 @@ impl VhtlcScript {
         map
     }
 
-    pub fn into_vtxo(self) -> Vtxo {
-        todo!()
+    pub fn tapscripts(self) -> Vec<ScriptBuf> {
+        vec![
+            self.claim_script(),
+            self.refund_script(),
+            self.refund_without_receiver_script(),
+            self.unilateral_claim_script(),
+            self.unilateral_refund_script(),
+            self.unilateral_refund_without_receiver_script(),
+        ]
     }
 }

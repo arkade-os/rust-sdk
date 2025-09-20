@@ -43,6 +43,7 @@ pub struct Input {
     witness_utxo: TxOut,
     // We do not serialize this.
     tapscripts: Vec<ScriptBuf>,
+    // FIXME: I think including this assumes that the input is always singlesig.
     pk: XOnlyPublicKey,
     spend_info: (ScriptBuf, taproot::ControlBlock),
     is_onchain: bool,

@@ -77,10 +77,13 @@ where
                     })
                     .expect("to find matching default VTXO");
 
-                let vtxo_spend_script = vtxo.forfeit_script();
+                let (forfeit_script, control_block) = vtxo.forfeit_spend_info();
+
                 send::VtxoInput::new(
-                    vtxo,
-                    vtxo_spend_script,
+                    forfeit_script,
+                    control_block,
+                    vtxo.tapscripts(),
+                    vtxo.script_pubkey(),
                     virtual_tx_outpoint.amount,
                     virtual_tx_outpoint.outpoint,
                 )
@@ -97,7 +100,7 @@ where
             Some(&change_address),
             &vtxo_inputs,
             &self.server_info,
-            &[self.inner.kp.public_key()],
+            &[self.inner.kp.public_key().x_only_public_key().0],
         )
         .map_err(Error::from)
         .context("failed to build offchain transactions")?;

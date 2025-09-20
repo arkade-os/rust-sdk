@@ -10,6 +10,8 @@ use ark_core::batch::sign_commitment_psbt;
 use ark_core::boarding_output::list_boarding_outpoints;
 use ark_core::boarding_output::BoardingOutpoints;
 use ark_core::proof_of_funds;
+use ark_core::script::csv_sig_script;
+use ark_core::script::multisig_script;
 use ark_core::send;
 use ark_core::send::build_offchain_transactions;
 use ark_core::send::sign_ark_transaction;
@@ -139,14 +141,21 @@ async fn main() -> Result<()> {
         .push_opcode(OP_CHECKSIG)
         .into_script();
 
-    let dlc_vtxo = Vtxo::new(
-        &secp,
-        server_info.pk.x_only_public_key().0,
-        shared_pk,
-        vec![dlc_refund_script],
-        server_info.unilateral_exit_delay,
-        server_info.network,
-    )?;
+    let dlc_vtxo = {
+        let server_pk = server_info.pk.x_only_public_key().0;
+
+        let forfeit_script = multisig_script(server_pk, shared_pk);
+        let redeem_script = csv_sig_script(server_info.unilateral_exit_delay, shared_pk);
+
+        Vtxo::new_with_custom_scripts(
+            &secp,
+            server_info.pk.x_only_public_key().0,
+            shared_pk,
+            vec![forfeit_script, redeem_script, dlc_refund_script],
+            server_info.unilateral_exit_delay,
+            server_info.network,
+        )?
+    };
 
     // We build the DLC funding transaction, but we don't "broadcast" it yet. We use it as a
     // reference point to build the rest of the DLC.
@@ -160,7 +169,8 @@ async fn main() -> Result<()> {
         )],
         None,
         &[alice_dlc_input.clone(), bob_dlc_input.clone()],
-        server_info.dust,
+        &server_info,
+        &[shared_pk],
     )
     .context("building DLC TX")?;
 
@@ -641,8 +651,11 @@ async fn fund_vtxo(
         .iter()
         .find(|v| v.commitment_txids[0] == commitment_txid)
         .ok_or(anyhow!("could not find input in batch"))?;
+
+    let vtxo_spend_script = vtxo.forfeit_script();
     let vtxo_input = send::VtxoInput::new(
         vtxo,
+        vtxo_spend_script,
         virtual_tx_outpoint.amount,
         virtual_tx_outpoint.outpoint,
     );
