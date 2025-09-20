@@ -36,10 +36,10 @@
 //!
 //! Author: Vincenzo Palazzo <vincenzopalazzodev@gmail.com>
 
+use crate::boltz::Network;
 use crate::boltz::storage::NoSqlStorage;
 use crate::boltz::storage::SwapStorage;
 use crate::boltz::storage::SwapStorageOptions;
-use crate::boltz::Network;
 use anyhow::Result;
 use bitcoin::Amount;
 use core::fmt;
@@ -50,8 +50,8 @@ use lightning::bolt11_invoice::Bolt11Invoice;
 use serde::Deserialize;
 use serde::Serialize;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::protocol::Message;
 

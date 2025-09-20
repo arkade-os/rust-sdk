@@ -208,7 +208,8 @@ fn test_vhtlc_with_valid_fixtures() {
             hex::encode(vhtlc.unilateral_refund_without_receiver_script().as_bytes());
 
         assert_eq!(
-            unilateral_refund_without_receiver_hex, test_case.scripts.unilateral_refund_without_receiver_script,
+            unilateral_refund_without_receiver_hex,
+            test_case.scripts.unilateral_refund_without_receiver_script,
             "Unilateral refund without receiver script hex mismatch for test case: {}. Our impl includes CLTV locktime, fixture expects only CSV",
             test_case.description
         );
@@ -323,7 +324,9 @@ fn test_vhtlc_with_invalid_fixtures() {
             assert!(
                 e.contains(&test_case.error),
                 "Expected error containing '{}', got '{}' for refund without receiver delay in test case: {}",
-                test_case.error, e, test_case.description
+                test_case.error,
+                e,
+                test_case.description
             );
             continue;
         }

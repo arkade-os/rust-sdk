@@ -98,7 +98,6 @@ pub fn build_offchain_transactions(
     change_address: Option<&ArkAddress>,
     vtxo_inputs: &[VtxoInput],
     server_info: &server::Info,
-    checkpoint_exit_pks: &[XOnlyPublicKey],
 ) -> Result<OffchainTransactions, Error> {
     if vtxo_inputs.is_empty() {
         return Err(Error::transaction(
@@ -108,7 +107,7 @@ pub fn build_offchain_transactions(
 
     let checkpoint_exit_script = csv_sig_script(
         server_info.unilateral_exit_delay,
-        *checkpoint_exit_pks.first().expect("one"),
+        server_info.pk.x_only_public_key().0,
     );
 
     let mut checkpoint_txs = Vec::new();
@@ -512,22 +511,20 @@ where
 
     // In the case of input checkpoint outputs, we are using a script spend path.
 
-    let forfeit_script = &checkpoint_output.vtxo_spend_script;
+    let vtxo_spend_script = &checkpoint_output.vtxo_spend_script;
     let leaf_version = LeafVersion::TapScript;
 
-    let forfeit_control_block = checkpoint_output
+    let control_block = checkpoint_output
         .spend_info
-        .control_block(&(forfeit_script.clone(), leaf_version))
+        .control_block(&(vtxo_spend_script.clone(), leaf_version))
         .ok_or_else(|| {
             Error::transaction(format!(
                 "failed to construct control block for input {outpoint:?}"
             ))
         })?;
 
-    psbt_input.tap_scripts = BTreeMap::from_iter([(
-        forfeit_control_block,
-        (forfeit_script.clone(), leaf_version),
-    )]);
+    psbt_input.tap_scripts =
+        BTreeMap::from_iter([(control_block, (vtxo_spend_script.clone(), leaf_version))]);
 
     let prevouts = checkpoint_inputs
         .iter()
@@ -538,7 +535,7 @@ where
         .collect::<Vec<_>>();
     let prevouts = Prevouts::All(&prevouts);
 
-    let leaf_hash = TapLeafHash::from_script(forfeit_script, leaf_version);
+    let leaf_hash = TapLeafHash::from_script(vtxo_spend_script, leaf_version);
 
     let tap_sighash = SighashCache::new(&psbt.unsigned_tx)
         .taproot_script_spend_signature_hash(

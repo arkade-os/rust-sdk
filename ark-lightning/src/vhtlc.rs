@@ -6,14 +6,14 @@
 
 use ark_core::ArkAddress;
 use ark_core::UNSPENDABLE_KEY;
-use bitcoin::opcodes::all::*;
-use bitcoin::taproot::TaprootBuilder;
-use bitcoin::taproot::TaprootSpendInfo;
 use bitcoin::Network;
 use bitcoin::PublicKey;
 use bitcoin::ScriptBuf;
 use bitcoin::Sequence;
 use bitcoin::XOnlyPublicKey;
+use bitcoin::opcodes::all::*;
+use bitcoin::taproot::TaprootBuilder;
+use bitcoin::taproot::TaprootSpendInfo;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;

@@ -2,8 +2,8 @@
 //!
 //! Vincenzo Palazzo <vincenzopalazzodev@gmail.com>
 use crate::vhtlc::VhtlcScript;
-use ark_core::send::VtxoInput;
 use ark_core::ArkAddress;
+use ark_core::send::VtxoInput;
 use bitcoin::Amount;
 use bitcoin::Psbt;
 use bitcoin::Transaction;

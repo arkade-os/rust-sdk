@@ -263,20 +263,15 @@ where
         let OffchainTransactions {
             mut ark_tx,
             checkpoint_txs,
-        } = build_offchain_transactions(
-            &outputs,
-            None,
-            &[vhtlc_input.clone()],
-            &self.server_info,
-            &[claim_pk.x_only_public_key().0],
-        )?;
+        } = build_offchain_transactions(&outputs, None, &[vhtlc_input.clone()], &self.server_info)?;
 
         let sign_fn = |input: &mut psbt::Input,
                        msg: secp256k1::Message|
          -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
             // Add preimage to PSBT input.
             {
-                let mut bytes = Vec::new();
+                // Initialized with a 1, because we only have one witness element: the preimage.
+                let mut bytes = vec![1];
 
                 let length = VarInt::from(preimage.len() as u64);
 
@@ -321,8 +316,7 @@ where
                     .collect(),
             )
             .await
-            .map_err(Error::ark_server)
-            .context("failed to submit offchain transaction request")?;
+            .unwrap();
 
         // TODO: Handle error properly.
         let mut checkpoint_psbt = res.signed_checkpoint_txs.first().expect("one").clone();
@@ -332,11 +326,13 @@ where
         timeout_op(
             self.inner.timeout,
             self.network_client()
-                .finalize_offchain_transaction(ark_txid, res.signed_checkpoint_txs),
+                .finalize_offchain_transaction(ark_txid, vec![checkpoint_psbt]),
         )
         .await?
         .map_err(Error::ark_server)
         .context("failed to finalize offchain transaction")?;
+
+        tracing::info!(txid = %ark_txid, "Spent VHTLC");
 
         Ok(())
     }

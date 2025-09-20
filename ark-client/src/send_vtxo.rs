@@ -100,7 +100,6 @@ where
             Some(&change_address),
             &vtxo_inputs,
             &self.server_info,
-            &[self.inner.kp.public_key().x_only_public_key().0],
         )
         .map_err(Error::from)
         .context("failed to build offchain transactions")?;
