@@ -85,6 +85,10 @@ enum Commands {
         /// How many sats to receive
         amount: u64,
     },
+    PayInvoice {
+        /// A bolt11 invoice
+        invoice: String,
+    },
 }
 
 #[derive(Clone)]
@@ -341,6 +345,20 @@ async fn main() -> Result<()> {
                 .wait_for_payment(&swap_id)
                 .await
                 .map_err(|e| anyhow!(e))?;
+        }
+        Commands::PayInvoice { invoice } => {
+            let result = client
+                .pay_ln_invoice(invoice.clone())
+                .await
+                .map_err(|e| anyhow!(e))?;
+
+            dbg!(&result);
+
+            let response = client
+                .subscribe_to_swap_updates(result.swap_id.as_str())
+                .await
+                .unwrap();
+            dbg!(response);
         }
     }
 

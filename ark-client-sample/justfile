@@ -38,3 +38,7 @@ send-onchain actor address amount:
 # Receive via lightning
 lightning-invoice actor amount:
     cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed lightning-invoice {{ amount }}
+
+# Pay lightning invoice
+pay-invoice actor invoice:
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed pay-invoice {{ invoice }}

@@ -14,6 +14,7 @@ use ark_core::send::VTXO_CONDITION_KEY;
 use ark_core::server::GetVtxosRequest;
 use ark_core::vhtlc::VhtlcOptions;
 use ark_core::vhtlc::VhtlcScript;
+use ark_core::ArkAddress;
 use bitcoin::consensus::Encodable;
 use bitcoin::hashes::sha256;
 use bitcoin::hashes::Hash;
@@ -34,12 +35,19 @@ use lightning_invoice::Bolt11Invoice;
 use lightning_invoice::ParseOrSemanticError;
 use serde::Deserialize;
 use serde::Serialize;
+use std::str::FromStr;
 
 const BOLTZ_URL: &str = "http://localhost:9001";
 
 pub struct BoltzSwapInvoice {
     pub invoice: Bolt11Invoice,
     pub swap_data: SwapData,
+}
+
+#[derive(Clone, Debug)]
+pub struct BoltzSubmarineSwapResult {
+    pub swap_id: String,
+    pub txid: Txid,
 }
 
 impl<B, W> Client<B, W>
@@ -55,8 +63,57 @@ where
     //
     // - TXID of VHTLC transaction.
     // - Swap ID.
-    pub async fn pay_ln_invoice(&self, invoice: String, amount: Amount) -> Result<(), Error> {
-        unimplemented!()
+    pub async fn pay_ln_invoice(&self, invoice: String) -> Result<BoltzSubmarineSwapResult, Error> {
+        let claim_public_key = self.inner.kp.public_key();
+
+        // just verifying validity of invoice
+        let _invoice = Bolt11Invoice::from_str(invoice.as_str()).unwrap();
+
+        let request = CreateSubmarineSwapRequest {
+            from: Asset::Ark,
+            to: Asset::Btc,
+            invoice,
+            refund_public_key: claim_public_key.to_string(),
+        };
+        let url = format!("{BOLTZ_URL}/v2/swap/submarine");
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| Error::ad_hoc(e.to_string()))
+            .context("failed to send submarine swap request")?;
+
+        if !response.status().is_success() {
+            let error_text = response
+                .text()
+                .await
+                .map_err(|e| Error::ad_hoc(e.to_string()))
+                .context("failed to read error text")?;
+
+            return Err(Error::ad_hoc(format!(
+                "failed to create submarine swap: {error_text}"
+            )));
+        }
+
+        let response: CreateSubmarineSwapResponse = response
+            .json()
+            .await
+            .map_err(|e| Error::ad_hoc(e.to_string()))
+            .context("failed to deserialize submarine swap response")?;
+
+        let address = ArkAddress::decode(response.address.as_str()).unwrap();
+
+        let amount = Amount::from_sat(response.expected_amount);
+
+        let txid = self.send_vtxo(address, amount).await?;
+
+        Ok(BoltzSubmarineSwapResult {
+            swap_id: response.id,
+            txid,
+        })
     }
 
     // Caller could provide specific Swap ID OR we could just refund all refundable VHTLCs
@@ -343,8 +400,39 @@ where
         unimplemented!()
     }
 
-    pub async fn subscribe_to_swap_updates() -> Result<(), Error> {
-        unimplemented!()
+    pub async fn subscribe_to_swap_updates(
+        &self,
+        swaps_id: &str,
+    ) -> Result<GetSwapStatusResponse, Error> {
+        let url = format!("{BOLTZ_URL}/v2/swap/{swaps_id}");
+
+        let client = reqwest::Client::new();
+        let response = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| Error::ad_hoc(e.to_string()))
+            .context("failed to send reverse swap request")?;
+
+        if !response.status().is_success() {
+            let error_text = response
+                .text()
+                .await
+                .map_err(|e| Error::ad_hoc(e.to_string()))
+                .context("failed to read error text")?;
+
+            return Err(Error::ad_hoc(format!(
+                "failed to check swap status: {error_text}"
+            )));
+        }
+
+        let response: GetSwapStatusResponse = response
+            .json()
+            .await
+            .map_err(|e| Error::ad_hoc(e.to_string()))
+            .context("failed to deserialize swap status response")?;
+
+        Ok(response)
     }
 }
 
@@ -587,6 +675,7 @@ pub struct CreateReverseSwapRequest {
 pub enum Asset {
     Btc,
     Ark,
+    Lightning,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -633,4 +722,49 @@ pub struct SwapStatusResponse {
 pub struct SwapTransaction {
     id: String,
     hex: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateSubmarineSwapRequest {
+    pub from: Asset,
+    pub to: Asset,
+    pub invoice: String,
+    #[serde(rename = "refundPublicKey")]
+    pub refund_public_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateSubmarineSwapResponse {
+    pub id: String,
+    pub address: String,
+    #[serde(rename = "redeemScript")]
+    pub redeem_script: String,
+    #[serde(rename = "acceptZeroConf")]
+    pub accept_zero_conf: bool,
+    #[serde(rename = "expectedAmount")]
+    pub expected_amount: u64,
+    #[serde(rename = "claimPublicKey")]
+    pub claim_public_key: String,
+    #[serde(rename = "timeoutBlockHeight")]
+    pub timeout_block_height: u64,
+    #[serde(rename = "blindingKey", skip_serializing_if = "Option::is_none")]
+    pub blinding_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetSwapStatusResponse {
+    pub status: SwapStatus,
+    #[serde(rename = "zeroConfRejected", skip_serializing_if = "Option::is_none")]
+    pub zero_conf_rejected: Option<bool>,
+    pub transaction: Option<TransactionInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransactionInfo {
+    pub id: String,
+    pub hex: Option<String>,
+    #[serde(rename = "blockHeight", skip_serializing_if = "Option::is_none")]
+    pub block_height: Option<u64>,
 }
