@@ -116,6 +116,13 @@ where
         })
     }
 
+    /// Waits for the invoice to be paid by Boltz, after our Ark payment has been claimed.
+    pub async fn wait_for_invoice_paid(&self, swap_id: &str) -> Result<(), Error> {
+        wait_until_status(swap_id, &[SwapStatus::InvoicePaid]).await?;
+
+        Ok(())
+    }
+
     // Caller could provide specific Swap ID OR we could just refund all refundable VHTLCs
     // (persisted somehow).
     pub async fn refund_vhtlc(&self) -> Result<Txid, Error> {
@@ -734,21 +741,14 @@ pub struct CreateSubmarineSwapRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateSubmarineSwapResponse {
     pub id: String,
     pub address: String,
-    #[serde(rename = "redeemScript")]
-    pub redeem_script: String,
-    #[serde(rename = "acceptZeroConf")]
     pub accept_zero_conf: bool,
-    #[serde(rename = "expectedAmount")]
     pub expected_amount: u64,
-    #[serde(rename = "claimPublicKey")]
     pub claim_public_key: String,
-    #[serde(rename = "timeoutBlockHeight")]
-    pub timeout_block_height: u64,
-    #[serde(rename = "blindingKey", skip_serializing_if = "Option::is_none")]
-    pub blinding_key: Option<String>,
+    pub timeout_block_heights: TimeoutBlockHeights,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

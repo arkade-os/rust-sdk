@@ -345,6 +345,8 @@ async fn main() -> Result<()> {
                 .wait_for_payment(&swap_id)
                 .await
                 .map_err(|e| anyhow!(e))?;
+
+            tracing::info!(invoice, swap_id, "Lightning invoice paid");
         }
         Commands::PayInvoice { invoice } => {
             let result = client
@@ -352,13 +354,14 @@ async fn main() -> Result<()> {
                 .await
                 .map_err(|e| anyhow!(e))?;
 
-            dbg!(&result);
+            let swap_id = result.swap_id;
 
-            let response = client
-                .subscribe_to_swap_updates(result.swap_id.as_str())
+            client
+                .wait_for_invoice_paid(swap_id.as_str())
                 .await
-                .unwrap();
-            dbg!(response);
+                .map_err(|e| anyhow!(e))?;
+
+            tracing::info!(invoice, swap_id, "Payment made");
         }
     }
 
