@@ -118,9 +118,24 @@ where
 
     /// Waits for the invoice to be paid by Boltz, after our Ark payment has been claimed.
     pub async fn wait_for_invoice_paid(&self, swap_id: &str) -> Result<(), Error> {
-        wait_until_status(swap_id, &[SwapStatus::InvoicePaid]).await?;
+        use futures::StreamExt;
 
-        Ok(())
+        let stream = self.subscribe_to_swap_updates(swap_id.to_string());
+        tokio::pin!(stream);
+
+        while let Some(status_result) = stream.next().await {
+            match status_result {
+                Ok(status) => {
+                    tracing::debug!(current = ?status, "Swap status");
+                    if status == SwapStatus::InvoicePaid {
+                        return Ok(());
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Err(Error::ad_hoc("Status stream ended unexpectedly"))
     }
 
     // Caller could provide specific Swap ID OR we could just refund all refundable VHTLCs
@@ -220,6 +235,8 @@ where
 
     /// Waits for a payment and settles it into our own wallet
     pub async fn wait_for_payment(&self, swap_id: &str) -> Result<(), Error> {
+        use futures::StreamExt;
+
         let swap = {
             let swaps = self.swaps.lock().expect("to get lock");
             swaps
@@ -228,14 +245,23 @@ where
                 .clone()
         };
 
-        wait_until_status(
-            swap_id,
-            &[
-                SwapStatus::TransactionMempool,
-                SwapStatus::TransactionConfirmed,
-            ],
-        )
-        .await?;
+        let stream = self.subscribe_to_swap_updates(swap_id.to_string());
+        tokio::pin!(stream);
+
+        while let Some(status_result) = stream.next().await {
+            match status_result {
+                Ok(status) => {
+                    tracing::debug!(current = ?status, "Swap status");
+                    if matches!(
+                        status,
+                        SwapStatus::TransactionMempool | SwapStatus::TransactionConfirmed
+                    ) {
+                        break;
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
 
         tracing::debug!("Ark transaction for swap found");
 
@@ -401,90 +427,68 @@ where
         Ok(())
     }
 
-    // Misc (not definitive)
-
-    pub async fn get_swap_status() -> Result<(), Error> {
-        unimplemented!()
-    }
-
-    pub async fn subscribe_to_swap_updates(
+    pub fn subscribe_to_swap_updates(
         &self,
-        swaps_id: &str,
-    ) -> Result<GetSwapStatusResponse, Error> {
-        let url = format!("{BOLTZ_URL}/v2/swap/{swaps_id}");
+        swap_id: String,
+    ) -> impl futures::Stream<Item = Result<SwapStatus, Error>> + '_ {
+        async_stream::stream! {
+            let mut last_status: Option<SwapStatus> = None;
+            let url = format!("{BOLTZ_URL}/v2/swap/{swap_id}");
 
-        let client = reqwest::Client::new();
-        let response = client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| Error::ad_hoc(e.to_string()))
-            .context("failed to send reverse swap request")?;
+            loop {
+                let client = reqwest::Client::new();
+                let response = client
+                    .get(&url)
+                    .send()
+                    .await;
 
-        if !response.status().is_success() {
-            let error_text = response
-                .text()
-                .await
-                .map_err(|e| Error::ad_hoc(e.to_string()))
-                .context("failed to read error text")?;
+                match response {
+                    Ok(resp) if resp.status().is_success() => {
+                        let status_response = resp
+                            .json::<GetSwapStatusResponse>()
+                            .await
+                            .map_err(|e| Error::ad_hoc(e.to_string()));
 
-            return Err(Error::ad_hoc(format!(
-                "failed to check swap status: {error_text}"
-            )));
+                        match status_response {
+                            Ok(current_status) => {
+                                let current_status = current_status.status;
+
+                                // Only yield if status has changed
+                                if last_status.as_ref() != Some(&current_status) {
+                                    last_status = Some(current_status.clone());
+                                    yield Ok(current_status);
+                                }
+                            }
+                            Err(e) => {
+                                yield Err(Error::ad_hoc(format!(
+                                            "failed to deserialize swap status response: {e}"
+                                        )));
+                                break;
+                            }
+                        }
+                    }
+                    Ok(resp) => {
+                        let error_text = resp
+                            .text()
+                            .await
+                            .unwrap_or_else(|_| "Unknown error".to_string());
+
+                        yield Err(Error::ad_hoc(format!(
+                            "failed to check swap status: {error_text}"
+                        )));
+                        break;
+                    }
+                    Err(e) => {
+                        yield Err(Error::ad_hoc(e.to_string())
+                            .context("failed to send swap status request"));
+                        break;
+                    }
+                }
+
+                // Poll every second
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
         }
-
-        let response: GetSwapStatusResponse = response
-            .json()
-            .await
-            .map_err(|e| Error::ad_hoc(e.to_string()))
-            .context("failed to deserialize swap status response")?;
-
-        Ok(response)
-    }
-}
-
-async fn wait_until_status(swap_id: &str, statuses: &[SwapStatus]) -> Result<(), Error> {
-    let url = format!("{BOLTZ_URL}/v2/swap/{swap_id}");
-
-    loop {
-        let client = reqwest::Client::new();
-        let response = client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| Error::ad_hoc(e.to_string()))
-            .context("failed to send swap status request")?;
-
-        if !response.status().is_success() {
-            let error_text = response
-                .text()
-                .await
-                .map_err(|e| Error::ad_hoc(e.to_string()))
-                .context("failed to read error text")?;
-
-            return Err(Error::ad_hoc(format!(
-                "failed to get swap status: {error_text}"
-            )));
-        }
-
-        let response_text = response
-            .text()
-            .await
-            .map_err(|e| Error::ad_hoc(e.to_string()))?;
-
-        tracing::debug!("Response body: {}", response_text);
-
-        let response: SwapStatusResponse = serde_json::from_str(&response_text)
-            .map_err(|e| Error::ad_hoc(e.to_string()))
-            .context("failed to deserialize swap status response")?;
-
-        if statuses.contains(&response.status) {
-            return Ok(());
-        }
-
-        tracing::debug!(current = ?response.status, target = ?statuses, "Swap status");
-
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 }
 
