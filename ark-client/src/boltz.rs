@@ -1,4 +1,5 @@
 use crate::error::ErrorContext;
+use crate::swap_storage::SwapStorage;
 use crate::timeout_op;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
@@ -50,10 +51,11 @@ pub struct BoltzSubmarineSwapResult {
     pub txid: Txid,
 }
 
-impl<B, W> Client<B, W>
+impl<B, W, S> Client<B, W, S>
 where
     B: Blockchain,
     W: BoardingWallet + OnchainWallet,
+    S: SwapStorage + 'static,
 {
     // SUBMARINE SWAP
 
@@ -223,9 +225,10 @@ where
             },
         };
 
-        // TODO: Introduce SwapStorage trait.
-        let mut swaps = self.swaps.lock().expect("to get lock");
-        swaps.insert(response.id, swap.clone());
+        self.swap_storage
+            .insert(response.id.clone(), swap.clone())
+            .await
+            .context("failed to persist swap data")?;
 
         Ok(BoltzSwapInvoice {
             invoice,
@@ -237,13 +240,12 @@ where
     pub async fn wait_for_payment(&self, swap_id: &str) -> Result<(), Error> {
         use futures::StreamExt;
 
-        let swap = {
-            let swaps = self.swaps.lock().expect("to get lock");
-            swaps
-                .get(swap_id)
-                .ok_or_else(|| Error::ad_hoc(format!("swap data not found: {swap_id}")))?
-                .clone()
-        };
+        let swap = self
+            .swap_storage
+            .get(swap_id)
+            .await
+            .context("failed to get swap data")?
+            .ok_or_else(|| Error::ad_hoc(format!("swap data not found: {swap_id}")))?;
 
         let stream = self.subscribe_to_swap_updates(swap_id.to_string());
         tokio::pin!(stream);
@@ -495,7 +497,7 @@ where
 /// Persistent swap data
 ///
 /// This structure maintains swap state.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SwapData {
     /// Unique swap identifier
     pub id: String,
@@ -510,7 +512,7 @@ pub struct SwapData {
 }
 
 /// Type of Boltz swap
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SwapType {
     /// On-chain to Lightning swap
     Submarine,

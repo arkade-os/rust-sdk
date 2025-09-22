@@ -1,4 +1,3 @@
-use crate::boltz::SwapData;
 use crate::error::ErrorContext;
 use crate::utils::sleep;
 use crate::utils::timeout_op;
@@ -29,12 +28,11 @@ use bitcoin::Txid;
 use futures::Future;
 use futures::Stream;
 use jiff::Timestamp;
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 
 pub mod error;
+pub mod swap_storage;
 pub mod wallet;
 
 mod batch;
@@ -45,6 +43,7 @@ mod unilateral_exit;
 mod utils;
 
 pub use error::Error;
+pub use swap_storage::{InMemorySwapStorage, SqliteSwapStorage, SwapStorage};
 
 /// A client to interact with Ark Server
 ///
@@ -199,7 +198,7 @@ pub use error::Error;
 ///     Ok(client)
 /// }
 /// ```
-pub struct OfflineClient<B, W> {
+pub struct OfflineClient<B, W, S = InMemorySwapStorage> {
     // TODO: We could introduce a generic interface so that consumers can use either GRPC or REST.
     network_client: ark_grpc::Client,
     pub name: String,
@@ -207,16 +206,17 @@ pub struct OfflineClient<B, W> {
     blockchain: Arc<B>,
     secp: Secp256k1<All>,
     wallet: Arc<W>,
+    swap_storage: Option<Arc<S>>,
     timeout: Duration,
 }
 
 /// A client to interact with Ark server
 ///
 /// See [`OfflineClient`] docs for details.
-pub struct Client<B, W> {
-    inner: OfflineClient<B, W>,
+pub struct Client<B, W, S = InMemorySwapStorage> {
+    inner: OfflineClient<B, W, S>,
     pub server_info: server::Info,
-    pub swaps: Arc<Mutex<HashMap<String, SwapData>>>,
+    pub swap_storage: Arc<S>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -297,7 +297,7 @@ pub trait Blockchain {
     ) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
-impl<B, W> OfflineClient<B, W>
+impl<B, W> OfflineClient<B, W, InMemorySwapStorage>
 where
     B: Blockchain,
     W: BoardingWallet + OnchainWallet,
@@ -321,7 +321,36 @@ where
             blockchain,
             secp,
             wallet,
+            swap_storage: None,
             timeout,
+        }
+    }
+
+    /// Set a custom swap storage implementation.
+    ///
+    /// This method consumes the current offline client and returns a new one with the specified storage.
+    /// Call this before `connect_with_storage()` to use custom storage.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let offline_client = OfflineClient::new(...)
+    ///     .set_swap_storage(Arc::new(MyDatabaseStorage::new()));
+    /// let client = offline_client.connect_with_storage().await?;
+    /// ```
+    pub fn set_swap_storage<S>(self, swap_storage: Arc<S>) -> OfflineClient<B, W, S>
+    where
+        S: SwapStorage + 'static,
+    {
+        OfflineClient {
+            network_client: self.network_client,
+            name: self.name,
+            kp: self.kp,
+            blockchain: self.blockchain,
+            secp: self.secp,
+            wallet: self.wallet,
+            swap_storage: Some(swap_storage),
+            timeout: self.timeout,
         }
     }
 
@@ -330,7 +359,7 @@ where
     /// # Errors
     ///
     /// Returns an error if the connection fails or times out.
-    pub async fn connect(mut self) -> Result<Client<B, W>, Error> {
+    pub async fn connect(mut self) -> Result<Client<B, W, InMemorySwapStorage>, Error> {
         timeout_op(self.timeout, self.network_client.connect())
             .await
             .context("Failed to connect to Ark server")??;
@@ -346,10 +375,12 @@ where
 
         // TODO: If LN enabled: spawn task to monitor status of Boltz swaps using Boltz's API.
 
+        tracing::warn!("Inmemory storage will be used for lightning swaps.");
+
         Ok(Client {
             inner: self,
             server_info,
-            swaps: Arc::new(Mutex::new(HashMap::default())),
+            swap_storage: Arc::new(InMemorySwapStorage::new()),
         })
     }
 
@@ -360,7 +391,10 @@ where
     /// # Errors
     ///
     /// Returns an error if the connection fails or times out.
-    pub async fn connect_with_retries(mut self, max_retries: usize) -> Result<Client<B, W>, Error> {
+    pub async fn connect_with_retries(
+        mut self,
+        max_retries: usize,
+    ) -> Result<Client<B, W, InMemorySwapStorage>, Error> {
         let mut n_retries = 0;
         while n_retries < max_retries {
             let res = timeout_op(self.timeout, self.network_client.connect())
@@ -391,19 +425,103 @@ where
             "Connected to Ark server"
         );
 
+        tracing::warn!("Inmemory storage will be used for lightning swaps.");
+
         Ok(Client {
             inner: self,
             server_info,
-            swaps: Arc::new(Mutex::new(HashMap::default())),
+            swap_storage: Arc::new(InMemorySwapStorage::new()),
         })
     }
 }
 
-impl<B, W> Client<B, W>
+impl<B, W, S> OfflineClient<B, W, S>
 where
     B: Blockchain,
     W: BoardingWallet + OnchainWallet,
+    S: SwapStorage + 'static,
 {
+    pub fn with_swap_storage(
+        name: String,
+        kp: Keypair,
+        blockchain: Arc<B>,
+        wallet: Arc<W>,
+        ark_server_url: String,
+        swap_storage: Arc<S>,
+        timeout: Duration,
+    ) -> Self {
+        let secp = Secp256k1::new();
+        let network_client = ark_grpc::Client::new(ark_server_url);
+
+        Self {
+            network_client,
+            name,
+            kp,
+            blockchain,
+            secp,
+            wallet,
+            swap_storage: Some(swap_storage),
+            timeout,
+        }
+    }
+
+    /// Connects to the Ark server and retrieves server information with custom storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connection fails, times out, or swap storage is not provided.
+    pub async fn connect_with_storage(mut self) -> Result<Client<B, W, S>, Error> {
+        timeout_op(self.timeout, self.network_client.connect())
+            .await
+            .context("Failed to connect to Ark server")??;
+        let server_info = timeout_op(self.timeout, self.network_client.get_info())
+            .await
+            .context("Failed to get Ark server info")??;
+
+        tracing::debug!(
+            name = self.name,
+            ark_server_url = ?self.network_client,
+            "Connected to Ark server"
+        );
+
+        let swap_storage = self.swap_storage.take().ok_or_else(|| {
+            Error::ad_hoc("Swap storage must be provided for connect_with_storage")
+        })?;
+
+        Ok(Client {
+            inner: self,
+            server_info,
+            swap_storage,
+        })
+    }
+}
+
+impl<B, W, S> Client<B, W, S>
+where
+    B: Blockchain,
+    W: BoardingWallet + OnchainWallet,
+    S: SwapStorage + 'static,
+{
+    pub fn with_swap_storage<NewS>(self, swap_storage: Arc<NewS>) -> Client<B, W, NewS>
+    where
+        NewS: SwapStorage + 'static,
+    {
+        Client {
+            inner: OfflineClient {
+                network_client: self.inner.network_client,
+                name: self.inner.name,
+                kp: self.inner.kp,
+                blockchain: self.inner.blockchain,
+                secp: self.inner.secp,
+                wallet: self.inner.wallet,
+                swap_storage: Some(swap_storage.clone()),
+                timeout: self.inner.timeout,
+            },
+            server_info: self.server_info,
+            swap_storage,
+        }
+    }
+
     // At the moment we are always generating the same address.
     pub fn get_offchain_address(&self) -> Result<(ArkAddress, Vtxo), Error> {
         let server_info = &self.server_info;

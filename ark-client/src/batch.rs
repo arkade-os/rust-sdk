@@ -1,4 +1,5 @@
 use crate::error::ErrorContext;
+use crate::swap_storage::SwapStorage;
 use crate::utils::sleep;
 use crate::utils::timeout_op;
 use crate::wallet::BoardingWallet;
@@ -37,10 +38,11 @@ use rand::CryptoRng;
 use rand::Rng;
 use std::collections::HashMap;
 
-impl<B, W> Client<B, W>
+impl<B, W, S> Client<B, W, S>
 where
     B: Blockchain,
     W: BoardingWallet + OnchainWallet,
+    S: SwapStorage + 'static,
 {
     /// Settle _all_ prior VTXOs and boarding outputs into the next batch, generating new confirmed
     /// VTXOs.

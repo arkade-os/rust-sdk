@@ -1,4 +1,5 @@
 use crate::error::ErrorContext;
+use crate::swap_storage::SwapStorage;
 use crate::utils::timeout_op;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
@@ -20,10 +21,11 @@ use bitcoin::Amount;
 use bitcoin::Txid;
 use bitcoin::XOnlyPublicKey;
 
-impl<B, W> Client<B, W>
+impl<B, W, S> Client<B, W, S>
 where
     B: Blockchain,
     W: BoardingWallet + OnchainWallet,
+    S: SwapStorage + 'static,
 {
     /// Spend confirmed and pre-confimed VTXOs in an Ark transaction sending the given `amount` to
     /// the given `address`.
