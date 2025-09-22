@@ -22,7 +22,6 @@ use bitcoin::hashes::Hash;
 use bitcoin::hex::DisplayHex;
 use bitcoin::io::Write;
 use bitcoin::key::Secp256k1;
-use bitcoin::psbt;
 use bitcoin::secp256k1;
 use bitcoin::secp256k1::schnorr;
 use bitcoin::taproot::LeafVersion;
@@ -32,6 +31,7 @@ use bitcoin::Sequence;
 use bitcoin::Txid;
 use bitcoin::VarInt;
 use bitcoin::XOnlyPublicKey;
+use bitcoin::{psbt, Psbt};
 use lightning_invoice::Bolt11Invoice;
 use lightning_invoice::ParseOrSemanticError;
 use serde::Deserialize;
@@ -59,23 +59,25 @@ where
 {
     // SUBMARINE SWAP
 
-    // This is a submarine swap (Ark to Lightning).
-    //
-    // Returns:
-    //
-    // - TXID of VHTLC transaction.
-    // - Swap ID.
+    /// This is a submarine swap (Ark to Lightning).
+    ///
+    /// Arguments:
+    /// - `invoice`: a Bolt11Invoice to get paid
+    ///
+    /// Returns:
+    ///
+    /// - TXID of VHTLC transaction.
+    /// - Swap ID.
     pub async fn pay_ln_invoice(&self, invoice: String) -> Result<BoltzSubmarineSwapResult, Error> {
-        let claim_public_key = self.inner.kp.public_key();
+        let refund_public_key = self.inner.kp.public_key();
 
-        // just verifying validity of invoice
-        let _invoice = Bolt11Invoice::from_str(invoice.as_str()).unwrap();
+        let bolt11_invoice = Bolt11Invoice::from_str(invoice.as_str()).unwrap();
 
         let request = CreateSubmarineSwapRequest {
             from: Asset::Ark,
             to: Asset::Btc,
             invoice,
-            refund_public_key: claim_public_key.to_string(),
+            refund_public_key: refund_public_key.to_string(),
         };
         let url = format!("{BOLTZ_URL}/v2/swap/submarine");
 
@@ -99,21 +101,47 @@ where
                 "failed to create submarine swap: {error_text}"
             )));
         }
+        let preimage_hash = bolt11_invoice.payment_hash();
 
-        let response: CreateSubmarineSwapResponse = response
-            .json()
-            .await
+        let string = response.text().await.expect("to work");
+        dbg!(&string);
+
+        let swap_response: CreateSubmarineSwapResponse = serde_json::from_str(&string)
             .map_err(|e| Error::ad_hoc(e.to_string()))
             .context("failed to deserialize submarine swap response")?;
 
-        let address = ArkAddress::decode(response.address.as_str()).unwrap();
+        self.swap_storage
+            .insert(
+                swap_response.id.clone(),
+                SwapData {
+                    id: swap_response.id.clone(),
+                    swap_type: SwapType::Submarine,
+                    status: SwapStatus::Created,
+                    created_at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs(),
+                    metadata: SwapMetadata::Submarine {
+                        address: swap_response.address.clone(),
+                        preimage_hash: *preimage_hash,
+                        // TODO: set this?
+                        redeem_script: "".to_string(),
+                        accept_zero_conf: swap_response.accept_zero_conf,
+                        expected_amount: swap_response.expected_amount,
+                        claim_public_key: swap_response.claim_public_key,
+                        timeout_block_height: swap_response.timeout_block_heights,
+                        blinding_key: None,
+                    },
+                },
+            )
+            .await?;
 
-        let amount = Amount::from_sat(response.expected_amount);
-
+        let address = ArkAddress::decode(swap_response.address.as_str()).unwrap();
+        let amount = Amount::from_sat(swap_response.expected_amount);
         let txid = self.send_vtxo(address, amount).await?;
 
         Ok(BoltzSubmarineSwapResult {
-            swap_id: response.id,
+            swap_id: swap_response.id,
             txid,
         })
     }
@@ -140,10 +168,195 @@ where
         Err(Error::ad_hoc("Status stream ended unexpectedly"))
     }
 
-    // Caller could provide specific Swap ID OR we could just refund all refundable VHTLCs
-    // (persisted somehow).
-    pub async fn refund_vhtlc(&self) -> Result<Txid, Error> {
-        unimplemented!()
+    /// Attempts to refund a VHTLC
+    ///
+    /// Arguments
+    /// - `swap_id` - the swap to refund
+    /// - `collaborative`: whether to refund collaboratively with the swap provider
+    pub async fn refund_vhtlc(&self, swap_id: &str, collaborative: bool) -> Result<Txid, Error> {
+        let swap_data = self
+            .swap_storage
+            .get(swap_id)
+            .await?
+            .ok_or(Error::ad_hoc("Swap not found"))?;
+
+        // TODO: Should probably persist or deterministically derive this.
+        let refund_pk = self.inner.kp.public_key();
+        // TODO: don't expect here
+        let claim_pk = swap_data.metadata.claim_pk().expect("to have claim key");
+        let claim_pk = secp256k1::PublicKey::from_str(&claim_pk).expect("to be xonly");
+
+        // TODO: Use a different key!
+        let server_pk = self.server_info.pk.x_only_public_key().0;
+
+        let preimage_hash = swap_data.metadata.preimage_hash();
+
+        let timeout_block_heights = swap_data.metadata.timeout_block_heights();
+
+        dbg!("1");
+        let vhtlc = VhtlcScript::new(
+            VhtlcOptions {
+                sender: refund_pk.x_only_public_key().0,
+                // FIXME: wrong key, should be claim_pk
+                receiver: claim_pk.x_only_public_key().0,
+                server: server_pk,
+                preimage_hash,
+                refund_locktime: timeout_block_heights.refund,
+                unilateral_claim_delay: Sequence::from_height(
+                    timeout_block_heights.unilateral_claim,
+                ),
+                unilateral_refund_delay: Sequence::from_height(
+                    timeout_block_heights.unilateral_refund,
+                ),
+                unilateral_refund_without_receiver_delay: Sequence::from_height(
+                    timeout_block_heights.unilateral_refund_without_receiver,
+                ),
+            },
+            self.server_info.network,
+        )
+        .map_err(Error::ad_hoc)?;
+
+        dbg!("2");
+
+        let vhtlc_address = vhtlc.address();
+        if vhtlc_address.to_string() != swap_data.metadata.address() {
+            return Err(Error::ad_hoc(format!(
+                "VHTLC address ({vhtlc_address}) does not match swap address ({})",
+                swap_data.metadata.address()
+            )));
+        }
+
+        dbg!("3");
+
+        let vhtlc_outpoint = {
+            let request = GetVtxosRequest::new_for_addresses(&[vhtlc_address]);
+
+            let list = timeout_op(
+                self.inner.timeout,
+                self.network_client().list_vtxos(request),
+            )
+            .await
+            .context("Failed to fetch VHTLC")??;
+
+            // We expect a single outpoint.
+            let all = list.all();
+            let vhtlc_outpoint = all.first().ok_or_else(|| {
+                Error::ad_hoc(format!("no outpoint found for address {vhtlc_address}"))
+            })?;
+
+            vhtlc_outpoint.clone()
+        };
+
+        let refund_script = if collaborative {
+            vhtlc.refund_without_receiver_script()
+        } else {
+            // TODO: implement refund after timeout
+            unimplemented!();
+        };
+
+        let script_ver = (refund_script, LeafVersion::TapScript);
+        let spend_info = vhtlc.taproot_info().expect("info");
+        let control_block = spend_info
+            .control_block(&script_ver)
+            .ok_or(Error::ad_hoc("control block not found for claim script"))?;
+
+        let script_pubkey = vhtlc.script_pubkey().expect("script pubkey");
+
+        let vhtlc_input = VtxoInput::new(
+            script_ver.0,
+            control_block,
+            vhtlc.tapscripts(),
+            script_pubkey,
+            swap_data.metadata.amount(),
+            vhtlc_outpoint.outpoint,
+        );
+
+        let (claim_address, _) = self.get_offchain_address()?;
+        let claim_amount = swap_data.metadata.amount();
+
+        let outputs = vec![(&claim_address, claim_amount)];
+
+        let OffchainTransactions {
+            mut ark_tx,
+            checkpoint_txs,
+        } = build_offchain_transactions(&outputs, None, &[vhtlc_input.clone()], &self.server_info)?;
+
+        let sign_fn = |_input: &mut psbt::Input,
+                       msg: secp256k1::Message|
+         -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+            let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, self.kp());
+            let pk = self.kp().x_only_public_key().0;
+
+            Ok((sig, pk))
+        };
+
+        // TODO: Handle error properly.
+        let checkpoint_tx = checkpoint_txs.first().expect("one");
+
+        sign_ark_transaction(
+            sign_fn,
+            &mut ark_tx,
+            &[(checkpoint_tx.1.clone(), checkpoint_tx.2)],
+            0,
+        )?;
+
+        dbg!("8");
+
+        let signed_ark_tx = if collaborative {
+            let url = format!("{BOLTZ_URL}/v2/swap/submarine/{swap_id}/refund/ark");
+            let client = reqwest::Client::new();
+            let response = client
+                .post(&url)
+                .json(&RefundSwapRequest {
+                    transaction: dbg!(ark_tx.to_string()),
+                })
+                .send()
+                .await
+                .map_err(Error::ad_hoc)?;
+
+            let string = response.text().await.map_err(Error::ad_hoc)?;
+
+            let refund_response: RefundSwapResponse =
+                serde_json::from_str(&string).map_err(Error::ad_hoc)?;
+
+            Psbt::from_str(refund_response.transaction.as_str())
+                .map_err(Error::ad_hoc)
+                .context("Could not parse refund transaction to psbt")?
+        } else {
+            ark_tx
+        };
+
+        let ark_txid = signed_ark_tx.unsigned_tx.compute_txid();
+
+        let res = self
+            .network_client()
+            .submit_offchain_transaction_request(
+                signed_ark_tx,
+                checkpoint_txs
+                    .into_iter()
+                    .map(|(psbt, _, _, _)| psbt)
+                    .collect(),
+            )
+            .await
+            .unwrap();
+
+        // TODO: Handle error properly.
+        let mut checkpoint_psbt = res.signed_checkpoint_txs.first().expect("one").clone();
+
+        sign_checkpoint_transaction(sign_fn, &mut checkpoint_psbt, &vhtlc_input)?;
+
+        timeout_op(
+            self.inner.timeout,
+            self.network_client()
+                .finalize_offchain_transaction(ark_txid, vec![checkpoint_psbt]),
+        )
+        .await?
+        .map_err(Error::ark_server)
+        .context("failed to finalize offchain transaction")?;
+
+        tracing::info!(txid = %ark_txid, "Refunded VHTLC");
+
+        Ok(ark_txid)
     }
 
     // REVERSE SUBMARINE SWAP
@@ -277,7 +490,7 @@ where
         // TODO: Use a different key!
         let server_pk = self.server_info.pk.x_only_public_key().0;
 
-        let preimage_hash = swap.metadata.preimage_hash().unwrap();
+        let preimage_hash = swap.metadata.preimage_hash();
 
         let timeout_block_heights = swap.metadata.timeout_block_heights();
 
@@ -591,6 +804,8 @@ pub enum SwapMetadata {
     Submarine {
         /// Address to send funds to
         address: String,
+        /// Extracted from the bolt11 invoice
+        preimage_hash: sha256::Hash,
         /// Redeem script for the swap
         redeem_script: String,
         /// Whether zero-confirmation transactions are accepted
@@ -600,7 +815,7 @@ pub enum SwapMetadata {
         /// Public key for claiming funds
         claim_public_key: String,
         /// Block height when swap times out
-        timeout_block_height: u64,
+        timeout_block_height: TimeoutBlockHeights,
         /// Optional blinding key for confidential transactions
         blinding_key: Option<String>,
     },
@@ -619,10 +834,10 @@ impl SwapMetadata {
         }
     }
 
-    pub fn preimage_hash(&self) -> Option<sha256::Hash> {
+    pub fn preimage_hash(&self) -> sha256::Hash {
         match self {
-            SwapMetadata::Reverse { preimage_hash, .. } => Some(*preimage_hash),
-            SwapMetadata::Submarine { .. } => None,
+            SwapMetadata::Reverse { preimage_hash, .. } => *preimage_hash,
+            SwapMetadata::Submarine { preimage_hash, .. } => *preimage_hash,
         }
     }
 
@@ -662,13 +877,25 @@ impl SwapMetadata {
         }
     }
 
+    pub fn claim_pk(&self) -> Option<String> {
+        match self {
+            SwapMetadata::Reverse { .. } => None,
+            SwapMetadata::Submarine {
+                claim_public_key, ..
+            } => Some(claim_public_key.clone()),
+        }
+    }
+
     pub fn timeout_block_heights(&self) -> TimeoutBlockHeights {
         match self {
             SwapMetadata::Reverse {
                 timeout_block_heights,
                 ..
             } => timeout_block_heights.clone(),
-            SwapMetadata::Submarine { .. } => unimplemented!(),
+            SwapMetadata::Submarine {
+                timeout_block_height,
+                ..
+            } => timeout_block_height.clone(),
         }
     }
 }
@@ -702,7 +929,7 @@ pub struct CreateReverseSwapResponse {
     pub onchain_amount: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Copy)]
 #[serde(rename_all = "camelCase")]
 pub struct TimeoutBlockHeights {
     pub refund: u32,
@@ -773,4 +1000,16 @@ pub struct TransactionInfo {
     pub hex: Option<String>,
     #[serde(rename = "blockHeight", skip_serializing_if = "Option::is_none")]
     pub block_height: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefundSwapRequest {
+    transaction: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefundSwapResponse {
+    transaction: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }

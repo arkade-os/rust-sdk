@@ -42,3 +42,7 @@ lightning-invoice actor amount:
 # Pay lightning invoice
 pay-invoice actor invoice:
     cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed pay-invoice {{ invoice }}
+
+# Pay lightning invoice
+refund-swap actor swap_id:
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed refund-swap {{ swap_id }}

@@ -109,7 +109,7 @@ impl SwapStorage for SqliteSwapStorage {
         match row {
             Some(row) => {
                 let data: String = row.get("data");
-                let swap_data: SwapData = serde_json::from_str(&data).map_err(|e| {
+                let swap_data: SwapData = serde_json::from_str(&dbg!(data)).map_err(|e| {
                     Error::ad_hoc(format!("Failed to deserialize swap data: {}", e))
                 })?;
                 Ok(Some(swap_data))

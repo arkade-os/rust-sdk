@@ -12,6 +12,7 @@ use ark_bdk_wallet::Wallet;
 use ark_client::Blockchain;
 use ark_client::Error;
 use ark_client::OfflineClient;
+use ark_client::SqliteSwapStorage;
 use ark_core::history;
 use ark_core::ArkAddress;
 use bitcoin::address::NetworkUnchecked;
@@ -89,6 +90,10 @@ enum Commands {
         /// A bolt11 invoice
         invoice: String,
     },
+    RefundSwap {
+        /// Attempt to refund a past swap
+        swap_id: String,
+    },
 }
 
 #[derive(Clone)]
@@ -135,6 +140,7 @@ impl FromStr for AddressesAndAmounts {
 struct Config {
     ark_server_url: String,
     esplora_url: String,
+    swap_storage_path: String,
 }
 
 #[tokio::main]
@@ -162,6 +168,11 @@ async fn main() -> Result<()> {
     let esplora_client = EsploraClient::new(&config.esplora_url)?;
     let esplora_client = Arc::new(esplora_client);
 
+    let storage = Arc::new(
+        SqliteSwapStorage::new(&config.swap_storage_path)
+            .await
+            .map_err(|e| anyhow!(e))?,
+    );
     let client = OfflineClient::new(
         "sample-client".to_string(),
         kp,
@@ -170,7 +181,8 @@ async fn main() -> Result<()> {
         config.ark_server_url,
         Duration::from_secs(30),
     )
-    .connect()
+    .set_swap_storage(storage)
+    .connect_with_storage()
     .await
     .map_err(|e| anyhow!(e))?;
 
@@ -356,12 +368,22 @@ async fn main() -> Result<()> {
 
             let swap_id = result.swap_id;
 
+            tracing::info!(swap_id, "Payment sent, waiting for finalization");
+
             client
                 .wait_for_invoice_paid(swap_id.as_str())
                 .await
                 .map_err(|e| anyhow!(e))?;
 
-            tracing::info!(invoice, swap_id, "Payment made");
+            tracing::info!(swap_id, "Payment made");
+        }
+        Commands::RefundSwap { swap_id } => {
+            let txid = client
+                .refund_vhtlc(swap_id.as_str(), true)
+                .await
+                .map_err(|e| anyhow!(e))?;
+
+            tracing::info!(?txid, swap_id, "Refunded swap");
         }
     }
 
