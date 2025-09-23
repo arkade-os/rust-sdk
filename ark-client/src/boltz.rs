@@ -6,12 +6,12 @@ use crate::wallet::OnchainWallet;
 use crate::Blockchain;
 use crate::Client;
 use crate::Error;
-use ark_core::send::build_offchain_transactions;
 use ark_core::send::sign_ark_transaction;
 use ark_core::send::sign_checkpoint_transaction;
 use ark_core::send::OffchainTransactions;
 use ark_core::send::VtxoInput;
 use ark_core::send::VTXO_CONDITION_KEY;
+use ark_core::send::{build_offchain_transactions, VTXO_TREE_EXPIRY_PSBT_KEY};
 use ark_core::server::GetVtxosRequest;
 use ark_core::vhtlc::VhtlcOptions;
 use ark_core::vhtlc::VhtlcScript;
@@ -248,7 +248,7 @@ where
         };
 
         let refund_script = if collaborative {
-            vhtlc.refund_without_receiver_script()
+            vhtlc.refund_script()
         } else {
             // TODO: implement refund after timeout
             unimplemented!();
@@ -258,7 +258,7 @@ where
         let spend_info = vhtlc.taproot_info().expect("info");
         let control_block = spend_info
             .control_block(&script_ver)
-            .ok_or(Error::ad_hoc("control block not found for claim script"))?;
+            .ok_or(Error::ad_hoc("control block not found for refund script"))?;
 
         let script_pubkey = vhtlc.script_pubkey().expect("script pubkey");
 
@@ -281,9 +281,37 @@ where
             checkpoint_txs,
         } = build_offchain_transactions(&outputs, None, &[vhtlc_input.clone()], &self.server_info)?;
 
-        let sign_fn = |_input: &mut psbt::Input,
+        // TODO: this needs to be different if NOT collaborative
+        let expiry = swap_data.metadata.timeout_block_heights().refund;
+
+        let sign_fn = |input: &mut psbt::Input,
                        msg: secp256k1::Message|
          -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+            {
+                // FIXME: TODO: the below is probably wrong
+                let sequence = Sequence::from_height(expiry as u16);
+
+                // Initialized with a 1, because we only have one witness element: the length.
+                let mut bytes = vec![];
+
+                // TODO: maybe?
+                let length = VarInt::from(4u64);
+
+                length.consensus_encode(&mut bytes).unwrap();
+
+                let sequence = sequence.to_consensus_u32();
+
+                bytes.write_all(&sequence.to_le_bytes()).unwrap();
+
+                input.unknown.insert(
+                    psbt::raw::Key {
+                        type_value: u8::MAX,
+                        key: VTXO_TREE_EXPIRY_PSBT_KEY.to_vec(),
+                    },
+                    bytes,
+                );
+            }
+
             let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, self.kp());
             let pk = self.kp().x_only_public_key().0;
 
@@ -325,6 +353,7 @@ where
         } else {
             ark_tx
         };
+        dbg!("9");
 
         let ark_txid = signed_ark_tx.unsigned_tx.compute_txid();
 
