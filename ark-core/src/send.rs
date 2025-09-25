@@ -51,6 +51,9 @@ pub struct VtxoInput {
     ///
     /// The very same spend path is also used when building the corresponding checkpoint output.
     spend_script: ScriptBuf,
+    /// An optional locktime, only set if the `spend_script` uses `OP_CLTV`.
+    // TODO: Parse this information from the script instead.
+    locktime: Option<LockTime>,
     control_block: ControlBlock,
     /// All the scripts in the Taproot tree.
     tapscripts: Vec<ScriptBuf>,
@@ -64,6 +67,7 @@ pub struct VtxoInput {
 impl VtxoInput {
     pub fn new(
         vtxo_spend_script: ScriptBuf,
+        locktime: Option<LockTime>,
         control_block: ControlBlock,
         tapscripts: Vec<ScriptBuf>,
         script_pubkey: ScriptBuf,
@@ -72,6 +76,7 @@ impl VtxoInput {
     ) -> Self {
         Self {
             spend_script: vtxo_spend_script,
+            locktime,
             control_block,
             tapscripts,
             script_pubkey,
@@ -177,8 +182,26 @@ pub fn build_offchain_transactions(
 
     outputs.push(anchor_output());
 
-    // TODO: Use a different locktime if we have CLTV multisig script.
-    let lock_time = LockTime::ZERO;
+    let timelocked_inputs = vtxo_inputs
+        .iter()
+        .filter_map(|x| x.locktime)
+        .collect::<Vec<_>>();
+
+    let highest_timelock = timelocked_inputs
+        .iter()
+        .try_fold(None, |acc, a| match (acc, a) {
+            (None, locktime) => Ok(Some(*locktime)),
+            (Some(a @ LockTime::Blocks(h1)), LockTime::Blocks(h2)) if h1 > *h2 => Ok(Some(a)),
+            (Some(LockTime::Blocks(_)), b @ LockTime::Blocks(_)) => Ok(Some(*b)),
+            (Some(a @ LockTime::Seconds(t1)), LockTime::Seconds(t2)) if t1 > *t2 => Ok(Some(a)),
+            (Some(LockTime::Seconds(_)), b @ LockTime::Seconds(_)) => Ok(Some(*b)),
+            _ => Err(Error::transaction("incompatible locktimes")),
+        })?;
+
+    let (lock_time, sequence) = match highest_timelock {
+        Some(timelock) => (timelock, bitcoin::Sequence::ENABLE_LOCKTIME_NO_RBF),
+        None => (LockTime::ZERO, bitcoin::Sequence::MAX),
+    };
 
     let unsigned_ark_tx = Transaction {
         version: transaction::Version::non_standard(3),
@@ -188,8 +211,7 @@ pub fn build_offchain_transactions(
             .map(|(_, _, CheckpointOutPoint { outpoint, .. }, _)| TxIn {
                 previous_output: *outpoint,
                 script_sig: Default::default(),
-                // TODO: Use a different sequence number if we have a CLTV multisig script.
-                sequence: bitcoin::Sequence::MAX,
+                sequence,
                 witness: Default::default(),
             })
             .collect(),
@@ -275,17 +297,21 @@ impl CheckpointOutput {
 
 fn build_checkpoint_psbt(
     vtxo_input: &VtxoInput,
-    // An alternative way to unilaterally spend the checkpoint output, in case the server does not
-    // cooperate.
+    // An alternative way for the _server_ unilaterally spend the checkpoint output, in case the
+    // owner does not spend it.
     //
-    // This must be a "CSV Multisig" script. This script is "optionally" multisig i.e. singlesig is
-    // valid too. The set of PKs should not include the server PK.
+    // This must be a "CSV Multisig" script, with only a single PK: the server PK.
     checkpoint_exit_script: ScriptBuf,
 ) -> Result<(Psbt, CheckpointOutput, CheckpointOutPoint), Error> {
+    let (lock_time, sequence) = match vtxo_input.locktime {
+        Some(timelock) => (timelock, bitcoin::Sequence::ENABLE_LOCKTIME_NO_RBF),
+        None => (LockTime::ZERO, bitcoin::Sequence::MAX),
+    };
+
     let inputs = vec![TxIn {
         previous_output: vtxo_input.outpoint,
         script_sig: Default::default(),
-        sequence: bitcoin::Sequence::MAX,
+        sequence,
         witness: Default::default(),
     }];
 
@@ -298,8 +324,6 @@ fn build_checkpoint_psbt(
         },
         anchor_output(),
     ];
-
-    let lock_time = LockTime::ZERO;
 
     let unsigned_tx = Transaction {
         version: transaction::Version::non_standard(3),

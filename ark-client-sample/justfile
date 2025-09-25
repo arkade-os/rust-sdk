@@ -43,6 +43,10 @@ lightning-invoice actor amount:
 pay-invoice actor invoice:
     cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed pay-invoice {{ invoice }}
 
-# Pay lightning invoice
-refund-swap actor swap_id:
+# Refund a submarine swap collaboratively
+refund-swap-collab actor swap_id:
     cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed refund-swap {{ swap_id }}
+
+# Refund a submarine swap without the receiver
+refund-swap actor swap_id:
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed refund-swap-without-receiver {{ swap_id }}

@@ -83,6 +83,7 @@ where
 
                 send::VtxoInput::new(
                     forfeit_script,
+                    None,
                     control_block,
                     vtxo.tapscripts(),
                     vtxo.script_pubkey(),

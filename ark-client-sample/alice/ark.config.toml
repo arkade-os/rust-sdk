@@ -1,4 +1,5 @@
 ark_server_url = "http://localhost:7070"
 esplora_url = "http://localhost:30000"
+swap_storage_path = "./swap/"
 # ark_server_url = "http://mutinynet.arkade.sh"
 # esplora_url = "https://mutinynet.com/api"

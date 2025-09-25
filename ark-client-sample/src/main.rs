@@ -82,18 +82,23 @@ enum Commands {
         /// How many sats to send.
         amount: u64,
     },
+    /// Generate a BOLT11 invoice to receive payment via a Boltz reverse submarine swap.
     LightningInvoice {
-        /// How many sats to receive
+        /// How many sats to receive.
         amount: u64,
     },
+    /// Pay a BOLT11 invoice via a Boltz submarine swap.
     PayInvoice {
-        /// A bolt11 invoice
+        /// A BOLT11 invoice.
         invoice: String,
     },
+    /// Attempt to refund a past swap collaboratively.
     RefundSwap {
         /// Attempt to refund a past swap
         swap_id: String,
     },
+    /// Attempt to refund a past swap without the receiver's signature.
+    RefundSwapWithoutReceiver { swap_id: String },
 }
 
 #[derive(Clone)]
@@ -380,6 +385,14 @@ async fn main() -> Result<()> {
         Commands::RefundSwap { swap_id } => {
             let txid = client
                 .refund_vhtlc(swap_id.as_str(), true)
+                .await
+                .map_err(|e| anyhow!(e))?;
+
+            tracing::info!(?txid, swap_id, "Refunded swap");
+        }
+        Commands::RefundSwapWithoutReceiver { swap_id } => {
+            let txid = client
+                .refund_vhtlc(swap_id.as_str(), false)
                 .await
                 .map_err(|e| anyhow!(e))?;
 
