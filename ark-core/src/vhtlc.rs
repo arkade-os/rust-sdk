@@ -319,7 +319,7 @@ impl VhtlcOptions {
         }
 
         // Return the root node
-        Ok(lst.into_iter().next().unwrap())
+        Ok(lst.into_iter().next().expect("root node"))
     }
 
     /// Recursively add tree nodes to TaprootBuilder
@@ -577,7 +577,7 @@ mod tests {
                     if self.value < 512 {
                         return Err("seconds timelock must be greater or equal to 512".to_string());
                     }
-                    if self.value % 512 != 0 {
+                    if !self.value.is_multiple_of(512) {
                         return Err("seconds timelock must be multiple of 512".to_string());
                     }
                     Sequence::from_seconds_ceil(self.value)

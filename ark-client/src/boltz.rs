@@ -271,7 +271,12 @@ where
         let OffchainTransactions {
             mut ark_tx,
             checkpoint_txs,
-        } = build_offchain_transactions(&outputs, None, &[vhtlc_input.clone()], &self.server_info)?;
+        } = build_offchain_transactions(
+            &outputs,
+            None,
+            std::slice::from_ref(&vhtlc_input),
+            &self.server_info,
+        )?;
 
         let sign_fn = |_: &mut psbt::Input,
                        msg: secp256k1::Message|
@@ -416,7 +421,12 @@ where
         let OffchainTransactions {
             mut ark_tx,
             checkpoint_txs,
-        } = build_offchain_transactions(&outputs, None, &[vhtlc_input.clone()], &self.server_info)?;
+        } = build_offchain_transactions(
+            &outputs,
+            None,
+            std::slice::from_ref(&vhtlc_input),
+            &self.server_info,
+        )?;
 
         let sign_fn = |_: &mut psbt::Input,
                        msg: secp256k1::Message|
@@ -691,7 +701,12 @@ where
         let OffchainTransactions {
             mut ark_tx,
             checkpoint_txs,
-        } = build_offchain_transactions(&outputs, None, &[vhtlc_input.clone()], &self.server_info)?;
+        } = build_offchain_transactions(
+            &outputs,
+            None,
+            std::slice::from_ref(&vhtlc_input),
+            &self.server_info,
+        )?;
 
         let sign_fn = |input: &mut psbt::Input,
                        msg: secp256k1::Message|
