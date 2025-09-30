@@ -5,8 +5,9 @@ use bitcoin::key::TweakedPublicKey;
 use bitcoin::Network;
 use bitcoin::ScriptBuf;
 use bitcoin::XOnlyPublicKey;
+use std::str::FromStr;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ArkAddress {
     version: u8,
     hrp: Hrp,
@@ -77,6 +78,14 @@ impl ArkAddress {
 impl std::fmt::Display for ArkAddress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.encode())
+    }
+}
+
+impl FromStr for ArkAddress {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::decode(s)
     }
 }
 

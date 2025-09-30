@@ -43,6 +43,10 @@ pub struct Input {
     witness_utxo: TxOut,
     // We do not serialize this.
     tapscripts: Vec<ScriptBuf>,
+    // TODO: I think including this assumes that the input is always singlesig.
+    //
+    // For a more general VTXO, the requirement here is that we sign a spend path that does not
+    // involve the server (proving unilateral ownership of the VTXO, I guess).
     pk: XOnlyPublicKey,
     spend_info: (ScriptBuf, taproot::ControlBlock),
     is_onchain: bool,

@@ -6,6 +6,7 @@ use ark_client::wallet::Persistence;
 use ark_client::Blockchain;
 use ark_client::Client;
 use ark_client::ExplorerUtxo;
+use ark_client::InMemorySwapStorage;
 use ark_client::OfflineClient;
 use ark_client::SpendStatus;
 use ark_core::BoardingOutput;
@@ -351,7 +352,10 @@ pub async fn set_up_client(
     name: String,
     nigiri: Arc<Nigiri>,
     secp: Secp256k1<All>,
-) -> (Client<Nigiri, Wallet<InMemoryDb>>, Arc<Wallet<InMemoryDb>>) {
+) -> (
+    Client<Nigiri, Wallet<InMemoryDb>, InMemorySwapStorage>,
+    Arc<Wallet<InMemoryDb>>,
+) {
     let mut rng = thread_rng();
 
     let sk = SecretKey::new(&mut rng);
@@ -367,6 +371,8 @@ pub async fn set_up_client(
         nigiri,
         wallet.clone(),
         "http://localhost:7070".to_string(),
+        Arc::new(InMemorySwapStorage::default()),
+        "http://localhost:9001".to_string(),
         Duration::from_secs(30),
     )
     .connect_with_retries(5)
@@ -378,7 +384,7 @@ pub async fn set_up_client(
 
 #[allow(unused)]
 pub async fn wait_until_balance(
-    client: &Client<Nigiri, Wallet<InMemoryDb>>,
+    client: &Client<Nigiri, Wallet<InMemoryDb>, InMemorySwapStorage>,
     confirmed_target: Amount,
     pending_target: Amount,
 ) -> Result<(), String> {

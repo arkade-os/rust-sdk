@@ -34,3 +34,19 @@ subscribe actor address:
 # Send coins to an Onchain address from a given actor, e.g. just send-onchain bob bc1... 1234
 send-onchain actor address amount:
     cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed send-onchain {{ address }} {{ amount }}
+
+# Receive via lightning
+lightning-invoice actor amount:
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed lightning-invoice {{ amount }}
+
+# Pay lightning invoice
+pay-invoice actor invoice:
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed pay-invoice {{ invoice }}
+
+# Refund a submarine swap collaboratively
+refund-swap-collab actor swap_id:
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed refund-swap {{ swap_id }}
+
+# Refund a submarine swap without the receiver
+refund-swap actor swap_id:
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed refund-swap-without-receiver {{ swap_id }}

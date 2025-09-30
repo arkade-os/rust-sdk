@@ -28,3 +28,5 @@ Cargo.lock
 
 # Repository for arkd
 /ark-go
+
+**/*.sqlite

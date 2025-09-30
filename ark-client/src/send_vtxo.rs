@@ -1,4 +1,5 @@
 use crate::error::ErrorContext;
+use crate::swap_storage::SwapStorage;
 use crate::utils::timeout_op;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
@@ -12,17 +13,20 @@ use ark_core::send::sign_ark_transaction;
 use ark_core::send::sign_checkpoint_transaction;
 use ark_core::send::OffchainTransactions;
 use ark_core::ArkAddress;
+use ark_core::ErrorContext as _;
 use bitcoin::key::Secp256k1;
+use bitcoin::psbt;
 use bitcoin::secp256k1;
 use bitcoin::secp256k1::schnorr;
 use bitcoin::Amount;
 use bitcoin::Txid;
 use bitcoin::XOnlyPublicKey;
 
-impl<B, W> Client<B, W>
+impl<B, W, S> Client<B, W, S>
 where
     B: Blockchain,
     W: BoardingWallet + OnchainWallet,
+    S: SwapStorage + 'static,
 {
     /// Spend confirmed and pre-confimed VTXOs in an Ark transaction sending the given `amount` to
     /// the given `address`.
@@ -76,13 +80,21 @@ where
                     })
                     .expect("to find matching default VTXO");
 
-                send::VtxoInput::new(
-                    vtxo,
+                let (forfeit_script, control_block) = vtxo
+                    .forfeit_spend_info()
+                    .context("failed to get forfeit spend info")?;
+
+                Ok(send::VtxoInput::new(
+                    forfeit_script,
+                    None,
+                    control_block,
+                    vtxo.tapscripts(),
+                    vtxo.script_pubkey(),
                     virtual_tx_outpoint.amount,
                     virtual_tx_outpoint.outpoint,
-                )
+                ))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, Error>>()?;
 
         let (change_address, _) = self.get_offchain_address()?;
 
@@ -93,13 +105,14 @@ where
             &[(&address, amount)],
             Some(&change_address),
             &vtxo_inputs,
-            self.server_info.dust,
+            &self.server_info,
         )
         .map_err(Error::from)
         .context("failed to build offchain transactions")?;
 
-        let sign_fn =
-        |msg: secp256k1::Message| -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+        let sign_fn = |_: &mut psbt::Input,
+                       msg: secp256k1::Message|
+         -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
             let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, self.kp());
             let pk = self.kp().x_only_public_key().0;
 

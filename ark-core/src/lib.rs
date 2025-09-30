@@ -9,14 +9,15 @@ pub mod coin_select;
 pub mod conversions;
 pub mod history;
 pub mod proof_of_funds;
+pub mod script;
 pub mod send;
 pub mod server;
 pub mod unilateral_exit;
+pub mod vhtlc;
 pub mod vtxo;
 
 mod ark_address;
 mod error;
-mod script;
 mod tree_tx_output_script;
 mod tx_graph;
 

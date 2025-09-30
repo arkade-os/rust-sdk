@@ -59,6 +59,9 @@ async fn init_client() -> Result<Client<MyBlockchain, MyWallet>, ark_client::Err
         blockchain,
         wallet,
         "https://ark-server.example.com".to_string(),
+        InMemorySwapStorage::default(),
+        "http://boltz.example.com".to_string(),
+        timeout,
     );
 
     // Connect to the Ark server and get server info

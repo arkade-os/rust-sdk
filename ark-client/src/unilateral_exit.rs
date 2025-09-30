@@ -1,6 +1,7 @@
 use crate::coin_select::coin_select_for_onchain;
 use crate::error::Error;
 use crate::error::ErrorContext;
+use crate::swap_storage::SwapStorage;
 use crate::utils::sleep;
 use crate::utils::timeout_op;
 use crate::wallet::BoardingWallet;
@@ -23,10 +24,11 @@ use std::collections::HashSet;
 
 // TODO: We should not _need_ to connect to the Ark server to perform unilateral exit. Currently we
 // do talk to the Ark server for simplicity.
-impl<B, W> Client<B, W>
+impl<B, W, S> Client<B, W, S>
 where
     B: Blockchain,
     W: BoardingWallet + OnchainWallet,
+    S: SwapStorage + 'static,
 {
     /// Build the unilateral exit transaction tree for all spendable VTXOs.
     ///
