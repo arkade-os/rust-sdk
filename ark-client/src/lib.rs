@@ -204,6 +204,7 @@ pub use swap_storage::SwapStorage;
 ///     Ok(client)
 /// }
 /// ```
+#[derive(Clone)]
 pub struct OfflineClient<B, W, S> {
     // TODO: We could introduce a generic interface so that consumers can use either GRPC or REST.
     network_client: ark_grpc::Client,
