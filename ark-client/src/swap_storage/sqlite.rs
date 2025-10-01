@@ -16,6 +16,7 @@ use std::time::UNIX_EPOCH;
 
 // TODO: move this into its own crate?
 /// SQLite-based persistent implementation of [`SwapStorage`].
+#[derive(Clone)]
 pub struct SqliteSwapStorage {
     pool: Pool<Sqlite>,
 }
