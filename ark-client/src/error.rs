@@ -259,3 +259,9 @@ impl From<ark_grpc::Error> for Error {
         Self::ark_server(value)
     }
 }
+
+impl StdError for Error {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        self.inner.cause.as_ref().map(|e| e as &(dyn StdError + 'static))
+    }
+}
