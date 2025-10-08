@@ -167,13 +167,11 @@ arkd-wallet-run:
 
     set -euxo pipefail
 
-    make run-wallet-bitcoind -C $ARKD_DIR run &> {{ arkd_wallet_logs }} &
+    make run-wallet -C $ARKD_DIR run &> {{ arkd_wallet_logs }} &
 
-    just _create-arkd-wallet
-
-    echo "Created arkd wallet"
-
-    just arkd-wallet-init
+    # We have to trigger it again because it always fails the first time D:
+    sleep 2
+    make run-wallet -C $ARKD_DIR run &> {{ arkd_wallet_logs }} &
 
     echo "arkd wallet started. Find the logs in {{ arkd_wallet_logs }}"
 
@@ -185,7 +183,25 @@ arkd-run:
 
     make -C $ARKD_DIR run &> {{ arkd_logs }} &
 
+    just _create-arkd
+
+    echo "Created arkd wallet"
+
+    just arkd-init
+
     echo "arkd started. Find the logs in {{ arkd_logs }}"
+
+# Initialize `arkd` by creating and unlocking a new wallet.
+arkd-init:
+    #!/usr/bin/env bash
+
+    set -euxo pipefail
+
+    curl -s --data-binary '{"password" : "password"}' -H "Content-Type: application/json" {{ arkd_url }}/v1/admin/wallet/unlock
+
+    echo "Unlocked arkd wallet"
+
+    just _wait-until-arkd-is-initialized
 
 # Build `arkd` binary.
 arkd-build:
@@ -197,17 +213,6 @@ arkd-build:
 
     echo "arkd built"
 
-# Initialize `arkd-wallet` by creating and unlocking a new wallet.
-arkd-wallet-init:
-    #!/usr/bin/env bash
-
-    set -euxo pipefail
-
-    curl -s --data-binary '{"password" : "password"}' -H "Content-Type: application/json" {{ arkd_wallet_url }}/v1/wallet/unlock
-
-    echo "Unlocked arkd wallet"
-
-    just _wait-until-arkd-wallet-is-initialized
 
 # Fund `arkd`'s wallet with `n` utxos.
 arkd-fund n:
@@ -249,6 +254,11 @@ arkd-wallet-kill:
 # Restart `arkd-wallet` and `arkd`.
 arkd-restart: arkd-kill arkd-wallet-kill arkd-redis-wipe arkd-redis-run arkd-wallet-run arkd-run
 
+# Wipe docker containers set up from the `arkd` repo.
+docker-wipe:
+    @echo Stopping arkd-related docker containers
+    make docker-stop -C $ARKD_DIR &
+
 # Wipe `arkd` data directory.
 arkd-wipe:
     @echo Clearing $ARKD_DIR/data
@@ -263,17 +273,17 @@ arkd-redis-wipe:
     @echo Stopping and clearing arkd redis
     make redis-down -C $ARKD_DIR &
 
-_create-arkd-wallet:
+_create-arkd:
     #!/usr/bin/env bash
 
     echo "Waiting for arkd wallet seed to be ready..."
 
     for ((i=0; i<30; i+=1)); do
-      seed=$(curl -s {{ arkd_wallet_url }}/v1/wallet/seed | jq .seed -r)
+      seed=$(curl -s {{ arkd_url }}/v1/admin/wallet/seed | jq .seed -r)
 
       if [ -n "$seed" ]; then
         echo "arkd wallet seed is ready! Creating wallet"
-        curl -s --data-binary '{"seed": "$seed", "password": "password"}' -H "Content-Type: application/json" {{ arkd_wallet_url }}/v1/wallet/create
+        curl -v --data-binary "{\"seed\": \"$seed\", \"password\": \"password\"}" -H "Content-Type: application/json" {{ arkd_url }}/v1/admin/wallet/create
         exit 0
       fi
       sleep 1
@@ -283,13 +293,13 @@ _create-arkd-wallet:
 
     exit 1
 
-_wait-until-arkd-wallet-is-initialized:
+_wait-until-arkd-is-initialized:
     #!/usr/bin/env bash
 
     echo "Waiting for arkd wallet to be initialized..."
 
     for ((i=0; i<30; i+=1)); do
-      res=$(curl -s {{ arkd_wallet_url }}/v1/wallet/status)
+      res=$(curl -s {{ arkd_url }}/v1/admin/wallet/status)
 
       if echo "$res" | jq -e '.initialized == true and .unlocked == true and .synced == true' > /dev/null; then
         echo "arkd wallet is initialized!"
