@@ -28,65 +28,74 @@ def deep_merge(base: Dict[str, Any], update: Dict[str, Any]) -> Dict[str, Any]:
 
 def merge_swagger_files():
     """Merge the three swagger files into one"""
-    
-    # Read the three swagger files
-    with open('swagger/service.swagger.json', 'r') as f:
+
+    # Read the swagger files
+    with open('swagger/service.openapi.json', 'r') as f:
         service = json.load(f)
-    
-    with open('swagger/indexer.swagger.json', 'r') as f:
+
+    with open('swagger/indexer.openapi.json', 'r') as f:
         indexer = json.load(f)
-    
-    with open('swagger/types.swagger.json', 'r') as f:
+
+    with open('swagger/types.openapi.json', 'r') as f:
         types = json.load(f)
-    
+
+    with open('swagger/admin.openapi.json', 'r') as f:
+        service = json.load(f)
+
+    with open('swagger/signer_manager.openapi.json', 'r') as f:
+        indexer = json.load(f)
+
+    with open('swagger/wallet.openapi.json', 'r') as f:
+        types = json.load(f)
+
     # Start with service as base (it has the main API)
     merged = service.copy()
-    
+
     # Update info section
     merged['info'] = {
         'title': 'Ark API',
         'version': '1.0.0',
         'description': 'Combined Ark Service and Indexer API'
     }
-    
+
     # Merge tags
     if 'tags' not in merged:
         merged['tags'] = []
-    
+
     # Add indexer tags
     for tag in indexer.get('tags', []):
         if tag not in merged['tags']:
             merged['tags'].append(tag)
-    
+
     # Merge paths from indexer
     if 'paths' not in merged:
         merged['paths'] = {}
     merged['paths'] = deep_merge(merged['paths'], indexer.get('paths', {}))
-    
+
     # Merge definitions from all three files
     if 'definitions' not in merged:
         merged['definitions'] = {}
-    
+
     # First merge types definitions (base types)
     merged['definitions'] = deep_merge(merged['definitions'], types.get('definitions', {}))
-    
+
     # Then merge indexer definitions
     merged['definitions'] = deep_merge(merged['definitions'], indexer.get('definitions', {}))
-    
+
     # Service definitions are already in merged
-    
+
     # Write the merged swagger file
     with open('swagger/merged.swagger.json', 'w') as f:
         json.dump(merged, f, indent=2)
-    
+
     print("✅ Successfully merged swagger files into swagger/merged.swagger.json")
-    
+
     # Also create an OpenAPI 3.0 version if needed
     create_openapi3_version(merged)
 
 def create_openapi3_version(swagger2: Dict[str, Any]):
     """Convert Swagger 2.0 to OpenAPI 3.0 format (basic conversion)"""
-    
+
     openapi3 = {
         'openapi': '3.0.0',
         'info': swagger2.get('info', {}),
@@ -101,7 +110,7 @@ def create_openapi3_version(swagger2: Dict[str, Any]):
             'schemas': {}
         }
     }
-    
+
     # Convert paths
     for path, methods in swagger2.get('paths', {}).items():
         openapi3['paths'][path] = {}
@@ -109,15 +118,15 @@ def create_openapi3_version(swagger2: Dict[str, Any]):
             if method in ['get', 'post', 'put', 'delete', 'patch', 'options', 'head']:
                 converted_op = convert_operation(operation)
                 openapi3['paths'][path][method] = converted_op
-    
+
     # Convert definitions to components/schemas
     for name, schema in swagger2.get('definitions', {}).items():
         openapi3['components']['schemas'][name] = convert_schema(schema)
-    
+
     # Write the OpenAPI 3.0 file
     with open('swagger/merged.openapi3.json', 'w') as f:
         json.dump(openapi3, f, indent=2)
-    
+
     print("✅ Also created OpenAPI 3.0 version at swagger/merged.openapi3.json")
 
 def convert_operation(operation: Dict[str, Any]) -> Dict[str, Any]:
@@ -129,18 +138,18 @@ def convert_operation(operation: Dict[str, Any]) -> Dict[str, Any]:
         'tags': operation.get('tags', []),
         'responses': {}
     }
-    
+
     # Convert parameters
     if 'parameters' in operation:
         converted['parameters'] = []
         body_param = None
-        
+
         for param in operation['parameters']:
             if param.get('in') == 'body':
                 body_param = param
             else:
                 converted['parameters'].append(param)
-        
+
         # Convert body parameter to requestBody
         if body_param:
             converted['requestBody'] = {
@@ -151,11 +160,11 @@ def convert_operation(operation: Dict[str, Any]) -> Dict[str, Any]:
                     }
                 }
             }
-    
+
     # Convert responses
     for status, response in operation.get('responses', {}).items():
         converted['responses'][status] = convert_response(response)
-    
+
     return converted
 
 def convert_response(response: Dict[str, Any]) -> Dict[str, Any]:
@@ -163,14 +172,14 @@ def convert_response(response: Dict[str, Any]) -> Dict[str, Any]:
     converted = {
         'description': response.get('description', '')
     }
-    
+
     if 'schema' in response:
         converted['content'] = {
             'application/json': {
                 'schema': response['schema']
             }
         }
-    
+
     return converted
 
 def convert_schema(schema: Dict[str, Any]) -> Dict[str, Any]:

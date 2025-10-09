@@ -1,9 +1,8 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "Ark API",
-    "version": "1.0.0",
-    "description": "Combined Ark Service and Indexer API"
+    "title": "",
+    "version": "version not set"
   },
   "paths": {
     "/v1/admin/conviction/ban": {
@@ -565,46 +564,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/GetScheduledSweepResponse"
-                }
-              }
-            }
-          },
-          "default": {
-            "description": "An unexpected error response.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Status"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/admin/signer": {
-      "post": {
-        "tags": [
-          "SignerManagerService"
-        ],
-        "operationId": "SignerManagerService_LoadSigner",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/LoadSignerRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "a successful response.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LoadSignerResponse"
                 }
               }
             }
@@ -1225,10 +1184,6 @@
   "tags": [
     {
       "name": "AdminService"
-    },
-    {
-      "name": "SignerManagerService"
     }
-  ],
-  "definitions": {}
+  ]
 }
