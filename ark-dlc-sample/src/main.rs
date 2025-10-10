@@ -5,7 +5,7 @@ use anyhow::Result;
 use ark_core::batch;
 use ark_core::batch::create_and_sign_forfeit_txs;
 use ark_core::batch::generate_nonce_tree;
-use ark_core::batch::sign_batch_tree;
+use ark_core::batch::sign_batch_tree_tx;
 use ark_core::batch::sign_commitment_psbt;
 use ark_core::boarding_output::list_boarding_outpoints;
 use ark_core::boarding_output::BoardingOutpoints;
@@ -82,7 +82,7 @@ async fn main() -> Result<()> {
 
     grpc_client.connect().await?;
     let server_info = grpc_client.get_info().await?;
-    let server_pk = server_info.pk.x_only_public_key().0;
+    let server_pk = server_info.signer_pk.x_only_public_key().0;
 
     let esplora_client = EsploraClient::new("http://localhost:30000")?;
 
@@ -149,7 +149,7 @@ async fn main() -> Result<()> {
 
         Vtxo::new_with_custom_scripts(
             &secp,
-            server_info.pk.into(),
+            server_info.signer_pk.into(),
             shared_pk,
             vec![
                 dlc_multisig_script.clone(),
@@ -187,7 +187,7 @@ async fn main() -> Result<()> {
 
     let alice_payout_vtxo = Vtxo::new_default(
         &secp,
-        server_info.pk.x_only_public_key().0,
+        server_info.signer_pk.x_only_public_key().0,
         alice_xonly_pk,
         server_info.unilateral_exit_delay,
         server_info.network,
@@ -195,7 +195,7 @@ async fn main() -> Result<()> {
 
     let bob_payout_vtxo = Vtxo::new_default(
         &secp,
-        server_info.pk.x_only_public_key().0,
+        server_info.signer_pk.x_only_public_key().0,
         bob_xonly_pk,
         server_info.unilateral_exit_delay,
         server_info.network,
@@ -640,7 +640,7 @@ async fn fund_vtxo(
 
     let boarding_output = BoardingOutput::new(
         &secp,
-        server_info.pk.x_only_public_key().0,
+        server_info.signer_pk.x_only_public_key().0,
         pk,
         server_info.boarding_exit_delay,
         server_info.network,
@@ -658,7 +658,7 @@ async fn fund_vtxo(
 
     let vtxo = Vtxo::new_default(
         &secp,
-        server_info.pk.x_only_public_key().0,
+        server_info.signer_pk.x_only_public_key().0,
         pk,
         server_info.unilateral_exit_delay,
         server_info.network,
@@ -1366,9 +1366,9 @@ async fn settle(
 
     let agg_pub_nonce_tree = batch_signing_nonces_generated_event.tree_nonces;
 
-    let partial_sig_tree = sign_batch_tree(
-        server_info.vtxo_tree_expiry,
-        server_info.pk.x_only_public_key().0,
+    let partial_sig_tree = sign_batch_tree_tx(
+        batch_started_event.batch_expiry,
+        server_info.signer_pk.x_only_public_key().0,
         &cosigner_kp,
         &vtxo_graph,
         &batch_signing_event.unsigned_commitment_tx,

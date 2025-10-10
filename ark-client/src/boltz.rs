@@ -196,7 +196,7 @@ where
             VhtlcOptions {
                 sender: swap_data.refund_public_key.into(),
                 receiver: swap_data.claim_public_key.into(),
-                server: self.server_info.pk.into(),
+                server: self.server_info.signer_pk.into(),
                 preimage_hash: swap_data.preimage_hash,
                 refund_locktime: timeout_block_heights.refund,
                 unilateral_claim_delay: Sequence::from_height(
@@ -346,7 +346,7 @@ where
             VhtlcOptions {
                 sender: swap_data.refund_public_key.into(),
                 receiver: swap_data.claim_public_key.into(),
-                server: self.server_info.pk.into(),
+                server: self.server_info.signer_pk.into(),
                 preimage_hash: swap_data.preimage_hash,
                 refund_locktime: timeout_block_heights.refund,
                 unilateral_claim_delay: Sequence::from_height(
@@ -630,7 +630,7 @@ where
             VhtlcOptions {
                 sender: swap.refund_public_key.into(),
                 receiver: swap.claim_public_key.into(),
-                server: self.server_info.pk.into(),
+                server: self.server_info.signer_pk.into(),
                 preimage_hash: swap.preimage_hash,
                 refund_locktime: timeout_block_heights.refund,
                 unilateral_claim_delay: Sequence::from_height(

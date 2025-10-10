@@ -421,7 +421,7 @@ where
     pub fn get_offchain_address(&self) -> Result<(ArkAddress, Vtxo), Error> {
         let server_info = &self.server_info;
 
-        let (server, _) = server_info.pk.x_only_public_key();
+        let (server, _) = server_info.signer_pk.x_only_public_key();
         let (owner, _) = self.inner.kp.public_key().x_only_public_key();
 
         let vtxo = Vtxo::new_default(
@@ -448,7 +448,7 @@ where
         let server_info = &self.server_info;
 
         let boarding_output = self.inner.wallet.new_boarding_output(
-            server_info.pk.x_only_public_key().0,
+            server_info.signer_pk.x_only_public_key().0,
             server_info.boarding_exit_delay,
             server_info.network,
         )?;

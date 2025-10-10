@@ -3,8 +3,8 @@
 use crate::tx_graph::TxGraphChunk;
 use crate::ArkAddress;
 use crate::Error;
-use ::serde::Deserialize;
-use ::serde::Serialize;
+use crate::ErrorContext;
+use bitcoin::hex::DisplayHex;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::taproot::Signature;
 use bitcoin::Amount;
@@ -18,10 +18,9 @@ use musig::musig;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 
-/// A public nonce per shared internal (non-leaf) node in the VTXO tree.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct NoncePks(#[serde(with = "serde::nonce_map")] HashMap<Txid, musig::PublicNonce>);
+/// An aggregate public nonce per shared internal (non-leaf) node in the VTXO tree.
+#[derive(Debug, Clone)]
+pub struct NoncePks(HashMap<Txid, musig::PublicNonce>);
 
 impl NoncePks {
     pub fn new(nonce_pks: HashMap<Txid, musig::PublicNonce>) -> Self {
@@ -32,14 +31,124 @@ impl NoncePks {
     pub fn get(&self, txid: &Txid) -> Option<musig::PublicNonce> {
         self.0.get(txid).copied()
     }
+
+    pub fn encode(&self) -> HashMap<String, String> {
+        self.0
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.serialize().to_lower_hex_string()))
+            .collect()
+    }
+
+    pub fn decode(map: HashMap<String, String>) -> Result<Self, Error> {
+        let map = map
+            .into_iter()
+            .map(|(k, v)| {
+                let key = k
+                    .parse()
+                    .map_err(Error::ad_hoc)
+                    .context("failed to parse TXID")?;
+
+                let value = {
+                    let nonce_bytes = bitcoin::hex::FromHex::from_hex(&v)
+                        .map_err(Error::ad_hoc)
+                        .context("failed to decode public nonce from hex")?;
+                    musig::PublicNonce::from_byte_array(&nonce_bytes)
+                        .map_err(Error::ad_hoc)
+                        .context("failed to decode public nonce from bytes")?
+                };
+
+                Ok((key, value))
+            })
+            .collect::<Result<HashMap<Txid, musig::PublicNonce>, Error>>()?;
+
+        Ok(Self(map))
+    }
+}
+
+/// A public nonce per public key, where each public key corresponds to a party signing the VTXO
+/// tree.
+#[derive(Debug, Clone)]
+pub struct TreeTxNoncePks(pub HashMap<PublicKey, musig::PublicNonce>);
+
+impl TreeTxNoncePks {
+    pub fn new(tree_nonce_pks: HashMap<PublicKey, musig::PublicNonce>) -> Self {
+        Self(tree_nonce_pks)
+    }
+
+    pub fn to_pks(&self) -> Vec<musig::PublicNonce> {
+        self.0.values().copied().collect()
+    }
+
+    pub fn encode(&self) -> HashMap<String, String> {
+        self.0
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.serialize().to_lower_hex_string()))
+            .collect()
+    }
+
+    pub fn decode(map: HashMap<String, String>) -> Result<Self, Error> {
+        let map = map
+            .into_iter()
+            .map(|(k, v)| {
+                let key = k
+                    .parse()
+                    .map_err(Error::ad_hoc)
+                    .context("failed to parse PK")?;
+
+                let value = {
+                    let nonce_bytes = bitcoin::hex::FromHex::from_hex(&v)
+                        .map_err(Error::ad_hoc)
+                        .context("failed to decode public nonce from hex")?;
+                    musig::PublicNonce::from_byte_array(&nonce_bytes)
+                        .map_err(Error::ad_hoc)
+                        .context("failed to decode public nonce from bytes")?
+                };
+
+                Ok((key, value))
+            })
+            .collect::<Result<HashMap<PublicKey, musig::PublicNonce>, Error>>()?;
+
+        Ok(Self(map))
+    }
 }
 
 /// A Musig partial signature per shared internal (non-leaf) node in the VTXO tree.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct PartialSigTree(
-    #[serde(with = "serde::partial_sig_map")] pub HashMap<Txid, musig::PartialSignature>,
-);
+#[derive(Debug, Clone)]
+pub struct PartialSigTree(pub HashMap<Txid, musig::PartialSignature>);
+
+impl PartialSigTree {
+    pub fn encode(&self) -> HashMap<String, String> {
+        self.0
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.serialize().to_lower_hex_string()))
+            .collect()
+    }
+
+    pub fn decode(map: HashMap<String, String>) -> Result<Self, Error> {
+        let map = map
+            .into_iter()
+            .map(|(k, v)| {
+                let key = k
+                    .parse()
+                    .map_err(Error::ad_hoc)
+                    .context("failed to parse TXID")?;
+
+                let value = {
+                    let sig_bytes = bitcoin::hex::FromHex::from_hex(&v)
+                        .map_err(Error::ad_hoc)
+                        .context("failed to decode partial signature from hex")?;
+                    musig::PartialSignature::from_byte_array(&sig_bytes)
+                        .map_err(Error::ad_hoc)
+                        .context("failed to decode partial signature from bytes")?
+                };
+
+                Ok((key, value))
+            })
+            .collect::<Result<HashMap<Txid, musig::PartialSignature>, Error>>()?;
+
+        Ok(Self(map))
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct TxTree {
@@ -214,19 +323,54 @@ impl VirtualTxOutPoint {
 
 #[derive(Clone, Debug)]
 pub struct Info {
-    pub pk: PublicKey,
-    pub vtxo_tree_expiry: bitcoin::Sequence,
+    pub version: String,
+    pub signer_pk: PublicKey,
+    pub forfeit_pk: PublicKey,
+    pub forfeit_address: bitcoin::Address,
+    pub checkpoint_tapscript: ScriptBuf,
+    pub network: Network,
+    pub session_duration: u64,
     pub unilateral_exit_delay: bitcoin::Sequence,
     pub boarding_exit_delay: bitcoin::Sequence,
-    pub round_interval: i64,
-    pub network: Network,
-    pub dust: Amount,
-    pub forfeit_address: bitcoin::Address,
-    pub version: String,
     pub utxo_min_amount: Option<Amount>,
     pub utxo_max_amount: Option<Amount>,
     pub vtxo_min_amount: Option<Amount>,
     pub vtxo_max_amount: Option<Amount>,
+    pub dust: Amount,
+    pub fees: Option<FeeInfo>,
+    pub scheduled_session: Option<ScheduledSession>,
+    pub deprecated_signers: Vec<DeprecatedSigner>,
+    pub service_status: HashMap<String, String>,
+    pub digest: String,
+}
+
+// FIXME: Use proper types.
+#[derive(Clone, Debug)]
+pub struct FeeInfo {
+    pub intent_fee: Option<IntentFeeInfo>,
+    pub tx_fee_rate: String,
+}
+#[derive(Clone, Debug)]
+pub struct IntentFeeInfo {
+    pub offchain_input: String,
+    pub offchain_output: String,
+    pub onchain_input: String,
+    pub onchain_output: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ScheduledSession {
+    pub next_start_time: i64,
+    pub next_end_time: i64,
+    pub period: i64,
+    pub duration: i64,
+    pub fees: Option<FeeInfo>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DeprecatedSigner {
+    pub pk: PublicKey,
+    pub cutoff_date: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -280,8 +424,7 @@ impl ListVtxo {
 pub struct BatchStartedEvent {
     pub id: String,
     pub intent_id_hashes: Vec<String>,
-    // TODO: Perhaps needs to be `bitcoin::Sequence`.
-    pub batch_expiry: i64,
+    pub batch_expiry: bitcoin::Sequence,
 }
 
 #[derive(Debug, Clone)]
@@ -333,6 +476,14 @@ pub struct TreeSignatureEvent {
 }
 
 #[derive(Debug, Clone)]
+pub struct TreeNoncesEvent {
+    pub id: String,
+    pub topic: Vec<String>,
+    pub txid: Txid,
+    pub nonces: TreeTxNoncePks,
+}
+
+#[derive(Debug, Clone)]
 pub enum BatchTreeEventType {
     Vtxo,
     Connector,
@@ -348,6 +499,8 @@ pub enum StreamEvent {
     TreeNoncesAggregated(TreeNoncesAggregatedEvent),
     TreeTx(TreeTxEvent),
     TreeSignature(TreeSignatureEvent),
+    TreeNonces(TreeNoncesEvent),
+    Heartbeat,
 }
 
 impl StreamEvent {
@@ -361,15 +514,18 @@ impl StreamEvent {
             StreamEvent::TreeNoncesAggregated(_) => "TreeNoncesAggregated",
             StreamEvent::TreeTx(_) => "TreeTx",
             StreamEvent::TreeSignature(_) => "TreeSignature",
+            StreamEvent::TreeNonces(_) => "TreeNoncesEvent",
+            StreamEvent::Heartbeat => "Heartbeat",
         };
 
         s.to_string()
     }
 }
 
-pub enum StreamTransaction {
+pub enum StreamTransactionData {
     Commitment(CommitmentTransaction),
     Ark(ArkTransaction),
+    Heartbeat,
 }
 
 pub struct ArkTransaction {
@@ -385,7 +541,13 @@ pub struct CommitmentTransaction {
 }
 
 #[derive(Clone, Debug)]
-pub struct SubscriptionResponse {
+pub enum SubscriptionResponse {
+    Event(Box<SubscriptionEvent>),
+    Heartbeat,
+}
+
+#[derive(Clone, Debug)]
+pub struct SubscriptionEvent {
     pub txid: Txid,
     pub scripts: Vec<ScriptBuf>,
     pub new_vtxos: Vec<VirtualTxOutPoint>,
@@ -433,107 +595,4 @@ pub struct IndexerPage {
     pub current: i32,
     pub next: i32,
     pub total: i32,
-}
-
-mod serde {
-    use super::*;
-    use ::serde::de;
-    use ::serde::Deserialize;
-    use ::serde::Deserializer;
-    use ::serde::Serialize;
-    use ::serde::Serializer;
-    use bitcoin::hex::DisplayHex;
-    use std::collections::HashMap as StdHashMap;
-
-    pub mod nonce_map {
-        use super::*;
-
-        pub fn serialize<S>(
-            map: &HashMap<Txid, musig::PublicNonce>,
-            serializer: S,
-        ) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
-        {
-            let map_object: StdHashMap<String, String> = map
-                .iter()
-                .map(|(txid, nonce)| {
-                    let hex_nonce = nonce.serialize().to_vec().to_lower_hex_string();
-                    (txid.to_string(), hex_nonce)
-                })
-                .collect();
-
-            map_object.serialize(serializer)
-        }
-
-        pub fn deserialize<'de, D>(
-            deserializer: D,
-        ) -> Result<HashMap<Txid, musig::PublicNonce>, D::Error>
-        where
-            D: Deserializer<'de>,
-        {
-            use de::Error;
-
-            let map_object: StdHashMap<String, String> = StdHashMap::deserialize(deserializer)?;
-
-            let mut nonce_pks = HashMap::new();
-
-            for (txid_str, hex_nonce) in map_object {
-                let txid = txid_str.parse().map_err(D::Error::custom)?;
-                let nonce_bytes =
-                    bitcoin::hex::FromHex::from_hex(&hex_nonce).map_err(D::Error::custom)?;
-                let nonce =
-                    musig::PublicNonce::from_byte_array(&nonce_bytes).map_err(D::Error::custom)?;
-                nonce_pks.insert(txid, nonce);
-            }
-
-            Ok(nonce_pks)
-        }
-    }
-
-    pub mod partial_sig_map {
-        use super::*;
-
-        pub fn serialize<S>(
-            map: &HashMap<Txid, musig::PartialSignature>,
-            serializer: S,
-        ) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
-        {
-            let map_object: StdHashMap<String, String> = map
-                .iter()
-                .map(|(txid, sig)| {
-                    let hex_sig = sig.serialize().to_vec().to_lower_hex_string();
-                    (txid.to_string(), hex_sig)
-                })
-                .collect();
-
-            map_object.serialize(serializer)
-        }
-
-        pub fn deserialize<'de, D>(
-            deserializer: D,
-        ) -> Result<HashMap<Txid, musig::PartialSignature>, D::Error>
-        where
-            D: Deserializer<'de>,
-        {
-            use de::Error;
-
-            let map_object: StdHashMap<String, String> = StdHashMap::deserialize(deserializer)?;
-
-            let mut partial_sigs = HashMap::new();
-
-            for (txid_str, hex_sig) in map_object {
-                let txid = txid_str.parse().map_err(D::Error::custom)?;
-                let sig_bytes =
-                    bitcoin::hex::FromHex::from_hex(&hex_sig).map_err(D::Error::custom)?;
-                let sig = musig::PartialSignature::from_byte_array(&sig_bytes)
-                    .map_err(D::Error::custom)?;
-                partial_sigs.insert(txid, sig);
-            }
-
-            Ok(partial_sigs)
-        }
-    }
 }

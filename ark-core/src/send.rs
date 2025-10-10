@@ -115,7 +115,7 @@ pub fn build_offchain_transactions(
 
     let checkpoint_exit_script = csv_sig_script(
         server_info.unilateral_exit_delay,
-        server_info.pk.x_only_public_key().0,
+        server_info.signer_pk.x_only_public_key().0,
     );
 
     let mut checkpoint_txs = Vec::new();

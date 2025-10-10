@@ -11,7 +11,7 @@ use crate::ExplorerUtxo;
 use ark_core::batch;
 use ark_core::batch::create_and_sign_forfeit_txs;
 use ark_core::batch::generate_nonce_tree;
-use ark_core::batch::sign_batch_tree;
+use ark_core::batch::sign_batch_tree_tx;
 use ark_core::batch::sign_commitment_psbt;
 use ark_core::batch::NonceKps;
 use ark_core::proof_of_funds;
@@ -402,7 +402,7 @@ where
 
         let mut stream = network_client.get_event_stream(topics).await?;
 
-        let (ark_server_pk, _) = server_info.pk.x_only_public_key();
+        let (ark_server_pk, _) = server_info.signer_pk.x_only_public_key();
 
         let mut unsigned_commitment_tx = None;
 
@@ -410,6 +410,7 @@ where
         let mut vtxo_graph: Option<TxGraph> = None;
 
         let mut connectors_graph_chunks = Some(Vec::new());
+        let mut batch_expiry = None;
 
         let mut our_nonce_trees: Option<HashMap<Keypair, NonceKps>> = None;
         loop {
@@ -443,8 +444,10 @@ where
                                 .any(|o| matches!(o, proof_of_funds::Output::Offchain(_)))
                             {
                                 true => Step::BatchStarted,
-                                false => Step::BatchSigningNoncesGenerated,
+                                false => Step::BatchSigningStarted,
                             };
+
+                            batch_expiry = Some(e.batch_expiry);
                         } else {
                             tracing::debug!(
                                 batch_id = e.id,
@@ -454,7 +457,7 @@ where
                         }
                     }
                     StreamEvent::TreeTx(e) => {
-                        if step != Step::BatchStarted && step != Step::BatchSigningNoncesGenerated {
+                        if step != Step::BatchStarted && step != Step::BatchSigningStarted {
                             continue;
                         }
 
@@ -486,7 +489,7 @@ where
                         }
                     }
                     StreamEvent::TreeSignature(e) => {
-                        if step != Step::BatchSigningNoncesGenerated {
+                        if step != Step::BatchSigningStarted {
                             continue;
                         }
 
@@ -577,24 +580,55 @@ where
                         our_nonce_trees = Some(our_nonce_tree_map);
 
                         step = step.next();
-                        continue;
                     }
-                    StreamEvent::TreeNoncesAggregated(e) => {
+                    StreamEvent::TreeNonces(e) => {
                         if step != Step::BatchSigningStarted {
                             continue;
                         }
 
-                        let agg_pub_nonce_tree = e.tree_nonces;
+                        let node_nonce_pks = e.nonces;
+
+                        let (cosigner_pk, nonce_pk) = match node_nonce_pks
+                            .0
+                            .iter()
+                            .find(|(pk, _)| own_cosigner_pks.contains(pk))
+                        {
+                            Some((pk, nonce_pk)) => (*pk, *nonce_pk),
+                            None => {
+                                tracing::debug!(
+                                    batch_id = e.id,
+                                    txid = %e.txid,
+                                    "Received irrelevant TreeNonces event"
+                                );
+
+                                continue;
+                            }
+                        };
 
                         tracing::debug!(
                             batch_id = e.id,
-                            ?agg_pub_nonce_tree,
-                            "Batch combined nonces generated"
+                            txid = %e.txid,
+                            %cosigner_pk,
+                            "Received TreeNonces event"
                         );
 
-                        let our_nonce_trees = our_nonce_trees.take().ok_or(Error::ark_server(
-                            "missing nonce tree during batch protocol",
+                        let cosigner_kp = own_cosigner_kps
+                            .iter()
+                            .find(|kp| kp.public_key() == cosigner_pk)
+                            .ok_or_else(|| {
+                                Error::ad_hoc("no cosigner keypair to sign for own PK")
+                            })?;
+
+                        let our_nonce_trees = our_nonce_trees.as_mut().ok_or(Error::ark_server(
+                            "missing nonce trees during batch protocol",
                         ))?;
+
+                        let our_nonce_tree =
+                            our_nonce_trees
+                                .get_mut(cosigner_kp)
+                                .ok_or(Error::ark_server(
+                                    "missing nonce tree during batch protocol",
+                                ))?;
 
                         let vtxo_graph = match vtxo_graph {
                             Some(ref vtxo_graph) => vtxo_graph,
@@ -613,34 +647,38 @@ where
                             .as_ref()
                             .ok_or_else(|| Error::ad_hoc("missing commitment TX"))?;
 
-                        for (cosigner_kp, our_nonce_tree) in our_nonce_trees {
-                            let partial_sig_tree = sign_batch_tree(
-                                server_info.vtxo_tree_expiry,
-                                ark_server_pk,
-                                &cosigner_kp,
-                                vtxo_graph,
-                                unsigned_commitment_tx,
-                                our_nonce_tree,
-                                &agg_pub_nonce_tree,
+                        let batch_expiry =
+                            batch_expiry.ok_or_else(|| Error::ad_hoc("missing batch expiry"))?;
+
+                        let partial_sig_tree = sign_batch_tree_tx(
+                            e.txid,
+                            batch_expiry,
+                            ark_server_pk,
+                            cosigner_kp,
+                            &nonce_pk,
+                            vtxo_graph,
+                            unsigned_commitment_tx,
+                            our_nonce_tree,
+                            node_nonce_pks,
+                        )
+                        .map_err(Error::from)
+                        .context("failed to sign VTXO tree")?;
+
+                        network_client
+                            .submit_tree_signatures(
+                                &e.id,
+                                cosigner_kp.public_key(),
+                                partial_sig_tree,
                             )
-                            .map_err(Error::from)
-                            .context("failed to sign VTXO tree")?;
-
-                            network_client
-                                .submit_tree_signatures(
-                                    &e.id,
-                                    cosigner_kp.public_key(),
-                                    partial_sig_tree,
-                                )
-                                .await
-                                .map_err(Error::ark_server)
-                                .context("failed to submit VTXO tree signatures")?;
-                        }
-
-                        step = step.next();
+                            .await
+                            .map_err(Error::ark_server)
+                            .context("failed to submit VTXO tree signatures")?;
+                    }
+                    StreamEvent::TreeNoncesAggregated(e) => {
+                        tracing::debug!(batch_id = e.id, "Batch combined nonces generated");
                     }
                     StreamEvent::BatchFinalization(e) => {
-                        if step != Step::BatchSigningNoncesGenerated {
+                        if step != Step::BatchSigningStarted {
                             continue;
                         }
 
@@ -707,7 +745,7 @@ where
                         step = step.next();
                     }
                     StreamEvent::BatchFinalized(e) => {
-                        if step != Step::BatchFinalization {
+                        if step != Step::BatchSigningStarted {
                             continue;
                         }
 
@@ -726,9 +764,8 @@ where
                         }
 
                         tracing::debug!("Unrelated batch failed: {e:?}");
-
-                        continue;
                     }
+                    StreamEvent::Heartbeat => {}
                 },
                 Some(Err(e)) => {
                     return Err(Error::ark_server(e));
@@ -744,8 +781,6 @@ where
             Start,
             BatchStarted,
             BatchSigningStarted,
-            BatchSigningNoncesGenerated,
-            BatchFinalization,
             Finalized,
         }
 
@@ -754,9 +789,7 @@ where
                 match self {
                     Step::Start => Step::BatchStarted,
                     Step::BatchStarted => Step::BatchSigningStarted,
-                    Step::BatchSigningStarted => Step::BatchSigningNoncesGenerated,
-                    Step::BatchSigningNoncesGenerated => Step::BatchFinalization,
-                    Step::BatchFinalization => Step::Finalized,
+                    Step::BatchSigningStarted => Step::Finalized,
                     Step::Finalized => Step::Finalized, // we can't go further
                 }
             }
