@@ -11,6 +11,7 @@ use common::Nigiri;
 use rand::thread_rng;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 mod common;
 
@@ -74,6 +75,21 @@ pub async fn send_onchain_vtxo_and_boarding_output() {
         .unwrap();
 
     let unilateral_exit_trees = alice.build_unilateral_exit_trees().await.unwrap();
+
+    // Mine blocks regularly to ensure that any transaction published by the Ark server actually
+    // gets confirmed.
+    tokio::spawn({
+        let nigiri = nigiri.clone();
+        let alice_wallet = alice_wallet.clone();
+        async move {
+            loop {
+                nigiri.mine(1).await;
+                alice_wallet.sync().await.unwrap();
+
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+    });
 
     for (i, unilateral_exit_tree) in unilateral_exit_trees.iter().enumerate() {
         while let Some(txid) = alice

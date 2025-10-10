@@ -30,7 +30,7 @@ ark-core = "0.1" # Replace with actual version
 - [`e2e_send_onchain_boarding_output`](./e2e-tests/tests/e2e_send_onchain_boarding_output.rs)
 - [`e2e_send_onchain_vtxo_and_boarding_output`](./e2e-tests/tests/e2e_send_onchain_vtxo_and_boarding_output.rs)
 - [`e2e_sub_dust.rs`](./e2e-tests/tests/e2e_sub_dust.rs)
-- [`sample client`](./ark-sample/src/main.rs)
+- [`sample client`](./ark-client-sample/src/main.rs)
 
 ### Client Initialization
 

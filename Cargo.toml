@@ -3,11 +3,11 @@ members = [
   "ark-client",
   "ark-core",
   "ark-grpc",
-  "ark-rest",
+  # TODO: Re-generate ark-rest and fix it. Also re-enable e2e_rest_client_get_info.rs.
+  # "ark-rest",
   "ark-bdk-wallet",
   "e2e-tests",
   "ark-client-sample",
-  "ark-sample",
   "ark-rust-secp256k1",
   "ark-dlc-sample",
   "ark-rs",

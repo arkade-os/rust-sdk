@@ -11,11 +11,11 @@ use ark_core::send::sign_ark_transaction;
 use ark_core::send::sign_checkpoint_transaction;
 use ark_core::send::OffchainTransactions;
 use ark_core::send::VtxoInput;
-use ark_core::send::VTXO_CONDITION_KEY;
 use ark_core::server::GetVtxosRequest;
 use ark_core::vhtlc::VhtlcOptions;
 use ark_core::vhtlc::VhtlcScript;
 use ark_core::ArkAddress;
+use ark_core::VTXO_CONDITION_KEY;
 use bitcoin::absolute::LockTime;
 use bitcoin::consensus::Encodable;
 use bitcoin::hashes::ripemd160;
@@ -196,7 +196,7 @@ where
             VhtlcOptions {
                 sender: swap_data.refund_public_key.into(),
                 receiver: swap_data.claim_public_key.into(),
-                server: self.server_info.pk.into(),
+                server: self.server_info.signer_pk.into(),
                 preimage_hash: swap_data.preimage_hash,
                 refund_locktime: timeout_block_heights.refund,
                 unilateral_claim_delay: Sequence::from_height(
@@ -346,7 +346,7 @@ where
             VhtlcOptions {
                 sender: swap_data.refund_public_key.into(),
                 receiver: swap_data.claim_public_key.into(),
-                server: self.server_info.pk.into(),
+                server: self.server_info.signer_pk.into(),
                 preimage_hash: swap_data.preimage_hash,
                 refund_locktime: timeout_block_heights.refund,
                 unilateral_claim_delay: Sequence::from_height(
@@ -630,7 +630,7 @@ where
             VhtlcOptions {
                 sender: swap.refund_public_key.into(),
                 receiver: swap.claim_public_key.into(),
-                server: self.server_info.pk.into(),
+                server: self.server_info.signer_pk.into(),
                 preimage_hash: swap.preimage_hash,
                 refund_locktime: timeout_block_heights.refund,
                 unilateral_claim_delay: Sequence::from_height(
@@ -728,7 +728,7 @@ where
 
                 input.unknown.insert(
                     psbt::raw::Key {
-                        type_value: u8::MAX,
+                        type_value: 222,
                         key: VTXO_CONDITION_KEY.to_vec(),
                     },
                     bytes,

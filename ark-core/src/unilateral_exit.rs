@@ -463,7 +463,7 @@ pub fn sign_unilateral_exit_tree(
 
                 // We assume that the signatures are in the correct order. TODO: May need to
                 // revise this.
-                for sig in tap_script_sigs {
+                for sig in tap_script_sigs.rev() {
                     witness.push(sig.to_vec());
                 }
 

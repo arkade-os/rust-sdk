@@ -962,6 +962,11 @@ pub struct WithdrawRequest {
     pub address: ::prost::alloc::string::String,
     #[prost(uint64, tag = "2")]
     pub amount: u64,
+    /// if all=true, amount is ignored and all available balance is withdrawn including connectors
+    /// account funds must be used carefully to not make connectors utxos unspendable, making
+    /// forfeit txs invalid
+    #[prost(bool, tag = "3")]
+    pub all: bool,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct WithdrawResponse {
@@ -2163,6 +2168,16 @@ pub struct BanScriptRequest {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct BanScriptResponse {}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RevokeAuthRequest {
+    #[prost(string, tag = "1")]
+    pub token: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RevokeAuthResponse {
+    #[prost(string, tag = "1")]
+    pub token: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SweepableOutput {
     #[prost(string, tag = "1")]
     pub txid: ::prost::alloc::string::String,
@@ -2656,6 +2671,21 @@ pub mod admin_service_client {
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("ark.v1.AdminService", "BanScript"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn revoke_auth(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RevokeAuthRequest>,
+        ) -> std::result::Result<tonic::Response<super::RevokeAuthResponse>, tonic::Status>
+        {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/ark.v1.AdminService/RevokeAuth");
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ark.v1.AdminService", "RevokeAuth"));
             self.inner.unary(req, path, codec).await
         }
     }

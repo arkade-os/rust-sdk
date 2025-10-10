@@ -3,12 +3,14 @@ use crate::conversions::from_musig_xonly;
 use crate::conversions::to_musig_pk;
 use crate::server::NoncePks;
 use crate::server::PartialSigTree;
+use crate::server::TreeTxNoncePks;
 use crate::tree_tx_output_script::TreeTxOutputScript;
 use crate::BoardingOutput;
 use crate::Error;
 use crate::ErrorContext;
 use crate::TxGraph;
 use crate::Vtxo;
+use crate::VTXO_COSIGNER_PSBT_KEY;
 use crate::VTXO_INPUT_INDEX;
 use bitcoin::absolute::LockTime;
 use bitcoin::hashes::Hash;
@@ -37,13 +39,6 @@ use rand::CryptoRng;
 use rand::Rng;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-
-/// The cosigner PKs that sign a VTXO TX input are included in the `unknown` key-value map field of
-/// that input in the VTXO PSBT. Since the `unknown` field can be used for any purpose, we know that
-/// a value is a cosigner PK if the corresponding key starts with this prefix.
-///
-/// The byte value corresponds to the string "cosigner".
-const COSIGNER_PSBT_KEY_PREFIX: [u8; 8] = [111, 115, 105, 103, 110, 101, 114, 0];
 
 /// A UTXO that is primed to become a VTXO. Alternatively, the owner of this UTXO may decide to
 /// spend it into a vanilla UTXO.
@@ -128,6 +123,10 @@ impl VtxoInput {
 pub struct NonceKps(HashMap<Txid, (Option<musig::SecretNonce>, musig::PublicNonce)>);
 
 impl NonceKps {
+    pub fn get_pk(&mut self, txid: &Txid) -> Option<musig::PublicNonce> {
+        self.0.get(txid).map(|(_, pk)| pk).copied()
+    }
+
     /// Take ownership of the [`musig::SecretNonce`] for the transaction identified by `txid`.
     ///
     /// The caller must take ownership because the [`musig::SecretNonce`] ensures that it can only
@@ -256,17 +255,31 @@ fn tree_tx_sighash(
     Ok(msg)
 }
 
+/// Compute the aggregated nonce public key for a transaction in the VTXO tree.
+///
+/// The [`TreeTxNoncePks`] holds the public nonces of all the cosigners of this transaction.
+pub fn aggregate_nonces(tree_tx_nonce_pks: TreeTxNoncePks) -> musig::AggregatedNonce {
+    let secp_musig = ::musig::Secp256k1::new();
+
+    let pks = tree_tx_nonce_pks.to_pks();
+    let ref_pks = pks.iter().collect::<Vec<_>>();
+    musig::AggregatedNonce::new(&secp_musig, &ref_pks)
+}
+
 /// Use `own_cosigner_kp` to sign each batch tree transaction output that we are a part, using
 /// `our_nonce_kps` to provide our share of each aggregate nonce.
 #[allow(clippy::too_many_arguments)]
-pub fn sign_batch_tree(
+pub fn sign_batch_tree_tx(
+    tree_txid: Txid,
     vtxo_tree_expiry: bitcoin::Sequence,
     server_pk: XOnlyPublicKey,
     own_cosigner_kp: &Keypair,
+    agg_nonce_pk: musig::AggregatedNonce,
     batch_tree_tx_graph: &TxGraph,
     commitment_psbt: &Psbt,
-    mut our_nonce_kps: NonceKps,
-    aggregate_nonce_pks: &NoncePks,
+    // This holds all the nonce KPs we generated earlier. We need to mutate it to be able to _move_
+    // the secret nonce out of it before signing.
+    our_nonce_kps: &mut NonceKps,
 ) -> Result<PartialSigTree, Error> {
     let own_cosigner_pk = own_cosigner_kp.public_key();
 
@@ -281,59 +294,55 @@ pub fn sign_batch_tree(
 
     let batch_tree_tx_map = batch_tree_tx_graph.as_map();
 
-    let mut partial_sig_tree = HashMap::new();
-    for (txid, psbt) in batch_tree_tx_map.iter() {
-        let mut cosigner_pks = extract_cosigner_pks_from_vtxo_psbt(psbt)?;
-        cosigner_pks.sort_by_key(|k| k.serialize());
+    let psbt = batch_tree_tx_map
+        .get(&tree_txid)
+        .ok_or_else(|| Error::ad_hoc(format!("TXID {tree_txid} not found in batch tree map")))?;
 
-        if !cosigner_pks.contains(&own_cosigner_pk) {
-            continue;
-        }
+    let mut cosigner_pks = extract_cosigner_pks_from_vtxo_psbt(psbt)?;
+    cosigner_pks.sort_by_key(|k| k.serialize());
 
-        tracing::debug!(%txid, "Generating partial signature");
-
-        let mut key_agg_cache = {
-            let cosigner_pks = cosigner_pks
-                .iter()
-                .map(|pk| to_musig_pk(*pk))
-                .collect::<Vec<_>>();
-            musig::KeyAggCache::new(&secp_musig, &cosigner_pks.iter().collect::<Vec<_>>())
-        };
-
-        let sweep_tap_tree =
-            internal_node_script.sweep_spend_leaf(&secp, from_musig_xonly(key_agg_cache.agg_pk()));
-
-        let tweak = ::musig::Scalar::from(
-            ::musig::SecretKey::from_slice(sweep_tap_tree.tap_tweak().as_byte_array())
-                .expect("valid conversion"),
-        );
-
-        key_agg_cache
-            .pubkey_xonly_tweak_add(&secp_musig, &tweak)
-            .map_err(Error::crypto)?;
-
-        let agg_pub_nonce = aggregate_nonce_pks
-            .get(txid)
-            .ok_or_else(|| Error::crypto(format!("missing pub nonce for tree TX {txid}")))?;
-
-        // Equivalent to parsing the individual `MusigAggNonce` from a slice.
-        let agg_nonce = musig::AggregatedNonce::new(&secp_musig, &[&agg_pub_nonce]);
-
-        let msg = tree_tx_sighash(psbt, &batch_tree_tx_map, commitment_psbt)?;
-
-        let nonce_sk = our_nonce_kps
-            .take_sk(txid)
-            .ok_or_else(|| Error::crypto(format!("missing nonce for tree TX {txid}")))?;
-
-        let sig = musig::Session::new(&secp_musig, &key_agg_cache, agg_nonce, msg).partial_sign(
-            &secp_musig,
-            nonce_sk,
-            &own_cosigner_kp,
-            &key_agg_cache,
-        );
-
-        partial_sig_tree.insert(*txid, sig);
+    if !cosigner_pks.contains(&own_cosigner_pk) {
+        return Err(Error::ad_hoc(
+            "own cosigner PK not found among tree transaction cosigner PKs",
+        ));
     }
+
+    tracing::debug!(%tree_txid, "Generating partial signature");
+
+    let mut key_agg_cache = {
+        let cosigner_pks = cosigner_pks
+            .iter()
+            .map(|pk| to_musig_pk(*pk))
+            .collect::<Vec<_>>();
+        musig::KeyAggCache::new(&secp_musig, &cosigner_pks.iter().collect::<Vec<_>>())
+    };
+
+    let sweep_tap_tree =
+        internal_node_script.sweep_spend_leaf(&secp, from_musig_xonly(key_agg_cache.agg_pk()));
+
+    let tweak = ::musig::Scalar::from(
+        ::musig::SecretKey::from_slice(sweep_tap_tree.tap_tweak().as_byte_array())
+            .expect("valid conversion"),
+    );
+
+    key_agg_cache
+        .pubkey_xonly_tweak_add(&secp_musig, &tweak)
+        .map_err(Error::crypto)?;
+
+    let msg = tree_tx_sighash(psbt, &batch_tree_tx_map, commitment_psbt)?;
+
+    let nonce_sk = our_nonce_kps
+        .take_sk(&tree_txid)
+        .ok_or_else(|| Error::crypto(format!("missing nonce for tree TX {tree_txid}")))?;
+
+    let sig = musig::Session::new(&secp_musig, &key_agg_cache, agg_nonce_pk, msg).partial_sign(
+        &secp_musig,
+        nonce_sk,
+        &own_cosigner_kp,
+        &key_agg_cache,
+    );
+
+    let partial_sig_tree = HashMap::from_iter([(tree_txid, sig)]);
 
     Ok(PartialSigTree(partial_sig_tree))
 }
@@ -614,7 +623,7 @@ fn extract_cosigner_pks_from_vtxo_psbt(psbt: &Psbt) -> Result<Vec<PublicKey>, Er
 
     let mut cosigner_pks = Vec::new();
     for (key, pk) in vtxo_input.unknown.iter() {
-        if key.key.starts_with(&COSIGNER_PSBT_KEY_PREFIX) {
+        if key.key.starts_with(&VTXO_COSIGNER_PSBT_KEY) {
             cosigner_pks.push(
                 bitcoin::PublicKey::from_slice(pk)
                     .map_err(Error::crypto)
