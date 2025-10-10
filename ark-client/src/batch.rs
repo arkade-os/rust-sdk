@@ -14,7 +14,7 @@ use ark_core::batch::generate_nonce_tree;
 use ark_core::batch::sign_batch_tree_tx;
 use ark_core::batch::sign_commitment_psbt;
 use ark_core::batch::NonceKps;
-use ark_core::proof_of_funds;
+use ark_core::intent;
 use ark_core::server::BatchTreeEventType;
 use ark_core::server::StreamEvent;
 use ark_core::ArkAddress;
@@ -278,7 +278,7 @@ where
 
         let inputs = {
             let boarding_inputs = onchain_inputs.clone().into_iter().map(|o| {
-                proof_of_funds::Input::new(
+                intent::Input::new(
                     o.outpoint(),
                     o.boarding_output().exit_delay(),
                     TxOut {
@@ -287,7 +287,7 @@ where
                     },
                     o.boarding_output().tapscripts(),
                     o.boarding_output().owner_pk(),
-                    o.boarding_output().exit_spend_info(),
+                    o.boarding_output().forfeit_spend_info(),
                     true,
                 )
             });
@@ -296,7 +296,7 @@ where
                 .clone()
                 .into_iter()
                 .map(|v| {
-                    Ok(proof_of_funds::Input::new(
+                    Ok(intent::Input::new(
                         v.outpoint(),
                         v.vtxo().exit_delay(),
                         TxOut {
@@ -306,7 +306,7 @@ where
                         v.vtxo().tapscripts(),
                         v.vtxo().owner_pk(),
                         v.vtxo()
-                            .exit_spend_info()
+                            .forfeit_spend_info()
                             .context("failed to get exit spend info")?,
                         false,
                     ))
@@ -322,7 +322,7 @@ where
             BatchOutputType::Board {
                 to_address,
                 to_amount,
-            } => outputs.push(proof_of_funds::Output::Offchain(TxOut {
+            } => outputs.push(intent::Output::Offchain(TxOut {
                 value: to_amount,
                 script_pubkey: to_address.to_p2tr_script_pubkey(),
             })),
@@ -332,12 +332,12 @@ where
                 change_address,
                 change_amount,
             } => {
-                outputs.push(proof_of_funds::Output::Onchain(TxOut {
+                outputs.push(intent::Output::Onchain(TxOut {
                     value: to_amount,
                     script_pubkey: to_address.script_pubkey(),
                 }));
                 if change_amount > self.server_info.dust {
-                    outputs.push(proof_of_funds::Output::Offchain(TxOut {
+                    outputs.push(intent::Output::Offchain(TxOut {
                         value: change_amount,
                         script_pubkey: change_address.to_p2tr_script_pubkey(),
                     }));
@@ -362,7 +362,7 @@ where
                 .map_err(|e| ark_core::Error::ad_hoc(e.to_string()))
         };
 
-        let (bip322_proof, intent_message) = proof_of_funds::make_bip322_signature(
+        let intent = intent::make_intent(
             &[*self.kp()],
             sign_for_onchain_pk_fn,
             inputs,
@@ -372,8 +372,7 @@ where
 
         let intent_id = timeout_op(
             self.inner.timeout,
-            self.network_client()
-                .register_intent(&intent_message, &bip322_proof),
+            self.network_client().register_intent(intent),
         )
         .await
         .context("failed to register intent")??;
@@ -441,7 +440,7 @@ where
                             // with a different step in the state machine.
                             step = match outputs
                                 .iter()
-                                .any(|o| matches!(o, proof_of_funds::Output::Offchain(_)))
+                                .any(|o| matches!(o, intent::Output::Offchain(_)))
                             {
                                 true => Step::BatchStarted,
                                 false => Step::BatchSigningStarted,

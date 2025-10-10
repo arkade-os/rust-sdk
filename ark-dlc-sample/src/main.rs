@@ -9,7 +9,7 @@ use ark_core::batch::sign_batch_tree_tx;
 use ark_core::batch::sign_commitment_psbt;
 use ark_core::boarding_output::list_boarding_outpoints;
 use ark_core::boarding_output::BoardingOutpoints;
-use ark_core::proof_of_funds;
+use ark_core::intent;
 use ark_core::script::csv_sig_script;
 use ark_core::script::multisig_script;
 use ark_core::send;
@@ -1207,7 +1207,7 @@ async fn settle(
     let batch_inputs = {
         let boarding_inputs = boarding_outpoints.spendable.clone().into_iter().map(
             |(outpoint, amount, boarding_output)| {
-                proof_of_funds::Input::new(
+                intent::Input::new(
                     outpoint,
                     boarding_output.exit_delay(),
                     TxOut {
@@ -1227,7 +1227,7 @@ async fn settle(
             .clone()
             .into_iter()
             .map(|(virtual_tx_outpoint, vtxo)| {
-                anyhow::Ok(proof_of_funds::Input::new(
+                anyhow::Ok(intent::Input::new(
                     virtual_tx_outpoint.outpoint,
                     vtxo.exit_delay(),
                     TxOut {
@@ -1248,7 +1248,7 @@ async fn settle(
 
     let spendable_amount =
         boarding_outpoints.spendable_balance() + virtual_tx_outpoints.spendable_balance();
-    let batch_outputs = vec![proof_of_funds::Output::Offchain(TxOut {
+    let batch_outputs = vec![intent::Output::Offchain(TxOut {
         value: spendable_amount,
         script_pubkey: to_address.to_p2tr_script_pubkey(),
     })];
@@ -1267,7 +1267,7 @@ async fn settle(
     };
 
     let signing_kp = Keypair::from_secret_key(&secp, &sk);
-    let (bip322_proof, intent_message) = proof_of_funds::make_bip322_signature(
+    let (bip322_proof, intent_message) = intent::make_intent(
         &[signing_kp],
         sign_for_onchain_pk_fn,
         batch_inputs,

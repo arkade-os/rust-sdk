@@ -20,7 +20,6 @@ use crate::generated::ark::v1::UnsubscribeForScriptsRequest;
 use crate::parse_sequence_number;
 use crate::Error;
 use ark_core::history;
-use ark_core::proof_of_funds;
 use ark_core::server::ArkTransaction;
 use ark_core::server::BatchFailed;
 use ark_core::server::BatchFinalizationEvent;
@@ -166,18 +165,12 @@ impl Client {
         Ok(ListVtxo::new(spent, spendable))
     }
 
-    pub async fn register_intent(
-        &self,
-        intent_message: &proof_of_funds::IntentMessage,
-        proof: &proof_of_funds::Bip322Proof,
-    ) -> Result<String, Error> {
+    pub async fn register_intent(&self, intent: ark_core::intent::Intent) -> Result<String, Error> {
         let mut client = self.ark_client()?;
 
+        let intent = intent.try_into()?;
         let request = RegisterIntentRequest {
-            intent: Some(Intent {
-                proof: proof.serialize(),
-                message: intent_message.encode().map_err(Error::conversion)?,
-            }),
+            intent: Some(intent),
         };
 
         let response = client
@@ -567,6 +560,17 @@ impl Client {
     }
     fn indexer_client(&self) -> Result<IndexerServiceClient<tonic::transport::Channel>, Error> {
         self.indexer_client.clone().ok_or(Error::not_connected())
+    }
+}
+
+impl TryFrom<ark_core::intent::Intent> for Intent {
+    type Error = Error;
+
+    fn try_from(value: ark_core::intent::Intent) -> Result<Self, Self::Error> {
+        Ok(Self {
+            proof: value.serialize_proof(),
+            message: value.serialize_message().map_err(Error::conversion)?,
+        })
     }
 }
 

@@ -6,6 +6,7 @@ use crate::ArkAddress;
 use crate::Error;
 use crate::ErrorContext;
 use crate::UNSPENDABLE_KEY;
+use crate::VTXO_TAPROOT_KEY;
 use bitcoin::absolute::LockTime;
 use bitcoin::hashes::Hash;
 use bitcoin::key::PublicKey;
@@ -34,15 +35,6 @@ use bitcoin::XOnlyPublicKey;
 use std::collections::BTreeMap;
 use std::io;
 use std::io::Write;
-
-/// The byte value corresponds to the string "taptree".
-const VTXO_TAPROOT_KEY: [u8; 7] = [116, 97, 112, 116, 114, 101, 101];
-
-/// The byte value corresponds to the string "condition".
-pub const VTXO_CONDITION_KEY: [u8; 9] = [99, 111, 110, 100, 105, 116, 105, 111, 110];
-
-/// The byte value corresponds to the string "expiry".
-pub const VTXO_TREE_EXPIRY_PSBT_KEY: [u8; 6] = [101, 120, 112, 105, 114, 121];
 
 /// A VTXO to be spent into an unconfirmed VTXO.
 #[derive(Debug, Clone)]

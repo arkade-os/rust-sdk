@@ -8,7 +8,7 @@ pub mod boarding_output;
 pub mod coin_select;
 pub mod conversions;
 pub mod history;
-pub mod proof_of_funds;
+pub mod intent;
 pub mod script;
 pub mod send;
 pub mod server;
@@ -38,6 +38,18 @@ pub const UNSPENDABLE_KEY: &str =
     "0250929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0";
 
 pub const VTXO_INPUT_INDEX: usize = 0;
+
+/// The byte value corresponds to the string "taptree".
+pub const VTXO_TAPROOT_KEY: [u8; 7] = [116, 97, 112, 116, 114, 101, 101];
+
+/// The byte value corresponds to the string "condition".
+pub const VTXO_CONDITION_KEY: [u8; 9] = [99, 111, 110, 100, 105, 116, 105, 111, 110];
+
+/// The byte value corresponds to the string "expiry".
+pub const VTXO_TREE_EXPIRY_PSBT_KEY: [u8; 6] = [101, 120, 112, 105, 114, 121];
+
+/// The byte value corresponds to the string "cosigner".
+pub const VTXO_COSIGNER_PSBT_KEY: [u8; 8] = [99, 111, 115, 105, 103, 110, 101, 114];
 
 const ANCHOR_SCRIPT_PUBKEY: [u8; 4] = [0x51, 0x02, 0x4e, 0x73];
 
