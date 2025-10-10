@@ -1,5 +1,0 @@
-# ark_server_url = "https://insiders.mutinynet.arklabs.to"
-# esplora_url = "https://mutinynet.com/api"
-ark_server_url = "https://mutinynet.arkade.sh"
-esplora_url = "https://mutinynet.com/api"
-swap_storage_path = "./insiders/swap_storage.sqlite"

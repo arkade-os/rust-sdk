@@ -105,7 +105,7 @@ impl TxGraph {
         })
     }
 
-    fn nb_of_nodes(&self) -> usize {
+    pub fn nb_of_nodes(&self) -> usize {
         let mut nb = 1;
         for child in self.children.values() {
             nb += child.nb_of_nodes();

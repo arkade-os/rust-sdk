@@ -11,9 +11,8 @@ jobs:
       fail-fast: false
       matrix:
         arkd-version: [
-          'v0.7.0',
-          'next-version',
-          'master'
+          'master',
+          'v0.8.0-rc.1'
           # Add more versions as needed
         ]
 

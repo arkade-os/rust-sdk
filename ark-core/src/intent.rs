@@ -1,14 +1,15 @@
 use crate::Error;
 use crate::ErrorContext;
+use crate::VTXO_TAPROOT_KEY;
 use bitcoin::absolute::LockTime;
 use bitcoin::base64;
 use bitcoin::base64::Engine;
 use bitcoin::hashes::sha256;
 use bitcoin::hashes::Hash;
-use bitcoin::hex::DisplayHex;
 use bitcoin::key::Keypair;
 use bitcoin::key::Secp256k1;
 use bitcoin::opcodes::all::*;
+use bitcoin::psbt;
 use bitcoin::psbt::PsbtSighashType;
 use bitcoin::secp256k1;
 use bitcoin::secp256k1::schnorr;
@@ -82,46 +83,39 @@ pub enum Output {
     Onchain(TxOut),
 }
 
-pub struct Bip322Proof(Transaction);
+#[derive(Debug, Clone)]
+pub struct Intent {
+    proof: Psbt,
+    message: IntentMessage,
+}
 
-impl Bip322Proof {
-    pub fn serialize(&self) -> String {
+impl Intent {
+    pub fn serialize_proof(&self) -> String {
         let base64 = base64::engine::GeneralPurpose::new(
             &base64::alphabet::STANDARD,
             base64::engine::GeneralPurposeConfig::new(),
         );
 
-        let bytes = bitcoin::consensus::encode::serialize(&self.0);
+        let bytes = self.proof.serialize();
+
         base64.encode(&bytes)
+    }
+
+    pub fn serialize_message(&self) -> Result<String, Error> {
+        self.message.encode()
     }
 }
 
-pub fn make_bip322_signature<F>(
+pub fn make_intent<F>(
     signing_kps: &[Keypair],
     sign_for_onchain_pk_fn: F,
     inputs: Vec<Input>,
     outputs: Vec<Output>,
     own_cosigner_pks: Vec<PublicKey>,
-) -> Result<(Bip322Proof, IntentMessage), Error>
+) -> Result<Intent, Error>
 where
     F: Fn(&XOnlyPublicKey, &secp256k1::Message) -> Result<schnorr::Signature, Error>,
 {
-    let mut input_tap_trees = Vec::new();
-    for input in inputs.iter() {
-        let input_taptree = input
-            .tapscripts
-            .iter()
-            .map(|t| t.to_hex_string())
-            .collect::<Vec<_>>();
-
-        let input_taptree = taptree::TapTree(input_taptree)
-            .encode()
-            .map_err(Error::ad_hoc)
-            .context("failed to encode input taptree")?;
-
-        input_tap_trees.push(input_taptree.to_lower_hex_string());
-    }
-
     let mut onchain_output_indexes = Vec::new();
     for (i, output) in outputs.iter().enumerate() {
         if matches!(output, Output::Onchain(_)) {
@@ -139,7 +133,6 @@ where
 
     let intent_message = IntentMessage {
         intent_message_type: IntentMessageType::Register,
-        input_tap_trees,
         onchain_output_indexes,
         valid_at: now,
         expire_at,
@@ -149,16 +142,30 @@ where
     let (mut proof_psbt, fake_input) = build_proof_psbt(&intent_message, &inputs, &outputs)?;
 
     for (i, proof_input) in proof_psbt.inputs.iter_mut().enumerate() {
-        let leaf_proof = if i == 0 {
-            inputs[0].spend_info.clone()
-        } else {
-            inputs[i - 1].spend_info.clone()
-        };
+        if i == 0 {
+            let (script, control_block) = inputs[0].spend_info.clone();
 
-        proof_input.tap_scripts = BTreeMap::from_iter([(
-            leaf_proof.1.clone(),
-            (leaf_proof.0.clone(), taproot::LeafVersion::TapScript),
-        )]);
+            proof_input.tap_scripts =
+                BTreeMap::from_iter([(control_block, (script, taproot::LeafVersion::TapScript))]);
+        } else {
+            let (script, control_block) = inputs[i - 1].spend_info.clone();
+
+            let tap_tree = taptree::TapTree(inputs[i - 1].tapscripts.clone());
+            let bytes = tap_tree
+                .encode()
+                .map_err(Error::ad_hoc)
+                .with_context(|| format!("failed to encode taptree for input {i}"))?;
+
+            proof_input.unknown.insert(
+                psbt::raw::Key {
+                    type_value: 222,
+                    key: VTXO_TAPROOT_KEY.to_vec(),
+                },
+                bytes,
+            );
+            proof_input.tap_scripts =
+                BTreeMap::from_iter([(control_block, (script, taproot::LeafVersion::TapScript))]);
+        };
     }
 
     let secp = Secp256k1::new();
@@ -179,10 +186,10 @@ where
 
         let prevouts = Prevouts::All(&prevouts);
 
-        let (exit_control_block, (exit_script, leaf_version)) =
+        let (_, (script, leaf_version)) =
             proof_input.tap_scripts.first_key_value().expect("a value");
 
-        let leaf_hash = TapLeafHash::from_script(exit_script, *leaf_version);
+        let leaf_hash = TapLeafHash::from_script(script, *leaf_version);
 
         let tap_sighash = SighashCache::new(&proof_psbt.unsigned_tx)
             .taproot_script_spend_signature_hash(i, &prevouts, leaf_hash, TapSighashType::Default)
@@ -193,7 +200,7 @@ where
 
         let pk = input.pk;
 
-        let sig = match input.is_onchain {
+        match input.is_onchain {
             true => {
                 let sig = sign_for_onchain_pk_fn(&pk, &msg)?;
 
@@ -207,8 +214,6 @@ where
                 };
 
                 proof_input.tap_script_sigs = BTreeMap::from_iter([((pk, leaf_hash), sig)]);
-
-                sig
             }
             false => {
                 let signing_kp = signing_kps
@@ -231,26 +236,14 @@ where
                 };
 
                 proof_input.tap_script_sigs = BTreeMap::from_iter([((pk, leaf_hash), sig)]);
-
-                sig
             }
         };
-
-        let witness = Witness::from_slice(&[
-            &sig.signature[..],
-            exit_script.as_bytes(),
-            &exit_control_block.serialize(),
-        ]);
-
-        proof_input.final_script_witness = Some(witness);
     }
 
-    let signed_proof_tx = proof_psbt
-        .extract_tx()
-        .map_err(Error::crypto)
-        .context("failed to extract signed proof TX")?;
-
-    Ok((Bip322Proof(signed_proof_tx), intent_message))
+    Ok(Intent {
+        proof: proof_psbt,
+        message: intent_message,
+    })
 }
 
 fn build_proof_psbt(
@@ -271,7 +264,7 @@ fn build_proof_psbt(
     let script_pubkey = first_input.witness_utxo.script_pubkey.clone();
 
     let to_spend_tx = {
-        let hash = bip322_hash(message.as_bytes());
+        let hash = message_hash(message.as_bytes());
 
         let script_sig = ScriptBuf::builder()
             .push_opcode(OP_PUSHBYTES_0)
@@ -352,7 +345,7 @@ fn build_proof_psbt(
 
         for (i, input) in inputs.iter().enumerate() {
             psbt.inputs[i + 1].witness_utxo = Some(input.witness_utxo.clone());
-            psbt.inputs[i + 1].sighash_type = Some(TapSighashType::Default.into());
+            psbt.inputs[i + 1].sighash_type = Some(PsbtSighashType::from_u32(1));
         }
 
         psbt
@@ -364,8 +357,8 @@ fn build_proof_psbt(
     Ok((to_sign_psbt, first_input_modified))
 }
 
-fn bip322_hash(message: &[u8]) -> sha256::Hash {
-    const TAG: &[u8] = b"BIP0322-signed-message";
+fn message_hash(message: &[u8]) -> sha256::Hash {
+    const TAG: &[u8] = b"ark-intent-proof-message";
 
     let hashed_tag = sha256::Hash::hash(TAG);
 
@@ -377,11 +370,10 @@ fn bip322_hash(message: &[u8]) -> sha256::Hash {
     sha256::Hash::hash(&v)
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Debug, Clone)]
 pub struct IntentMessage {
     #[serde(rename = "type")]
     intent_message_type: IntentMessageType,
-    input_tap_trees: Vec<String>,
     // Indicates which outputs are on-chain out of all the outputs we are registering.
     onchain_output_indexes: Vec<usize>,
     // The time when this intent message is valid from.
@@ -401,7 +393,7 @@ impl IntentMessage {
     }
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "lowercase")]
 pub enum IntentMessageType {
     Register,
@@ -409,23 +401,16 @@ pub enum IntentMessageType {
 }
 
 mod taptree {
-    use bitcoin::hex::FromHex;
+    use bitcoin::ScriptBuf;
     use std::io::Write;
     use std::io::{self};
 
-    pub struct TapTree(pub Vec<String>);
+    pub struct TapTree(pub Vec<ScriptBuf>);
 
     impl TapTree {
         pub fn encode(&self) -> io::Result<Vec<u8>> {
             let mut tapscripts_bytes = Vec::new();
-
-            // write number of leaves as compact size uint
-            write_compact_size_uint(&mut tapscripts_bytes, self.0.len() as u64)?;
-
             for tapscript in &self.0 {
-                let script_bytes = Vec::from_hex(tapscript)
-                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "hex decode error"))?;
-
                 // write depth (always 1)
                 tapscripts_bytes.push(1);
 
@@ -433,8 +418,8 @@ mod taptree {
                 tapscripts_bytes.push(0xc0);
 
                 // write script
-                write_compact_size_uint(&mut tapscripts_bytes, script_bytes.len() as u64)?;
-                tapscripts_bytes.extend(&script_bytes);
+                write_compact_size_uint(&mut tapscripts_bytes, tapscript.len() as u64)?;
+                tapscripts_bytes.extend(tapscript.as_bytes());
             }
 
             Ok(tapscripts_bytes)
@@ -442,16 +427,14 @@ mod taptree {
 
         #[cfg(test)]
         pub fn decode(data: &[u8]) -> io::Result<Self> {
-            use bitcoin::hex::DisplayHex;
             use std::io::Cursor;
             use std::io::Read;
 
             let mut buf = Cursor::new(data);
-            let count = read_compact_size_uint(&mut buf)?;
+            let mut leaves = Vec::new();
 
-            let mut leaves = Vec::with_capacity(count as usize);
-
-            for _ in 0..count {
+            // Read leaves until we run out of data
+            while buf.position() < data.len() as u64 {
                 // depth : ignore
                 let mut depth = [0u8; 1];
                 buf.read_exact(&mut depth)?;
@@ -467,7 +450,7 @@ mod taptree {
                 let mut script_bytes = vec![0u8; script_len];
                 buf.read_exact(&mut script_bytes)?;
 
-                leaves.push(script_bytes.to_lower_hex_string());
+                leaves.push(ScriptBuf::from_bytes(script_bytes));
             }
 
             Ok(TapTree(leaves))
@@ -518,25 +501,29 @@ mod taptree {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use bitcoin::opcodes::OP_FALSE;
+        use bitcoin::opcodes::OP_TRUE;
 
         #[test]
         fn tap_tree_encode_decode_roundtrip() {
-            // sample tapscript (OP_TRUE)
-            let tapscript_hex = "51";
-            let tree = TapTree(vec![tapscript_hex.into()]);
+            let scripts = vec![ScriptBuf::builder().push_opcode(OP_TRUE).into_script()];
+
+            let tree = TapTree(scripts.clone());
             let encoded = tree.encode().unwrap();
             let decoded = TapTree::decode(&encoded).unwrap();
-            assert_eq!(decoded.0, vec![tapscript_hex]);
+            assert_eq!(decoded.0, scripts);
         }
 
         #[test]
         fn tap_tree_multiple_leaves() {
-            let tapscript_hex1 = "51";
-            let tapscript_hex2 = "52";
-            let tree = TapTree(vec![tapscript_hex1.into(), tapscript_hex2.into()]);
+            let scripts = vec![
+                ScriptBuf::builder().push_opcode(OP_TRUE).into_script(),
+                ScriptBuf::builder().push_opcode(OP_FALSE).into_script(),
+            ];
+            let tree = TapTree(scripts.clone());
             let encoded = tree.encode().unwrap();
             let decoded = TapTree::decode(&encoded).unwrap();
-            assert_eq!(decoded.0, vec![tapscript_hex1, tapscript_hex2]);
+            assert_eq!(decoded.0, scripts);
         }
     }
 }

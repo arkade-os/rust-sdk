@@ -26,7 +26,7 @@ use std::time::Duration;
 /// All the information needed to _spend_ a VTXO.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Vtxo {
-    server: XOnlyPublicKey,
+    server_forfeit: XOnlyPublicKey,
     owner: XOnlyPublicKey,
     spend_info: TaprootSpendInfo,
     /// All the scripts in this VTXO's Taproot tree.
@@ -49,7 +49,7 @@ impl Vtxo {
     /// - All other spend paths MUST involve the Ark server's signature.
     pub fn new_with_custom_scripts<C>(
         secp: &Secp256k1<C>,
-        server: XOnlyPublicKey,
+        server_forfeit: XOnlyPublicKey,
         owner: XOnlyPublicKey,
         // TODO: Verify the validity of these scripts before constructing the `Vtxo`.
         scripts: Vec<ScriptBuf>,
@@ -84,7 +84,7 @@ impl Vtxo {
         let address = Address::from_script(&script_pubkey, network).expect("valid script");
 
         Ok(Self {
-            server,
+            server_forfeit,
             owner,
             spend_info,
             tapscripts: scripts,
@@ -98,7 +98,7 @@ impl Vtxo {
     /// Build a default VTXO.
     pub fn new_default<C>(
         secp: &Secp256k1<C>,
-        server: XOnlyPublicKey,
+        server_signer: XOnlyPublicKey,
         owner: XOnlyPublicKey,
         exit_delay: bitcoin::Sequence,
         network: Network,
@@ -106,12 +106,12 @@ impl Vtxo {
     where
         C: Verification,
     {
-        let forfeit_script = multisig_script(server, owner);
+        let forfeit_script = multisig_script(server_signer, owner);
         let redeem_script = csv_sig_script(exit_delay, owner);
 
         Self::new_with_custom_scripts(
             secp,
-            server,
+            server_signer,
             owner,
             vec![forfeit_script, redeem_script],
             exit_delay,
@@ -132,7 +132,7 @@ impl Vtxo {
     }
 
     pub fn server_pk(&self) -> XOnlyPublicKey {
-        self.server
+        self.server_forfeit
     }
 
     pub fn exit_delay(&self) -> bitcoin::Sequence {
@@ -145,7 +145,7 @@ impl Vtxo {
 
     pub fn to_ark_address(&self) -> ArkAddress {
         let vtxo_tap_key = self.spend_info.output_key();
-        ArkAddress::new(self.network, self.server, vtxo_tap_key)
+        ArkAddress::new(self.network, self.server_forfeit, vtxo_tap_key)
     }
 
     /// The spend info of an arbitrary branch of a VTXO.
@@ -163,7 +163,7 @@ impl Vtxo {
     /// This method can fail because [`Vtxo`]s constructed with the method
     /// [`Vtxo::new_with_custom_scripts`] may not contain this script exactly.
     pub fn forfeit_spend_info(&self) -> Result<(ScriptBuf, taproot::ControlBlock), Error> {
-        let forfeit_script = multisig_script(self.server, self.owner);
+        let forfeit_script = multisig_script(self.server_forfeit, self.owner);
 
         let control_block = self
             .get_spend_info(forfeit_script.clone())

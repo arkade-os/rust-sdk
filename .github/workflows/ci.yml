@@ -71,10 +71,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arkd-version: [
-          'v0.7.0'
-        ]
-
+        arkd-version: [ 'v0.8.0-rc.1' ]
     uses: ./.github/workflows/e2e-core.yml
     with:
       arkd-version: ${{ matrix.arkd-version }}
@@ -84,7 +81,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ ubuntu-latest ]
-        arkd-version: [ 'v0.7.0' ]
+        arkd-version: [ 'v0.8.0-rc.1' ]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -105,7 +102,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ macos-latest ]
-        arkd-version: [ 'v0.7.0' ]
+        arkd-version: [ 'v0.8.0-rc.1' ]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

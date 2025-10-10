@@ -1,14 +1,15 @@
 use crate::generated;
 use crate::generated::ark::v1::ark_service_client::ArkServiceClient;
+use crate::generated::ark::v1::get_subscription_response;
 use crate::generated::ark::v1::indexer_service_client::IndexerServiceClient;
 use crate::generated::ark::v1::indexer_tx_history_record::Key;
-use crate::generated::ark::v1::Bip322Signature;
 use crate::generated::ark::v1::ConfirmRegistrationRequest;
 use crate::generated::ark::v1::GetEventStreamRequest;
 use crate::generated::ark::v1::GetInfoRequest;
 use crate::generated::ark::v1::GetSubscriptionRequest;
 use crate::generated::ark::v1::GetTransactionsStreamRequest;
 use crate::generated::ark::v1::IndexerChainedTxType;
+use crate::generated::ark::v1::Intent;
 use crate::generated::ark::v1::Outpoint;
 use crate::generated::ark::v1::RegisterIntentRequest;
 use crate::generated::ark::v1::SubmitSignedForfeitTxsRequest;
@@ -18,7 +19,7 @@ use crate::generated::ark::v1::SubscribeForScriptsRequest;
 use crate::generated::ark::v1::UnsubscribeForScriptsRequest;
 use crate::Error;
 use ark_core::history;
-use ark_core::proof_of_funds;
+use ark_core::server::parse_sequence_number;
 use ark_core::server::ArkTransaction;
 use ark_core::server::BatchFailed;
 use ark_core::server::BatchFinalizationEvent;
@@ -37,13 +38,16 @@ use ark_core::server::ListVtxo;
 use ark_core::server::NoncePks;
 use ark_core::server::PartialSigTree;
 use ark_core::server::StreamEvent;
-use ark_core::server::StreamTransaction;
+use ark_core::server::StreamTransactionData;
 use ark_core::server::SubmitOffchainTxResponse;
+use ark_core::server::SubscriptionEvent;
 use ark_core::server::SubscriptionResponse;
 use ark_core::server::TreeNoncesAggregatedEvent;
+use ark_core::server::TreeNoncesEvent;
 use ark_core::server::TreeSignatureEvent;
 use ark_core::server::TreeSigningStartedEvent;
 use ark_core::server::TreeTxEvent;
+use ark_core::server::TreeTxNoncePks;
 use ark_core::server::VirtualTxOutPoint;
 use ark_core::server::VirtualTxsResponse;
 use ark_core::server::VtxoChain;
@@ -161,18 +165,12 @@ impl Client {
         Ok(ListVtxo::new(spent, spendable))
     }
 
-    pub async fn register_intent(
-        &self,
-        intent_message: &proof_of_funds::IntentMessage,
-        proof: &proof_of_funds::Bip322Proof,
-    ) -> Result<String, Error> {
+    pub async fn register_intent(&self, intent: ark_core::intent::Intent) -> Result<String, Error> {
         let mut client = self.ark_client()?;
 
+        let intent = intent.try_into()?;
         let request = RegisterIntentRequest {
-            intent: Some(Bip322Signature {
-                signature: proof.serialize(),
-                message: intent_message.encode().map_err(Error::conversion)?,
-            }),
+            intent: Some(intent),
         };
 
         let response = client
@@ -282,13 +280,11 @@ impl Client {
     ) -> Result<(), Error> {
         let mut client = self.ark_client()?;
 
-        let tree_nonces = serde_json::to_string(&pub_nonce_tree).map_err(Error::conversion)?;
-
         client
             .submit_tree_nonces(SubmitTreeNoncesRequest {
                 batch_id: batch_id.to_string(),
                 pubkey: cosigner_pubkey.to_string(),
-                tree_nonces,
+                tree_nonces: pub_nonce_tree.encode(),
             })
             .await
             .map_err(Error::request)?;
@@ -304,14 +300,11 @@ impl Client {
     ) -> Result<(), Error> {
         let mut client = self.ark_client()?;
 
-        let tree_signatures =
-            serde_json::to_string(&partial_sig_tree).map_err(Error::conversion)?;
-
         client
             .submit_tree_signatures(SubmitTreeSignaturesRequest {
                 batch_id: batch_id.to_string(),
                 pubkey: cosigner_pk.to_string(),
-                tree_signatures,
+                tree_signatures: partial_sig_tree.encode(),
             })
             .await
             .map_err(Error::request)?;
@@ -387,7 +380,7 @@ impl Client {
 
     pub async fn get_tx_stream(
         &self,
-    ) -> Result<impl Stream<Item = Result<StreamTransaction, Error>> + Unpin, Error> {
+    ) -> Result<impl Stream<Item = Result<StreamTransactionData, Error>> + Unpin, Error> {
         let mut client = self.ark_client()?;
 
         let response = client
@@ -400,12 +393,12 @@ impl Client {
         let stream = stream! {
             loop {
                 match stream.try_next().await {
-                    Ok(Some(event)) => match event.tx {
+                    Ok(Some(event)) => match event.data {
                         None => {
                             log::debug!("Got empty message");
                         }
                         Some(event) => {
-                            yield Ok(StreamTransaction::try_from(event)?);
+                            yield Ok(StreamTransactionData::try_from(event)?);
                         }
                     },
                     Ok(None) => {
@@ -570,14 +563,27 @@ impl Client {
     }
 }
 
+impl TryFrom<ark_core::intent::Intent> for Intent {
+    type Error = Error;
+
+    fn try_from(value: ark_core::intent::Intent) -> Result<Self, Self::Error> {
+        Ok(Self {
+            proof: value.serialize_proof(),
+            message: value.serialize_message().map_err(Error::conversion)?,
+        })
+    }
+}
+
 impl TryFrom<generated::ark::v1::BatchStartedEvent> for BatchStartedEvent {
     type Error = Error;
 
     fn try_from(value: generated::ark::v1::BatchStartedEvent) -> Result<Self, Self::Error> {
+        let batch_expiry = parse_sequence_number(value.batch_expiry).map_err(Error::conversion)?;
+
         Ok(BatchStartedEvent {
             id: value.id,
             intent_id_hashes: value.intent_id_hashes,
-            batch_expiry: value.batch_expiry,
+            batch_expiry,
         })
     }
 }
@@ -655,7 +661,7 @@ impl TryFrom<generated::ark::v1::TreeNoncesAggregatedEvent> for TreeNoncesAggreg
     type Error = Error;
 
     fn try_from(value: generated::ark::v1::TreeNoncesAggregatedEvent) -> Result<Self, Self::Error> {
-        let tree_nonces = serde_json::from_str(&value.tree_nonces).map_err(Error::conversion)?;
+        let tree_nonces = NoncePks::decode(value.tree_nonces).map_err(Error::conversion)?;
 
         Ok(TreeNoncesAggregatedEvent {
             id: value.id,
@@ -728,6 +734,23 @@ impl TryFrom<generated::ark::v1::TreeSignatureEvent> for TreeSignatureEvent {
     }
 }
 
+impl TryFrom<generated::ark::v1::TreeNoncesEvent> for TreeNoncesEvent {
+    type Error = Error;
+
+    fn try_from(value: generated::ark::v1::TreeNoncesEvent) -> Result<Self, Self::Error> {
+        let txid = value.txid.parse().map_err(Error::conversion)?;
+
+        let nonces = TreeTxNoncePks::decode(value.nonces).map_err(Error::conversion)?;
+
+        Ok(Self {
+            id: value.id,
+            topic: value.topic,
+            txid,
+            nonces,
+        })
+    }
+}
+
 impl TryFrom<generated::ark::v1::get_event_stream_response::Event> for StreamEvent {
     type Error = Error;
 
@@ -759,24 +782,33 @@ impl TryFrom<generated::ark::v1::get_event_stream_response::Event> for StreamEve
             generated::ark::v1::get_event_stream_response::Event::TreeSignature(e) => {
                 StreamEvent::TreeSignature(e.try_into()?)
             }
+            generated::ark::v1::get_event_stream_response::Event::TreeNonces(e) => {
+                StreamEvent::TreeNonces(e.try_into()?)
+            }
+            generated::ark::v1::get_event_stream_response::Event::Heartbeat(_) => {
+                StreamEvent::Heartbeat
+            }
         })
     }
 }
 
-impl TryFrom<generated::ark::v1::get_transactions_stream_response::Tx> for StreamTransaction {
+impl TryFrom<generated::ark::v1::get_transactions_stream_response::Data> for StreamTransactionData {
     type Error = Error;
 
     fn try_from(
-        value: generated::ark::v1::get_transactions_stream_response::Tx,
+        value: generated::ark::v1::get_transactions_stream_response::Data,
     ) -> Result<Self, Self::Error> {
         match value {
-            generated::ark::v1::get_transactions_stream_response::Tx::CommitmentTx(
+            generated::ark::v1::get_transactions_stream_response::Data::CommitmentTx(
                 commitment_tx,
-            ) => Ok(StreamTransaction::Commitment(
+            ) => Ok(StreamTransactionData::Commitment(
                 CommitmentTransaction::try_from(commitment_tx)?,
             )),
-            generated::ark::v1::get_transactions_stream_response::Tx::ArkTx(redeem) => {
-                Ok(StreamTransaction::Ark(ArkTransaction::try_from(redeem)?))
+            generated::ark::v1::get_transactions_stream_response::Data::ArkTx(redeem) => Ok(
+                StreamTransactionData::Ark(ArkTransaction::try_from(redeem)?),
+            ),
+            generated::ark::v1::get_transactions_stream_response::Data::Heartbeat(_) => {
+                Ok(StreamTransactionData::Heartbeat)
             }
         }
     }
@@ -976,6 +1008,12 @@ impl TryFrom<generated::ark::v1::GetSubscriptionResponse> for SubscriptionRespon
     type Error = Error;
 
     fn try_from(value: generated::ark::v1::GetSubscriptionResponse) -> Result<Self, Self::Error> {
+        let value = match value.data {
+            Some(get_subscription_response::Data::Heartbeat(_)) => return Ok(Self::Heartbeat),
+            Some(get_subscription_response::Data::Event(event)) => event,
+            None => return Err(Error::conversion("empty subscription response")),
+        };
+
         let txid = value.txid.parse().map_err(Error::conversion)?;
 
         let new_vtxos = value
@@ -1017,14 +1055,14 @@ impl TryFrom<generated::ark::v1::GetSubscriptionResponse> for SubscriptionRespon
             .map(|h| ScriptBuf::from_hex(h).map_err(Error::conversion))
             .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(SubscriptionResponse {
+        Ok(Self::Event(Box::new(SubscriptionEvent {
             txid,
             scripts,
             new_vtxos,
             spent_vtxos,
             tx,
             checkpoint_txs,
-        })
+        })))
     }
 }
 

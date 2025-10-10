@@ -1,0 +1,4 @@
+ark_server_url = "https://mutinynet.arkade.sh"
+esplora_url = "https://mutinynet.com/api"
+swap_storage_path = "./mutinynet/swap_storage.sqlite"
+boltz_url = "https://api.boltz.mutinynet.arkade.sh"

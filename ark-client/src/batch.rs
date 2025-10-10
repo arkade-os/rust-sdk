@@ -9,13 +9,15 @@ use crate::Client;
 use crate::Error;
 use crate::ExplorerUtxo;
 use ark_core::batch;
+use ark_core::batch::aggregate_nonces;
 use ark_core::batch::create_and_sign_forfeit_txs;
 use ark_core::batch::generate_nonce_tree;
-use ark_core::batch::sign_batch_tree;
+use ark_core::batch::sign_batch_tree_tx;
 use ark_core::batch::sign_commitment_psbt;
 use ark_core::batch::NonceKps;
-use ark_core::proof_of_funds;
+use ark_core::intent;
 use ark_core::server::BatchTreeEventType;
+use ark_core::server::PartialSigTree;
 use ark_core::server::StreamEvent;
 use ark_core::ArkAddress;
 use ark_core::ErrorContext as _;
@@ -278,7 +280,7 @@ where
 
         let inputs = {
             let boarding_inputs = onchain_inputs.clone().into_iter().map(|o| {
-                proof_of_funds::Input::new(
+                intent::Input::new(
                     o.outpoint(),
                     o.boarding_output().exit_delay(),
                     TxOut {
@@ -287,7 +289,7 @@ where
                     },
                     o.boarding_output().tapscripts(),
                     o.boarding_output().owner_pk(),
-                    o.boarding_output().exit_spend_info(),
+                    o.boarding_output().forfeit_spend_info(),
                     true,
                 )
             });
@@ -296,7 +298,7 @@ where
                 .clone()
                 .into_iter()
                 .map(|v| {
-                    Ok(proof_of_funds::Input::new(
+                    Ok(intent::Input::new(
                         v.outpoint(),
                         v.vtxo().exit_delay(),
                         TxOut {
@@ -306,7 +308,7 @@ where
                         v.vtxo().tapscripts(),
                         v.vtxo().owner_pk(),
                         v.vtxo()
-                            .exit_spend_info()
+                            .forfeit_spend_info()
                             .context("failed to get exit spend info")?,
                         false,
                     ))
@@ -322,7 +324,7 @@ where
             BatchOutputType::Board {
                 to_address,
                 to_amount,
-            } => outputs.push(proof_of_funds::Output::Offchain(TxOut {
+            } => outputs.push(intent::Output::Offchain(TxOut {
                 value: to_amount,
                 script_pubkey: to_address.to_p2tr_script_pubkey(),
             })),
@@ -332,12 +334,12 @@ where
                 change_address,
                 change_amount,
             } => {
-                outputs.push(proof_of_funds::Output::Onchain(TxOut {
+                outputs.push(intent::Output::Onchain(TxOut {
                     value: to_amount,
                     script_pubkey: to_address.script_pubkey(),
                 }));
                 if change_amount > self.server_info.dust {
-                    outputs.push(proof_of_funds::Output::Offchain(TxOut {
+                    outputs.push(intent::Output::Offchain(TxOut {
                         value: change_amount,
                         script_pubkey: change_address.to_p2tr_script_pubkey(),
                     }));
@@ -362,7 +364,7 @@ where
                 .map_err(|e| ark_core::Error::ad_hoc(e.to_string()))
         };
 
-        let (bip322_proof, intent_message) = proof_of_funds::make_bip322_signature(
+        let intent = intent::make_intent(
             &[*self.kp()],
             sign_for_onchain_pk_fn,
             inputs,
@@ -372,8 +374,7 @@ where
 
         let intent_id = timeout_op(
             self.inner.timeout,
-            self.network_client()
-                .register_intent(&intent_message, &bip322_proof),
+            self.network_client().register_intent(intent),
         )
         .await
         .context("failed to register intent")??;
@@ -402,7 +403,7 @@ where
 
         let mut stream = network_client.get_event_stream(topics).await?;
 
-        let (ark_server_pk, _) = server_info.pk.x_only_public_key();
+        let (ark_forfeit_pk, _) = server_info.forfeit_pk.x_only_public_key();
 
         let mut unsigned_commitment_tx = None;
 
@@ -410,6 +411,9 @@ where
         let mut vtxo_graph: Option<TxGraph> = None;
 
         let mut connectors_graph_chunks = Some(Vec::new());
+        let mut batch_expiry = None;
+
+        let mut agg_nonce_pks = HashMap::new();
 
         let mut our_nonce_trees: Option<HashMap<Keypair, NonceKps>> = None;
         loop {
@@ -440,11 +444,13 @@ where
                             // with a different step in the state machine.
                             step = match outputs
                                 .iter()
-                                .any(|o| matches!(o, proof_of_funds::Output::Offchain(_)))
+                                .any(|o| matches!(o, intent::Output::Offchain(_)))
                             {
                                 true => Step::BatchStarted,
-                                false => Step::BatchSigningNoncesGenerated,
+                                false => Step::BatchSigningStarted,
                             };
+
+                            batch_expiry = Some(e.batch_expiry);
                         } else {
                             tracing::debug!(
                                 batch_id = e.id,
@@ -454,7 +460,7 @@ where
                         }
                     }
                     StreamEvent::TreeTx(e) => {
-                        if step != Step::BatchStarted && step != Step::BatchSigningNoncesGenerated {
+                        if step != Step::BatchStarted && step != Step::BatchSigningStarted {
                             continue;
                         }
 
@@ -462,6 +468,8 @@ where
                             BatchTreeEventType::Vtxo => {
                                 match &mut vtxo_graph_chunks {
                                     Some(vtxo_graph_chunks) => {
+                                        tracing::debug!("Got new VTXO graph chunk");
+
                                         vtxo_graph_chunks.push(e.tx_graph_chunk)
                                     }
                                     None => {
@@ -474,6 +482,8 @@ where
                             BatchTreeEventType::Connector => {
                                 match connectors_graph_chunks {
                                     Some(ref mut connectors_graph_chunks) => {
+                                        tracing::debug!("Got new connectors graph chunk");
+
                                         connectors_graph_chunks.push(e.tx_graph_chunk)
                                     }
                                     None => {
@@ -486,7 +496,7 @@ where
                         }
                     }
                     StreamEvent::TreeSignature(e) => {
-                        if step != Step::BatchSigningNoncesGenerated {
+                        if step != Step::BatchSigningStarted {
                             continue;
                         }
 
@@ -577,30 +587,47 @@ where
                         our_nonce_trees = Some(our_nonce_tree_map);
 
                         step = step.next();
-                        continue;
                     }
-                    StreamEvent::TreeNoncesAggregated(e) => {
+                    StreamEvent::TreeNonces(e) => {
                         if step != Step::BatchSigningStarted {
                             continue;
                         }
 
-                        let agg_pub_nonce_tree = e.tree_nonces;
+                        let tree_tx_nonce_pks = e.nonces;
+
+                        let cosigner_pk = match tree_tx_nonce_pks.0.iter().find(|(pk, _)| {
+                            own_cosigner_pks
+                                .iter()
+                                .any(|p| &&p.x_only_public_key().0 == pk)
+                        }) {
+                            Some((pk, _)) => *pk,
+                            None => {
+                                tracing::debug!(
+                                    batch_id = e.id,
+                                    txid = %e.txid,
+                                    "Received irrelevant TreeNonces event"
+                                );
+
+                                continue;
+                            }
+                        };
 
                         tracing::debug!(
                             batch_id = e.id,
-                            ?agg_pub_nonce_tree,
-                            "Batch combined nonces generated"
+                            txid = %e.txid,
+                            %cosigner_pk,
+                            "Received TreeNonces event"
                         );
 
-                        let our_nonce_trees = our_nonce_trees.take().ok_or(Error::ark_server(
-                            "missing nonce tree during batch protocol",
-                        ))?;
+                        let agg_nonce_pk = aggregate_nonces(tree_tx_nonce_pks);
+
+                        agg_nonce_pks.insert(e.txid, agg_nonce_pk);
 
                         let vtxo_graph = match vtxo_graph {
                             Some(ref vtxo_graph) => vtxo_graph,
                             None => {
                                 let chunks = vtxo_graph_chunks.take().ok_or(Error::ark_server(
-                                    "received tree nonces aggregated event without VTXO graph chunks",
+                                    "received tree nonces event without VTXO graph chunks",
                                 ))?;
 
                                 &TxGraph::new(chunks)
@@ -609,22 +636,57 @@ where
                             }
                         };
 
-                        let unsigned_commitment_tx = unsigned_commitment_tx
-                            .as_ref()
-                            .ok_or_else(|| Error::ad_hoc("missing commitment TX"))?;
+                        // Once we collect an aggregated nonce per transaction in our VTXO graph, we
+                        // can go ahead with signing and submitting.
+                        if agg_nonce_pks.len() == vtxo_graph.nb_of_nodes() {
+                            let cosigner_kp = own_cosigner_kps
+                                .iter()
+                                .find(|kp| kp.public_key().x_only_public_key().0 == cosigner_pk)
+                                .ok_or_else(|| {
+                                    Error::ad_hoc("no cosigner keypair to sign for own PK")
+                                })?;
 
-                        for (cosigner_kp, our_nonce_tree) in our_nonce_trees {
-                            let partial_sig_tree = sign_batch_tree(
-                                server_info.vtxo_tree_expiry,
-                                ark_server_pk,
-                                &cosigner_kp,
-                                vtxo_graph,
-                                unsigned_commitment_tx,
-                                our_nonce_tree,
-                                &agg_pub_nonce_tree,
-                            )
-                            .map_err(Error::from)
-                            .context("failed to sign VTXO tree")?;
+                            let our_nonce_trees = our_nonce_trees.as_mut().ok_or(
+                                Error::ark_server("missing nonce trees during batch protocol"),
+                            )?;
+
+                            let our_nonce_tree =
+                                our_nonce_trees
+                                    .get_mut(cosigner_kp)
+                                    .ok_or(Error::ark_server(
+                                        "missing nonce tree during batch protocol",
+                                    ))?;
+
+                            let unsigned_commitment_tx = unsigned_commitment_tx
+                                .as_ref()
+                                .ok_or_else(|| Error::ad_hoc("missing commitment TX"))?;
+
+                            let batch_expiry = batch_expiry
+                                .ok_or_else(|| Error::ad_hoc("missing batch expiry"))?;
+
+                            let mut partial_sig_tree = PartialSigTree::default();
+                            for (txid, _) in vtxo_graph.as_map() {
+                                let agg_nonce_pk = agg_nonce_pks.get(&txid).ok_or_else(|| {
+                                    Error::ad_hoc(format!(
+                                        "missing aggregated nonce PK for TX {txid}"
+                                    ))
+                                })?;
+
+                                let sigs = sign_batch_tree_tx(
+                                    txid,
+                                    batch_expiry,
+                                    ark_forfeit_pk,
+                                    cosigner_kp,
+                                    *agg_nonce_pk,
+                                    vtxo_graph,
+                                    unsigned_commitment_tx,
+                                    our_nonce_tree,
+                                )
+                                .map_err(Error::from)
+                                .context("failed to sign VTXO tree")?;
+
+                                partial_sig_tree.0.extend(sigs.0);
+                            }
 
                             network_client
                                 .submit_tree_signatures(
@@ -636,13 +698,19 @@ where
                                 .map_err(Error::ark_server)
                                 .context("failed to submit VTXO tree signatures")?;
                         }
-
-                        step = step.next();
+                    }
+                    StreamEvent::TreeNoncesAggregated(e) => {
+                        tracing::debug!(batch_id = e.id, "Batch combined nonces generated");
                     }
                     StreamEvent::BatchFinalization(e) => {
-                        if step != Step::BatchSigningNoncesGenerated {
+                        if step != Step::BatchSigningStarted {
                             continue;
                         }
+
+                        tracing::debug!(
+                            commitment_txid = %e.commitment_tx.unsigned_tx.compute_txid(),
+                            "Batch finalization started"
+                        );
 
                         let signed_forfeit_psbts = if !vtxo_inputs.is_empty() {
                             let chunks =
@@ -707,7 +775,7 @@ where
                         step = step.next();
                     }
                     StreamEvent::BatchFinalized(e) => {
-                        if step != Step::BatchFinalization {
+                        if step != Step::Finalized {
                             continue;
                         }
 
@@ -726,11 +794,12 @@ where
                         }
 
                         tracing::debug!("Unrelated batch failed: {e:?}");
-
-                        continue;
                     }
+                    StreamEvent::Heartbeat => {}
                 },
                 Some(Err(e)) => {
+                    tracing::error!("Got error from event stream");
+
                     return Err(Error::ark_server(e));
                 }
                 None => {
@@ -744,8 +813,6 @@ where
             Start,
             BatchStarted,
             BatchSigningStarted,
-            BatchSigningNoncesGenerated,
-            BatchFinalization,
             Finalized,
         }
 
@@ -754,9 +821,7 @@ where
                 match self {
                     Step::Start => Step::BatchStarted,
                     Step::BatchStarted => Step::BatchSigningStarted,
-                    Step::BatchSigningStarted => Step::BatchSigningNoncesGenerated,
-                    Step::BatchSigningNoncesGenerated => Step::BatchFinalization,
-                    Step::BatchFinalization => Step::Finalized,
+                    Step::BatchSigningStarted => Step::Finalized,
                     Step::Finalized => Step::Finalized, // we can't go further
                 }
             }

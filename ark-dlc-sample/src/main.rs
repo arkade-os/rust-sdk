@@ -3,13 +3,14 @@ use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use ark_core::batch;
+use ark_core::batch::aggregate_nonces;
 use ark_core::batch::create_and_sign_forfeit_txs;
 use ark_core::batch::generate_nonce_tree;
-use ark_core::batch::sign_batch_tree;
+use ark_core::batch::sign_batch_tree_tx;
 use ark_core::batch::sign_commitment_psbt;
 use ark_core::boarding_output::list_boarding_outpoints;
 use ark_core::boarding_output::BoardingOutpoints;
-use ark_core::proof_of_funds;
+use ark_core::intent;
 use ark_core::script::csv_sig_script;
 use ark_core::script::multisig_script;
 use ark_core::send;
@@ -82,7 +83,7 @@ async fn main() -> Result<()> {
 
     grpc_client.connect().await?;
     let server_info = grpc_client.get_info().await?;
-    let server_pk = server_info.pk.x_only_public_key().0;
+    let server_pk = server_info.signer_pk.x_only_public_key().0;
 
     let esplora_client = EsploraClient::new("http://localhost:30000")?;
 
@@ -149,7 +150,7 @@ async fn main() -> Result<()> {
 
         Vtxo::new_with_custom_scripts(
             &secp,
-            server_info.pk.into(),
+            server_info.signer_pk.into(),
             shared_pk,
             vec![
                 dlc_multisig_script.clone(),
@@ -187,7 +188,7 @@ async fn main() -> Result<()> {
 
     let alice_payout_vtxo = Vtxo::new_default(
         &secp,
-        server_info.pk.x_only_public_key().0,
+        server_info.signer_pk.x_only_public_key().0,
         alice_xonly_pk,
         server_info.unilateral_exit_delay,
         server_info.network,
@@ -195,7 +196,7 @@ async fn main() -> Result<()> {
 
     let bob_payout_vtxo = Vtxo::new_default(
         &secp,
-        server_info.pk.x_only_public_key().0,
+        server_info.signer_pk.x_only_public_key().0,
         bob_xonly_pk,
         server_info.unilateral_exit_delay,
         server_info.network,
@@ -640,7 +641,7 @@ async fn fund_vtxo(
 
     let boarding_output = BoardingOutput::new(
         &secp,
-        server_info.pk.x_only_public_key().0,
+        server_info.signer_pk.x_only_public_key().0,
         pk,
         server_info.boarding_exit_delay,
         server_info.network,
@@ -658,7 +659,7 @@ async fn fund_vtxo(
 
     let vtxo = Vtxo::new_default(
         &secp,
-        server_info.pk.x_only_public_key().0,
+        server_info.signer_pk.x_only_public_key().0,
         pk,
         server_info.unilateral_exit_delay,
         server_info.network,
@@ -1207,7 +1208,7 @@ async fn settle(
     let batch_inputs = {
         let boarding_inputs = boarding_outpoints.spendable.clone().into_iter().map(
             |(outpoint, amount, boarding_output)| {
-                proof_of_funds::Input::new(
+                intent::Input::new(
                     outpoint,
                     boarding_output.exit_delay(),
                     TxOut {
@@ -1227,7 +1228,7 @@ async fn settle(
             .clone()
             .into_iter()
             .map(|(virtual_tx_outpoint, vtxo)| {
-                anyhow::Ok(proof_of_funds::Input::new(
+                anyhow::Ok(intent::Input::new(
                     virtual_tx_outpoint.outpoint,
                     vtxo.exit_delay(),
                     TxOut {
@@ -1248,7 +1249,7 @@ async fn settle(
 
     let spendable_amount =
         boarding_outpoints.spendable_balance() + virtual_tx_outpoints.spendable_balance();
-    let batch_outputs = vec![proof_of_funds::Output::Offchain(TxOut {
+    let batch_outputs = vec![intent::Output::Offchain(TxOut {
         value: spendable_amount,
         script_pubkey: to_address.to_p2tr_script_pubkey(),
     })];
@@ -1267,7 +1268,7 @@ async fn settle(
     };
 
     let signing_kp = Keypair::from_secret_key(&secp, &sk);
-    let (bip322_proof, intent_message) = proof_of_funds::make_bip322_signature(
+    let intent = intent::make_intent(
         &[signing_kp],
         sign_for_onchain_pk_fn,
         batch_inputs,
@@ -1275,9 +1276,7 @@ async fn settle(
         own_cosigner_pks.clone(),
     )?;
 
-    let intent_id = grpc_client
-        .register_intent(&intent_message, &bip322_proof)
-        .await?;
+    let intent_id = grpc_client.register_intent(intent).await?;
 
     tracing::info!(intent_id, "Registered intent");
 
@@ -1318,6 +1317,8 @@ async fn settle(
         )
     }
 
+    let batch_expiry = batch_started_event.batch_expiry;
+
     let batch_signing_event;
     loop {
         match event_stream.next().await {
@@ -1340,7 +1341,7 @@ async fn settle(
     let batch_id = batch_signing_event.id;
     tracing::info!(batch_id, "Batch signing started");
 
-    let nonce_tree = generate_nonce_tree(
+    let mut nonce_tree = generate_nonce_tree(
         &mut rng,
         &vtxo_graph,
         cosigner_kp.public_key(),
@@ -1355,25 +1356,38 @@ async fn settle(
         )
         .await?;
 
-    let batch_signing_nonces_generated_event = match event_stream.next().await {
-        Some(Ok(StreamEvent::TreeNoncesAggregated(e))) => e,
+    let tree_nonces_event = match event_stream.next().await {
+        Some(Ok(StreamEvent::TreeNonces(e))) => e,
         other => bail!("Did not get batch signing nonces generated event: {other:?}"),
     };
 
-    tracing::info!(batch_id, "Batch combined nonces generated");
+    tracing::info!(batch_id, "Tree nonces event");
 
-    let batch_id = batch_signing_nonces_generated_event.id;
+    let batch_id = tree_nonces_event.id;
 
-    let agg_pub_nonce_tree = batch_signing_nonces_generated_event.tree_nonces;
+    let tree_tx_nonce_pks = tree_nonces_event.nonces;
 
-    let partial_sig_tree = sign_batch_tree(
-        server_info.vtxo_tree_expiry,
-        server_info.pk.x_only_public_key().0,
+    tree_tx_nonce_pks
+        .0
+        .iter()
+        .find(|(pk, _)| {
+            own_cosigner_pks
+                .iter()
+                .any(|p| &&p.x_only_public_key().0 == pk)
+        })
+        .context("received unexpected irrelevant TreeNonces event")?;
+
+    let agg_nonce_pk = aggregate_nonces(tree_tx_nonce_pks);
+
+    let partial_sig_tree = sign_batch_tree_tx(
+        tree_nonces_event.txid,
+        batch_expiry,
+        server_info.forfeit_pk.into(),
         &cosigner_kp,
+        agg_nonce_pk,
         &vtxo_graph,
         &batch_signing_event.unsigned_commitment_tx,
-        nonce_tree,
-        &agg_pub_nonce_tree,
+        &mut nonce_tree,
     )?;
 
     grpc_client
@@ -1385,6 +1399,9 @@ async fn settle(
     let batch_finalization_event;
     loop {
         match event_stream.next().await {
+            Some(Ok(StreamEvent::TreeNoncesAggregated(_))) => {
+                // TreeNoncesAggregated is now deprecated.
+            }
             Some(Ok(StreamEvent::TreeTx(e))) => match e.batch_tree_event_type {
                 BatchTreeEventType::Vtxo => {
                     bail!("Unexpected VTXO batch tree event");
