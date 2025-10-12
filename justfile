@@ -147,8 +147,6 @@ arkd-wallet-run:
     make run-wallet -C $ARKD_DIR run &> {{ arkd_wallet_logs }} &
 
     # We have to trigger it again because it always fails the first time D:
-    sleep 2
-    make run-wallet -C $ARKD_DIR run &> {{ arkd_wallet_logs }} &
 
     echo "arkd wallet started. Find the logs in {{ arkd_wallet_logs }}"
 
@@ -157,6 +155,8 @@ arkd-run:
     #!/usr/bin/env bash
 
     set -euxo pipefail
+
+    echo "Creating arkd wallet with logs in {{ arkd_logs }}"
 
     make -C $ARKD_DIR run &> {{ arkd_logs }} &
 
