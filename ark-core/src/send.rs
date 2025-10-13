@@ -1,5 +1,4 @@
 use crate::anchor_output;
-use crate::script::csv_sig_script;
 use crate::script::tr_script_pubkey;
 use crate::server;
 use crate::ArkAddress;
@@ -105,22 +104,17 @@ pub fn build_offchain_transactions(
         ));
     }
 
-    let checkpoint_exit_script = csv_sig_script(
-        server_info.unilateral_exit_delay,
-        server_info.signer_pk.x_only_public_key().0,
-    );
+    let checkpoint_script = &server_info.checkpoint_tapscript;
 
     let mut checkpoint_txs = Vec::new();
     for vtxo_input in vtxo_inputs.iter() {
         let (psbt, checkpoint_output, checkpoint_out_point) =
-            build_checkpoint_psbt(vtxo_input, checkpoint_exit_script.clone()).with_context(
-                || {
-                    format!(
-                        "failed to build checkpoint psbt for input {:?}",
-                        vtxo_input.outpoint
-                    )
-                },
-            )?;
+            build_checkpoint_psbt(vtxo_input, checkpoint_script.clone()).with_context(|| {
+                format!(
+                    "failed to build checkpoint psbt for input {:?}",
+                    vtxo_input.outpoint
+                )
+            })?;
 
         checkpoint_txs.push((
             psbt,
@@ -234,7 +228,7 @@ pub fn build_offchain_transactions(
 
         unsigned_ark_psbt.inputs[i].unknown.insert(
             psbt::raw::Key {
-                type_value: u8::MAX,
+                type_value: 222,
                 key: VTXO_TAPROOT_KEY.to_vec(),
             },
             bytes,
@@ -329,9 +323,6 @@ fn build_checkpoint_psbt(
 
     let mut bytes = Vec::new();
 
-    write_compact_size_uint(&mut bytes, vtxo_input.tapscripts.len() as u64)
-        .map_err(Error::transaction)?;
-
     for script in vtxo_input.tapscripts.iter() {
         // Write the depth (always 1). TODO: Support more depth.
         bytes.push(1);
@@ -363,7 +354,7 @@ fn build_checkpoint_psbt(
 
     unsigned_checkpoint_psbt.inputs[0].unknown.insert(
         psbt::raw::Key {
-            type_value: u8::MAX,
+            type_value: 222,
             key: VTXO_TAPROOT_KEY.to_vec(),
         },
         bytes,
@@ -472,8 +463,6 @@ where
         sighash_type: TapSighashType::Default,
     };
 
-    // FIXME(server): We were able to delete the server's signature here and it did not complain. We
-    // were then unable to perform unilateral exit (same for the server I think).
     psbt_input.tap_script_sigs.insert((pk, leaf_hash), sig);
 
     Ok(())

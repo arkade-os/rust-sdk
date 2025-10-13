@@ -421,12 +421,12 @@ where
     pub fn get_offchain_address(&self) -> Result<(ArkAddress, Vtxo), Error> {
         let server_info = &self.server_info;
 
-        let server_forfeit = server_info.forfeit_pk.into();
+        let server_signer = server_info.signer_pk.into();
         let owner = self.inner.kp.public_key().into();
 
         let vtxo = Vtxo::new_default(
             self.secp(),
-            server_forfeit,
+            server_signer,
             owner,
             server_info.unilateral_exit_delay,
             server_info.network,

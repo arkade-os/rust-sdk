@@ -158,7 +158,7 @@ where
 
             proof_input.unknown.insert(
                 psbt::raw::Key {
-                    type_value: u8::MAX,
+                    type_value: 222,
                     key: VTXO_TAPROOT_KEY.to_vec(),
                 },
                 bytes,
@@ -186,10 +186,10 @@ where
 
         let prevouts = Prevouts::All(&prevouts);
 
-        let (exit_control_block, (exit_script, leaf_version)) =
+        let (_, (script, leaf_version)) =
             proof_input.tap_scripts.first_key_value().expect("a value");
 
-        let leaf_hash = TapLeafHash::from_script(exit_script, *leaf_version);
+        let leaf_hash = TapLeafHash::from_script(script, *leaf_version);
 
         let tap_sighash = SighashCache::new(&proof_psbt.unsigned_tx)
             .taproot_script_spend_signature_hash(i, &prevouts, leaf_hash, TapSighashType::Default)
@@ -200,7 +200,7 @@ where
 
         let pk = input.pk;
 
-        let sig = match input.is_onchain {
+        match input.is_onchain {
             true => {
                 let sig = sign_for_onchain_pk_fn(&pk, &msg)?;
 
@@ -214,8 +214,6 @@ where
                 };
 
                 proof_input.tap_script_sigs = BTreeMap::from_iter([((pk, leaf_hash), sig)]);
-
-                sig
             }
             false => {
                 let signing_kp = signing_kps
@@ -238,18 +236,8 @@ where
                 };
 
                 proof_input.tap_script_sigs = BTreeMap::from_iter([((pk, leaf_hash), sig)]);
-
-                sig
             }
         };
-
-        let witness = Witness::from_slice(&[
-            &sig.signature[..],
-            exit_script.as_bytes(),
-            &exit_control_block.serialize(),
-        ]);
-
-        proof_input.final_script_witness = Some(witness);
     }
 
     Ok(Intent {
@@ -276,7 +264,7 @@ fn build_proof_psbt(
     let script_pubkey = first_input.witness_utxo.script_pubkey.clone();
 
     let to_spend_tx = {
-        let hash = bip322_hash(message.as_bytes());
+        let hash = message_hash(message.as_bytes());
 
         let script_sig = ScriptBuf::builder()
             .push_opcode(OP_PUSHBYTES_0)
@@ -357,7 +345,7 @@ fn build_proof_psbt(
 
         for (i, input) in inputs.iter().enumerate() {
             psbt.inputs[i + 1].witness_utxo = Some(input.witness_utxo.clone());
-            psbt.inputs[i + 1].sighash_type = Some(TapSighashType::Default.into());
+            psbt.inputs[i + 1].sighash_type = Some(PsbtSighashType::from_u32(1));
         }
 
         psbt
@@ -369,8 +357,8 @@ fn build_proof_psbt(
     Ok((to_sign_psbt, first_input_modified))
 }
 
-fn bip322_hash(message: &[u8]) -> sha256::Hash {
-    const TAG: &[u8] = b"BIP0322-signed-message";
+fn message_hash(message: &[u8]) -> sha256::Hash {
+    const TAG: &[u8] = b"ark-intent-proof-message";
 
     let hashed_tag = sha256::Hash::hash(TAG);
 
@@ -439,16 +427,14 @@ mod taptree {
 
         #[cfg(test)]
         pub fn decode(data: &[u8]) -> io::Result<Self> {
-            use bitcoin::hex::DisplayHex;
             use std::io::Cursor;
             use std::io::Read;
 
             let mut buf = Cursor::new(data);
-            let count = read_compact_size_uint(&mut buf)?;
+            let mut leaves = Vec::new();
 
-            let mut leaves = Vec::with_capacity(count as usize);
-
-            for _ in 0..count {
+            // Read leaves until we run out of data
+            while buf.position() < data.len() as u64 {
                 // depth : ignore
                 let mut depth = [0u8; 1];
                 buf.read_exact(&mut depth)?;
@@ -464,7 +450,7 @@ mod taptree {
                 let mut script_bytes = vec![0u8; script_len];
                 buf.read_exact(&mut script_bytes)?;
 
-                leaves.push(script_bytes.to_lower_hex_string());
+                leaves.push(ScriptBuf::from_bytes(script_bytes));
             }
 
             Ok(TapTree(leaves))
@@ -515,25 +501,29 @@ mod taptree {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use bitcoin::opcodes::OP_FALSE;
+        use bitcoin::opcodes::OP_TRUE;
 
         #[test]
         fn tap_tree_encode_decode_roundtrip() {
-            // sample tapscript (OP_TRUE)
-            let tapscript_hex = "51";
-            let tree = TapTree(vec![tapscript_hex.into()]);
+            let scripts = vec![ScriptBuf::builder().push_opcode(OP_TRUE).into_script()];
+
+            let tree = TapTree(scripts.clone());
             let encoded = tree.encode().unwrap();
             let decoded = TapTree::decode(&encoded).unwrap();
-            assert_eq!(decoded.0, vec![tapscript_hex]);
+            assert_eq!(decoded.0, scripts);
         }
 
         #[test]
         fn tap_tree_multiple_leaves() {
-            let tapscript_hex1 = "51";
-            let tapscript_hex2 = "52";
-            let tree = TapTree(vec![tapscript_hex1.into(), tapscript_hex2.into()]);
+            let scripts = vec![
+                ScriptBuf::builder().push_opcode(OP_TRUE).into_script(),
+                ScriptBuf::builder().push_opcode(OP_FALSE).into_script(),
+            ];
+            let tree = TapTree(scripts.clone());
             let encoded = tree.encode().unwrap();
             let decoded = TapTree::decode(&encoded).unwrap();
-            assert_eq!(decoded.0, vec![tapscript_hex1, tapscript_hex2]);
+            assert_eq!(decoded.0, scripts);
         }
     }
 }

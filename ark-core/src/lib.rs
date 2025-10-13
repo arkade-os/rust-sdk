@@ -48,6 +48,10 @@ pub const VTXO_CONDITION_KEY: [u8; 9] = [99, 111, 110, 100, 105, 116, 105, 111, 
 /// The byte value corresponds to the string "expiry".
 pub const VTXO_TREE_EXPIRY_PSBT_KEY: [u8; 6] = [101, 120, 112, 105, 114, 121];
 
+/// The cosigner PKs that sign a VTXO TX input are included in the `unknown` key-value map field of
+/// that input in the VTXO PSBT. Since the `unknown` field can be used for any purpose, we know that
+/// a value is a cosigner PK if the corresponding key starts with this prefix.
+///
 /// The byte value corresponds to the string "cosigner".
 pub const VTXO_COSIGNER_PSBT_KEY: [u8; 8] = [99, 111, 115, 105, 103, 110, 101, 114];
 

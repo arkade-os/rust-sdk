@@ -10,6 +10,7 @@ use crate::Error;
 use crate::ErrorContext;
 use crate::TxGraph;
 use crate::Vtxo;
+use crate::VTXO_COSIGNER_PSBT_KEY;
 use crate::VTXO_INPUT_INDEX;
 use bitcoin::absolute::LockTime;
 use bitcoin::hashes::Hash;
@@ -38,13 +39,6 @@ use rand::CryptoRng;
 use rand::Rng;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-
-/// The cosigner PKs that sign a VTXO TX input are included in the `unknown` key-value map field of
-/// that input in the VTXO PSBT. Since the `unknown` field can be used for any purpose, we know that
-/// a value is a cosigner PK if the corresponding key starts with this prefix.
-///
-/// The byte value corresponds to the string "cosigner".
-const COSIGNER_PSBT_KEY_PREFIX: [u8; 8] = [111, 115, 105, 103, 110, 101, 114, 0];
 
 /// A UTXO that is primed to become a VTXO. Alternatively, the owner of this UTXO may decide to
 /// spend it into a vanilla UTXO.
@@ -291,7 +285,6 @@ pub fn sign_batch_tree_tx(
 
     let batch_tree_tx_map = batch_tree_tx_graph.as_map();
 
-    let mut partial_sig_tree = HashMap::new();
     let psbt = batch_tree_tx_map
         .get(&tree_txid)
         .ok_or_else(|| Error::ad_hoc(format!("TXID {tree_txid} not found in batch tree map")))?;
@@ -307,7 +300,9 @@ pub fn sign_batch_tree_tx(
 
     // Since the nonce PKs for the tree transaction that we are signing do not include our own nonce
     // PK, we must add it before aggregating.
-    tree_tx_nonce_pks.0.insert(own_cosigner_pk, *nonce_pk);
+    tree_tx_nonce_pks
+        .0
+        .insert(own_cosigner_pk.into(), *nonce_pk);
 
     let agg_pub_nonce = {
         let pks = tree_tx_nonce_pks.to_pks();
@@ -350,7 +345,7 @@ pub fn sign_batch_tree_tx(
         &key_agg_cache,
     );
 
-    partial_sig_tree.insert(tree_txid, sig);
+    let partial_sig_tree = HashMap::from_iter([(tree_txid, sig)]);
 
     Ok(PartialSigTree(partial_sig_tree))
 }
@@ -631,7 +626,7 @@ fn extract_cosigner_pks_from_vtxo_psbt(psbt: &Psbt) -> Result<Vec<PublicKey>, Er
 
     let mut cosigner_pks = Vec::new();
     for (key, pk) in vtxo_input.unknown.iter() {
-        if key.key.starts_with(&COSIGNER_PSBT_KEY_PREFIX) {
+        if key.key.starts_with(&VTXO_COSIGNER_PSBT_KEY) {
             cosigner_pks.push(
                 bitcoin::PublicKey::from_slice(pk)
                     .map_err(Error::crypto)

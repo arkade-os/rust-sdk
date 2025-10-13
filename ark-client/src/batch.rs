@@ -401,7 +401,7 @@ where
 
         let mut stream = network_client.get_event_stream(topics).await?;
 
-        let (ark_server_pk, _) = server_info.signer_pk.x_only_public_key();
+        let (ark_forfeit_pk, _) = server_info.forfeit_pk.x_only_public_key();
 
         let mut unsigned_commitment_tx = None;
 
@@ -464,6 +464,8 @@ where
                             BatchTreeEventType::Vtxo => {
                                 match &mut vtxo_graph_chunks {
                                     Some(vtxo_graph_chunks) => {
+                                        tracing::debug!("Got new VTXO graph chunk");
+
                                         vtxo_graph_chunks.push(e.tx_graph_chunk)
                                     }
                                     None => {
@@ -476,6 +478,8 @@ where
                             BatchTreeEventType::Connector => {
                                 match connectors_graph_chunks {
                                     Some(ref mut connectors_graph_chunks) => {
+                                        tracing::debug!("Got new connectors graph chunk");
+
                                         connectors_graph_chunks.push(e.tx_graph_chunk)
                                     }
                                     None => {
@@ -587,22 +591,23 @@ where
 
                         let node_nonce_pks = e.nonces;
 
-                        let (cosigner_pk, nonce_pk) = match node_nonce_pks
-                            .0
-                            .iter()
-                            .find(|(pk, _)| own_cosigner_pks.contains(pk))
-                        {
-                            Some((pk, nonce_pk)) => (*pk, *nonce_pk),
-                            None => {
-                                tracing::debug!(
-                                    batch_id = e.id,
-                                    txid = %e.txid,
-                                    "Received irrelevant TreeNonces event"
-                                );
+                        let (cosigner_pk, nonce_pk) =
+                            match node_nonce_pks.0.iter().find(|(pk, _)| {
+                                own_cosigner_pks
+                                    .iter()
+                                    .any(|p| &&p.x_only_public_key().0 == pk)
+                            }) {
+                                Some((pk, nonce_pk)) => (*pk, *nonce_pk),
+                                None => {
+                                    tracing::debug!(
+                                        batch_id = e.id,
+                                        txid = %e.txid,
+                                        "Received irrelevant TreeNonces event"
+                                    );
 
-                                continue;
-                            }
-                        };
+                                    continue;
+                                }
+                            };
 
                         tracing::debug!(
                             batch_id = e.id,
@@ -613,7 +618,7 @@ where
 
                         let cosigner_kp = own_cosigner_kps
                             .iter()
-                            .find(|kp| kp.public_key() == cosigner_pk)
+                            .find(|kp| kp.public_key().x_only_public_key().0 == cosigner_pk)
                             .ok_or_else(|| {
                                 Error::ad_hoc("no cosigner keypair to sign for own PK")
                             })?;
@@ -652,7 +657,7 @@ where
                         let partial_sig_tree = sign_batch_tree_tx(
                             e.txid,
                             batch_expiry,
-                            ark_server_pk,
+                            ark_forfeit_pk,
                             cosigner_kp,
                             &nonce_pk,
                             vtxo_graph,
@@ -680,6 +685,11 @@ where
                         if step != Step::BatchSigningStarted {
                             continue;
                         }
+
+                        tracing::debug!(
+                            commitment_txid = %e.commitment_tx.unsigned_tx.compute_txid(),
+                            "Batch finalization started"
+                        );
 
                         let signed_forfeit_psbts = if !vtxo_inputs.is_empty() {
                             let chunks =
@@ -744,7 +754,7 @@ where
                         step = step.next();
                     }
                     StreamEvent::BatchFinalized(e) => {
-                        if step != Step::BatchSigningStarted {
+                        if step != Step::Finalized {
                             continue;
                         }
 
@@ -767,6 +777,8 @@ where
                     StreamEvent::Heartbeat => {}
                 },
                 Some(Err(e)) => {
+                    tracing::error!("Got error from event stream");
+
                     return Err(Error::ark_server(e));
                 }
                 None => {

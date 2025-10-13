@@ -728,7 +728,7 @@ where
 
                 input.unknown.insert(
                     psbt::raw::Key {
-                        type_value: u8::MAX,
+                        type_value: 222,
                         key: VTXO_CONDITION_KEY.to_vec(),
                     },
                     bytes,

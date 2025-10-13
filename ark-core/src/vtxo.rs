@@ -98,7 +98,7 @@ impl Vtxo {
     /// Build a default VTXO.
     pub fn new_default<C>(
         secp: &Secp256k1<C>,
-        server_forfeit: XOnlyPublicKey,
+        server_signer: XOnlyPublicKey,
         owner: XOnlyPublicKey,
         exit_delay: bitcoin::Sequence,
         network: Network,
@@ -106,12 +106,12 @@ impl Vtxo {
     where
         C: Verification,
     {
-        let forfeit_script = multisig_script(server_forfeit, owner);
+        let forfeit_script = multisig_script(server_signer, owner);
         let redeem_script = csv_sig_script(exit_delay, owner);
 
         Self::new_with_custom_scripts(
             secp,
-            server_forfeit,
+            server_signer,
             owner,
             vec![forfeit_script, redeem_script],
             exit_delay,

@@ -14,6 +14,7 @@ use bitcoin::Psbt;
 use bitcoin::ScriptBuf;
 use bitcoin::Transaction;
 use bitcoin::Txid;
+use bitcoin::XOnlyPublicKey;
 use musig::musig;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -68,10 +69,10 @@ impl NoncePks {
 /// A public nonce per public key, where each public key corresponds to a party signing the VTXO
 /// tree.
 #[derive(Debug, Clone)]
-pub struct TreeTxNoncePks(pub HashMap<PublicKey, musig::PublicNonce>);
+pub struct TreeTxNoncePks(pub HashMap<XOnlyPublicKey, musig::PublicNonce>);
 
 impl TreeTxNoncePks {
-    pub fn new(tree_nonce_pks: HashMap<PublicKey, musig::PublicNonce>) -> Self {
+    pub fn new(tree_nonce_pks: HashMap<XOnlyPublicKey, musig::PublicNonce>) -> Self {
         Self(tree_nonce_pks)
     }
 
@@ -106,7 +107,7 @@ impl TreeTxNoncePks {
 
                 Ok((key, value))
             })
-            .collect::<Result<HashMap<PublicKey, musig::PublicNonce>, Error>>()?;
+            .collect::<Result<HashMap<XOnlyPublicKey, musig::PublicNonce>, Error>>()?;
 
         Ok(Self(map))
     }
