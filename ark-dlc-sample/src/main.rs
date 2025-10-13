@@ -1267,7 +1267,7 @@ async fn settle(
     };
 
     let signing_kp = Keypair::from_secret_key(&secp, &sk);
-    let (bip322_proof, intent_message) = intent::make_intent(
+    let intent = intent::make_intent(
         &[signing_kp],
         sign_for_onchain_pk_fn,
         batch_inputs,
@@ -1275,9 +1275,7 @@ async fn settle(
         own_cosigner_pks.clone(),
     )?;
 
-    let intent_id = grpc_client
-        .register_intent(&intent_message, &bip322_proof)
-        .await?;
+    let intent_id = grpc_client.register_intent(intent).await?;
 
     tracing::info!(intent_id, "Registered intent");
 
@@ -1318,6 +1316,8 @@ async fn settle(
         )
     }
 
+    let batch_expiry = batch_started_event.batch_expiry;
+
     let batch_signing_event;
     loop {
         match event_stream.next().await {
@@ -1340,7 +1340,7 @@ async fn settle(
     let batch_id = batch_signing_event.id;
     tracing::info!(batch_id, "Batch signing started");
 
-    let nonce_tree = generate_nonce_tree(
+    let mut nonce_tree = generate_nonce_tree(
         &mut rng,
         &vtxo_graph,
         cosigner_kp.public_key(),
@@ -1355,25 +1355,37 @@ async fn settle(
         )
         .await?;
 
-    let batch_signing_nonces_generated_event = match event_stream.next().await {
-        Some(Ok(StreamEvent::TreeNoncesAggregated(e))) => e,
+    let tree_nonces_event = match event_stream.next().await {
+        Some(Ok(StreamEvent::TreeNonces(e))) => e,
         other => bail!("Did not get batch signing nonces generated event: {other:?}"),
     };
 
-    tracing::info!(batch_id, "Batch combined nonces generated");
+    tracing::info!(batch_id, "Tree nonces event");
 
-    let batch_id = batch_signing_nonces_generated_event.id;
+    let batch_id = tree_nonces_event.id;
 
-    let agg_pub_nonce_tree = batch_signing_nonces_generated_event.tree_nonces;
+    let node_nonce_pks = tree_nonces_event.nonces;
+
+    let (_, nonce_pk) = node_nonce_pks
+        .0
+        .iter()
+        .find(|(pk, _)| {
+            own_cosigner_pks
+                .iter()
+                .any(|p| &&p.x_only_public_key().0 == pk)
+        })
+        .context("received unexpected irrelevant TreeNonces event")?;
 
     let partial_sig_tree = sign_batch_tree_tx(
-        batch_started_event.batch_expiry,
-        server_info.signer_pk.x_only_public_key().0,
+        tree_nonces_event.txid,
+        batch_expiry,
+        server_info.forfeit_pk.into(),
         &cosigner_kp,
+        &nonce_pk.clone(),
         &vtxo_graph,
         &batch_signing_event.unsigned_commitment_tx,
-        nonce_tree,
-        &agg_pub_nonce_tree,
+        &mut nonce_tree,
+        node_nonce_pks,
     )?;
 
     grpc_client
@@ -1385,6 +1397,9 @@ async fn settle(
     let batch_finalization_event;
     loop {
         match event_stream.next().await {
+            Some(Ok(StreamEvent::TreeNoncesAggregated(_))) => {
+                // TreeNoncesAggregated is now deprecated.
+            }
             Some(Ok(StreamEvent::TreeTx(e))) => match e.batch_tree_event_type {
                 BatchTreeEventType::Vtxo => {
                     bail!("Unexpected VTXO batch tree event");
