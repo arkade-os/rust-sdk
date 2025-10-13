@@ -211,20 +211,22 @@ pub fn build_offchain_transactions(
         let mut bytes = Vec::new();
 
         let script = &checkpoint_output.vtxo_spend_script;
-        write_compact_size_uint(&mut bytes, script.len() as u64).map_err(Error::transaction)?;
+        let scripts = vec![script.clone(), checkpoint_script.clone()];
 
-        // Write the depth (always 1). TODO: Support more depth.
-        bytes.push(1);
+        for script in scripts.iter() {
+            // Write the depth (always 1). TODO: Support more depth.
+            bytes.push(1);
 
-        // TODO: Support future leaf versions.
-        bytes.push(LeafVersion::TapScript.to_consensus());
+            // TODO: Support future leaf versions.
+            bytes.push(LeafVersion::TapScript.to_consensus());
 
-        let mut script_bytes = script.to_bytes();
+            let mut script_bytes = script.to_bytes();
 
-        write_compact_size_uint(&mut bytes, script_bytes.len() as u64)
-            .map_err(Error::transaction)?;
+            write_compact_size_uint(&mut bytes, script_bytes.len() as u64)
+                .map_err(Error::transaction)?;
 
-        bytes.append(&mut script_bytes);
+            bytes.append(&mut script_bytes);
+        }
 
         unsigned_ark_psbt.inputs[i].unknown.insert(
             psbt::raw::Key {
