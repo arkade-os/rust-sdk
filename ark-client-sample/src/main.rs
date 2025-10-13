@@ -15,6 +15,7 @@ use ark_client::Error;
 use ark_client::OfflineClient;
 use ark_client::SqliteSwapStorage;
 use ark_core::history;
+use ark_core::server::SubscriptionResponse;
 use ark_core::ArkAddress;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::key::Secp256k1;
@@ -289,8 +290,8 @@ async fn main() -> Result<()> {
             // Process subscription responses as they come in
             while let Some(result) = subscription_stream.next().await {
                 match result {
-                    Ok(response) => {
-                        if let Some(psbt) = response.tx {
+                    Ok(SubscriptionResponse::Event(e)) => {
+                        if let Some(psbt) = e.tx {
                             let tx = &psbt.unsigned_tx;
                             let output = tx.output.to_vec().iter().find_map(|out| {
                                 if out.script_pubkey == address.0.to_p2tr_script_pubkey() {
@@ -318,6 +319,7 @@ async fn main() -> Result<()> {
 
                         tracing::info!("---");
                     }
+                    Ok(SubscriptionResponse::Heartbeat) => {}
                     Err(e) => {
                         tracing::error!("Error receiving subscription response: {e}");
                         break;
