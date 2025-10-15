@@ -277,7 +277,6 @@ async fn main() -> Result<()> {
         &alice_kp,
         &bob_kp,
         &musig_key_agg_cache,
-        &refund_dlc_vtxo_input,
     )
     .context("signing refund offchain TXs")?;
 
@@ -311,7 +310,6 @@ async fn main() -> Result<()> {
         &bob_kp,
         &musig_key_agg_cache,
         heads_adaptor_pk,
-        &cet_dlc_vtxo_input,
     )
     .context("signing heads CET offchain TXs")?;
 
@@ -326,7 +324,6 @@ async fn main() -> Result<()> {
         &bob_kp,
         &musig_key_agg_cache,
         tails_adaptor_pk,
-        &cet_dlc_vtxo_input,
     )
     .context("signing tails CET offchain TXs")?;
 
@@ -341,10 +338,6 @@ async fn main() -> Result<()> {
             Ok((sig, alice_xonly_pk))
         },
         &mut dlc_virtual_tx,
-        &dlc_checkpoint_txs
-            .iter()
-            .map(|(_, output, outpoint, _)| (output.clone(), *outpoint))
-            .collect::<Vec<_>>(),
         0, // Alice's DLC-funding virtual TX input.
     )
     .context("failed to sign DLC-funding virtual TX as Alice")?;
@@ -358,10 +351,6 @@ async fn main() -> Result<()> {
             Ok((sig, bob_xonly_pk))
         },
         &mut dlc_virtual_tx,
-        &dlc_checkpoint_txs
-            .iter()
-            .map(|(_, output, outpoint, _)| (output.clone(), *outpoint))
-            .collect::<Vec<_>>(),
         1, // Bob's DLC-funding virtual TX input.
     )
     .context("failed to sign DLC-funding virtual TX as Bob")?;
@@ -370,13 +359,7 @@ async fn main() -> Result<()> {
 
     // Submit DLC funding transaction.
     let res = grpc_client
-        .submit_offchain_transaction_request(
-            dlc_virtual_tx,
-            dlc_checkpoint_txs
-                .into_iter()
-                .map(|(psbt, _, _, _)| psbt)
-                .collect(),
-        )
+        .submit_offchain_transaction_request(dlc_virtual_tx, dlc_checkpoint_txs)
         .await
         .context("failed to submit offchain TX request to fund DLC")?;
 
@@ -390,7 +373,6 @@ async fn main() -> Result<()> {
             Ok((sig, alice_xonly_pk))
         },
         &mut alice_signed_checkpoint_psbt,
-        &alice_dlc_input,
     )
     .context("failed to sign Alice's DLC-funding checkpoint TX")?;
 
@@ -404,7 +386,6 @@ async fn main() -> Result<()> {
             Ok((sig, bob_xonly_pk))
         },
         &mut bob_signed_checkpoint_psbt,
-        &bob_dlc_input,
     )
     .context("failed to sign Bob's DLC-funding checkpoint TX")?;
 
@@ -424,11 +405,7 @@ async fn main() -> Result<()> {
         let res = grpc_client
             .submit_offchain_transaction_request(
                 refund_virtual_tx,
-                refund_offchain_txs
-                    .checkpoint_txs
-                    .into_iter()
-                    .map(|(psbt, _, _, _)| psbt)
-                    .collect(),
+                refund_offchain_txs.checkpoint_txs,
             )
             .await
             .context("failed to submit offchain TX request to refund DLC")?;
@@ -487,7 +464,7 @@ async fn main() -> Result<()> {
             heads_virtual_cet,
             heads_virtual_cet_parity,
             heads_signed_checkpoint_tx,
-            heads_cet_offchain_txs.checkpoint_txs[0].0.clone(),
+            heads_cet_offchain_txs.checkpoint_txs[0].clone(),
             heads_checkpoint_tx_parity,
         )
     } else {
@@ -495,7 +472,7 @@ async fn main() -> Result<()> {
             tails_virtual_cet,
             tails_virtual_cet_parity,
             tails_signed_checkpoint_tx,
-            tails_cet_offchain_txs.checkpoint_txs[0].0.clone(),
+            tails_cet_offchain_txs.checkpoint_txs[0].clone(),
             tails_checkpoint_tx_parity,
         )
     };
@@ -718,7 +695,6 @@ fn sign_refund_offchain_transactions(
     alice_kp: &Keypair,
     bob_kp: &Keypair,
     musig_key_agg_cache: &MusigKeyAggCache,
-    dlc_vtxo_input: &send::VtxoInput,
 ) -> Result<SignedRefundOffchainTransactions> {
     let zkp = zkp::Secp256k1::new();
     let mut rng = thread_rng();
@@ -729,8 +705,7 @@ fn sign_refund_offchain_transactions(
     } = offchain_txs;
 
     // For a transaction spending a DLC output, there can only be one input.
-    let (mut refund_checkpoint_psbt, refund_checkpoint_output, refund_checkpoint_outpoint, _) =
-        refund_checkpoint_txs[0].clone();
+    let mut refund_checkpoint_psbt = refund_checkpoint_txs[0].clone();
 
     // Signing the virtual TX.
     {
@@ -799,13 +774,8 @@ fn sign_refund_offchain_transactions(
             Ok((sig, shared_pk))
         };
 
-        sign_ark_transaction(
-            sign_fn,
-            &mut refund_virtual_tx,
-            &[(refund_checkpoint_output, refund_checkpoint_outpoint)],
-            0,
-        )
-        .context("signing refund virtual TX")?;
+        sign_ark_transaction(sign_fn, &mut refund_virtual_tx, 0)
+            .context("signing refund virtual TX")?;
     }
 
     // Signing the checkpoint TX. Some unnecessary duplication here.
@@ -877,7 +847,7 @@ fn sign_refund_offchain_transactions(
 
         // Normally we would sign this one after communicating with the server, but since this
         // output is owned by two parties we need to do this ahead of time.
-        sign_checkpoint_transaction(sign_fn, &mut refund_checkpoint_psbt, dlc_vtxo_input)
+        sign_checkpoint_transaction(sign_fn, &mut refund_checkpoint_psbt)
             .context("signing refund checkpoint TX")?;
     }
 
@@ -910,7 +880,6 @@ fn sign_cet_offchain_txs(
     bob_kp: &Keypair,
     musig_key_agg_cache: &MusigKeyAggCache,
     adaptor_pk: zkp::PublicKey,
-    dlc_vtxo_input: &send::VtxoInput,
 ) -> Result<SignedCetOffchainTransactions> {
     let zkp = zkp::Secp256k1::new();
     let mut rng = thread_rng();
@@ -921,8 +890,7 @@ fn sign_cet_offchain_txs(
     } = offchain_txs;
 
     // For a transaction spending a DLC output, there can only be one input.
-    let (mut cet_checkpoint_psbt, cet_checkpoint_output, cet_checkpoint_outpoint, _) =
-        cet_checkpoint_txs[0].clone();
+    let mut cet_checkpoint_psbt = cet_checkpoint_txs[0].clone();
 
     // Signing the virtual CET.
     let virtual_cet_parity = {
@@ -1000,13 +968,7 @@ fn sign_cet_offchain_txs(
             Ok((sig, shared_pk))
         };
 
-        sign_ark_transaction(
-            sign_fn,
-            &mut virtual_cet,
-            &[(cet_checkpoint_output, cet_checkpoint_outpoint)],
-            0,
-        )
-        .context("signing virtual CET")?;
+        sign_ark_transaction(sign_fn, &mut virtual_cet, 0).context("signing virtual CET")?;
 
         musig_nonce_parity.context("to be set")?
     };
@@ -1089,7 +1051,7 @@ fn sign_cet_offchain_txs(
 
         // Normally we would sign this one after communicating with the server, but since this
         // output is owned by two parties we need to do this ahead of time.
-        sign_checkpoint_transaction(sign_fn, &mut cet_checkpoint_psbt, dlc_vtxo_input)
+        sign_checkpoint_transaction(sign_fn, &mut cet_checkpoint_psbt)
             .context("signing CET checkpoint TX")?;
 
         musig_nonce_parity.context("to be set")?

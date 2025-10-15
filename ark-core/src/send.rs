@@ -88,7 +88,7 @@ impl VtxoInput {
 #[derive(Debug, Clone)]
 pub struct OffchainTransactions {
     pub ark_tx: Psbt,
-    pub checkpoint_txs: Vec<(Psbt, CheckpointOutput, CheckpointOutPoint, VtxoInput)>,
+    pub checkpoint_txs: Vec<Psbt>,
 }
 
 /// Build a transaction to send VTXOs to another [`ArkAddress`].
@@ -106,22 +106,17 @@ pub fn build_offchain_transactions(
 
     let checkpoint_script = &server_info.checkpoint_tapscript;
 
-    let mut checkpoint_txs = Vec::new();
+    let mut checkpoint_data = Vec::new();
     for vtxo_input in vtxo_inputs.iter() {
-        let (psbt, checkpoint_output, checkpoint_out_point) =
-            build_checkpoint_psbt(vtxo_input, checkpoint_script.clone()).with_context(|| {
+        let (psbt, spend_info) = build_checkpoint_psbt(vtxo_input, checkpoint_script.clone())
+            .with_context(|| {
                 format!(
                     "failed to build checkpoint psbt for input {:?}",
                     vtxo_input.outpoint
                 )
             })?;
 
-        checkpoint_txs.push((
-            psbt,
-            checkpoint_output,
-            checkpoint_out_point,
-            vtxo_input.clone(),
-        ));
+        checkpoint_data.push((psbt, spend_info));
     }
 
     let mut outputs = outputs
@@ -192,10 +187,13 @@ pub fn build_offchain_transactions(
     let unsigned_ark_tx = Transaction {
         version: transaction::Version::non_standard(3),
         lock_time,
-        input: checkpoint_txs
+        input: checkpoint_data
             .iter()
-            .map(|(_, _, CheckpointOutPoint { outpoint, .. }, _)| TxIn {
-                previous_output: *outpoint,
+            .map(|(psbt, _)| TxIn {
+                previous_output: OutPoint {
+                    txid: psbt.unsigned_tx.compute_txid(),
+                    vout: 0,
+                },
                 script_sig: Default::default(),
                 sequence,
                 witness: Default::default(),
@@ -207,10 +205,29 @@ pub fn build_offchain_transactions(
     let mut unsigned_ark_psbt =
         Psbt::from_unsigned_tx(unsigned_ark_tx).map_err(Error::transaction)?;
 
-    for (i, (_, checkpoint_output, _, _)) in checkpoint_txs.iter().enumerate() {
+    for (i, (checkpoint_psbt, checkpoint_spend_info)) in checkpoint_data.iter().enumerate() {
+        // Set checkpoint output as `witness_utxo` field.
+
+        unsigned_ark_psbt.inputs[i].witness_utxo =
+            Some(checkpoint_psbt.unsigned_tx.output[0].clone());
+
+        // Set script to be used in `tap_scripts` field for spending the checkpoint output.
+
+        let vtxo_spend_script = &vtxo_inputs[i].spend_script;
+        let leaf_version = LeafVersion::TapScript;
+        let control_block = checkpoint_spend_info
+            .spend_info
+            .control_block(&(vtxo_spend_script.clone(), leaf_version))
+            .expect("control block for vtxo spend script");
+
+        unsigned_ark_psbt.inputs[i].tap_scripts =
+            BTreeMap::from_iter([(control_block, (vtxo_spend_script.clone(), leaf_version))]);
+
+        // Add _all_ the scripts in the Taproot tree to custom unknown field.
+
         let mut bytes = Vec::new();
 
-        let script = &checkpoint_output.vtxo_spend_script;
+        let script = &vtxo_inputs[i].spend_script;
         let scripts = [script.clone(), checkpoint_script.clone()];
 
         for script in scripts {
@@ -239,23 +256,16 @@ pub fn build_offchain_transactions(
 
     Ok(OffchainTransactions {
         ark_tx: unsigned_ark_psbt,
-        checkpoint_txs,
+        checkpoint_txs: checkpoint_data.into_iter().map(|(psbt, _)| psbt).collect(),
     })
 }
 
 #[derive(Debug, Clone)]
-pub struct CheckpointOutput {
-    vtxo_spend_script: ScriptBuf,
+struct CheckpointSpendInfo {
     spend_info: TaprootSpendInfo,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct CheckpointOutPoint {
-    outpoint: OutPoint,
-    amount: Amount,
-}
-
-impl CheckpointOutput {
+impl CheckpointSpendInfo {
     fn new(vtxo_input: &VtxoInput, checkpoint_exit_script: ScriptBuf) -> Self {
         let secp = Secp256k1::new();
 
@@ -272,10 +282,7 @@ impl CheckpointOutput {
             .finalize(&secp, unspendable_key)
             .expect("can be finalized");
 
-        Self {
-            vtxo_spend_script: vtxo_spend_script.clone(),
-            spend_info,
-        }
+        Self { spend_info }
     }
 
     fn script_pubkey(&self) -> ScriptBuf {
@@ -290,7 +297,7 @@ fn build_checkpoint_psbt(
     //
     // This is defined by the Ark server.
     checkpoint_exit_script: ScriptBuf,
-) -> Result<(Psbt, CheckpointOutput, CheckpointOutPoint), Error> {
+) -> Result<(Psbt, CheckpointSpendInfo), Error> {
     let (lock_time, sequence) = match vtxo_input.locktime {
         Some(timelock) => (timelock, bitcoin::Sequence::ENABLE_LOCKTIME_NO_RBF),
         None => (LockTime::ZERO, bitcoin::Sequence::MAX),
@@ -303,12 +310,12 @@ fn build_checkpoint_psbt(
         witness: Default::default(),
     }];
 
-    let checkpoint_output = CheckpointOutput::new(vtxo_input, checkpoint_exit_script);
+    let checkpoint_spend_info = CheckpointSpendInfo::new(vtxo_input, checkpoint_exit_script);
 
     let outputs = vec![
         TxOut {
             value: vtxo_input.amount,
-            script_pubkey: checkpoint_output.script_pubkey(),
+            script_pubkey: checkpoint_spend_info.script_pubkey(),
         },
         anchor_output(),
     ];
@@ -322,6 +329,25 @@ fn build_checkpoint_psbt(
 
     let mut unsigned_checkpoint_psbt =
         Psbt::from_unsigned_tx(unsigned_tx).map_err(Error::transaction)?;
+
+    // Set VTXO being spent as `witness_utxo` field.
+
+    unsigned_checkpoint_psbt.inputs[0].witness_utxo = Some(TxOut {
+        value: vtxo_input.amount,
+        script_pubkey: vtxo_input.script_pubkey.clone(),
+    });
+
+    // Set script to be used in `tap_scripts` field for spending the VTXO.
+
+    let (vtxo_spend_script, vtxo_spend_control_block) = vtxo_input.spend_info();
+
+    let leaf_version = vtxo_spend_control_block.leaf_version;
+    unsigned_checkpoint_psbt.inputs[0].tap_scripts = BTreeMap::from_iter([(
+        vtxo_spend_control_block.clone(),
+        (vtxo_spend_script.clone(), leaf_version),
+    )]);
+
+    // Add _all_ the scripts in the Taproot tree to custom unknown field.
 
     let mut bytes = Vec::new();
 
@@ -340,20 +366,6 @@ fn build_checkpoint_psbt(
         bytes.append(&mut script_bytes);
     }
 
-    unsigned_checkpoint_psbt.inputs[0].witness_utxo = Some(TxOut {
-        value: vtxo_input.amount,
-        script_pubkey: vtxo_input.script_pubkey.clone(),
-    });
-
-    // In the case of input VTXOs, we are actually using a script spend path.
-    let (vtxo_spend_script, vtxo_spend_control_block) = vtxo_input.spend_info();
-
-    let leaf_version = vtxo_spend_control_block.leaf_version;
-    unsigned_checkpoint_psbt.inputs[0].tap_scripts = BTreeMap::from_iter([(
-        vtxo_spend_control_block.clone(),
-        (vtxo_spend_script.clone(), leaf_version),
-    )]);
-
     unsigned_checkpoint_psbt.inputs[0].unknown.insert(
         psbt::raw::Key {
             type_value: 222,
@@ -362,19 +374,7 @@ fn build_checkpoint_psbt(
         bytes,
     );
 
-    let checkpoint_outpoint = CheckpointOutPoint {
-        outpoint: OutPoint {
-            txid: unsigned_checkpoint_psbt.unsigned_tx.compute_txid(),
-            vout: 0,
-        },
-        amount: vtxo_input.amount,
-    };
-
-    Ok((
-        unsigned_checkpoint_psbt,
-        checkpoint_output,
-        checkpoint_outpoint,
-    ))
+    Ok((unsigned_checkpoint_psbt, checkpoint_spend_info))
 }
 
 fn write_compact_size_uint<W: Write>(w: &mut W, val: u64) -> io::Result<()> {
@@ -393,58 +393,68 @@ fn write_compact_size_uint<W: Write>(w: &mut W, val: u64) -> io::Result<()> {
     Ok(())
 }
 
-pub fn sign_checkpoint_transaction<S>(
-    sign_fn: S,
-    psbt: &mut Psbt,
-    vtxo_input: &VtxoInput,
-) -> Result<(), Error>
+// TODO: Sign checkpoint and sign Ark are basically the same. We can combine them, probably.
+pub fn sign_checkpoint_transaction<S>(sign_fn: S, psbt: &mut Psbt) -> Result<(), Error>
 where
     S: FnOnce(
         &mut psbt::Input,
         secp256k1::Message,
     ) -> Result<(schnorr::Signature, XOnlyPublicKey), Error>,
 {
-    let VtxoInput {
-        amount,
-        outpoint,
-        script_pubkey,
-        ..
-    } = vtxo_input;
+    let witness_utxo = [psbt.inputs[0].witness_utxo.clone().expect("witness UTXO")];
+    let prevouts = Prevouts::All(&witness_utxo);
 
-    tracing::debug!(
-        ?outpoint,
-        %amount,
-        "Attempting to sign selected VTXO for checkpoint transaction"
-    );
+    let psbt_input = psbt.inputs.get_mut(0).expect("input at index");
 
-    let (input_index, _) = psbt
-        .unsigned_tx
-        .input
+    let (_, (vtxo_spend_script, leaf_version)) =
+        psbt_input.tap_scripts.first_key_value().expect("one entry");
+
+    let leaf_hash = TapLeafHash::from_script(vtxo_spend_script, *leaf_version);
+
+    let tap_sighash = SighashCache::new(&psbt.unsigned_tx)
+        .taproot_script_spend_signature_hash(0, &prevouts, leaf_hash, TapSighashType::Default)
+        .map_err(Error::crypto)
+        .context("failed to generate sighash")?;
+
+    let msg = secp256k1::Message::from_digest(tap_sighash.to_raw_hash().to_byte_array());
+
+    let (sig, pk) = sign_fn(psbt_input, msg)?;
+
+    let sig = taproot::Signature {
+        signature: sig,
+        sighash_type: TapSighashType::Default,
+    };
+
+    psbt_input.tap_script_sigs.insert((pk, leaf_hash), sig);
+
+    Ok(())
+}
+
+pub fn sign_ark_transaction<S>(sign_fn: S, psbt: &mut Psbt, input_index: usize) -> Result<(), Error>
+where
+    S: FnOnce(
+        &mut psbt::Input,
+        secp256k1::Message,
+    ) -> Result<(schnorr::Signature, XOnlyPublicKey), Error>,
+{
+    tracing::debug!(index = input_index, "Signing Ark transaction input");
+
+    let witness_utxos = psbt
+        .inputs
         .iter()
-        .enumerate()
-        .find(|(_, input)| input.previous_output == *outpoint)
-        .ok_or_else(|| Error::transaction(format!("missing input for outpoint {outpoint}")))?;
-
-    tracing::debug!(
-        ?outpoint,
-        index = input_index,
-        "Signing selected VTXO for checkpoint transaction"
-    );
+        .map(|i| i.witness_utxo.clone().expect("witness UTXO"))
+        .collect::<Vec<_>>();
 
     let psbt_input = psbt.inputs.get_mut(input_index).expect("input at index");
 
-    // In the case of input VTXOs, we are actually using a script spend path.
-    let (vtxo_spend_script, vtxo_spend_control_block) = vtxo_input.spend_info();
+    // To spend a checkpoint output we are using a script spend path.
 
-    let leaf_version = vtxo_spend_control_block.leaf_version;
+    let prevouts = Prevouts::All(&witness_utxos);
 
-    let prevouts = [TxOut {
-        value: *amount,
-        script_pubkey: script_pubkey.clone(),
-    }];
-    let prevouts = Prevouts::All(&prevouts);
+    let (_, (vtxo_spend_script, leaf_version)) =
+        psbt_input.tap_scripts.first_key_value().expect("one entry");
 
-    let leaf_hash = TapLeafHash::from_script(vtxo_spend_script, leaf_version);
+    let leaf_hash = TapLeafHash::from_script(vtxo_spend_script, *leaf_version);
 
     let tap_sighash = SighashCache::new(&psbt.unsigned_tx)
         .taproot_script_spend_signature_hash(
@@ -466,102 +476,6 @@ where
     };
 
     psbt_input.tap_script_sigs.insert((pk, leaf_hash), sig);
-
-    Ok(())
-}
-
-pub fn sign_ark_transaction<S>(
-    sign_fn: S,
-    psbt: &mut Psbt,
-    checkpoint_inputs: &[(CheckpointOutput, CheckpointOutPoint)],
-    input_index: usize,
-) -> Result<(), Error>
-where
-    S: FnOnce(
-        &mut psbt::Input,
-        secp256k1::Message,
-    ) -> Result<(schnorr::Signature, XOnlyPublicKey), Error>,
-{
-    let (checkpoint_output, CheckpointOutPoint { outpoint, amount }) = checkpoint_inputs
-        .get(input_index)
-        .ok_or_else(|| Error::ad_hoc(format!("no input to sign at index {input_index}")))?;
-
-    tracing::debug!(
-        ?outpoint,
-        %amount,
-        "Attempting to sign selected checkpoint output for Ark transaction"
-    );
-
-    let prevout = TxOut {
-        value: *amount,
-        script_pubkey: checkpoint_output.script_pubkey(),
-    };
-
-    psbt.unsigned_tx
-        .input
-        .iter()
-        .enumerate()
-        .find(|(_, input)| input.previous_output == *outpoint)
-        .ok_or_else(|| Error::transaction(format!("missing input for outpoint {outpoint}")))?;
-
-    tracing::debug!(
-        ?outpoint,
-        index = input_index,
-        "Signing checkpoint output for Ark transaction"
-    );
-
-    let psbt_input = psbt.inputs.get_mut(input_index).expect("input at index");
-
-    psbt_input.witness_utxo = Some(prevout.clone());
-
-    // In the case of input checkpoint outputs, we are using a script spend path.
-
-    let vtxo_spend_script = &checkpoint_output.vtxo_spend_script;
-    let leaf_version = LeafVersion::TapScript;
-
-    let control_block = checkpoint_output
-        .spend_info
-        .control_block(&(vtxo_spend_script.clone(), leaf_version))
-        .ok_or_else(|| {
-            Error::transaction(format!(
-                "failed to construct control block for input {outpoint:?}"
-            ))
-        })?;
-
-    psbt_input.tap_scripts =
-        BTreeMap::from_iter([(control_block, (vtxo_spend_script.clone(), leaf_version))]);
-
-    let prevouts = checkpoint_inputs
-        .iter()
-        .map(|(output, outpoint)| TxOut {
-            value: outpoint.amount,
-            script_pubkey: output.script_pubkey(),
-        })
-        .collect::<Vec<_>>();
-    let prevouts = Prevouts::All(&prevouts);
-
-    let leaf_hash = TapLeafHash::from_script(vtxo_spend_script, leaf_version);
-
-    let tap_sighash = SighashCache::new(&psbt.unsigned_tx)
-        .taproot_script_spend_signature_hash(
-            input_index,
-            &prevouts,
-            leaf_hash,
-            TapSighashType::Default,
-        )
-        .map_err(Error::crypto)
-        .context("failed to generate sighash")?;
-
-    let msg = secp256k1::Message::from_digest(tap_sighash.to_raw_hash().to_byte_array());
-
-    let (sig, pk) = sign_fn(psbt_input, msg)?;
-
-    let sig = taproot::Signature {
-        signature: sig,
-        sighash_type: TapSighashType::Default,
-    };
-
-    psbt_input.tap_script_sigs = BTreeMap::from_iter([((pk, leaf_hash), sig)]);
 
     Ok(())
 }

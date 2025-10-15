@@ -292,26 +292,13 @@ where
             Ok((sig, pk))
         };
 
-        let checkpoint_tx = checkpoint_txs.first().expect("one checkpoint PSBT");
-
-        sign_ark_transaction(
-            sign_fn,
-            &mut ark_tx,
-            &[(checkpoint_tx.1.clone(), checkpoint_tx.2)],
-            0,
-        )?;
+        sign_ark_transaction(sign_fn, &mut ark_tx, 0)?;
 
         let ark_txid = ark_tx.unsigned_tx.compute_txid();
 
         let res = self
             .network_client()
-            .submit_offchain_transaction_request(
-                ark_tx,
-                checkpoint_txs
-                    .into_iter()
-                    .map(|(psbt, _, _, _)| psbt)
-                    .collect(),
-            )
+            .submit_offchain_transaction_request(ark_tx, checkpoint_txs)
             .await?;
 
         let mut checkpoint_psbt = res
@@ -320,7 +307,7 @@ where
             .ok_or_else(|| Error::ad_hoc("no checkpoint PSBTs found"))?
             .clone();
 
-        sign_checkpoint_transaction(sign_fn, &mut checkpoint_psbt, &vhtlc_input)?;
+        sign_checkpoint_transaction(sign_fn, &mut checkpoint_psbt)?;
 
         timeout_op(
             self.inner.timeout,
@@ -449,14 +436,7 @@ where
             Ok((sig, pk))
         };
 
-        let checkpoint_tx = checkpoint_txs.first().expect("one checkpoint PSBT");
-
-        sign_ark_transaction(
-            sign_fn,
-            &mut ark_tx,
-            &[(checkpoint_tx.1.clone(), checkpoint_tx.2)],
-            0,
-        )?;
+        sign_ark_transaction(sign_fn, &mut ark_tx, 0)?;
 
         let url = format!(
             "{}/v2/swap/submarine/{swap_id}/refund/ark",
@@ -485,13 +465,7 @@ where
 
         let res = self
             .network_client()
-            .submit_offchain_transaction_request(
-                signed_ark_tx,
-                checkpoint_txs
-                    .into_iter()
-                    .map(|(psbt, _, _, _)| psbt)
-                    .collect(),
-            )
+            .submit_offchain_transaction_request(signed_ark_tx, checkpoint_txs)
             .await?;
 
         let mut checkpoint_psbt = res
@@ -500,7 +474,7 @@ where
             .ok_or_else(|| Error::ad_hoc("no checkpoint PSBTs found"))?
             .clone();
 
-        sign_checkpoint_transaction(sign_fn, &mut checkpoint_psbt, &vhtlc_input)?;
+        sign_checkpoint_transaction(sign_fn, &mut checkpoint_psbt)?;
 
         timeout_op(
             self.inner.timeout,
@@ -763,28 +737,15 @@ where
             Ok((sig, pk))
         };
 
-        let checkpoint_tx = checkpoint_txs.first().expect("one checkpoint PSBT");
-
-        sign_ark_transaction(
-            sign_fn,
-            &mut ark_tx,
-            &[(checkpoint_tx.1.clone(), checkpoint_tx.2)],
-            0,
-        )
-        .map_err(Error::from)
-        .context("failed to sign Ark TX")?;
+        sign_ark_transaction(sign_fn, &mut ark_tx, 0)
+            .map_err(Error::from)
+            .context("failed to sign Ark TX")?;
 
         let ark_txid = ark_tx.unsigned_tx.compute_txid();
 
         let res = self
             .network_client()
-            .submit_offchain_transaction_request(
-                ark_tx,
-                checkpoint_txs
-                    .into_iter()
-                    .map(|(psbt, _, _, _)| psbt)
-                    .collect(),
-            )
+            .submit_offchain_transaction_request(ark_tx, checkpoint_txs)
             .await
             .map_err(Error::from)
             .context("failed to submit offchain TXs")?;
@@ -795,7 +756,7 @@ where
             .ok_or_else(|| Error::ad_hoc("no checkpoint PSBTs found"))?
             .clone();
 
-        sign_checkpoint_transaction(sign_fn, &mut checkpoint_psbt, &vhtlc_input)
+        sign_checkpoint_transaction(sign_fn, &mut checkpoint_psbt)
             .map_err(Error::from)
             .context("failed to sign checkpoint TX")?;
 
