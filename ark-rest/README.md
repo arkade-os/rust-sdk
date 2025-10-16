@@ -1,6 +1,6 @@
 # Rust API client for ark-rest
 
-Combined Ark Service and Indexer API
+Combined Ark Service, Indexer, Admin, Signer Manager, and Wallet API
 
 ## Overview
 
@@ -23,88 +23,131 @@ ark-rest = { path = "./ark-rest" }
 
 All URIs are relative to _http://localhost_
 
-| Class               | Method                                                                                                                     | HTTP request                                                            | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| ------------------- | -------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| _ArkServiceApi_     | [**ark_service_confirm_registration**](docs/ArkServiceApi.md#ark_service_confirm_registration)                             | **POST** /v1/batch/ack                                                  | ConfirmRegistration allows a client that has been selected for the next batch to confirm its participation by revealing the intent id.                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| _ArkServiceApi_     | [**ark_service_delete_intent**](docs/ArkServiceApi.md#ark_service_delete_intent)                                           | **POST** /v1/batch/deleteIntent                                         | DeleteIntent removes a previously registered intent from the server. The client should provide the BIP-322 signature and message including any of the vtxos used in the registered intent to prove its ownership. The server should delete the intent and return success.                                                                                                                                                                                                                                                                                                                    |
-| _ArkServiceApi_     | [**ark_service_finalize_tx**](docs/ArkServiceApi.md#ark_service_finalize_tx)                                               | **POST** /v1/tx/finalize                                                | FinalizeTx is the last lef of the process of spending vtxos offchain and allows a client to submit the fully signed checkpoint txs for the provided Ark txid . The server verifies the signed checkpoint transactions and returns success if everything is valid.                                                                                                                                                                                                                                                                                                                            |
-| _ArkServiceApi_     | [**ark_service_get_event_stream**](docs/ArkServiceApi.md#ark_service_get_event_stream)                                     | **GET** /v1/batch/events                                                | GetEventStream is a server-side streaming RPC that allows clients to receive a stream of events related to batch processing. Clients should use this stream as soon as they are ready to join a batch and can listen for various events such as batch start, batch finalization, and other related activities. The server pushes these events to the client in real-time as soon as its ready to move to the next phase of the batch processing.                                                                                                                                             |
-| _ArkServiceApi_     | [**ark_service_get_info**](docs/ArkServiceApi.md#ark_service_get_info)                                                     | **GET** /v1/info                                                        | GetInfo returns information and parameters of the server.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| _ArkServiceApi_     | [**ark_service_get_transactions_stream**](docs/ArkServiceApi.md#ark_service_get_transactions_stream)                       | **GET** /v1/txs                                                         | GetTransactionsStream is a server-side streaming RPC that allows clients to receive notifications in real-time about any commitment tx or ark tx processed and finalized by the server. NOTE: the stream doesn't have history support, therefore returns only txs from the moment it's opened until it's closed.                                                                                                                                                                                                                                                                             |
-| _ArkServiceApi_     | [**ark_service_register_intent**](docs/ArkServiceApi.md#ark_service_register_intent)                                       | **POST** /v1/batch/registerIntent                                       | RegisterIntent allows to register a new intent that will be eventually selected by the server for a particular batch. The client should provide a BIP-322 message with the intent information, and the server should respond with an intent id.                                                                                                                                                                                                                                                                                                                                              |
-| _ArkServiceApi_     | [**ark_service_submit_signed_forfeit_txs**](docs/ArkServiceApi.md#ark_service_submit_signed_forfeit_txs)                   | **POST** /v1/batch/submitForfeitTxs                                     | SubmitSignedForfeitTxs allows a client to submit signed forfeit transactions and/or signed commitment transaction (in case of onboarding). The server should verify the signed txs and return success.                                                                                                                                                                                                                                                                                                                                                                                       |
-| _ArkServiceApi_     | [**ark_service_submit_tree_nonces**](docs/ArkServiceApi.md#ark_service_submit_tree_nonces)                                 | **POST** /v1/batch/tree/submitNonces                                    | SubmitTreeNonces allows a cosigner to submit the tree nonces for the musig2 session of a given batch. The client should provide the batch id, the cosigner public key, and the tree nonces. The server should verify the cosigner public key and the nonces, and store them for later aggregation once nonces from all clients are collected.                                                                                                                                                                                                                                                |
-| _ArkServiceApi_     | [**ark_service_submit_tree_signatures**](docs/ArkServiceApi.md#ark_service_submit_tree_signatures)                         | **POST** /v1/batch/tree/submitSignatures                                | SubmitTreeSignatures allows a cosigner to submit the tree signatures for the musig2 session of a given batch. The client should provide the batch id, the cosigner public key, and the tree signatures. The server should verify the cosigner public key and the signatures, and store them for later aggregation once signatures from all clients are collected.                                                                                                                                                                                                                            |
-| _ArkServiceApi_     | [**ark_service_submit_tx**](docs/ArkServiceApi.md#ark_service_submit_tx)                                                   | **POST** /v1/tx/submit                                                  | SubmitTx is the first leg of the process of spending vtxos offchain and allows a client to submit a signed Ark transaction and the unsigned checkpoint transactions. The server should verify the signed transactions and return the fully signed Ark tx and the signed checkpoint txs.                                                                                                                                                                                                                                                                                                      |
-| _IndexerServiceApi_ | [**indexer_service_get_batch_sweep_transactions**](docs/IndexerServiceApi.md#indexer_service_get_batch_sweep_transactions) | **GET** /v1/batch/{batchOutpoint.txid}/{batchOutpoint.vout}/sweepTxs    | GetBatchSweepTransactions returns the list of transaction (txid) that swept a given batch output. In most cases the list contains only one txid, meaning that all the amount locked for a vtxo tree has been claimed back. If any of the leaves of the tree have been unrolled onchain before the expiration, the list will contain many txids instead. In a binary tree with 4 or more leaves, 1 unroll causes the server to broadcast 3 txs to sweep the whole rest of tree for example. If a whole vtxo tree has been unrolled onchain, the list of txids for that batch output is empty. |
-| _IndexerServiceApi_ | [**indexer_service_get_commitment_tx**](docs/IndexerServiceApi.md#indexer_service_get_commitment_tx)                       | **GET** /v1/commitmentTx/{txid}                                         | GetCommitmentTx returns information about a specific commitment transaction identified by the provided txid.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| _IndexerServiceApi_ | [**indexer_service_get_connectors**](docs/IndexerServiceApi.md#indexer_service_get_connectors)                             | **GET** /v1/commitmentTx/{txid}/connectors                              | GetConnectors returns the tree of connectors for the provided commitment transaction. The response includes a list of connector txs with details on the tree posistion and may include pagination information if the results span multiple pages.                                                                                                                                                                                                                                                                                                                                            |
-| _IndexerServiceApi_ | [**indexer_service_get_forfeit_txs**](docs/IndexerServiceApi.md#indexer_service_get_forfeit_txs)                           | **GET** /v1/commitmentTx/{txid}/forfeitTxs                              | GetForfeitTxs returns the list of forfeit transactions that were submitted for the provided commitment transaction. The response may include pagination information if the results span multiple pages.                                                                                                                                                                                                                                                                                                                                                                                      |
-| _IndexerServiceApi_ | [**indexer_service_get_subscription**](docs/IndexerServiceApi.md#indexer_service_get_subscription)                         | **GET** /v1/script/subscription/{subscriptionId}                        | GetSubscription is a server-side streaming RPC which allows clients to receive real-time notifications on transactions related to the subscribed vtxo scripts. The subscription can be created or updated by using the SubscribeForScripts and UnsubscribeForScripts RPCs.                                                                                                                                                                                                                                                                                                                   |
-| _IndexerServiceApi_ | [**indexer_service_get_virtual_txs**](docs/IndexerServiceApi.md#indexer_service_get_virtual_txs)                           | **GET** /v1/virtualTx/{txids}                                           | GetVirtualTxs returns the virtual transactions in hex format for the specified txids. The response may be paginated if the results span multiple pages.                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| _IndexerServiceApi_ | [**indexer_service_get_vtxo_chain**](docs/IndexerServiceApi.md#indexer_service_get_vtxo_chain)                             | **GET** /v1/vtxo/{outpoint.txid}/{outpoint.vout}/chain                  | GetVtxoChain returns the the chain of ark txs that starts from spending any vtxo leaf and ends with the creation of the provided vtxo outpoint. The response may be paginated if the results span multiple pages.                                                                                                                                                                                                                                                                                                                                                                            |
-| _IndexerServiceApi_ | [**indexer_service_get_vtxo_tree**](docs/IndexerServiceApi.md#indexer_service_get_vtxo_tree)                               | **GET** /v1/batch/{batchOutpoint.txid}/{batchOutpoint.vout}/tree        | GetVtxoTree returns the vtxo tree for the provided batch outpoint. The response includes a list of txs with details on the tree posistion and may include pagination information if the results span multiple pages.                                                                                                                                                                                                                                                                                                                                                                         |
-| _IndexerServiceApi_ | [**indexer_service_get_vtxo_tree_leaves**](docs/IndexerServiceApi.md#indexer_service_get_vtxo_tree_leaves)                 | **GET** /v1/batch/{batchOutpoint.txid}/{batchOutpoint.vout}/tree/leaves | GetVtxoTreeLeaves returns the list of leaves (vtxo outpoints) of the tree(s) for the provided batch outpoint. The response may be paginated if the results span multiple pages.                                                                                                                                                                                                                                                                                                                                                                                                              |
-| _IndexerServiceApi_ | [**indexer_service_get_vtxos**](docs/IndexerServiceApi.md#indexer_service_get_vtxos)                                       | **GET** /v1/vtxos                                                       | GetVtxos returns the list of vtxos based on the provided filter. Vtxos can be retrieved either by addresses or by outpoints, and optionally filtered by spendable or spent only. The response may be paginated if the results span multiple pages.                                                                                                                                                                                                                                                                                                                                           |
-| _IndexerServiceApi_ | [**indexer_service_subscribe_for_scripts**](docs/IndexerServiceApi.md#indexer_service_subscribe_for_scripts)               | **POST** /v1/script/subscribe                                           | SubscribeForScripts allows to subscribe for tx notifications related to the provided vtxo scripts. It can also be used to update an existing subscribtion by adding new scripts to it.                                                                                                                                                                                                                                                                                                                                                                                                       |
-| _IndexerServiceApi_ | [**indexer_service_unsubscribe_for_scripts**](docs/IndexerServiceApi.md#indexer_service_unsubscribe_for_scripts)           | **POST** /v1/script/unsubscribe                                         | UnsubscribeForScripts allows to remove scripts from an existing subscription.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| Class                         | Method                                                                                                                     | HTTP request                                                                      | Description |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- | ----------- |
+| _ArkServiceApi_               | [**ark_service_confirm_registration**](docs/ArkServiceApi.md#ark_service_confirm_registration)                             | **POST** /v1/batch/ack                                                            |             |
+| _ArkServiceApi_               | [**ark_service_delete_intent**](docs/ArkServiceApi.md#ark_service_delete_intent)                                           | **POST** /v1/batch/deleteIntent                                                   |             |
+| _ArkServiceApi_               | [**ark_service_finalize_tx**](docs/ArkServiceApi.md#ark_service_finalize_tx)                                               | **POST** /v1/tx/finalize                                                          |             |
+| _ArkServiceApi_               | [**ark_service_get_event_stream**](docs/ArkServiceApi.md#ark_service_get_event_stream)                                     | **GET** /v1/batch/events                                                          |             |
+| _ArkServiceApi_               | [**ark_service_get_info**](docs/ArkServiceApi.md#ark_service_get_info)                                                     | **GET** /v1/info                                                                  |             |
+| _ArkServiceApi_               | [**ark_service_get_pending_tx**](docs/ArkServiceApi.md#ark_service_get_pending_tx)                                         | **POST** /v1/tx/pending                                                           |             |
+| _ArkServiceApi_               | [**ark_service_get_transactions_stream**](docs/ArkServiceApi.md#ark_service_get_transactions_stream)                       | **GET** /v1/txs                                                                   |             |
+| _ArkServiceApi_               | [**ark_service_register_intent**](docs/ArkServiceApi.md#ark_service_register_intent)                                       | **POST** /v1/batch/registerIntent                                                 |             |
+| _ArkServiceApi_               | [**ark_service_submit_signed_forfeit_txs**](docs/ArkServiceApi.md#ark_service_submit_signed_forfeit_txs)                   | **POST** /v1/batch/submitForfeitTxs                                               |             |
+| _ArkServiceApi_               | [**ark_service_submit_tree_nonces**](docs/ArkServiceApi.md#ark_service_submit_tree_nonces)                                 | **POST** /v1/batch/tree/submitNonces                                              |             |
+| _ArkServiceApi_               | [**ark_service_submit_tree_signatures**](docs/ArkServiceApi.md#ark_service_submit_tree_signatures)                         | **POST** /v1/batch/tree/submitSignatures                                          |             |
+| _ArkServiceApi_               | [**ark_service_submit_tx**](docs/ArkServiceApi.md#ark_service_submit_tx)                                                   | **POST** /v1/tx/submit                                                            |             |
+| _IndexerServiceApi_           | [**indexer_service_get_batch_sweep_transactions**](docs/IndexerServiceApi.md#indexer_service_get_batch_sweep_transactions) | **GET** /v1/indexer/batch/{batch_outpoint.txid}/{batch_outpoint.vout}/sweepTxs    |             |
+| _IndexerServiceApi_           | [**indexer_service_get_commitment_tx**](docs/IndexerServiceApi.md#indexer_service_get_commitment_tx)                       | **GET** /v1/indexer/commitmentTx/{txid}                                           |             |
+| _IndexerServiceApi_           | [**indexer_service_get_connectors**](docs/IndexerServiceApi.md#indexer_service_get_connectors)                             | **GET** /v1/indexer/commitmentTx/{txid}/connectors                                |             |
+| _IndexerServiceApi_           | [**indexer_service_get_forfeit_txs**](docs/IndexerServiceApi.md#indexer_service_get_forfeit_txs)                           | **GET** /v1/indexer/commitmentTx/{txid}/forfeitTxs                                |             |
+| _IndexerServiceApi_           | [**indexer_service_get_subscription**](docs/IndexerServiceApi.md#indexer_service_get_subscription)                         | **GET** /v1/indexer/script/subscription/{subscription_id}                         |             |
+| _IndexerServiceApi_           | [**indexer_service_get_virtual_txs**](docs/IndexerServiceApi.md#indexer_service_get_virtual_txs)                           | **GET** /v1/indexer/virtualTx/{txids}                                             |             |
+| _IndexerServiceApi_           | [**indexer_service_get_vtxo_chain**](docs/IndexerServiceApi.md#indexer_service_get_vtxo_chain)                             | **GET** /v1/indexer/vtxo/{outpoint.txid}/{outpoint.vout}/chain                    |             |
+| _IndexerServiceApi_           | [**indexer_service_get_vtxo_tree**](docs/IndexerServiceApi.md#indexer_service_get_vtxo_tree)                               | **GET** /v1/indexer/batch/{batch_outpoint.txid}/{batch_outpoint.vout}/tree        |             |
+| _IndexerServiceApi_           | [**indexer_service_get_vtxo_tree_leaves**](docs/IndexerServiceApi.md#indexer_service_get_vtxo_tree_leaves)                 | **GET** /v1/indexer/batch/{batch_outpoint.txid}/{batch_outpoint.vout}/tree/leaves |             |
+| _IndexerServiceApi_           | [**indexer_service_get_vtxos**](docs/IndexerServiceApi.md#indexer_service_get_vtxos)                                       | **GET** /v1/indexer/vtxos                                                         |             |
+| _IndexerServiceApi_           | [**indexer_service_subscribe_for_scripts**](docs/IndexerServiceApi.md#indexer_service_subscribe_for_scripts)               | **POST** /v1/indexer/script/subscribe                                             |             |
+| _IndexerServiceApi_           | [**indexer_service_unsubscribe_for_scripts**](docs/IndexerServiceApi.md#indexer_service_unsubscribe_for_scripts)           | **POST** /v1/indexer/script/unsubscribe                                           |             |
+| _SignerManagerServiceApi_     | [**signer_manager_service_load_signer**](docs/SignerManagerServiceApi.md#signer_manager_service_load_signer)               | **POST** /v1/admin/signer                                                         |             |
+| _WalletInitializerServiceApi_ | [**wallet_initializer_service_create**](docs/WalletInitializerServiceApi.md#wallet_initializer_service_create)             | **POST** /v1/admin/wallet/create                                                  |             |
+| _WalletInitializerServiceApi_ | [**wallet_initializer_service_gen_seed**](docs/WalletInitializerServiceApi.md#wallet_initializer_service_gen_seed)         | **GET** /v1/admin/wallet/seed                                                     |             |
+| _WalletInitializerServiceApi_ | [**wallet_initializer_service_get_status**](docs/WalletInitializerServiceApi.md#wallet_initializer_service_get_status)     | **GET** /v1/admin/wallet/status                                                   |             |
+| _WalletInitializerServiceApi_ | [**wallet_initializer_service_restore**](docs/WalletInitializerServiceApi.md#wallet_initializer_service_restore)           | **POST** /v1/admin/wallet/restore                                                 |             |
+| _WalletInitializerServiceApi_ | [**wallet_initializer_service_unlock**](docs/WalletInitializerServiceApi.md#wallet_initializer_service_unlock)             | **POST** /v1/admin/wallet/unlock                                                  |             |
+| _WalletServiceApi_            | [**wallet_service_derive_address**](docs/WalletServiceApi.md#wallet_service_derive_address)                                | **GET** /v1/admin/wallet/address                                                  |             |
+| _WalletServiceApi_            | [**wallet_service_get_balance**](docs/WalletServiceApi.md#wallet_service_get_balance)                                      | **GET** /v1/admin/wallet/balance                                                  |             |
+| _WalletServiceApi_            | [**wallet_service_lock**](docs/WalletServiceApi.md#wallet_service_lock)                                                    | **POST** /v1/admin/wallet/lock                                                    |             |
+| _WalletServiceApi_            | [**wallet_service_withdraw**](docs/WalletServiceApi.md#wallet_service_withdraw)                                            | **POST** /v1/admin/wallet/withdraw                                                |             |
 
 ## Documentation For Models
 
-- [ProtobufAny](docs/ProtobufAny.md)
-- [RpcStatus](docs/RpcStatus.md)
-- [StreamResultOfV1GetEventStreamResponse](docs/StreamResultOfV1GetEventStreamResponse.md)
-- [StreamResultOfV1GetSubscriptionResponse](docs/StreamResultOfV1GetSubscriptionResponse.md)
-- [StreamResultOfV1GetTransactionsStreamResponse](docs/StreamResultOfV1GetTransactionsStreamResponse.md)
-- [V1BatchFailedEvent](docs/V1BatchFailedEvent.md)
-- [V1BatchFinalizationEvent](docs/V1BatchFinalizationEvent.md)
-- [V1BatchFinalizedEvent](docs/V1BatchFinalizedEvent.md)
-- [V1BatchStartedEvent](docs/V1BatchStartedEvent.md)
-- [V1Bip322Signature](docs/V1Bip322Signature.md)
-- [V1ConfirmRegistrationRequest](docs/V1ConfirmRegistrationRequest.md)
-- [V1DeleteIntentRequest](docs/V1DeleteIntentRequest.md)
-- [V1FinalizeTxRequest](docs/V1FinalizeTxRequest.md)
-- [V1GetBatchSweepTransactionsResponse](docs/V1GetBatchSweepTransactionsResponse.md)
-- [V1GetCommitmentTxResponse](docs/V1GetCommitmentTxResponse.md)
-- [V1GetConnectorsResponse](docs/V1GetConnectorsResponse.md)
-- [V1GetEventStreamResponse](docs/V1GetEventStreamResponse.md)
-- [V1GetForfeitTxsResponse](docs/V1GetForfeitTxsResponse.md)
-- [V1GetInfoResponse](docs/V1GetInfoResponse.md)
-- [V1GetSubscriptionResponse](docs/V1GetSubscriptionResponse.md)
-- [V1GetTransactionsStreamResponse](docs/V1GetTransactionsStreamResponse.md)
-- [V1GetVirtualTxsResponse](docs/V1GetVirtualTxsResponse.md)
-- [V1GetVtxoChainResponse](docs/V1GetVtxoChainResponse.md)
-- [V1GetVtxoTreeLeavesResponse](docs/V1GetVtxoTreeLeavesResponse.md)
-- [V1GetVtxoTreeResponse](docs/V1GetVtxoTreeResponse.md)
-- [V1GetVtxosResponse](docs/V1GetVtxosResponse.md)
-- [V1IndexerBatch](docs/V1IndexerBatch.md)
-- [V1IndexerChain](docs/V1IndexerChain.md)
-- [V1IndexerChainedTxType](docs/V1IndexerChainedTxType.md)
-- [V1IndexerNode](docs/V1IndexerNode.md)
-- [V1IndexerOutpoint](docs/V1IndexerOutpoint.md)
-- [V1IndexerPageRequest](docs/V1IndexerPageRequest.md)
-- [V1IndexerPageResponse](docs/V1IndexerPageResponse.md)
-- [V1IndexerTxData](docs/V1IndexerTxData.md)
-- [V1IndexerVtxo](docs/V1IndexerVtxo.md)
-- [V1MarketHour](docs/V1MarketHour.md)
-- [V1Outpoint](docs/V1Outpoint.md)
-- [V1RegisterIntentRequest](docs/V1RegisterIntentRequest.md)
-- [V1RegisterIntentResponse](docs/V1RegisterIntentResponse.md)
-- [V1SubmitSignedForfeitTxsRequest](docs/V1SubmitSignedForfeitTxsRequest.md)
-- [V1SubmitTreeNoncesRequest](docs/V1SubmitTreeNoncesRequest.md)
-- [V1SubmitTreeSignaturesRequest](docs/V1SubmitTreeSignaturesRequest.md)
-- [V1SubmitTxRequest](docs/V1SubmitTxRequest.md)
-- [V1SubmitTxResponse](docs/V1SubmitTxResponse.md)
-- [V1SubscribeForScriptsRequest](docs/V1SubscribeForScriptsRequest.md)
-- [V1SubscribeForScriptsResponse](docs/V1SubscribeForScriptsResponse.md)
-- [V1TreeNoncesAggregatedEvent](docs/V1TreeNoncesAggregatedEvent.md)
-- [V1TreeSignatureEvent](docs/V1TreeSignatureEvent.md)
-- [V1TreeSigningStartedEvent](docs/V1TreeSigningStartedEvent.md)
-- [V1TreeTxEvent](docs/V1TreeTxEvent.md)
-- [V1TxData](docs/V1TxData.md)
-- [V1TxNotification](docs/V1TxNotification.md)
-- [V1UnsubscribeForScriptsRequest](docs/V1UnsubscribeForScriptsRequest.md)
-- [V1Vtxo](docs/V1Vtxo.md)
+- [Any](docs/Any.md)
+- [Balance](docs/Balance.md)
+- [BatchFailedEvent](docs/BatchFailedEvent.md)
+- [BatchFinalizationEvent](docs/BatchFinalizationEvent.md)
+- [BatchFinalizedEvent](docs/BatchFinalizedEvent.md)
+- [BatchStartedEvent](docs/BatchStartedEvent.md)
+- [ConfirmRegistrationRequest](docs/ConfirmRegistrationRequest.md)
+- [CreateRequest](docs/CreateRequest.md)
+- [DeleteIntentRequest](docs/DeleteIntentRequest.md)
+- [DeprecatedSigner](docs/DeprecatedSigner.md)
+- [DeriveAddressResponse](docs/DeriveAddressResponse.md)
+- [ErrorDetails](docs/ErrorDetails.md)
+- [FeeInfo](docs/FeeInfo.md)
+- [FinalizeTxRequest](docs/FinalizeTxRequest.md)
+- [GenSeedResponse](docs/GenSeedResponse.md)
+- [GetBalanceResponse](docs/GetBalanceResponse.md)
+- [GetBatchSweepTransactionsRequest](docs/GetBatchSweepTransactionsRequest.md)
+- [GetBatchSweepTransactionsResponse](docs/GetBatchSweepTransactionsResponse.md)
+- [GetCommitmentTxRequest](docs/GetCommitmentTxRequest.md)
+- [GetCommitmentTxResponse](docs/GetCommitmentTxResponse.md)
+- [GetConnectorsRequest](docs/GetConnectorsRequest.md)
+- [GetConnectorsResponse](docs/GetConnectorsResponse.md)
+- [GetEventStreamRequest](docs/GetEventStreamRequest.md)
+- [GetEventStreamResponse](docs/GetEventStreamResponse.md)
+- [GetForfeitTxsRequest](docs/GetForfeitTxsRequest.md)
+- [GetForfeitTxsResponse](docs/GetForfeitTxsResponse.md)
+- [GetInfoResponse](docs/GetInfoResponse.md)
+- [GetPendingTxRequest](docs/GetPendingTxRequest.md)
+- [GetPendingTxResponse](docs/GetPendingTxResponse.md)
+- [GetStatusResponse](docs/GetStatusResponse.md)
+- [GetSubscriptionRequest](docs/GetSubscriptionRequest.md)
+- [GetSubscriptionResponse](docs/GetSubscriptionResponse.md)
+- [GetTransactionsStreamResponse](docs/GetTransactionsStreamResponse.md)
+- [GetVirtualTxsRequest](docs/GetVirtualTxsRequest.md)
+- [GetVirtualTxsResponse](docs/GetVirtualTxsResponse.md)
+- [GetVtxoChainRequest](docs/GetVtxoChainRequest.md)
+- [GetVtxoChainResponse](docs/GetVtxoChainResponse.md)
+- [GetVtxoTreeLeavesRequest](docs/GetVtxoTreeLeavesRequest.md)
+- [GetVtxoTreeLeavesResponse](docs/GetVtxoTreeLeavesResponse.md)
+- [GetVtxoTreeRequest](docs/GetVtxoTreeRequest.md)
+- [GetVtxoTreeResponse](docs/GetVtxoTreeResponse.md)
+- [GetVtxosRequest](docs/GetVtxosRequest.md)
+- [GetVtxosResponse](docs/GetVtxosResponse.md)
+- [IndexerBatch](docs/IndexerBatch.md)
+- [IndexerChain](docs/IndexerChain.md)
+- [IndexerChainedTxType](docs/IndexerChainedTxType.md)
+- [IndexerNode](docs/IndexerNode.md)
+- [IndexerOutpoint](docs/IndexerOutpoint.md)
+- [IndexerPageRequest](docs/IndexerPageRequest.md)
+- [IndexerPageResponse](docs/IndexerPageResponse.md)
+- [IndexerSubscriptionEvent](docs/IndexerSubscriptionEvent.md)
+- [IndexerTxData](docs/IndexerTxData.md)
+- [IndexerTxHistoryRecord](docs/IndexerTxHistoryRecord.md)
+- [IndexerTxType](docs/IndexerTxType.md)
+- [IndexerVtxo](docs/IndexerVtxo.md)
+- [Input](docs/Input.md)
+- [Intent](docs/Intent.md)
+- [IntentFeeInfo](docs/IntentFeeInfo.md)
+- [LoadSignerRequest](docs/LoadSignerRequest.md)
+- [Outpoint](docs/Outpoint.md)
+- [PendingTx](docs/PendingTx.md)
+- [RegisterIntentRequest](docs/RegisterIntentRequest.md)
+- [RegisterIntentResponse](docs/RegisterIntentResponse.md)
+- [RestoreRequest](docs/RestoreRequest.md)
+- [ScheduledSession](docs/ScheduledSession.md)
+- [Status](docs/Status.md)
+- [SubmitSignedForfeitTxsRequest](docs/SubmitSignedForfeitTxsRequest.md)
+- [SubmitTreeNoncesRequest](docs/SubmitTreeNoncesRequest.md)
+- [SubmitTreeSignaturesRequest](docs/SubmitTreeSignaturesRequest.md)
+- [SubmitTxRequest](docs/SubmitTxRequest.md)
+- [SubmitTxResponse](docs/SubmitTxResponse.md)
+- [SubscribeForScriptsRequest](docs/SubscribeForScriptsRequest.md)
+- [SubscribeForScriptsResponse](docs/SubscribeForScriptsResponse.md)
+- [Tapscripts](docs/Tapscripts.md)
+- [TreeNoncesAggregatedEvent](docs/TreeNoncesAggregatedEvent.md)
+- [TreeNoncesEvent](docs/TreeNoncesEvent.md)
+- [TreeSignatureEvent](docs/TreeSignatureEvent.md)
+- [TreeSigningStartedEvent](docs/TreeSigningStartedEvent.md)
+- [TreeTxEvent](docs/TreeTxEvent.md)
+- [TxData](docs/TxData.md)
+- [TxNotification](docs/TxNotification.md)
+- [UnlockRequest](docs/UnlockRequest.md)
+- [UnsubscribeForScriptsRequest](docs/UnsubscribeForScriptsRequest.md)
+- [Vtxo](docs/Vtxo.md)
+- [WithdrawRequest](docs/WithdrawRequest.md)
+- [WithdrawResponse](docs/WithdrawResponse.md)
 
 To get access to the crate's generated documentation, use:
 

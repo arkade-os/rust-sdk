@@ -1,7 +1,7 @@
 /*
  * Ark API
  *
- * Combined Ark Service and Indexer API
+ * Combined Ark Service, Indexer, Admin, Signer Manager, and Wallet API
  *
  * The version of the OpenAPI document: 1.0.0
  *
