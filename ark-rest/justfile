@@ -14,7 +14,7 @@ generate:
 
     # Generate the client directly in the current directory
     npx @openapitools/openapi-generator-cli generate \
-        -i swagger/merged.swagger.json \
+        -i swagger/merged.openapi.json \
         -g rust \
         -o . \
         -c openapi-config.yaml \

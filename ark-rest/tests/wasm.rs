@@ -17,7 +17,10 @@ async fn test_get_info() {
 
     match client.get_info().await {
         Ok(info) => {
-            assert!(info.round_interval > 0, "Round interval should be positive");
+            assert!(
+                info.session_duration > 0,
+                "Session duration should be positive"
+            );
         }
         Err(err) => {
             web_sys::console::error_1(&format!("Error getting info: {err:?}").into());
@@ -45,7 +48,7 @@ async fn test_get_offchain_address() {
 
     let vtxo = Vtxo::new_default(
         &secp,
-        server_info.pk.into(),
+        server_info.signer_pk.into(),
         pk.into(),
         server_info.unilateral_exit_delay,
         server_info.network,

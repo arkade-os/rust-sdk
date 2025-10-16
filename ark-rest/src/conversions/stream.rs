@@ -1,8 +1,7 @@
 //! Stream event type conversions
 
-use crate::conversions::ConversionError;
+use crate::conversions::{parse_sequence_number, ConversionError};
 use crate::models;
-use ark_core::server::BatchFailed;
 use ark_core::server::BatchFinalizationEvent;
 use ark_core::server::BatchFinalizedEvent;
 use ark_core::server::BatchStartedEvent;
@@ -11,6 +10,7 @@ use ark_core::server::TreeNoncesAggregatedEvent;
 use ark_core::server::TreeSignatureEvent;
 use ark_core::server::TreeSigningStartedEvent;
 use ark_core::server::TreeTxEvent;
+use ark_core::server::{BatchFailed, NoncePks};
 use bitcoin::base64;
 use bitcoin::base64::Engine;
 use bitcoin::hex::FromHex;
@@ -20,10 +20,10 @@ use bitcoin::Psbt;
 use bitcoin::Txid;
 use std::str::FromStr;
 
-impl TryFrom<models::V1GetEventStreamResponse> for StreamEvent {
+impl TryFrom<models::GetEventStreamResponse> for StreamEvent {
     type Error = ConversionError;
 
-    fn try_from(response: models::V1GetEventStreamResponse) -> Result<Self, Self::Error> {
+    fn try_from(response: models::GetEventStreamResponse) -> Result<Self, Self::Error> {
         if let Some(batch_started) = response.batch_started {
             return Ok(StreamEvent::BatchStarted(batch_started.try_into()?));
         } else if let Some(batch_finalization) = response.batch_finalization {
@@ -52,28 +52,27 @@ impl TryFrom<models::V1GetEventStreamResponse> for StreamEvent {
     }
 }
 
-impl TryFrom<models::V1BatchStartedEvent> for BatchStartedEvent {
+impl TryFrom<models::BatchStartedEvent> for BatchStartedEvent {
     type Error = ConversionError;
 
-    fn try_from(event: models::V1BatchStartedEvent) -> Result<Self, Self::Error> {
+    fn try_from(event: models::BatchStartedEvent) -> Result<Self, Self::Error> {
+        let expiry = event
+            .batch_expiry
+            .ok_or_else(|| ConversionError("Missing batch_expiry".to_string()))?;
         Ok(BatchStartedEvent {
             id: event
                 .id
                 .ok_or_else(|| ConversionError("Missing batch id".to_string()))?,
             intent_id_hashes: event.intent_id_hashes.unwrap_or_default(),
-            batch_expiry: event
-                .batch_expiry
-                .ok_or_else(|| ConversionError("Missing batch_expiry".to_string()))?
-                .parse::<i64>()
-                .map_err(|e| ConversionError(format!("Invalid batch_expiry: {e}")))?,
+            batch_expiry: parse_sequence_number(expiry)?,
         })
     }
 }
 
-impl TryFrom<models::V1BatchFinalizationEvent> for BatchFinalizationEvent {
+impl TryFrom<models::BatchFinalizationEvent> for BatchFinalizationEvent {
     type Error = ConversionError;
 
-    fn try_from(event: models::V1BatchFinalizationEvent) -> Result<Self, Self::Error> {
+    fn try_from(event: models::BatchFinalizationEvent) -> Result<Self, Self::Error> {
         let id = event
             .id
             .ok_or_else(|| ConversionError("Missing batch id".to_string()))?;
@@ -97,10 +96,10 @@ impl TryFrom<models::V1BatchFinalizationEvent> for BatchFinalizationEvent {
     }
 }
 
-impl TryFrom<models::V1BatchFinalizedEvent> for BatchFinalizedEvent {
+impl TryFrom<models::BatchFinalizedEvent> for BatchFinalizedEvent {
     type Error = ConversionError;
 
-    fn try_from(event: models::V1BatchFinalizedEvent) -> Result<Self, Self::Error> {
+    fn try_from(event: models::BatchFinalizedEvent) -> Result<Self, Self::Error> {
         let id = event
             .id
             .ok_or_else(|| ConversionError("Missing batch id".to_string()))?;
@@ -117,10 +116,10 @@ impl TryFrom<models::V1BatchFinalizedEvent> for BatchFinalizedEvent {
     }
 }
 
-impl TryFrom<models::V1BatchFailedEvent> for BatchFailed {
+impl TryFrom<models::BatchFailedEvent> for BatchFailed {
     type Error = ConversionError;
 
-    fn try_from(event: models::V1BatchFailedEvent) -> Result<Self, Self::Error> {
+    fn try_from(event: models::BatchFailedEvent) -> Result<Self, Self::Error> {
         Ok(BatchFailed {
             id: event
                 .id
@@ -132,10 +131,10 @@ impl TryFrom<models::V1BatchFailedEvent> for BatchFailed {
     }
 }
 
-impl TryFrom<models::V1TreeSigningStartedEvent> for TreeSigningStartedEvent {
+impl TryFrom<models::TreeSigningStartedEvent> for TreeSigningStartedEvent {
     type Error = ConversionError;
 
-    fn try_from(event: models::V1TreeSigningStartedEvent) -> Result<Self, Self::Error> {
+    fn try_from(event: models::TreeSigningStartedEvent) -> Result<Self, Self::Error> {
         let id = event
             .id
             .ok_or_else(|| ConversionError("Missing batch id".to_string()))?;
@@ -173,10 +172,10 @@ impl TryFrom<models::V1TreeSigningStartedEvent> for TreeSigningStartedEvent {
     }
 }
 
-impl TryFrom<models::V1TreeNoncesAggregatedEvent> for TreeNoncesAggregatedEvent {
+impl TryFrom<models::TreeNoncesAggregatedEvent> for TreeNoncesAggregatedEvent {
     type Error = ConversionError;
 
-    fn try_from(event: models::V1TreeNoncesAggregatedEvent) -> Result<Self, Self::Error> {
+    fn try_from(event: models::TreeNoncesAggregatedEvent) -> Result<Self, Self::Error> {
         let id = event
             .id
             .ok_or_else(|| ConversionError("Missing batch id".to_string()))?;
@@ -186,17 +185,17 @@ impl TryFrom<models::V1TreeNoncesAggregatedEvent> for TreeNoncesAggregatedEvent 
             .ok_or_else(|| ConversionError("Missing tree_nonces".to_string()))?;
 
         // Parse the tree_nonces JSON string into NoncePks
-        let tree_nonces = serde_json::from_str::<ark_core::server::NoncePks>(&tree_nonces_str)
-            .map_err(|e| ConversionError(format!("Invalid tree_nonces JSON: {e}")))?;
+        let tree_nonces = NoncePks::decode(tree_nonces_str)
+            .map_err(|e| ConversionError(format!("Invalid tree_nonces: {e}")))?;
 
         Ok(TreeNoncesAggregatedEvent { id, tree_nonces })
     }
 }
 
-impl TryFrom<models::V1TreeTxEvent> for TreeTxEvent {
+impl TryFrom<models::TreeTxEvent> for TreeTxEvent {
     type Error = ConversionError;
 
-    fn try_from(event: models::V1TreeTxEvent) -> Result<Self, Self::Error> {
+    fn try_from(event: models::TreeTxEvent) -> Result<Self, Self::Error> {
         let id = event
             .id
             .ok_or_else(|| ConversionError("Missing batch id".to_string()))?;
@@ -261,10 +260,10 @@ impl TryFrom<models::V1TreeTxEvent> for TreeTxEvent {
     }
 }
 
-impl TryFrom<models::V1TreeSignatureEvent> for TreeSignatureEvent {
+impl TryFrom<models::TreeSignatureEvent> for TreeSignatureEvent {
     type Error = ConversionError;
 
-    fn try_from(event: models::V1TreeSignatureEvent) -> Result<Self, Self::Error> {
+    fn try_from(event: models::TreeSignatureEvent) -> Result<Self, Self::Error> {
         let id = event
             .id
             .ok_or_else(|| ConversionError("Missing batch id".to_string()))?;

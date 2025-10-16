@@ -1,8 +1,8 @@
 //! Type conversions between generated API types and ark-core types
 
-use crate::models::V1GetInfoResponse;
-use crate::models::V1GetSubscriptionResponse;
-use crate::models::V1IndexerVtxo;
+use crate::models::GetInfoResponse;
+use crate::models::GetSubscriptionResponse;
+use crate::models::IndexerVtxo;
 use bitcoin::base64;
 use bitcoin::base64::Engine;
 use bitcoin::secp256k1::PublicKey;
@@ -29,56 +29,133 @@ impl std::fmt::Display for ConversionError {
 
 impl StdError for ConversionError {}
 
-impl TryFrom<V1GetInfoResponse> for ark_core::server::Info {
+impl TryFrom<crate::models::IntentFeeInfo> for ark_core::server::IntentFeeInfo {
     type Error = ConversionError;
 
-    fn try_from(response: V1GetInfoResponse) -> Result<Self, Self::Error> {
+    fn try_from(value: crate::models::IntentFeeInfo) -> Result<Self, Self::Error> {
+        Ok(ark_core::server::IntentFeeInfo {
+            offchain_input: value.offchain_input.unwrap_or_default(),
+            offchain_output: value.offchain_output.unwrap_or_default(),
+            onchain_input: value.onchain_input.unwrap_or_default(),
+            onchain_output: value.onchain_output.unwrap_or_default(),
+        })
+    }
+}
+
+impl TryFrom<crate::models::FeeInfo> for ark_core::server::FeeInfo {
+    type Error = ConversionError;
+
+    fn try_from(value: crate::models::FeeInfo) -> Result<Self, Self::Error> {
+        let intent_fee = value
+            .intent_fee
+            .map(ark_core::server::IntentFeeInfo::try_from)
+            .transpose()?;
+
+        let tx_fee_rate = value.tx_fee_rate.unwrap_or_default();
+
+        Ok(ark_core::server::FeeInfo {
+            intent_fee,
+            tx_fee_rate,
+        })
+    }
+}
+
+impl TryFrom<crate::models::ScheduledSession> for ark_core::server::ScheduledSession {
+    type Error = ConversionError;
+
+    fn try_from(value: crate::models::ScheduledSession) -> Result<Self, Self::Error> {
+        let next_start_time = value
+            .next_start_time
+            .ok_or_else(|| ConversionError("Missing next_start_time".to_string()))?;
+        let next_end_time = value
+            .next_end_time
+            .ok_or_else(|| ConversionError("Missing next_end_time".to_string()))?;
+        let period = value
+            .period
+            .ok_or_else(|| ConversionError("Missing period".to_string()))?;
+        let duration = value
+            .duration
+            .ok_or_else(|| ConversionError("Missing duration".to_string()))?;
+
+        let fees = value
+            .fees
+            .map(ark_core::server::FeeInfo::try_from)
+            .transpose()?;
+
+        Ok(ark_core::server::ScheduledSession {
+            next_start_time,
+            next_end_time,
+            period,
+            duration,
+            fees,
+        })
+    }
+}
+
+impl TryFrom<crate::models::DeprecatedSigner> for ark_core::server::DeprecatedSigner {
+    type Error = ConversionError;
+
+    fn try_from(value: crate::models::DeprecatedSigner) -> Result<Self, Self::Error> {
+        let pubkey_str = value
+            .pubkey
+            .ok_or_else(|| ConversionError("Missing pubkey in deprecated signer".to_string()))?;
+        let pk = pubkey_str
+            .parse::<PublicKey>()
+            .map_err(|e| ConversionError(format!("Invalid pubkey '{pubkey_str}': {e}")))?;
+
+        let cutoff_date = value.cutoff_date.ok_or_else(|| {
+            ConversionError("Missing cutoff_date in deprecated signer".to_string())
+        })?;
+
+        Ok(ark_core::server::DeprecatedSigner { pk, cutoff_date })
+    }
+}
+
+impl TryFrom<GetInfoResponse> for ark_core::server::Info {
+    type Error = ConversionError;
+
+    fn try_from(response: GetInfoResponse) -> Result<Self, Self::Error> {
+        // Parse signer_pk
         let signer_pubkey_str = response
             .signer_pubkey
             .ok_or_else(|| ConversionError("Missing signer_pubkey".to_string()))?;
-        let pk = signer_pubkey_str.parse::<PublicKey>().map_err(|e| {
-            ConversionError(format!("Invalid signer_pubkey '{signer_pubkey_str}': {e}",))
+        let signer_pk = signer_pubkey_str.parse::<PublicKey>().map_err(|e| {
+            ConversionError(format!("Invalid signer_pubkey '{signer_pubkey_str}': {e}"))
         })?;
 
-        let vtxo_tree_expiry_str = response
-            .vtxo_tree_expiry
-            .ok_or_else(|| ConversionError("Missing vtxo_tree_expiry".to_string()))?;
-        let vtxo_tree_expiry_val = vtxo_tree_expiry_str.parse::<i64>().map_err(|e| {
+        // Parse forfeit_pk
+        let forfeit_pubkey_str = response
+            .forfeit_pubkey
+            .ok_or_else(|| ConversionError("Missing forfeit_pubkey".to_string()))?;
+        let forfeit_pk = forfeit_pubkey_str.parse::<PublicKey>().map_err(|e| {
             ConversionError(format!(
-                "Invalid vtxo_tree_expiry '{vtxo_tree_expiry_str}': {e}",
+                "Invalid forfeit_pubkey '{forfeit_pubkey_str}': {e}"
             ))
         })?;
-        let vtxo_tree_expiry = parse_sequence_number(vtxo_tree_expiry_val)?;
 
-        let unilateral_exit_delay_str = response
+        // Parse checkpoint_tapscript
+        let checkpoint_tapscript_str = response
+            .checkpoint_tapscript
+            .ok_or_else(|| ConversionError("Missing checkpoint_tapscript".to_string()))?;
+        let checkpoint_tapscript = ScriptBuf::from_hex(&checkpoint_tapscript_str).map_err(|e| {
+            ConversionError(format!(
+                "Invalid checkpoint_tapscript hex '{checkpoint_tapscript_str}': {e}"
+            ))
+        })?;
+
+        // Parse unilateral_exit_delay
+        let unilateral_exit_delay_val = response
             .unilateral_exit_delay
             .ok_or_else(|| ConversionError("Missing unilateral_exit_delay".to_string()))?;
-        let unilateral_exit_delay_val = unilateral_exit_delay_str.parse::<i64>().map_err(|e| {
-            ConversionError(format!(
-                "Invalid unilateral_exit_delay '{unilateral_exit_delay_str}': {e}",
-            ))
-        })?;
         let unilateral_exit_delay = parse_sequence_number(unilateral_exit_delay_val)?;
 
-        let boarding_exit_delay_str = response
+        // Parse boarding_exit_delay
+        let boarding_exit_delay_val = response
             .boarding_exit_delay
             .ok_or_else(|| ConversionError("Missing boarding_exit_delay".to_string()))?;
-        let boarding_exit_delay_val = boarding_exit_delay_str.parse::<i64>().map_err(|e| {
-            ConversionError(format!(
-                "Invalid boarding_exit_delay '{boarding_exit_delay_str}': {e}",
-            ))
-        })?;
         let boarding_exit_delay = parse_sequence_number(boarding_exit_delay_val)?;
 
-        let round_interval_str = response
-            .round_interval
-            .ok_or_else(|| ConversionError("Missing round_interval".to_string()))?;
-        let round_interval = round_interval_str.parse::<i64>().map_err(|e| {
-            ConversionError(format!(
-                "Invalid round_interval '{round_interval_str}': {e}",
-            ))
-        })?;
-
+        // Parse network
         let network_str = response
             .network
             .ok_or_else(|| ConversionError("Missing network".to_string()))?;
@@ -86,14 +163,19 @@ impl TryFrom<V1GetInfoResponse> for ark_core::server::Info {
             .parse::<Network>()
             .map_err(|e| ConversionError(format!("Invalid network '{network_str}': {e}")))?;
 
-        let dust_str = response
+        // Parse session_duration
+        let session_duration = response
+            .session_duration
+            .ok_or_else(|| ConversionError("Missing session_duration".to_string()))?
+            as u64;
+
+        // Parse dust
+        let dust_val = response
             .dust
             .ok_or_else(|| ConversionError("Missing dust".to_string()))?;
-        let dust = dust_str
-            .parse::<u64>()
-            .map_err(|e| ConversionError(format!("Invalid dust '{dust_str}': {e}")))
-            .map(Amount::from_sat)?;
+        let dust = Amount::from_sat(dust_val as u64);
 
+        // Parse forfeit_address
         let forfeit_address_str = response
             .forfeit_address
             .ok_or_else(|| ConversionError("Missing forfeit_address".to_string()))?;
@@ -101,98 +183,96 @@ impl TryFrom<V1GetInfoResponse> for ark_core::server::Info {
             .parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
             .map_err(|e| {
                 ConversionError(format!(
-                    "Invalid forfeit_address '{forfeit_address_str}': {e}",
+                    "Invalid forfeit_address '{forfeit_address_str}': {e}"
                 ))
             })?
             .require_network(network)
             .map_err(|e| {
                 ConversionError(format!(
-                    "Address network mismatch for '{forfeit_address_str}': {e}",
+                    "Address network mismatch for '{forfeit_address_str}': {e}"
                 ))
             })?;
 
+        // Parse version
         let version = response
             .version
             .ok_or_else(|| ConversionError("Missing version".to_string()))?;
 
+        // Parse digest
+        let digest = response.digest.unwrap_or_default();
+
+        // Parse utxo amount limits
         let utxo_min_amount = match response.utxo_min_amount {
-            Some(s) => {
-                let val = s
-                    .parse::<i64>()
-                    .map_err(|e| ConversionError(format!("Invalid utxo_min_amount '{s}': {e}")))?;
-                if val < 0 {
-                    None
-                } else {
-                    Some(Amount::from_sat(val as u64))
-                }
-            }
-            None => None,
+            Some(val) if val >= 0 => Some(Amount::from_sat(val as u64)),
+            _ => None,
         };
 
         let utxo_max_amount = match response.utxo_max_amount {
-            Some(s) => {
-                let val = s
-                    .parse::<i64>()
-                    .map_err(|e| ConversionError(format!("Invalid utxo_max_amount '{s}': {e}")))?;
-                if val < 0 {
-                    None
-                } else {
-                    Some(Amount::from_sat(val as u64))
-                }
-            }
-            None => None,
+            Some(val) if val >= 0 => Some(Amount::from_sat(val as u64)),
+            _ => None,
         };
 
         let vtxo_min_amount = match response.vtxo_min_amount {
-            Some(s) => {
-                let val = s
-                    .parse::<i64>()
-                    .map_err(|e| ConversionError(format!("Invalid vtxo_min_amount '{s}': {e}")))?;
-                if val < 0 {
-                    None
-                } else {
-                    Some(Amount::from_sat(val as u64))
-                }
-            }
-            None => None,
+            Some(val) if val >= 0 => Some(Amount::from_sat(val as u64)),
+            _ => None,
         };
 
         let vtxo_max_amount = match response.vtxo_max_amount {
-            Some(s) => {
-                let val = s
-                    .parse::<i64>()
-                    .map_err(|e| ConversionError(format!("Invalid vtxo_max_amount '{s}': {e}")))?;
-                if val < 0 {
-                    None
-                } else {
-                    Some(Amount::from_sat(val as u64))
-                }
-            }
-            None => None,
+            Some(val) if val >= 0 => Some(Amount::from_sat(val as u64)),
+            _ => None,
         };
 
+        // Parse fees
+        let fees = response
+            .fees
+            .map(ark_core::server::FeeInfo::try_from)
+            .transpose()?;
+
+        // Parse scheduled_session
+        let scheduled_session = response
+            .scheduled_session
+            .map(ark_core::server::ScheduledSession::try_from)
+            .transpose()?;
+
+        // Parse deprecated_signers
+        let deprecated_signers = response
+            .deprecated_signers
+            .unwrap_or_default()
+            .into_iter()
+            .map(ark_core::server::DeprecatedSigner::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Parse service_status
+        let service_status = response.service_status.unwrap_or_default();
+
         Ok(ark_core::server::Info {
-            pk,
-            vtxo_tree_expiry,
+            version,
+            signer_pk,
+            forfeit_pk,
+            forfeit_address,
+            checkpoint_tapscript,
+            network,
+            session_duration,
             unilateral_exit_delay,
             boarding_exit_delay,
-            round_interval,
-            network,
-            dust,
-            forfeit_address,
-            version,
             utxo_min_amount,
             utxo_max_amount,
             vtxo_min_amount,
             vtxo_max_amount,
+            dust,
+            fees,
+            scheduled_session,
+            deprecated_signers,
+            service_status,
+            digest,
         })
     }
 }
 
-impl TryFrom<V1IndexerVtxo> for ark_core::server::VirtualTxOutPoint {
+impl TryFrom<IndexerVtxo> for ark_core::server::VirtualTxOutPoint {
     type Error = ConversionError;
 
-    fn try_from(value: V1IndexerVtxo) -> Result<Self, Self::Error> {
+    fn try_from(value: IndexerVtxo) -> Result<Self, Self::Error> {
         // Parse outpoint
         let outpoint_data = value
             .outpoint
@@ -213,28 +293,19 @@ impl TryFrom<V1IndexerVtxo> for ark_core::server::VirtualTxOutPoint {
         let outpoint = OutPoint { txid, vout };
 
         // Parse timestamps
-        let created_at_str = value
+        let created_at = value
             .created_at
             .ok_or_else(|| ConversionError("Missing created_at".to_string()))?;
-        let created_at = created_at_str
-            .parse::<i64>()
-            .map_err(|e| ConversionError(format!("Invalid created_at '{created_at_str}': {e}")))?;
 
-        let expires_at_str = value
+        let expires_at = value
             .expires_at
             .ok_or_else(|| ConversionError("Missing expires_at".to_string()))?;
-        let expires_at = expires_at_str
-            .parse::<i64>()
-            .map_err(|e| ConversionError(format!("Invalid expires_at '{expires_at_str}': {e}")))?;
 
         // Parse amount
-        let amount_str = value
+        let amount_val = value
             .amount
             .ok_or_else(|| ConversionError("Missing amount".to_string()))?;
-        let amount_val = amount_str
-            .parse::<u64>()
-            .map_err(|e| ConversionError(format!("Invalid amount '{amount_str}': {e}")))?;
-        let amount = Amount::from_sat(amount_val);
+        let amount = Amount::from_sat(amount_val as u64);
 
         // Parse script
         let script_str = value
@@ -314,17 +385,31 @@ fn parse_sequence_number(value: i64) -> Result<bitcoin::Sequence, ConversionErro
     Ok(sequence)
 }
 
-impl TryFrom<V1GetSubscriptionResponse> for ark_core::server::SubscriptionResponse {
+impl TryFrom<crate::models::IndexerSubscriptionEvent> for ark_core::server::SubscriptionEvent {
     type Error = ConversionError;
 
-    fn try_from(value: V1GetSubscriptionResponse) -> Result<Self, Self::Error> {
-        let txid = value
+    fn try_from(event: crate::models::IndexerSubscriptionEvent) -> Result<Self, Self::Error> {
+        // Parse txid
+        let txid_str = event
             .txid
-            .ok_or_else(|| ConversionError("Missing txid".to_string()))?
-            .parse()
-            .map_err(|e| ConversionError(format!("Invalid txid: {e}")))?;
+            .ok_or_else(|| ConversionError("Missing txid in subscription event".to_string()))?;
+        let txid = txid_str
+            .parse::<Txid>()
+            .map_err(|e| ConversionError(format!("Invalid txid '{txid_str}': {e}")))?;
 
-        let new_vtxos = value
+        // Parse scripts
+        let scripts = event
+            .scripts
+            .unwrap_or_default()
+            .iter()
+            .map(|h| {
+                ScriptBuf::from_hex(h)
+                    .map_err(|e| ConversionError(format!("Invalid script hex: {e}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Parse new_vtxos
+        let new_vtxos = event
             .new_vtxos
             .unwrap_or_default()
             .into_iter()
@@ -332,7 +417,8 @@ impl TryFrom<V1GetSubscriptionResponse> for ark_core::server::SubscriptionRespon
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| ConversionError(format!("Invalid new_vtxos: {e}")))?;
 
-        let spent_vtxos = value
+        // Parse spent_vtxos
+        let spent_vtxos = event
             .spent_vtxos
             .unwrap_or_default()
             .into_iter()
@@ -340,7 +426,8 @@ impl TryFrom<V1GetSubscriptionResponse> for ark_core::server::SubscriptionRespon
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| ConversionError(format!("Invalid spent_vtxos: {e}")))?;
 
-        let tx = if let Some(tx_str) = value.tx.filter(|s| !s.is_empty()) {
+        // Parse tx (PSBT)
+        let tx = if let Some(tx_str) = event.tx.filter(|s| !s.is_empty()) {
             let base64 = base64::engine::GeneralPurpose::new(
                 &base64::alphabet::STANDARD,
                 base64::engine::GeneralPurposeConfig::new(),
@@ -356,33 +443,25 @@ impl TryFrom<V1GetSubscriptionResponse> for ark_core::server::SubscriptionRespon
             None
         };
 
-        let checkpoint_txs = value
+        // Parse checkpoint_txs
+        let checkpoint_txs = event
             .checkpoint_txs
             .unwrap_or_default()
             .into_iter()
             .map(|(k, v)| {
                 let out_point = OutPoint::from_str(&k)
                     .map_err(|e| ConversionError(format!("Invalid checkpoint outpoint: {e}")))?;
-                let txid = v
+                let txid_str = v
                     .txid
-                    .ok_or_else(|| ConversionError("Missing checkpoint txid".to_string()))?
-                    .parse()
+                    .ok_or_else(|| ConversionError("Missing checkpoint txid".to_string()))?;
+                let txid = txid_str
+                    .parse::<Txid>()
                     .map_err(|e| ConversionError(format!("Invalid checkpoint txid: {e}")))?;
                 Ok((out_point, txid))
             })
             .collect::<Result<HashMap<_, _>, ConversionError>>()?;
 
-        let scripts = value
-            .scripts
-            .unwrap_or_default()
-            .iter()
-            .map(|h| {
-                ScriptBuf::from_hex(h)
-                    .map_err(|e| ConversionError(format!("Invalid script hex: {e}")))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(ark_core::server::SubscriptionResponse {
+        Ok(ark_core::server::SubscriptionEvent {
             txid,
             scripts,
             new_vtxos,
@@ -390,5 +469,25 @@ impl TryFrom<V1GetSubscriptionResponse> for ark_core::server::SubscriptionRespon
             tx,
             checkpoint_txs,
         })
+    }
+}
+
+impl TryFrom<GetSubscriptionResponse> for ark_core::server::SubscriptionResponse {
+    type Error = ConversionError;
+
+    fn try_from(value: GetSubscriptionResponse) -> Result<Self, Self::Error> {
+        // Check if it's a heartbeat or an event
+        if value.heartbeat.is_some() {
+            Ok(ark_core::server::SubscriptionResponse::Heartbeat)
+        } else if let Some(event) = value.event {
+            let subscription_event = ark_core::server::SubscriptionEvent::try_from(event)?;
+            Ok(ark_core::server::SubscriptionResponse::Event(Box::new(
+                subscription_event,
+            )))
+        } else {
+            Err(ConversionError(
+                "GetSubscriptionResponse must have either event or heartbeat".to_string(),
+            ))
+        }
     }
 }

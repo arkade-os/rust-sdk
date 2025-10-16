@@ -1,4 +1,4 @@
-use crate::ConversionError;
+use crate::conversions::ConversionError;
 use std::error::Error as StdError;
 use std::fmt;
 
