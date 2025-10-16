@@ -132,7 +132,7 @@ where
     }
 
     /// Broadcast the next unconfirmed transaction in a branch, skipping transactions that are
-    /// already on-chain.
+    /// already on the blockchain.
     ///
     /// ### Returns
     ///
@@ -144,43 +144,58 @@ where
         let blockchain = &self.blockchain();
 
         for parent_tx in branch {
-            let txid = parent_tx.compute_txid();
+            let parent_txid = parent_tx.compute_txid();
 
-            // Check if this transaction is already on-chain.
-            let is_not_published = blockchain.find_tx(&txid).await?.is_none();
-            if is_not_published {
-                // This transaction is not on-chain yet, so broadcast it.
+            let broadcast = || async {
+                let is_not_published = blockchain.find_tx(&parent_txid).await?.is_none();
 
-                let child_tx = self.bump_tx(parent_tx).await?;
+                if is_not_published {
+                    let child_tx = self.bump_tx(parent_tx).await?;
+                    let bump_txid = child_tx.compute_txid();
 
+                    tracing::info!(
+                        txid = %parent_txid,
+                        %bump_txid,
+                        "Broadcasting unilateral exit TX"
+                    );
+
+                    blockchain
+                        .broadcast_package(&[parent_tx, &child_tx])
+                        .await?;
+
+                    Ok(Some(bump_txid))
+                } else {
+                    tracing::debug!(
+                        %parent_txid,
+                        "Unilateral exit TX already found on the blockchain"
+                    );
+
+                    Ok(None)
+                }
+            };
+
+            let res = broadcast
+                .retry(ExponentialBuilder::default().with_max_times(5))
+                .sleep(sleep)
+                .notify(|err: &Error, dur: std::time::Duration| {
+                    tracing::warn!(
+                        "Retrying broadcasting VTXO transaction {parent_txid} after {dur:?}. Error: {err}",
+                    );
+                })
+                .await
+                .with_context(|| format!("Failed to broadcast VTXO transaction {parent_txid}"))?;
+
+            if let Some(bump_txid) = res {
                 tracing::info!(
-                    %txid,
-                    bump_txid = %child_tx.compute_txid(),
-                    "Broadcasting unilateral exit TX"
+                    txid = %parent_txid,
+                    %bump_txid,
+                    "Broadcast VTXO transaction"
                 );
 
-                let broadcast =
-                    || async { blockchain.broadcast_package(&[parent_tx, &child_tx]).await };
-
-                broadcast
-                    .retry(ExponentialBuilder::default().with_max_times(5))
-                    .sleep(sleep)
-                    // TODO: Use `when` to only retry certain errors.
-                    .notify(|err: &Error, dur: std::time::Duration| {
-                        tracing::warn!(
-                            "Retrying broadcasting VTXO transaction {txid} after {dur:?}. Error: {err}",
-                        );
-                    })
-                    .await
-                    .with_context(|| format!("Failed to broadcast VTXO transaction {txid}"))?;
-
-                tracing::info!(
-                    %txid,
-                    bump_txid = %child_tx.compute_txid(),
-                    "Broadcasted VTXO transaction"
-                );
-
-                return Ok(Some(txid));
+                return Ok(Some(parent_txid));
+            } else {
+                // This transaction was already found on the blockchain.
+                continue;
             }
         }
 

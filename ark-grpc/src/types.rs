@@ -1,7 +1,13 @@
 use crate::generated;
 use crate::Error;
 use ark_core::server;
+use ark_core::server::parse_sequence_number;
+use ark_core::server::DeprecatedSigner;
+use ark_core::server::FeeInfo;
+use ark_core::server::IntentFeeInfo;
+use ark_core::server::ScheduledSession;
 use bitcoin::address::NetworkUnchecked;
+use bitcoin::hex::FromHex;
 use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
@@ -52,20 +58,29 @@ impl TryFrom<generated::ark::v1::GetInfoResponse> for server::Info {
     type Error = Error;
 
     fn try_from(value: generated::ark::v1::GetInfoResponse) -> Result<Self, Self::Error> {
-        let pk = value.signer_pubkey.parse().map_err(Error::conversion)?;
-
-        let vtxo_tree_expiry = parse_sequence_number(value.vtxo_tree_expiry)?;
-        let unilateral_exit_delay = parse_sequence_number(value.unilateral_exit_delay)?;
-        let boarding_exit_delay = parse_sequence_number(value.boarding_exit_delay)?;
+        let signer_pk = value.signer_pubkey.parse().map_err(Error::conversion)?;
+        let forfeit_pk = value.forfeit_pubkey.parse().map_err(Error::conversion)?;
 
         let network = Network::from_str(value.network.as_str()).map_err(Error::conversion)?;
         let network = bitcoin::Network::from(network);
 
         let forfeit_address: Address<NetworkUnchecked> =
             value.forfeit_address.parse().map_err(Error::conversion)?;
+
         let forfeit_address = forfeit_address
             .require_network(network)
             .map_err(Error::conversion)?;
+
+        let checkpoint_tapscript = ScriptBuf::from_bytes(
+            Vec::from_hex(&value.checkpoint_tapscript).map_err(Error::conversion)?,
+        );
+
+        let session_duration = value.session_duration as u64;
+
+        let unilateral_exit_delay =
+            parse_sequence_number(value.unilateral_exit_delay).map_err(Error::conversion)?;
+        let boarding_exit_delay =
+            parse_sequence_number(value.boarding_exit_delay).map_err(Error::conversion)?;
 
         let utxo_min_amount = match value.utxo_min_amount.is_positive() {
             true => Some(Amount::from_sat(value.utxo_min_amount as u64)),
@@ -87,43 +102,76 @@ impl TryFrom<generated::ark::v1::GetInfoResponse> for server::Info {
             false => None,
         };
 
+        let fees = value.fees.map(FeeInfo::from);
+        let scheduled_session = value.scheduled_session.map(ScheduledSession::from);
+
+        let deprecated_signers = value
+            .deprecated_signers
+            .into_iter()
+            .map(DeprecatedSigner::try_from)
+            .collect::<Result<Vec<_>, Error>>()?;
+
         Ok(Self {
-            pk,
-            vtxo_tree_expiry,
+            version: value.version,
+            signer_pk,
+            forfeit_pk,
+            forfeit_address,
+            checkpoint_tapscript,
+            network,
+            session_duration,
             unilateral_exit_delay,
             boarding_exit_delay,
-            round_interval: value.round_interval,
-            network,
-            dust: Amount::from_sat(value.dust as u64),
-            forfeit_address,
-            version: value.version,
             utxo_min_amount,
             utxo_max_amount,
             vtxo_min_amount,
             vtxo_max_amount,
+            dust: Amount::from_sat(value.dust as u64),
+            fees,
+            scheduled_session,
+            deprecated_signers,
+            service_status: value.service_status,
+            digest: value.digest,
         })
     }
 }
 
-fn parse_sequence_number(value: i64) -> Result<bitcoin::Sequence, Error> {
-    /// The threshold that determines whether an expiry or exit delay should be parsed as a
-    /// number of blocks or a number of seconds.
-    ///
-    /// - A value below 512 is considered a number of blocks.
-    /// - A value over 512 is considered a number of seconds.
-    const ARBITRARY_SEQUENCE_THRESHOLD: i64 = 512;
+impl From<generated::ark::v1::FeeInfo> for FeeInfo {
+    fn from(value: generated::ark::v1::FeeInfo) -> Self {
+        FeeInfo {
+            intent_fee: value.intent_fee.map(|i| IntentFeeInfo {
+                offchain_input: i.offchain_input,
+                offchain_output: i.offchain_output,
+                onchain_input: i.onchain_input,
+                onchain_output: i.onchain_output,
+            }),
+            tx_fee_rate: value.tx_fee_rate,
+        }
+    }
+}
 
-    let sequence = if value.is_negative() {
-        return Err(Error::conversion(format!(
-            "invalid sequence number: {value}"
-        )));
-    } else if value < ARBITRARY_SEQUENCE_THRESHOLD {
-        bitcoin::Sequence::from_height(value as u16)
-    } else {
-        bitcoin::Sequence::from_seconds_ceil(value as u32).map_err(Error::conversion)?
-    };
+impl From<generated::ark::v1::ScheduledSession> for ScheduledSession {
+    fn from(value: generated::ark::v1::ScheduledSession) -> Self {
+        Self {
+            next_start_time: value.next_start_time,
+            next_end_time: value.next_end_time,
+            period: value.period,
+            duration: value.duration,
+            fees: value.fees.map(FeeInfo::from),
+        }
+    }
+}
 
-    Ok(sequence)
+impl TryFrom<generated::ark::v1::DeprecatedSigner> for DeprecatedSigner {
+    type Error = Error;
+
+    fn try_from(value: generated::ark::v1::DeprecatedSigner) -> Result<Self, Self::Error> {
+        let pk = value.pubkey.parse().map_err(Error::conversion)?;
+
+        Ok(Self {
+            pk,
+            cutoff_date: value.cutoff_date,
+        })
+    }
 }
 
 impl TryFrom<&generated::ark::v1::IndexerVtxo> for server::VirtualTxOutPoint {

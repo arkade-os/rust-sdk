@@ -1,0 +1,11 @@
+version: v1
+name: buf.build/arkade-os/arkd
+deps:
+  - buf.build/meshapi/grpc-api-gateway
+breaking:
+  use:
+    - FILE
+  ignore_unstable_packages: true
+lint:
+  use:
+    - DEFAULT

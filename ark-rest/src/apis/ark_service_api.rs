@@ -1,7 +1,7 @@
 /*
  * Ark API
  *
- * Combined Ark Service and Indexer API
+ * Combined Ark Service, Indexer, Admin, Signer Manager, and Wallet API
  *
  * The version of the OpenAPI document: 1.0.0
  *
@@ -22,7 +22,7 @@ use serde::Serialize;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ArkServiceConfirmRegistrationError {
-    DefaultResponse(models::RpcStatus),
+    DefaultResponse(models::Status),
     UnknownValue(serde_json::Value),
 }
 
@@ -30,7 +30,7 @@ pub enum ArkServiceConfirmRegistrationError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ArkServiceDeleteIntentError {
-    DefaultResponse(models::RpcStatus),
+    DefaultResponse(models::Status),
     UnknownValue(serde_json::Value),
 }
 
@@ -38,7 +38,7 @@ pub enum ArkServiceDeleteIntentError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ArkServiceFinalizeTxError {
-    DefaultResponse(models::RpcStatus),
+    DefaultResponse(models::Status),
     UnknownValue(serde_json::Value),
 }
 
@@ -46,7 +46,7 @@ pub enum ArkServiceFinalizeTxError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ArkServiceGetEventStreamError {
-    DefaultResponse(models::RpcStatus),
+    DefaultResponse(models::Status),
     UnknownValue(serde_json::Value),
 }
 
@@ -54,7 +54,15 @@ pub enum ArkServiceGetEventStreamError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ArkServiceGetInfoError {
-    DefaultResponse(models::RpcStatus),
+    DefaultResponse(models::Status),
+    UnknownValue(serde_json::Value),
+}
+
+/// struct for typed errors of method [`ark_service_get_pending_tx`]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ArkServiceGetPendingTxError {
+    DefaultResponse(models::Status),
     UnknownValue(serde_json::Value),
 }
 
@@ -62,7 +70,7 @@ pub enum ArkServiceGetInfoError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ArkServiceGetTransactionsStreamError {
-    DefaultResponse(models::RpcStatus),
+    DefaultResponse(models::Status),
     UnknownValue(serde_json::Value),
 }
 
@@ -70,7 +78,7 @@ pub enum ArkServiceGetTransactionsStreamError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ArkServiceRegisterIntentError {
-    DefaultResponse(models::RpcStatus),
+    DefaultResponse(models::Status),
     UnknownValue(serde_json::Value),
 }
 
@@ -78,7 +86,7 @@ pub enum ArkServiceRegisterIntentError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ArkServiceSubmitSignedForfeitTxsError {
-    DefaultResponse(models::RpcStatus),
+    DefaultResponse(models::Status),
     UnknownValue(serde_json::Value),
 }
 
@@ -86,7 +94,7 @@ pub enum ArkServiceSubmitSignedForfeitTxsError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ArkServiceSubmitTreeNoncesError {
-    DefaultResponse(models::RpcStatus),
+    DefaultResponse(models::Status),
     UnknownValue(serde_json::Value),
 }
 
@@ -94,7 +102,7 @@ pub enum ArkServiceSubmitTreeNoncesError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ArkServiceSubmitTreeSignaturesError {
-    DefaultResponse(models::RpcStatus),
+    DefaultResponse(models::Status),
     UnknownValue(serde_json::Value),
 }
 
@@ -102,16 +110,18 @@ pub enum ArkServiceSubmitTreeSignaturesError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ArkServiceSubmitTxError {
-    DefaultResponse(models::RpcStatus),
+    DefaultResponse(models::Status),
     UnknownValue(serde_json::Value),
 }
 
+/// ConfirmRegistration allows a client that has been selected for the next batch to confirm its
+/// participation by revealing the intent id.
 pub async fn ark_service_confirm_registration(
     configuration: &configuration::Configuration,
-    body: models::V1ConfirmRegistrationRequest,
+    confirm_registration_request: models::ConfirmRegistrationRequest,
 ) -> Result<serde_json::Value, Error<ArkServiceConfirmRegistrationError>> {
     // add a prefix to parameters to efficiently prevent name collisions
-    let p_body = body;
+    let p_confirm_registration_request = confirm_registration_request;
 
     let uri_str = format!("{}/v1/batch/ack", configuration.base_path);
     let mut req_builder = configuration
@@ -121,7 +131,7 @@ pub async fn ark_service_confirm_registration(
     if let Some(ref user_agent) = configuration.user_agent {
         req_builder = req_builder.header(reqwest::header::USER_AGENT, user_agent.clone());
     }
-    req_builder = req_builder.json(&p_body);
+    req_builder = req_builder.json(&p_confirm_registration_request);
 
     let req = req_builder.build()?;
     let resp = configuration.client.execute(req).await?;
@@ -153,12 +163,15 @@ pub async fn ark_service_confirm_registration(
     }
 }
 
+/// DeleteIntent removes a previously registered intent from the server. The client should provide
+/// the BIP-322 signature and message including any of the vtxos used in the registered intent to
+/// prove its ownership. The server should delete the intent and return success.
 pub async fn ark_service_delete_intent(
     configuration: &configuration::Configuration,
-    body: models::V1DeleteIntentRequest,
+    delete_intent_request: models::DeleteIntentRequest,
 ) -> Result<serde_json::Value, Error<ArkServiceDeleteIntentError>> {
     // add a prefix to parameters to efficiently prevent name collisions
-    let p_body = body;
+    let p_delete_intent_request = delete_intent_request;
 
     let uri_str = format!("{}/v1/batch/deleteIntent", configuration.base_path);
     let mut req_builder = configuration
@@ -168,7 +181,7 @@ pub async fn ark_service_delete_intent(
     if let Some(ref user_agent) = configuration.user_agent {
         req_builder = req_builder.header(reqwest::header::USER_AGENT, user_agent.clone());
     }
-    req_builder = req_builder.json(&p_body);
+    req_builder = req_builder.json(&p_delete_intent_request);
 
     let req = req_builder.build()?;
     let resp = configuration.client.execute(req).await?;
@@ -199,12 +212,15 @@ pub async fn ark_service_delete_intent(
     }
 }
 
+/// FinalizeTx is the last lef of the process of spending vtxos offchain and allows a client to
+/// submit the fully signed checkpoint txs for the provided Ark txid . The server verifies the
+/// signed checkpoint transactions and returns success if everything is valid.
 pub async fn ark_service_finalize_tx(
     configuration: &configuration::Configuration,
-    body: models::V1FinalizeTxRequest,
+    finalize_tx_request: models::FinalizeTxRequest,
 ) -> Result<serde_json::Value, Error<ArkServiceFinalizeTxError>> {
     // add a prefix to parameters to efficiently prevent name collisions
-    let p_body = body;
+    let p_finalize_tx_request = finalize_tx_request;
 
     let uri_str = format!("{}/v1/tx/finalize", configuration.base_path);
     let mut req_builder = configuration
@@ -214,7 +230,7 @@ pub async fn ark_service_finalize_tx(
     if let Some(ref user_agent) = configuration.user_agent {
         req_builder = req_builder.header(reqwest::header::USER_AGENT, user_agent.clone());
     }
-    req_builder = req_builder.json(&p_body);
+    req_builder = req_builder.json(&p_finalize_tx_request);
 
     let req = req_builder.build()?;
     let resp = configuration.client.execute(req).await?;
@@ -245,10 +261,15 @@ pub async fn ark_service_finalize_tx(
     }
 }
 
+/// GetEventStream is a server-side streaming RPC that allows clients to receive a stream of events
+/// related to batch processing. Clients should use this stream as soon as they are ready to join a
+/// batch and can listen for various events such as batch start, batch finalization, and other
+/// related activities. The server pushes these events to the client in real-time as soon as its
+/// ready to move to the next phase of the batch processing.
 pub async fn ark_service_get_event_stream(
     configuration: &configuration::Configuration,
     topics: Option<Vec<String>>,
-) -> Result<models::StreamResultOfV1GetEventStreamResponse, Error<ArkServiceGetEventStreamError>> {
+) -> Result<models::GetEventStreamResponse, Error<ArkServiceGetEventStreamError>> {
     // add a prefix to parameters to efficiently prevent name collisions
     let p_topics = topics;
 
@@ -256,7 +277,7 @@ pub async fn ark_service_get_event_stream(
     let mut req_builder = configuration.client.request(reqwest::Method::GET, &uri_str);
 
     if let Some(ref param_value) = p_topics {
-        req_builder = match "multi" {
+        req_builder = match "csv" {
             "multi" => req_builder.query(
                 &param_value
                     .into_iter()
@@ -293,8 +314,8 @@ pub async fn ark_service_get_event_stream(
         let content = resp.text().await?;
         match content_type {
             ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
-            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::StreamResultOfV1GetEventStreamResponse`"))),
-            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::StreamResultOfV1GetEventStreamResponse`")))),
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::GetEventStreamResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::GetEventStreamResponse`")))),
         }
     } else {
         let content = resp.text().await?;
@@ -307,9 +328,10 @@ pub async fn ark_service_get_event_stream(
     }
 }
 
+/// GetInfo returns information and parameters of the server.
 pub async fn ark_service_get_info(
     configuration: &configuration::Configuration,
-) -> Result<models::V1GetInfoResponse, Error<ArkServiceGetInfoError>> {
+) -> Result<models::GetInfoResponse, Error<ArkServiceGetInfoError>> {
     let uri_str = format!("{}/v1/info", configuration.base_path);
     let mut req_builder = configuration.client.request(reqwest::Method::GET, &uri_str);
 
@@ -332,8 +354,8 @@ pub async fn ark_service_get_info(
         let content = resp.text().await?;
         match content_type {
             ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
-            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::V1GetInfoResponse`"))),
-            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::V1GetInfoResponse`")))),
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::GetInfoResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::GetInfoResponse`")))),
         }
     } else {
         let content = resp.text().await?;
@@ -346,12 +368,61 @@ pub async fn ark_service_get_info(
     }
 }
 
+/// GetPendingTx returns not finalized transaction(s) for a given set of inputs. the client should
+/// provide a BIP322 proof of ownership of the inputs
+pub async fn ark_service_get_pending_tx(
+    configuration: &configuration::Configuration,
+    get_pending_tx_request: models::GetPendingTxRequest,
+) -> Result<models::GetPendingTxResponse, Error<ArkServiceGetPendingTxError>> {
+    // add a prefix to parameters to efficiently prevent name collisions
+    let p_get_pending_tx_request = get_pending_tx_request;
+
+    let uri_str = format!("{}/v1/tx/pending", configuration.base_path);
+    let mut req_builder = configuration
+        .client
+        .request(reqwest::Method::POST, &uri_str);
+
+    if let Some(ref user_agent) = configuration.user_agent {
+        req_builder = req_builder.header(reqwest::header::USER_AGENT, user_agent.clone());
+    }
+    req_builder = req_builder.json(&p_get_pending_tx_request);
+
+    let req = req_builder.build()?;
+    let resp = configuration.client.execute(req).await?;
+
+    let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream");
+    let content_type = super::ContentType::from(content_type);
+
+    if !status.is_client_error() && !status.is_server_error() {
+        let content = resp.text().await?;
+        match content_type {
+            ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::GetPendingTxResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::GetPendingTxResponse`")))),
+        }
+    } else {
+        let content = resp.text().await?;
+        let entity: Option<ArkServiceGetPendingTxError> = serde_json::from_str(&content).ok();
+        Err(Error::ResponseError(ResponseContent {
+            status,
+            content,
+            entity,
+        }))
+    }
+}
+
+/// GetTransactionsStream is a server-side streaming RPC that allows clients to receive
+/// notifications in real-time about any commitment tx or ark tx processed and finalized by the
+/// server. NOTE: the stream doesn't have history support, therefore returns only txs from the
+/// moment it's opened until it's closed.
 pub async fn ark_service_get_transactions_stream(
     configuration: &configuration::Configuration,
-) -> Result<
-    models::StreamResultOfV1GetTransactionsStreamResponse,
-    Error<ArkServiceGetTransactionsStreamError>,
-> {
+) -> Result<models::GetTransactionsStreamResponse, Error<ArkServiceGetTransactionsStreamError>> {
     let uri_str = format!("{}/v1/txs", configuration.base_path);
     let mut req_builder = configuration.client.request(reqwest::Method::GET, &uri_str);
 
@@ -374,8 +445,8 @@ pub async fn ark_service_get_transactions_stream(
         let content = resp.text().await?;
         match content_type {
             ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
-            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::StreamResultOfV1GetTransactionsStreamResponse`"))),
-            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::StreamResultOfV1GetTransactionsStreamResponse`")))),
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::GetTransactionsStreamResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::GetTransactionsStreamResponse`")))),
         }
     } else {
         let content = resp.text().await?;
@@ -389,12 +460,15 @@ pub async fn ark_service_get_transactions_stream(
     }
 }
 
+/// RegisterIntent allows to register a new intent that will be eventually selected by the server
+/// for a particular batch. The client should provide a BIP-322 message with the intent information,
+/// and the server should respond with an intent id.
 pub async fn ark_service_register_intent(
     configuration: &configuration::Configuration,
-    body: models::V1RegisterIntentRequest,
-) -> Result<models::V1RegisterIntentResponse, Error<ArkServiceRegisterIntentError>> {
+    register_intent_request: models::RegisterIntentRequest,
+) -> Result<models::RegisterIntentResponse, Error<ArkServiceRegisterIntentError>> {
     // add a prefix to parameters to efficiently prevent name collisions
-    let p_body = body;
+    let p_register_intent_request = register_intent_request;
 
     let uri_str = format!("{}/v1/batch/registerIntent", configuration.base_path);
     let mut req_builder = configuration
@@ -404,7 +478,7 @@ pub async fn ark_service_register_intent(
     if let Some(ref user_agent) = configuration.user_agent {
         req_builder = req_builder.header(reqwest::header::USER_AGENT, user_agent.clone());
     }
-    req_builder = req_builder.json(&p_body);
+    req_builder = req_builder.json(&p_register_intent_request);
 
     let req = req_builder.build()?;
     let resp = configuration.client.execute(req).await?;
@@ -421,8 +495,8 @@ pub async fn ark_service_register_intent(
         let content = resp.text().await?;
         match content_type {
             ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
-            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::V1RegisterIntentResponse`"))),
-            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::V1RegisterIntentResponse`")))),
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::RegisterIntentResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::RegisterIntentResponse`")))),
         }
     } else {
         let content = resp.text().await?;
@@ -435,12 +509,15 @@ pub async fn ark_service_register_intent(
     }
 }
 
+/// SubmitSignedForfeitTxs allows a client to submit signed forfeit transactions and/or signed
+/// commitment transaction (in case of onboarding). The server should verify the signed txs and
+/// return success.
 pub async fn ark_service_submit_signed_forfeit_txs(
     configuration: &configuration::Configuration,
-    body: models::V1SubmitSignedForfeitTxsRequest,
+    submit_signed_forfeit_txs_request: models::SubmitSignedForfeitTxsRequest,
 ) -> Result<serde_json::Value, Error<ArkServiceSubmitSignedForfeitTxsError>> {
     // add a prefix to parameters to efficiently prevent name collisions
-    let p_body = body;
+    let p_submit_signed_forfeit_txs_request = submit_signed_forfeit_txs_request;
 
     let uri_str = format!("{}/v1/batch/submitForfeitTxs", configuration.base_path);
     let mut req_builder = configuration
@@ -450,7 +527,7 @@ pub async fn ark_service_submit_signed_forfeit_txs(
     if let Some(ref user_agent) = configuration.user_agent {
         req_builder = req_builder.header(reqwest::header::USER_AGENT, user_agent.clone());
     }
-    req_builder = req_builder.json(&p_body);
+    req_builder = req_builder.json(&p_submit_signed_forfeit_txs_request);
 
     let req = req_builder.build()?;
     let resp = configuration.client.execute(req).await?;
@@ -482,12 +559,16 @@ pub async fn ark_service_submit_signed_forfeit_txs(
     }
 }
 
+/// SubmitTreeNonces allows a cosigner to submit the tree nonces for the musig2 session of a given
+/// batch. The client should provide the batch id, the cosigner public key, and the tree nonces. The
+/// server should verify the cosigner public key and the nonces, and store them for later
+/// aggregation once nonces from all clients are collected.
 pub async fn ark_service_submit_tree_nonces(
     configuration: &configuration::Configuration,
-    body: models::V1SubmitTreeNoncesRequest,
+    submit_tree_nonces_request: models::SubmitTreeNoncesRequest,
 ) -> Result<serde_json::Value, Error<ArkServiceSubmitTreeNoncesError>> {
     // add a prefix to parameters to efficiently prevent name collisions
-    let p_body = body;
+    let p_submit_tree_nonces_request = submit_tree_nonces_request;
 
     let uri_str = format!("{}/v1/batch/tree/submitNonces", configuration.base_path);
     let mut req_builder = configuration
@@ -497,7 +578,7 @@ pub async fn ark_service_submit_tree_nonces(
     if let Some(ref user_agent) = configuration.user_agent {
         req_builder = req_builder.header(reqwest::header::USER_AGENT, user_agent.clone());
     }
-    req_builder = req_builder.json(&p_body);
+    req_builder = req_builder.json(&p_submit_tree_nonces_request);
 
     let req = req_builder.build()?;
     let resp = configuration.client.execute(req).await?;
@@ -528,12 +609,16 @@ pub async fn ark_service_submit_tree_nonces(
     }
 }
 
+/// SubmitTreeSignatures allows a cosigner to submit the tree signatures for the musig2 session of a
+/// given batch. The client should provide the batch id, the cosigner public key, and the tree
+/// signatures. The server should verify the cosigner public key and the signatures, and store them
+/// for later aggregation once signatures from all clients are collected.
 pub async fn ark_service_submit_tree_signatures(
     configuration: &configuration::Configuration,
-    body: models::V1SubmitTreeSignaturesRequest,
+    submit_tree_signatures_request: models::SubmitTreeSignaturesRequest,
 ) -> Result<serde_json::Value, Error<ArkServiceSubmitTreeSignaturesError>> {
     // add a prefix to parameters to efficiently prevent name collisions
-    let p_body = body;
+    let p_submit_tree_signatures_request = submit_tree_signatures_request;
 
     let uri_str = format!("{}/v1/batch/tree/submitSignatures", configuration.base_path);
     let mut req_builder = configuration
@@ -543,7 +628,7 @@ pub async fn ark_service_submit_tree_signatures(
     if let Some(ref user_agent) = configuration.user_agent {
         req_builder = req_builder.header(reqwest::header::USER_AGENT, user_agent.clone());
     }
-    req_builder = req_builder.json(&p_body);
+    req_builder = req_builder.json(&p_submit_tree_signatures_request);
 
     let req = req_builder.build()?;
     let resp = configuration.client.execute(req).await?;
@@ -575,12 +660,15 @@ pub async fn ark_service_submit_tree_signatures(
     }
 }
 
+/// SubmitTx is the first leg of the process of spending vtxos offchain and allows a client to
+/// submit a signed Ark transaction and the unsigned checkpoint transactions. The server should
+/// verify the signed transactions and return the fully signed Ark tx and the signed checkpoint txs.
 pub async fn ark_service_submit_tx(
     configuration: &configuration::Configuration,
-    body: models::V1SubmitTxRequest,
-) -> Result<models::V1SubmitTxResponse, Error<ArkServiceSubmitTxError>> {
+    submit_tx_request: models::SubmitTxRequest,
+) -> Result<models::SubmitTxResponse, Error<ArkServiceSubmitTxError>> {
     // add a prefix to parameters to efficiently prevent name collisions
-    let p_body = body;
+    let p_submit_tx_request = submit_tx_request;
 
     let uri_str = format!("{}/v1/tx/submit", configuration.base_path);
     let mut req_builder = configuration
@@ -590,7 +678,7 @@ pub async fn ark_service_submit_tx(
     if let Some(ref user_agent) = configuration.user_agent {
         req_builder = req_builder.header(reqwest::header::USER_AGENT, user_agent.clone());
     }
-    req_builder = req_builder.json(&p_body);
+    req_builder = req_builder.json(&p_submit_tx_request);
 
     let req = req_builder.build()?;
     let resp = configuration.client.execute(req).await?;
@@ -607,8 +695,8 @@ pub async fn ark_service_submit_tx(
         let content = resp.text().await?;
         match content_type {
             ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
-            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::V1SubmitTxResponse`"))),
-            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::V1SubmitTxResponse`")))),
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::SubmitTxResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::SubmitTxResponse`")))),
         }
     } else {
         let content = resp.text().await?;

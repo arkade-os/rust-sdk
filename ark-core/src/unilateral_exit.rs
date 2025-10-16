@@ -10,6 +10,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::hex::DisplayHex;
 use bitcoin::key::Keypair;
 use bitcoin::key::Secp256k1;
+use bitcoin::opcodes::all::*;
 use bitcoin::secp256k1;
 use bitcoin::sighash::Prevouts;
 use bitcoin::sighash::SighashCache;
@@ -18,6 +19,7 @@ use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
 use bitcoin::Psbt;
+use bitcoin::ScriptBuf;
 use bitcoin::Sequence;
 use bitcoin::TapLeafHash;
 use bitcoin::TapSighashType;
@@ -27,6 +29,7 @@ use bitcoin::TxOut;
 use bitcoin::Txid;
 use bitcoin::Weight;
 use bitcoin::Witness;
+use bitcoin::XOnlyPublicKey;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
@@ -450,23 +453,38 @@ pub fn sign_unilateral_exit_tree(
             } else if !psbt.inputs[VTXO_INPUT_INDEX].tap_script_sigs.is_empty() {
                 tracing::debug!(%txid, "Signing script spend for pre-confirmed VTXO");
 
-                // We assume that there is only one script. TODO: May need to revise this.
-                let tap_scripts = psbt.inputs[VTXO_INPUT_INDEX].tap_scripts.iter().next();
-                let tap_script_sigs = psbt.inputs[VTXO_INPUT_INDEX].tap_script_sigs.values();
+                // We always take the first script.
+                let tap_script = psbt.inputs[VTXO_INPUT_INDEX].tap_scripts.iter().next();
+                let tap_script_sigs = &psbt.inputs[VTXO_INPUT_INDEX].tap_script_sigs;
 
-                let (control_block, (script, _)) = tap_scripts.ok_or_else(|| {
+                let (control_block, (script, _)) = tap_script.ok_or_else(|| {
                     Error::transaction(format!("missing tapscripts in virtual TX {txid}"))
                 })?;
 
-                // Construct witness: [sig1, sig2, script, control_block].
+                // Extract pubkeys from the 2-of-2 multisig script to determine signature order.
+                let (pk_0, pk_1) = extract_pubkeys_from_2of2_script(script)?;
+
+                // Compute the TapLeafHash for the script to look up signatures.
+                let leaf_hash = TapLeafHash::from_script(script, control_block.leaf_version);
+
+                // Look up signatures in the correct order based on the pubkeys in the script.
+                let sig_0 = tap_script_sigs.get(&(pk_0, leaf_hash)).ok_or_else(|| {
+                    Error::transaction(format!(
+                        "missing signature for first pubkey {} in virtual TX {txid}",
+                        pk_0
+                    ))
+                })?;
+                let sig_1 = tap_script_sigs.get(&(pk_1, leaf_hash)).ok_or_else(|| {
+                    Error::transaction(format!(
+                        "missing signature for second pubkey {} in virtual TX {txid}",
+                        pk_1
+                    ))
+                })?;
+
+                // Construct witness: [sig_1, sig_0, script, control_block].
                 let mut witness = Witness::new();
-
-                // We assume that the signatures are in the correct order. TODO: May need to
-                // revise this.
-                for sig in tap_script_sigs {
-                    witness.push(sig.to_vec());
-                }
-
+                witness.push(sig_1.to_vec());
+                witness.push(sig_0.to_vec());
                 witness.push(script.as_bytes());
                 witness.push(control_block.serialize());
 
@@ -565,7 +583,7 @@ where
             .zip(sequences.iter())
             .map(|(outpoint, sequence)| TxIn {
                 previous_output: *outpoint,
-                script_sig: bitcoin::ScriptBuf::new(),
+                script_sig: ScriptBuf::new(),
                 sequence: *sequence,
                 witness: Witness::new(),
             })
@@ -605,4 +623,70 @@ fn find_anchor_outpoint(tx: &Transaction) -> Result<OutPoint, Error> {
     }
 
     Err(Error::transaction("anchor output not found in transaction"))
+}
+
+/// Extract the two [`XOnlyPublicKey`]s from a 2-of-2 multisig tapscript.
+///
+/// The script format is: <pk_0> CHECKSIGVERIFY <pk_1> CHECKSIG
+fn extract_pubkeys_from_2of2_script(
+    script: &ScriptBuf,
+) -> Result<(XOnlyPublicKey, XOnlyPublicKey), Error> {
+    let bytes = script.as_bytes();
+
+    // Expected format: [0x20] [32 bytes pk_0] [CHECKSIGVERIFY] [0x20] [32 bytes pk_1] [CHECKSIG]
+    // Minimum length: 1 + 32 + 1 + 1 + 32 + 1 = 68 bytes
+    if bytes.len() < 68 {
+        return Err(Error::transaction(format!(
+            "script too short to be 2-of-2 multisig: {} bytes",
+            bytes.len()
+        )));
+    }
+
+    // Check first push is 32 bytes
+    if bytes[0] != 0x20 {
+        return Err(Error::transaction(format!(
+            "expected OP_PUSHBYTES_32 (0x20) at position 0, got 0x{:02x}",
+            bytes[0]
+        )));
+    }
+
+    // Extract first pubkey (bytes 1-32)
+    let pk_0_bytes: [u8; 32] = bytes[1..33]
+        .try_into()
+        .map_err(|_| Error::transaction("failed to extract first pubkey bytes"))?;
+    let pk_0 = XOnlyPublicKey::from_slice(&pk_0_bytes)
+        .map_err(|e| Error::transaction(format!("invalid first pubkey: {e}")))?;
+
+    // Check CHECKSIGVERIFY at position 33
+    if bytes[33] != OP_CHECKSIGVERIFY.to_u8() {
+        return Err(Error::transaction(format!(
+            "expected OP_CHECKSIGVERIFY (0xad) at position 33, got 0x{:02x}",
+            bytes[33]
+        )));
+    }
+
+    // Check second push is 32 bytes at position 34
+    if bytes[34] != 0x20 {
+        return Err(Error::transaction(format!(
+            "expected OP_PUSHBYTES_32 (0x20) at position 34, got 0x{:02x}",
+            bytes[34]
+        )));
+    }
+
+    // Extract second pubkey (bytes 35-66)
+    let pk_1_bytes: [u8; 32] = bytes[35..67]
+        .try_into()
+        .map_err(|_| Error::transaction("failed to extract second pubkey bytes"))?;
+    let pk_1 = XOnlyPublicKey::from_slice(&pk_1_bytes)
+        .map_err(|e| Error::transaction(format!("invalid second pubkey: {e}")))?;
+
+    // Check CHECKSIG at position 67
+    if bytes[67] != OP_CHECKSIG.to_u8() {
+        return Err(Error::transaction(format!(
+            "expected OP_CHECKSIG (0xac) at position 67, got 0x{:02x}",
+            bytes[67]
+        )));
+    }
+
+    Ok((pk_0, pk_1))
 }

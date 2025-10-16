@@ -1,0 +1,60 @@
+syntax = "proto3";
+
+package meshapi.gateway;
+
+import "google/protobuf/descriptor.proto";
+import "meshapi/gateway/gateway.proto";
+import "meshapi/gateway/openapi/openapi.proto";
+
+option go_package = "github.com/meshapi/grpc-api-gateway/api";
+
+extend google.protobuf.FileOptions {
+	// openapi_doc holds OpenAPI file options.
+	gateway.openapi.Document openapi_doc = 1191;
+}
+
+extend google.protobuf.ServiceOptions {
+	// openapi_service_doc holds OpenAPI file options.
+	gateway.openapi.Document openapi_service_doc = 1191;
+}
+
+extend google.protobuf.MethodOptions {
+	// http holds HTTP endpoint binding configs.
+	//
+  // ID assigned by protobuf-global-extension-registry@google.com for gRPC-Gateway project.
+  ProtoEndpointBinding http = 1190;
+
+	// openapi_operation holds OpenAPI method/operation options.
+	gateway.openapi.Operation openapi_operation = 1191;
+}
+
+extend google.protobuf.MessageOptions {
+	gateway.openapi.Schema openapi_schema = 1191;
+}
+
+extend google.protobuf.EnumOptions {
+	gateway.openapi.Schema openapi_enum = 1191;
+}
+
+extend google.protobuf.FieldOptions {
+	gateway.openapi.Schema openapi_field = 1191;
+}
+
+message ProtoEndpointBinding {
+	oneof pattern {
+		string get = 2;
+		string put = 3;
+		string post = 4;
+		string delete = 5;
+		string patch = 6;
+
+		// custom can be used for custom HTTP methods.
+		CustomPattern custom = 7; 
+	}
+
+	string body = 8;
+	repeated QueryParameterBinding query_params = 9;
+	repeated AdditionalEndpointBinding additional_bindings = 10;
+	bool disable_query_param_discovery = 11;
+	StreamConfig stream = 12;
+}

@@ -115,5 +115,8 @@ impl From<&str> for ContentType {
 
 pub mod ark_service_api;
 pub mod indexer_service_api;
+pub mod signer_manager_service_api;
+pub mod wallet_initializer_service_api;
+pub mod wallet_service_api;
 
 pub mod configuration;

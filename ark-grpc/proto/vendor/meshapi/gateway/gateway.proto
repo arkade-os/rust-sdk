@@ -1,0 +1,146 @@
+syntax = "proto3";
+
+package meshapi.gateway;
+
+option go_package = "github.com/meshapi/grpc-api-gateway/api";
+
+// GatewaySpec holds gRPC gateway configurations.
+message GatewaySpec {
+	// endpoints hold a series of endpoint binding specs.
+	repeated EndpointBinding endpoints = 1;
+}
+
+// EndpointBinding is a gRPC method - HTTP endpoint binding specification.
+message EndpointBinding {
+	// selector is a dot-separated gRPC service method selector.
+	//
+	// If the selector begins with '~.', the current proto package will be added to the beginning
+	// of the path. For instance: `~.MyService`. Since no proto package can be deduced in the global
+	// config file, this alias cannot be used in the global config file.
+	//
+	// If the selector does not begin with '~.', it will be treated as a fully qualified method name (FQMN).
+	string selector = 1;
+
+	// pattern specifies the HTTP method for this endpoint binding.
+	oneof pattern {
+		string get = 2;
+		string put = 3;
+		string post = 4;
+		string delete = 5;
+		string patch = 6;
+
+		// custom can be used for custom HTTP methods.
+		//
+		// Not all HTTP methods are supported in OpenAPI specification, however and will not be included in the
+		// generated OpenAPI document.
+		CustomPattern custom = 7; 
+	}
+
+	// body is a request message field selector that will be read via HTTP body.
+	//
+	// '*' indicates that the entire request message gets decoded from the body.
+	// An empty string indicates that no part of the request gets decoded from the body.
+	//
+	// NOTE: Not all methods support HTTP body.
+	string body = 8;
+
+	// response_body is a response message field selector that will be written to HTTP response.
+	//
+	// '*' or an empty string indicates that the entire response message gets encoded.
+	string response_body = 9;
+
+	// query_params are explicit query parameter bindings that can be used to rename
+	// or ignore query parameters.
+	repeated QueryParameterBinding query_params = 10;
+
+	// additional_bindings holds additional bindings for the same gRPC service method.
+	repeated AdditionalEndpointBinding additional_bindings = 11;
+
+	// disable_query_param_discovery can be used to avoid auto binding query parameters.
+	bool disable_query_param_discovery = 12;
+
+	// stream holds configurations for streaming methods.
+	StreamConfig stream = 13;
+}
+
+// AdditionalEndpointBinding is an additional gRPC method - HTTP endpoint binding specification.
+message AdditionalEndpointBinding {
+	// pattern specifies the HTTP method for this additional endpoint binding.
+	oneof pattern {
+		string get = 2;
+		string put = 3;
+		string post = 4;
+		string delete = 5;
+		string patch = 6;
+
+		// custom can be used for custom HTTP methods.
+		//
+		// Not all HTTP methods are supported in OpenAPI specification, however and will not be included in the
+		// generated OpenAPI document.
+		CustomPattern custom = 7; 
+	}
+
+	// body is a request message field selector that will be read via HTTP body.
+	//
+	// '*' indicates that the entire request message gets decoded from the body.
+	// An empty string indicates that no part of the request gets decoded from the body.
+	//
+	// NOTE: Not all methods support HTTP body.
+	string body = 8;
+
+	// response_body is a response message field selector that will be written to HTTP response.
+	//
+	// '*' or an empty string indicates that the entire response message gets encoded.
+	string response_body = 9;
+
+	// query_params are explicit query parameter bindings that can be used to rename
+	// or ignore query parameters.
+	repeated QueryParameterBinding query_params = 10;
+
+	// disable_query_param_discovery can be used to avoid auto binding query parameters.
+	bool disable_query_param_discovery = 11;
+
+	// stream holds configurations for streaming methods.
+	StreamConfig stream = 12;
+}
+
+// CustomPattern describes an HTTP pattern and custom method.
+message CustomPattern {
+	// method is the custom HTTP method.
+	string method = 1;
+
+	// path is the HTTP path pattern.
+	string path = 2;
+}
+
+// QueryParameterBinding describes a query parameter to request message binding.
+message QueryParameterBinding {
+	// selector is a dot-separated path to the request message's field.
+	string selector = 1;
+
+	// name is the name of the HTTP query parameter that will be used.
+	string name = 2;
+
+	// ignore avoids reading this query parameter altogether (default: false).
+	bool ignore = 3;
+}
+
+// StreamConfig sets the behavior of the HTTP server for gRPC streaming methods.
+message StreamConfig {
+	// disable_websockets indicates whether or not websockets are allowed for this method.
+	// The client must still ask for a connection upgrade.
+	bool disable_websockets = 1;
+
+	// disable_sse indicates whether or not server-sent events are allowed.
+	//
+	// see: https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events
+	//
+	// SSE is only used when Accept-Type from the request includes MIME type text/event-stream.
+	bool disable_sse = 2;
+
+	// disable_chunked indicates whether or not chunked transfer encoding is allowed.
+	//
+	// NOTE: Chunked transfer encoding is disabled in HTTP/2 so this option will only be available if the request
+	// is HTTP/1.
+	bool disable_chunked_transfer = 3;
+}

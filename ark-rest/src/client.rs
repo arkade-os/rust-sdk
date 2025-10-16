@@ -13,15 +13,14 @@ use crate::apis::indexer_service_api::indexer_service_get_vtxos;
 use crate::apis::indexer_service_api::indexer_service_subscribe_for_scripts;
 use crate::apis::indexer_service_api::indexer_service_unsubscribe_for_scripts;
 use crate::models;
-use crate::models::V1Bip322Signature;
-use crate::models::V1ConfirmRegistrationRequest;
-use crate::models::V1SubmitSignedForfeitTxsRequest;
-use crate::models::V1SubmitTreeNoncesRequest;
-use crate::models::V1SubmitTreeSignaturesRequest;
-use crate::models::V1SubscribeForScriptsRequest;
-use crate::models::V1UnsubscribeForScriptsRequest;
+use crate::models::ConfirmRegistrationRequest;
+use crate::models::Intent;
+use crate::models::SubmitSignedForfeitTxsRequest;
+use crate::models::SubmitTreeNoncesRequest;
+use crate::models::SubmitTreeSignaturesRequest;
+use crate::models::SubscribeForScriptsRequest;
+use crate::models::UnsubscribeForScriptsRequest;
 use crate::Error;
-use ark_core::proof_of_funds;
 use ark_core::server::FinalizeOffchainTxResponse;
 use ark_core::server::GetVtxosRequest;
 use ark_core::server::GetVtxosRequestFilter;
@@ -88,7 +87,7 @@ impl Client {
 
         let res = ark_service_submit_tx(
             &self.configuration,
-            models::V1SubmitTxRequest {
+            models::SubmitTxRequest {
                 signed_ark_tx: Some(ark_tx),
                 checkpoint_txs,
             },
@@ -137,7 +136,7 @@ impl Client {
 
         ark_service_finalize_tx(
             &self.configuration,
-            models::V1FinalizeTxRequest {
+            models::FinalizeTxRequest {
                 ark_txid: Some(txid.to_string()),
                 final_checkpoint_txs: checkpoint_txs,
             },
@@ -235,16 +234,24 @@ impl Client {
 
     pub async fn register_intent(
         &self,
-        intent_message: &proof_of_funds::IntentMessage,
-        proof: &proof_of_funds::Bip322Proof,
+        intent_message: &ark_core::intent::IntentMessage,
+        proof: &Psbt,
     ) -> Result<String, Error> {
         let message = intent_message.encode().map_err(Error::conversion)?;
+        let base64 = base64::engine::GeneralPurpose::new(
+            &base64::alphabet::STANDARD,
+            base64::engine::GeneralPurposeConfig::new(),
+        );
+
+        let bytes = proof.serialize();
+
+        let proof = base64.encode(&bytes);
 
         let response = ark_service_register_intent(
             &self.configuration,
-            models::V1RegisterIntentRequest {
-                intent: Some(V1Bip322Signature {
-                    signature: Some(proof.serialize()),
+            models::RegisterIntentRequest {
+                intent: Some(Intent {
+                    proof: Some(proof),
                     message: Some(message),
                 }),
             },
@@ -260,16 +267,23 @@ impl Client {
 
     pub async fn delete_intent(
         &self,
-        intent_message: &proof_of_funds::IntentMessage,
-        proof: &proof_of_funds::Bip322Proof,
+        intent_message: &ark_core::intent::IntentMessage,
+        proof: &Psbt,
     ) -> Result<(), Error> {
         let message = intent_message.encode().map_err(Error::conversion)?;
+        let base64 = base64::engine::GeneralPurpose::new(
+            &base64::alphabet::STANDARD,
+            base64::engine::GeneralPurposeConfig::new(),
+        );
 
+        let bytes = proof.serialize();
+
+        let proof = base64.encode(&bytes);
         ark_service_delete_intent(
             &self.configuration,
-            models::V1DeleteIntentRequest {
-                proof: Some(V1Bip322Signature {
-                    signature: Some(proof.serialize()),
+            models::DeleteIntentRequest {
+                intent: Some(Intent {
+                    proof: Some(proof),
                     message: Some(message),
                 }),
             },
@@ -324,11 +338,11 @@ impl Client {
                             match event {
                                 Ok(event) => {
                                     if let Ok(response) =
-                                        serde_json::from_str::<
-                                            models::StreamResultOfV1GetEventStreamResponse,
-                                        >(&event)
+                                        serde_json::from_str::<models::GetEventStreamResponse>(
+                                            &event,
+                                        )
                                     {
-                                        match StreamEvent::try_from(response.result?) {
+                                        match StreamEvent::try_from(response) {
                                             Ok(stream_event) => Ok(stream_event),
                                             Err(e) => Err(Error::conversion(e)),
                                         }
@@ -353,7 +367,7 @@ impl Client {
     pub async fn confirm_registration(&self, intent_id: String) -> Result<(), Error> {
         ark_service_confirm_registration(
             &self.configuration,
-            V1ConfirmRegistrationRequest {
+            ConfirmRegistrationRequest {
                 intent_id: Some(intent_id),
             },
         )
@@ -369,11 +383,11 @@ impl Client {
         cosigner_pubkey: PublicKey,
         pub_nonce_tree: NoncePks,
     ) -> Result<(), Error> {
-        let tree_nonces = serde_json::to_string(&pub_nonce_tree).map_err(Error::conversion)?;
+        let tree_nonces = pub_nonce_tree.encode();
 
         ark_service_submit_tree_nonces(
             &self.configuration,
-            V1SubmitTreeNoncesRequest {
+            SubmitTreeNoncesRequest {
                 batch_id: Some(batch_id.to_string()),
                 pubkey: Some(cosigner_pubkey.to_string()),
                 tree_nonces: Some(tree_nonces),
@@ -391,12 +405,11 @@ impl Client {
         cosigner_pk: PublicKey,
         partial_sig_tree: PartialSigTree,
     ) -> Result<(), Error> {
-        let tree_signatures =
-            serde_json::to_string(&partial_sig_tree).map_err(Error::conversion)?;
+        let tree_signatures = partial_sig_tree.encode();
 
         ark_service_submit_tree_signatures(
             &self.configuration,
-            V1SubmitTreeSignaturesRequest {
+            SubmitTreeSignaturesRequest {
                 batch_id: Some(batch_id.to_string()),
                 pubkey: Some(cosigner_pk.to_string()),
                 tree_signatures: Some(tree_signatures),
@@ -424,7 +437,7 @@ impl Client {
 
         ark_service_submit_signed_forfeit_txs(
             &self.configuration,
-            V1SubmitSignedForfeitTxsRequest {
+            SubmitSignedForfeitTxsRequest {
                 signed_forfeit_txs: signed_forfeit_txs
                     .iter()
                     .map(|psbt| Some(base64.encode(psbt.serialize())))
@@ -462,7 +475,7 @@ impl Client {
 
         let response = indexer_service_subscribe_for_scripts(
             &self.configuration,
-            V1SubscribeForScriptsRequest {
+            SubscribeForScriptsRequest {
                 scripts: Some(scripts),
                 subscription_id: Some(subscription_id),
             },
@@ -490,7 +503,7 @@ impl Client {
 
         let _ = indexer_service_unsubscribe_for_scripts(
             &self.configuration,
-            V1UnsubscribeForScriptsRequest {
+            UnsubscribeForScriptsRequest {
                 subscription_id: Some(subscription_id),
                 scripts: Some(scripts),
             },
@@ -542,11 +555,11 @@ impl Client {
                                 match event {
                                     Ok(event) if !event.trim().is_empty() => {
                                         if let Ok(response) =
-                                            serde_json::from_str::<
-                                                models::StreamResultOfV1GetSubscriptionResponse,
-                                            >(&event)
+                                            serde_json::from_str::<models::GetSubscriptionResponse>(
+                                                &event,
+                                            )
                                         {
-                                            match SubscriptionResponse::try_from(response.result?) {
+                                            match SubscriptionResponse::try_from(response) {
                                                 Ok(subscription_response) => {
                                                     Ok(subscription_response)
                                                 }

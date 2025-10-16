@@ -120,46 +120,20 @@ where
         };
 
         for i in 0..checkpoint_txs.len() {
-            sign_ark_transaction(
-                sign_fn,
-                &mut ark_tx,
-                &checkpoint_txs
-                    .iter()
-                    .map(|(_, output, outpoint, _)| (output.clone(), *outpoint))
-                    .collect::<Vec<_>>(),
-                i,
-            )?;
+            sign_ark_transaction(sign_fn, &mut ark_tx, i)?;
         }
 
         let ark_txid = ark_tx.unsigned_tx.compute_txid();
 
         let mut res = self
             .network_client()
-            .submit_offchain_transaction_request(
-                ark_tx,
-                checkpoint_txs
-                    .into_iter()
-                    .map(|(psbt, _, _, _)| psbt)
-                    .collect(),
-            )
+            .submit_offchain_transaction_request(ark_tx, checkpoint_txs)
             .await
             .map_err(Error::ark_server)
             .context("failed to submit offchain transaction request")?;
 
         for checkpoint_psbt in res.signed_checkpoint_txs.iter_mut() {
-            let vtxo_input = vtxo_inputs
-                .iter()
-                .find(|input| {
-                    checkpoint_psbt.unsigned_tx.input[0].previous_output == input.outpoint()
-                })
-                .ok_or_else(|| {
-                    Error::ad_hoc(format!(
-                        "could not find VTXO input for checkpoint transaction {}",
-                        checkpoint_psbt.unsigned_tx.compute_txid(),
-                    ))
-                })?;
-
-            sign_checkpoint_transaction(sign_fn, checkpoint_psbt, vtxo_input)?;
+            sign_checkpoint_transaction(sign_fn, checkpoint_psbt)?;
         }
 
         timeout_op(

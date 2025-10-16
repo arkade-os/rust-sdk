@@ -1,4 +1,4 @@
-use crate::error::ErrorContext;
+use crate::error::ErrorContext as _;
 use crate::swap_storage::SwapStorage;
 use crate::timeout_op;
 use crate::wallet::BoardingWallet;
@@ -11,11 +11,12 @@ use ark_core::send::sign_ark_transaction;
 use ark_core::send::sign_checkpoint_transaction;
 use ark_core::send::OffchainTransactions;
 use ark_core::send::VtxoInput;
-use ark_core::send::VTXO_CONDITION_KEY;
+use ark_core::server::parse_sequence_number;
 use ark_core::server::GetVtxosRequest;
 use ark_core::vhtlc::VhtlcOptions;
 use ark_core::vhtlc::VhtlcScript;
 use ark_core::ArkAddress;
+use ark_core::VTXO_CONDITION_KEY;
 use bitcoin::absolute::LockTime;
 use bitcoin::consensus::Encodable;
 use bitcoin::hashes::ripemd160;
@@ -30,7 +31,6 @@ use bitcoin::taproot::LeafVersion;
 use bitcoin::Amount;
 use bitcoin::Psbt;
 use bitcoin::PublicKey;
-use bitcoin::Sequence;
 use bitcoin::Txid;
 use bitcoin::VarInt;
 use bitcoin::XOnlyPublicKey;
@@ -196,18 +196,23 @@ where
             VhtlcOptions {
                 sender: swap_data.refund_public_key.into(),
                 receiver: swap_data.claim_public_key.into(),
-                server: self.server_info.pk.into(),
+                server: self.server_info.signer_pk.into(),
                 preimage_hash: swap_data.preimage_hash,
                 refund_locktime: timeout_block_heights.refund,
-                unilateral_claim_delay: Sequence::from_height(
-                    timeout_block_heights.unilateral_claim,
-                ),
-                unilateral_refund_delay: Sequence::from_height(
-                    timeout_block_heights.unilateral_refund,
-                ),
-                unilateral_refund_without_receiver_delay: Sequence::from_height(
-                    timeout_block_heights.unilateral_refund_without_receiver,
-                ),
+                unilateral_claim_delay: parse_sequence_number(
+                    timeout_block_heights.unilateral_claim as i64,
+                )
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
+                unilateral_refund_delay: parse_sequence_number(
+                    timeout_block_heights.unilateral_refund as i64,
+                )
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral refund timeout: {e}")))?,
+                unilateral_refund_without_receiver_delay: parse_sequence_number(
+                    timeout_block_heights.unilateral_refund_without_receiver as i64,
+                )
+                .map_err(|e| {
+                    Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
+                })?,
             },
             self.server_info.network,
         )
@@ -287,26 +292,13 @@ where
             Ok((sig, pk))
         };
 
-        let checkpoint_tx = checkpoint_txs.first().expect("one checkpoint PSBT");
-
-        sign_ark_transaction(
-            sign_fn,
-            &mut ark_tx,
-            &[(checkpoint_tx.1.clone(), checkpoint_tx.2)],
-            0,
-        )?;
+        sign_ark_transaction(sign_fn, &mut ark_tx, 0)?;
 
         let ark_txid = ark_tx.unsigned_tx.compute_txid();
 
         let res = self
             .network_client()
-            .submit_offchain_transaction_request(
-                ark_tx,
-                checkpoint_txs
-                    .into_iter()
-                    .map(|(psbt, _, _, _)| psbt)
-                    .collect(),
-            )
+            .submit_offchain_transaction_request(ark_tx, checkpoint_txs)
             .await?;
 
         let mut checkpoint_psbt = res
@@ -315,7 +307,7 @@ where
             .ok_or_else(|| Error::ad_hoc("no checkpoint PSBTs found"))?
             .clone();
 
-        sign_checkpoint_transaction(sign_fn, &mut checkpoint_psbt, &vhtlc_input)?;
+        sign_checkpoint_transaction(sign_fn, &mut checkpoint_psbt)?;
 
         timeout_op(
             self.inner.timeout,
@@ -346,18 +338,23 @@ where
             VhtlcOptions {
                 sender: swap_data.refund_public_key.into(),
                 receiver: swap_data.claim_public_key.into(),
-                server: self.server_info.pk.into(),
+                server: self.server_info.signer_pk.into(),
                 preimage_hash: swap_data.preimage_hash,
                 refund_locktime: timeout_block_heights.refund,
-                unilateral_claim_delay: Sequence::from_height(
-                    timeout_block_heights.unilateral_claim,
-                ),
-                unilateral_refund_delay: Sequence::from_height(
-                    timeout_block_heights.unilateral_refund,
-                ),
-                unilateral_refund_without_receiver_delay: Sequence::from_height(
-                    timeout_block_heights.unilateral_refund_without_receiver,
-                ),
+                unilateral_claim_delay: parse_sequence_number(
+                    timeout_block_heights.unilateral_claim as i64,
+                )
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
+                unilateral_refund_delay: parse_sequence_number(
+                    timeout_block_heights.unilateral_refund as i64,
+                )
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral refund timeout: {e}")))?,
+                unilateral_refund_without_receiver_delay: parse_sequence_number(
+                    timeout_block_heights.unilateral_refund_without_receiver as i64,
+                )
+                .map_err(|e| {
+                    Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
+                })?,
             },
             self.server_info.network,
         )
@@ -439,14 +436,7 @@ where
             Ok((sig, pk))
         };
 
-        let checkpoint_tx = checkpoint_txs.first().expect("one checkpoint PSBT");
-
-        sign_ark_transaction(
-            sign_fn,
-            &mut ark_tx,
-            &[(checkpoint_tx.1.clone(), checkpoint_tx.2)],
-            0,
-        )?;
+        sign_ark_transaction(sign_fn, &mut ark_tx, 0)?;
 
         let url = format!(
             "{}/v2/swap/submarine/{swap_id}/refund/ark",
@@ -475,13 +465,7 @@ where
 
         let res = self
             .network_client()
-            .submit_offchain_transaction_request(
-                signed_ark_tx,
-                checkpoint_txs
-                    .into_iter()
-                    .map(|(psbt, _, _, _)| psbt)
-                    .collect(),
-            )
+            .submit_offchain_transaction_request(signed_ark_tx, checkpoint_txs)
             .await?;
 
         let mut checkpoint_psbt = res
@@ -490,7 +474,7 @@ where
             .ok_or_else(|| Error::ad_hoc("no checkpoint PSBTs found"))?
             .clone();
 
-        sign_checkpoint_transaction(sign_fn, &mut checkpoint_psbt, &vhtlc_input)?;
+        sign_checkpoint_transaction(sign_fn, &mut checkpoint_psbt)?;
 
         timeout_op(
             self.inner.timeout,
@@ -630,22 +614,28 @@ where
             VhtlcOptions {
                 sender: swap.refund_public_key.into(),
                 receiver: swap.claim_public_key.into(),
-                server: self.server_info.pk.into(),
+                server: self.server_info.signer_pk.into(),
                 preimage_hash: swap.preimage_hash,
                 refund_locktime: timeout_block_heights.refund,
-                unilateral_claim_delay: Sequence::from_height(
-                    timeout_block_heights.unilateral_claim,
-                ),
-                unilateral_refund_delay: Sequence::from_height(
-                    timeout_block_heights.unilateral_refund,
-                ),
-                unilateral_refund_without_receiver_delay: Sequence::from_height(
-                    timeout_block_heights.unilateral_refund_without_receiver,
-                ),
+                unilateral_claim_delay: parse_sequence_number(
+                    timeout_block_heights.unilateral_claim as i64,
+                )
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
+                unilateral_refund_delay: parse_sequence_number(
+                    timeout_block_heights.unilateral_refund as i64,
+                )
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral refund timeout: {e}")))?,
+                unilateral_refund_without_receiver_delay: parse_sequence_number(
+                    timeout_block_heights.unilateral_refund_without_receiver as i64,
+                )
+                .map_err(|e| {
+                    Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
+                })?,
             },
             self.server_info.network,
         )
-        .map_err(Error::ad_hoc)?;
+        .map_err(Error::ad_hoc)
+        .context("failed to build VHTLC script")?;
 
         let vhtlc_address = vhtlc.address();
         if vhtlc_address != swap.vhtlc_address {
@@ -664,7 +654,9 @@ where
                 self.network_client().list_vtxos(request),
             )
             .await
-            .context("Failed to fetch VHTLC")??;
+            .context("failed to fetch VHTLC")?
+            .map_err(Error::ark_server)
+            .context("failed to fetch VHTLC")?;
 
             // We expect a single outpoint.
             let all = list.all();
@@ -675,7 +667,9 @@ where
             vhtlc_outpoint.clone()
         };
 
-        let (claim_address, _) = self.get_offchain_address()?;
+        let (claim_address, _) = self
+            .get_offchain_address()
+            .context("failed to get offchain address")?;
         let claim_amount = swap.amount;
 
         let outputs = vec![(&claim_address, claim_amount)];
@@ -706,7 +700,9 @@ where
             None,
             std::slice::from_ref(&vhtlc_input),
             &self.server_info,
-        )?;
+        )
+        .map_err(Error::from)
+        .context("failed to build offchain TXs")?;
 
         let sign_fn = |input: &mut psbt::Input,
                        msg: secp256k1::Message|
@@ -728,7 +724,7 @@ where
 
                 input.unknown.insert(
                     psbt::raw::Key {
-                        type_value: u8::MAX,
+                        type_value: 222,
                         key: VTXO_CONDITION_KEY.to_vec(),
                     },
                     bytes,
@@ -741,27 +737,18 @@ where
             Ok((sig, pk))
         };
 
-        let checkpoint_tx = checkpoint_txs.first().expect("one checkpoint PSBT");
-
-        sign_ark_transaction(
-            sign_fn,
-            &mut ark_tx,
-            &[(checkpoint_tx.1.clone(), checkpoint_tx.2)],
-            0,
-        )?;
+        sign_ark_transaction(sign_fn, &mut ark_tx, 0)
+            .map_err(Error::from)
+            .context("failed to sign Ark TX")?;
 
         let ark_txid = ark_tx.unsigned_tx.compute_txid();
 
         let res = self
             .network_client()
-            .submit_offchain_transaction_request(
-                ark_tx,
-                checkpoint_txs
-                    .into_iter()
-                    .map(|(psbt, _, _, _)| psbt)
-                    .collect(),
-            )
-            .await?;
+            .submit_offchain_transaction_request(ark_tx, checkpoint_txs)
+            .await
+            .map_err(Error::from)
+            .context("failed to submit offchain TXs")?;
 
         let mut checkpoint_psbt = res
             .signed_checkpoint_txs
@@ -769,14 +756,17 @@ where
             .ok_or_else(|| Error::ad_hoc("no checkpoint PSBTs found"))?
             .clone();
 
-        sign_checkpoint_transaction(sign_fn, &mut checkpoint_psbt, &vhtlc_input)?;
+        sign_checkpoint_transaction(sign_fn, &mut checkpoint_psbt)
+            .map_err(Error::from)
+            .context("failed to sign checkpoint TX")?;
 
         timeout_op(
             self.inner.timeout,
             self.network_client()
                 .finalize_offchain_transaction(ark_txid, vec![checkpoint_psbt]),
         )
-        .await?
+        .await
+        .context("failed to finalize offchain transaction")?
         .map_err(Error::ark_server)
         .context("failed to finalize offchain transaction")?;
 
@@ -956,9 +946,9 @@ pub enum SwapStatus {
 #[serde(rename_all = "camelCase")]
 pub struct TimeoutBlockHeights {
     pub refund: u32,
-    pub unilateral_claim: u16,
-    pub unilateral_refund: u16,
-    pub unilateral_refund_without_receiver: u16,
+    pub unilateral_claim: u32,
+    pub unilateral_refund: u32,
+    pub unilateral_refund_without_receiver: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1027,4 +1017,53 @@ struct RefundSwapResponse {
     transaction: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_deserialize_create_reverse_swap_response() {
+        let json = r#"{
+  "id": "vqhG2fJtNY4H",
+  "lockupAddress": "tark1qra883hysahlkt0ujcwhv0x2n278849c3m7t3a08l7fdc40f4f2nmw3f7kn37vvq0hqazxtqgtvhwp3z83zfgr7qc82t9mty8vk95ynpx3l43d",
+  "refundPublicKey": "0206988651c7fbe41747bb21b54ced0a183f4d658e007ee8fdb23fbbfccb8e0c55",
+  "timeoutBlockHeights": {
+    "refund": 1760508054,
+    "unilateralClaim": 9728,
+    "unilateralRefund": 86528,
+    "unilateralRefundWithoutReceiver": 86528
+  },
+  "invoice": "lntbs10u1p5wmeeepp56ms94rkev7tdrwqyus5a63lny2mqzq9vh2rq3u4ym3v4lxv6xl4qdql2djkuepqw3hjqs2jfvsxzerywfjhxuccqz95xqztfsp5ckaskagag554na8d56tlrfdxasstqrmmpkvswqqqx6y386jcfq9s9qxpqysgqt7z0vkdwkqamydae7ctgkh7l8q75w7q9394ce3lda2mkfxrpfdtj5gmltuctav7jdgatkflhztrjjzutdla5e4xp0uhxxy7sluzll4qpkkh6wv",
+  "onchainAmount": 996
+}"#;
+
+        let response: CreateReverseSwapResponse =
+            serde_json::from_str(json).expect("Failed to deserialize CreateReverseSwapResponse");
+
+        // Verify the deserialized fields
+        assert_eq!(response.id, "vqhG2fJtNY4H");
+        assert_eq!(response.onchain_amount, Amount::from_sat(996));
+        assert_eq!(
+            response.refund_public_key,
+            PublicKey::from_str(
+                "0206988651c7fbe41747bb21b54ced0a183f4d658e007ee8fdb23fbbfccb8e0c55"
+            )
+            .expect("valid public key")
+        );
+        assert_eq!(
+            response.lockup_address.to_string(),
+            "tark1qra883hysahlkt0ujcwhv0x2n278849c3m7t3a08l7fdc40f4f2nmw3f7kn37vvq0hqazxtqgtvhwp3z83zfgr7qc82t9mty8vk95ynpx3l43d"
+        );
+        assert_eq!(response.timeout_block_heights.refund, 1760508054);
+        assert_eq!(response.timeout_block_heights.unilateral_claim, 9728);
+        assert_eq!(response.timeout_block_heights.unilateral_refund, 86528);
+        assert_eq!(
+            response
+                .timeout_block_heights
+                .unilateral_refund_without_receiver,
+            86528
+        );
+    }
 }

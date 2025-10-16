@@ -1,7 +1,7 @@
 /*
  * Ark API
  *
- * Combined Ark Service and Indexer API
+ * Combined Ark Service, Indexer, Admin, Signer Manager, and Wallet API
  *
  * The version of the OpenAPI document: 1.0.0
  *
@@ -22,7 +22,7 @@ use serde::Serialize;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum IndexerServiceGetBatchSweepTransactionsError {
-    DefaultResponse(models::RpcStatus),
+    DefaultResponse(models::Status),
     UnknownValue(serde_json::Value),
 }
 
@@ -30,7 +30,7 @@ pub enum IndexerServiceGetBatchSweepTransactionsError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum IndexerServiceGetCommitmentTxError {
-    DefaultResponse(models::RpcStatus),
+    DefaultResponse(models::Status),
     UnknownValue(serde_json::Value),
 }
 
@@ -38,7 +38,7 @@ pub enum IndexerServiceGetCommitmentTxError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum IndexerServiceGetConnectorsError {
-    DefaultResponse(models::RpcStatus),
+    DefaultResponse(models::Status),
     UnknownValue(serde_json::Value),
 }
 
@@ -46,7 +46,7 @@ pub enum IndexerServiceGetConnectorsError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum IndexerServiceGetForfeitTxsError {
-    DefaultResponse(models::RpcStatus),
+    DefaultResponse(models::Status),
     UnknownValue(serde_json::Value),
 }
 
@@ -54,7 +54,7 @@ pub enum IndexerServiceGetForfeitTxsError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum IndexerServiceGetSubscriptionError {
-    DefaultResponse(models::RpcStatus),
+    DefaultResponse(models::Status),
     UnknownValue(serde_json::Value),
 }
 
@@ -62,7 +62,7 @@ pub enum IndexerServiceGetSubscriptionError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum IndexerServiceGetVirtualTxsError {
-    DefaultResponse(models::RpcStatus),
+    DefaultResponse(models::Status),
     UnknownValue(serde_json::Value),
 }
 
@@ -70,7 +70,7 @@ pub enum IndexerServiceGetVirtualTxsError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum IndexerServiceGetVtxoChainError {
-    DefaultResponse(models::RpcStatus),
+    DefaultResponse(models::Status),
     UnknownValue(serde_json::Value),
 }
 
@@ -78,7 +78,7 @@ pub enum IndexerServiceGetVtxoChainError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum IndexerServiceGetVtxoTreeError {
-    DefaultResponse(models::RpcStatus),
+    DefaultResponse(models::Status),
     UnknownValue(serde_json::Value),
 }
 
@@ -86,7 +86,7 @@ pub enum IndexerServiceGetVtxoTreeError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum IndexerServiceGetVtxoTreeLeavesError {
-    DefaultResponse(models::RpcStatus),
+    DefaultResponse(models::Status),
     UnknownValue(serde_json::Value),
 }
 
@@ -94,7 +94,7 @@ pub enum IndexerServiceGetVtxoTreeLeavesError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum IndexerServiceGetVtxosError {
-    DefaultResponse(models::RpcStatus),
+    DefaultResponse(models::Status),
     UnknownValue(serde_json::Value),
 }
 
@@ -102,7 +102,7 @@ pub enum IndexerServiceGetVtxosError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum IndexerServiceSubscribeForScriptsError {
-    DefaultResponse(models::RpcStatus),
+    DefaultResponse(models::Status),
     UnknownValue(serde_json::Value),
 }
 
@@ -110,16 +110,23 @@ pub enum IndexerServiceSubscribeForScriptsError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum IndexerServiceUnsubscribeForScriptsError {
-    DefaultResponse(models::RpcStatus),
+    DefaultResponse(models::Status),
     UnknownValue(serde_json::Value),
 }
 
+/// GetBatchSweepTransactions returns the list of transaction (txid) that swept a given batch
+/// output. In most cases the list contains only one txid, meaning that all the amount locked for a
+/// vtxo tree has been claimed back. If any of the leaves of the tree have been unrolled onchain
+/// before the expiration, the list will contain many txids instead. In a binary tree with 4 or more
+/// leaves, 1 unroll causes the server to broadcast 3 txs to sweep the whole rest of tree for
+/// example. If a whole vtxo tree has been unrolled onchain, the list of txids for that batch output
+/// is empty.
 pub async fn indexer_service_get_batch_sweep_transactions(
     configuration: &configuration::Configuration,
     batch_outpoint_period_txid: &str,
-    batch_outpoint_period_vout: i64,
+    batch_outpoint_period_vout: i32,
 ) -> Result<
-    models::V1GetBatchSweepTransactionsResponse,
+    models::GetBatchSweepTransactionsResponse,
     Error<IndexerServiceGetBatchSweepTransactionsError>,
 > {
     // add a prefix to parameters to efficiently prevent name collisions
@@ -127,10 +134,10 @@ pub async fn indexer_service_get_batch_sweep_transactions(
     let p_batch_outpoint_period_vout = batch_outpoint_period_vout;
 
     let uri_str = format!(
-        "{}/v1/batch/{batchOutpoint_txid}/{batchOutpoint_vout}/sweepTxs",
+        "{}/v1/indexer/batch/{batch_outpoint_txid}/{batch_outpoint_vout}/sweepTxs",
         configuration.base_path,
-        batchOutpoint_txid = crate::apis::urlencode(p_batch_outpoint_period_txid),
-        batchOutpoint_vout = p_batch_outpoint_period_vout
+        batch_outpoint_txid = crate::apis::urlencode(p_batch_outpoint_period_txid),
+        batch_outpoint_vout = p_batch_outpoint_period_vout
     );
     let mut req_builder = configuration.client.request(reqwest::Method::GET, &uri_str);
 
@@ -153,8 +160,8 @@ pub async fn indexer_service_get_batch_sweep_transactions(
         let content = resp.text().await?;
         match content_type {
             ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
-            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::V1GetBatchSweepTransactionsResponse`"))),
-            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::V1GetBatchSweepTransactionsResponse`")))),
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::GetBatchSweepTransactionsResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::GetBatchSweepTransactionsResponse`")))),
         }
     } else {
         let content = resp.text().await?;
@@ -168,15 +175,17 @@ pub async fn indexer_service_get_batch_sweep_transactions(
     }
 }
 
+/// GetCommitmentTx returns information about a specific commitment transaction identified by the
+/// provided txid.
 pub async fn indexer_service_get_commitment_tx(
     configuration: &configuration::Configuration,
     txid: &str,
-) -> Result<models::V1GetCommitmentTxResponse, Error<IndexerServiceGetCommitmentTxError>> {
+) -> Result<models::GetCommitmentTxResponse, Error<IndexerServiceGetCommitmentTxError>> {
     // add a prefix to parameters to efficiently prevent name collisions
     let p_txid = txid;
 
     let uri_str = format!(
-        "{}/v1/commitmentTx/{txid}",
+        "{}/v1/indexer/commitmentTx/{txid}",
         configuration.base_path,
         txid = crate::apis::urlencode(p_txid)
     );
@@ -201,8 +210,8 @@ pub async fn indexer_service_get_commitment_tx(
         let content = resp.text().await?;
         match content_type {
             ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
-            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::V1GetCommitmentTxResponse`"))),
-            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::V1GetCommitmentTxResponse`")))),
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::GetCommitmentTxResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::GetCommitmentTxResponse`")))),
         }
     } else {
         let content = resp.text().await?;
@@ -216,19 +225,22 @@ pub async fn indexer_service_get_commitment_tx(
     }
 }
 
+/// GetConnectors returns the tree of connectors for the provided commitment transaction. The
+/// response includes a list of connector txs with details on the tree posistion and may include
+/// pagination information if the results span multiple pages.
 pub async fn indexer_service_get_connectors(
     configuration: &configuration::Configuration,
     txid: &str,
     page_period_size: Option<i32>,
     page_period_index: Option<i32>,
-) -> Result<models::V1GetConnectorsResponse, Error<IndexerServiceGetConnectorsError>> {
+) -> Result<models::GetConnectorsResponse, Error<IndexerServiceGetConnectorsError>> {
     // add a prefix to parameters to efficiently prevent name collisions
     let p_txid = txid;
     let p_page_period_size = page_period_size;
     let p_page_period_index = page_period_index;
 
     let uri_str = format!(
-        "{}/v1/commitmentTx/{txid}/connectors",
+        "{}/v1/indexer/commitmentTx/{txid}/connectors",
         configuration.base_path,
         txid = crate::apis::urlencode(p_txid)
     );
@@ -259,8 +271,8 @@ pub async fn indexer_service_get_connectors(
         let content = resp.text().await?;
         match content_type {
             ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
-            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::V1GetConnectorsResponse`"))),
-            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::V1GetConnectorsResponse`")))),
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::GetConnectorsResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::GetConnectorsResponse`")))),
         }
     } else {
         let content = resp.text().await?;
@@ -273,19 +285,22 @@ pub async fn indexer_service_get_connectors(
     }
 }
 
+/// GetForfeitTxs returns the list of forfeit transactions that were submitted for the provided
+/// commitment transaction. The response may include pagination information if the results span
+/// multiple pages.
 pub async fn indexer_service_get_forfeit_txs(
     configuration: &configuration::Configuration,
     txid: &str,
     page_period_size: Option<i32>,
     page_period_index: Option<i32>,
-) -> Result<models::V1GetForfeitTxsResponse, Error<IndexerServiceGetForfeitTxsError>> {
+) -> Result<models::GetForfeitTxsResponse, Error<IndexerServiceGetForfeitTxsError>> {
     // add a prefix to parameters to efficiently prevent name collisions
     let p_txid = txid;
     let p_page_period_size = page_period_size;
     let p_page_period_index = page_period_index;
 
     let uri_str = format!(
-        "{}/v1/commitmentTx/{txid}/forfeitTxs",
+        "{}/v1/indexer/commitmentTx/{txid}/forfeitTxs",
         configuration.base_path,
         txid = crate::apis::urlencode(p_txid)
     );
@@ -316,8 +331,8 @@ pub async fn indexer_service_get_forfeit_txs(
         let content = resp.text().await?;
         match content_type {
             ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
-            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::V1GetForfeitTxsResponse`"))),
-            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::V1GetForfeitTxsResponse`")))),
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::GetForfeitTxsResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::GetForfeitTxsResponse`")))),
         }
     } else {
         let content = resp.text().await?;
@@ -330,20 +345,20 @@ pub async fn indexer_service_get_forfeit_txs(
     }
 }
 
+/// GetSubscription is a server-side streaming RPC which allows clients to receive real-time
+/// notifications on transactions related to the subscribed vtxo scripts. The subscription can be
+/// created or updated by using the SubscribeForScripts and UnsubscribeForScripts RPCs.
 pub async fn indexer_service_get_subscription(
     configuration: &configuration::Configuration,
     subscription_id: &str,
-) -> Result<
-    models::StreamResultOfV1GetSubscriptionResponse,
-    Error<IndexerServiceGetSubscriptionError>,
-> {
+) -> Result<models::GetSubscriptionResponse, Error<IndexerServiceGetSubscriptionError>> {
     // add a prefix to parameters to efficiently prevent name collisions
     let p_subscription_id = subscription_id;
 
     let uri_str = format!(
-        "{}/v1/script/subscription/{subscriptionId}",
+        "{}/v1/indexer/script/subscription/{subscription_id}",
         configuration.base_path,
-        subscriptionId = crate::apis::urlencode(p_subscription_id)
+        subscription_id = crate::apis::urlencode(p_subscription_id)
     );
     let mut req_builder = configuration.client.request(reqwest::Method::GET, &uri_str);
 
@@ -366,8 +381,8 @@ pub async fn indexer_service_get_subscription(
         let content = resp.text().await?;
         match content_type {
             ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
-            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::StreamResultOfV1GetSubscriptionResponse`"))),
-            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::StreamResultOfV1GetSubscriptionResponse`")))),
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::GetSubscriptionResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::GetSubscriptionResponse`")))),
         }
     } else {
         let content = resp.text().await?;
@@ -381,19 +396,21 @@ pub async fn indexer_service_get_subscription(
     }
 }
 
+/// GetVirtualTxs returns the virtual transactions in hex format for the specified txids. The
+/// response may be paginated if the results span multiple pages.
 pub async fn indexer_service_get_virtual_txs(
     configuration: &configuration::Configuration,
     txids: Vec<String>,
     page_period_size: Option<i32>,
     page_period_index: Option<i32>,
-) -> Result<models::V1GetVirtualTxsResponse, Error<IndexerServiceGetVirtualTxsError>> {
+) -> Result<models::GetVirtualTxsResponse, Error<IndexerServiceGetVirtualTxsError>> {
     // add a prefix to parameters to efficiently prevent name collisions
     let p_txids = txids;
     let p_page_period_size = page_period_size;
     let p_page_period_index = page_period_index;
 
     let uri_str = format!(
-        "{}/v1/virtualTx/{txids}",
+        "{}/v1/indexer/virtualTx/{txids}",
         configuration.base_path,
         txids = p_txids.join(",")
     );
@@ -424,8 +441,8 @@ pub async fn indexer_service_get_virtual_txs(
         let content = resp.text().await?;
         match content_type {
             ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
-            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::V1GetVirtualTxsResponse`"))),
-            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::V1GetVirtualTxsResponse`")))),
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::GetVirtualTxsResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::GetVirtualTxsResponse`")))),
         }
     } else {
         let content = resp.text().await?;
@@ -438,13 +455,16 @@ pub async fn indexer_service_get_virtual_txs(
     }
 }
 
+/// GetVtxoChain returns the the chain of ark txs that starts from spending any vtxo leaf and ends
+/// with the creation of the provided vtxo outpoint. The response may be paginated if the results
+/// span multiple pages.
 pub async fn indexer_service_get_vtxo_chain(
     configuration: &configuration::Configuration,
     outpoint_period_txid: &str,
-    outpoint_period_vout: i64,
+    outpoint_period_vout: i32,
     page_period_size: Option<i32>,
     page_period_index: Option<i32>,
-) -> Result<models::V1GetVtxoChainResponse, Error<IndexerServiceGetVtxoChainError>> {
+) -> Result<models::GetVtxoChainResponse, Error<IndexerServiceGetVtxoChainError>> {
     // add a prefix to parameters to efficiently prevent name collisions
     let p_outpoint_period_txid = outpoint_period_txid;
     let p_outpoint_period_vout = outpoint_period_vout;
@@ -452,7 +472,7 @@ pub async fn indexer_service_get_vtxo_chain(
     let p_page_period_index = page_period_index;
 
     let uri_str = format!(
-        "{}/v1/vtxo/{outpoint_txid}/{outpoint_vout}/chain",
+        "{}/v1/indexer/vtxo/{outpoint_txid}/{outpoint_vout}/chain",
         configuration.base_path,
         outpoint_txid = crate::apis::urlencode(p_outpoint_period_txid),
         outpoint_vout = p_outpoint_period_vout
@@ -484,8 +504,8 @@ pub async fn indexer_service_get_vtxo_chain(
         let content = resp.text().await?;
         match content_type {
             ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
-            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::V1GetVtxoChainResponse`"))),
-            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::V1GetVtxoChainResponse`")))),
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::GetVtxoChainResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::GetVtxoChainResponse`")))),
         }
     } else {
         let content = resp.text().await?;
@@ -498,13 +518,16 @@ pub async fn indexer_service_get_vtxo_chain(
     }
 }
 
+/// GetVtxoTree returns the vtxo tree for the provided batch outpoint. The response includes a list
+/// of txs with details on the tree posistion and may include pagination information if the results
+/// span multiple pages.
 pub async fn indexer_service_get_vtxo_tree(
     configuration: &configuration::Configuration,
     batch_outpoint_period_txid: &str,
-    batch_outpoint_period_vout: i64,
+    batch_outpoint_period_vout: i32,
     page_period_size: Option<i32>,
     page_period_index: Option<i32>,
-) -> Result<models::V1GetVtxoTreeResponse, Error<IndexerServiceGetVtxoTreeError>> {
+) -> Result<models::GetVtxoTreeResponse, Error<IndexerServiceGetVtxoTreeError>> {
     // add a prefix to parameters to efficiently prevent name collisions
     let p_batch_outpoint_period_txid = batch_outpoint_period_txid;
     let p_batch_outpoint_period_vout = batch_outpoint_period_vout;
@@ -512,10 +535,10 @@ pub async fn indexer_service_get_vtxo_tree(
     let p_page_period_index = page_period_index;
 
     let uri_str = format!(
-        "{}/v1/batch/{batchOutpoint_txid}/{batchOutpoint_vout}/tree",
+        "{}/v1/indexer/batch/{batch_outpoint_txid}/{batch_outpoint_vout}/tree",
         configuration.base_path,
-        batchOutpoint_txid = crate::apis::urlencode(p_batch_outpoint_period_txid),
-        batchOutpoint_vout = p_batch_outpoint_period_vout
+        batch_outpoint_txid = crate::apis::urlencode(p_batch_outpoint_period_txid),
+        batch_outpoint_vout = p_batch_outpoint_period_vout
     );
     let mut req_builder = configuration.client.request(reqwest::Method::GET, &uri_str);
 
@@ -544,8 +567,8 @@ pub async fn indexer_service_get_vtxo_tree(
         let content = resp.text().await?;
         match content_type {
             ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
-            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::V1GetVtxoTreeResponse`"))),
-            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::V1GetVtxoTreeResponse`")))),
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::GetVtxoTreeResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::GetVtxoTreeResponse`")))),
         }
     } else {
         let content = resp.text().await?;
@@ -558,13 +581,15 @@ pub async fn indexer_service_get_vtxo_tree(
     }
 }
 
+/// GetVtxoTreeLeaves returns the list of leaves (vtxo outpoints) of the tree(s) for the provided
+/// batch outpoint. The response may be paginated if the results span multiple pages.
 pub async fn indexer_service_get_vtxo_tree_leaves(
     configuration: &configuration::Configuration,
     batch_outpoint_period_txid: &str,
-    batch_outpoint_period_vout: i64,
+    batch_outpoint_period_vout: i32,
     page_period_size: Option<i32>,
     page_period_index: Option<i32>,
-) -> Result<models::V1GetVtxoTreeLeavesResponse, Error<IndexerServiceGetVtxoTreeLeavesError>> {
+) -> Result<models::GetVtxoTreeLeavesResponse, Error<IndexerServiceGetVtxoTreeLeavesError>> {
     // add a prefix to parameters to efficiently prevent name collisions
     let p_batch_outpoint_period_txid = batch_outpoint_period_txid;
     let p_batch_outpoint_period_vout = batch_outpoint_period_vout;
@@ -572,10 +597,10 @@ pub async fn indexer_service_get_vtxo_tree_leaves(
     let p_page_period_index = page_period_index;
 
     let uri_str = format!(
-        "{}/v1/batch/{batchOutpoint_txid}/{batchOutpoint_vout}/tree/leaves",
+        "{}/v1/indexer/batch/{batch_outpoint_txid}/{batch_outpoint_vout}/tree/leaves",
         configuration.base_path,
-        batchOutpoint_txid = crate::apis::urlencode(p_batch_outpoint_period_txid),
-        batchOutpoint_vout = p_batch_outpoint_period_vout
+        batch_outpoint_txid = crate::apis::urlencode(p_batch_outpoint_period_txid),
+        batch_outpoint_vout = p_batch_outpoint_period_vout
     );
     let mut req_builder = configuration.client.request(reqwest::Method::GET, &uri_str);
 
@@ -604,8 +629,8 @@ pub async fn indexer_service_get_vtxo_tree_leaves(
         let content = resp.text().await?;
         match content_type {
             ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
-            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::V1GetVtxoTreeLeavesResponse`"))),
-            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::V1GetVtxoTreeLeavesResponse`")))),
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::GetVtxoTreeLeavesResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::GetVtxoTreeLeavesResponse`")))),
         }
     } else {
         let content = resp.text().await?;
@@ -619,6 +644,9 @@ pub async fn indexer_service_get_vtxo_tree_leaves(
     }
 }
 
+/// GetVtxos returns the list of vtxos based on the provided filter. Vtxos can be retrieved either
+/// by addresses or by outpoints, and optionally filtered by spendable or spent only. The response
+/// may be paginated if the results span multiple pages.
 pub async fn indexer_service_get_vtxos(
     configuration: &configuration::Configuration,
     scripts: Option<Vec<String>>,
@@ -628,7 +656,7 @@ pub async fn indexer_service_get_vtxos(
     recoverable_only: Option<bool>,
     page_period_size: Option<i32>,
     page_period_index: Option<i32>,
-) -> Result<models::V1GetVtxosResponse, Error<IndexerServiceGetVtxosError>> {
+) -> Result<models::GetVtxosResponse, Error<IndexerServiceGetVtxosError>> {
     // add a prefix to parameters to efficiently prevent name collisions
     let p_scripts = scripts;
     let p_outpoints = outpoints;
@@ -638,11 +666,11 @@ pub async fn indexer_service_get_vtxos(
     let p_page_period_size = page_period_size;
     let p_page_period_index = page_period_index;
 
-    let uri_str = format!("{}/v1/vtxos", configuration.base_path);
+    let uri_str = format!("{}/v1/indexer/vtxos", configuration.base_path);
     let mut req_builder = configuration.client.request(reqwest::Method::GET, &uri_str);
 
     if let Some(ref param_value) = p_scripts {
-        req_builder = match "multi" {
+        req_builder = match "csv" {
             "multi" => req_builder.query(
                 &param_value
                     .into_iter()
@@ -661,7 +689,7 @@ pub async fn indexer_service_get_vtxos(
         };
     }
     if let Some(ref param_value) = p_outpoints {
-        req_builder = match "multi" {
+        req_builder = match "csv" {
             "multi" => req_builder.query(
                 &param_value
                     .into_iter()
@@ -713,8 +741,8 @@ pub async fn indexer_service_get_vtxos(
         let content = resp.text().await?;
         match content_type {
             ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
-            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::V1GetVtxosResponse`"))),
-            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::V1GetVtxosResponse`")))),
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::GetVtxosResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::GetVtxosResponse`")))),
         }
     } else {
         let content = resp.text().await?;
@@ -727,14 +755,16 @@ pub async fn indexer_service_get_vtxos(
     }
 }
 
+/// SubscribeForScripts allows to subscribe for tx notifications related to the provided vtxo
+/// scripts. It can also be used to update an existing subscribtion by adding new scripts to it.
 pub async fn indexer_service_subscribe_for_scripts(
     configuration: &configuration::Configuration,
-    body: models::V1SubscribeForScriptsRequest,
-) -> Result<models::V1SubscribeForScriptsResponse, Error<IndexerServiceSubscribeForScriptsError>> {
+    subscribe_for_scripts_request: models::SubscribeForScriptsRequest,
+) -> Result<models::SubscribeForScriptsResponse, Error<IndexerServiceSubscribeForScriptsError>> {
     // add a prefix to parameters to efficiently prevent name collisions
-    let p_body = body;
+    let p_subscribe_for_scripts_request = subscribe_for_scripts_request;
 
-    let uri_str = format!("{}/v1/script/subscribe", configuration.base_path);
+    let uri_str = format!("{}/v1/indexer/script/subscribe", configuration.base_path);
     let mut req_builder = configuration
         .client
         .request(reqwest::Method::POST, &uri_str);
@@ -742,7 +772,7 @@ pub async fn indexer_service_subscribe_for_scripts(
     if let Some(ref user_agent) = configuration.user_agent {
         req_builder = req_builder.header(reqwest::header::USER_AGENT, user_agent.clone());
     }
-    req_builder = req_builder.json(&p_body);
+    req_builder = req_builder.json(&p_subscribe_for_scripts_request);
 
     let req = req_builder.build()?;
     let resp = configuration.client.execute(req).await?;
@@ -759,8 +789,8 @@ pub async fn indexer_service_subscribe_for_scripts(
         let content = resp.text().await?;
         match content_type {
             ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
-            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::V1SubscribeForScriptsResponse`"))),
-            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::V1SubscribeForScriptsResponse`")))),
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::SubscribeForScriptsResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::SubscribeForScriptsResponse`")))),
         }
     } else {
         let content = resp.text().await?;
@@ -774,14 +804,15 @@ pub async fn indexer_service_subscribe_for_scripts(
     }
 }
 
+/// UnsubscribeForScripts allows to remove scripts from an existing subscription.
 pub async fn indexer_service_unsubscribe_for_scripts(
     configuration: &configuration::Configuration,
-    body: models::V1UnsubscribeForScriptsRequest,
+    unsubscribe_for_scripts_request: models::UnsubscribeForScriptsRequest,
 ) -> Result<serde_json::Value, Error<IndexerServiceUnsubscribeForScriptsError>> {
     // add a prefix to parameters to efficiently prevent name collisions
-    let p_body = body;
+    let p_unsubscribe_for_scripts_request = unsubscribe_for_scripts_request;
 
-    let uri_str = format!("{}/v1/script/unsubscribe", configuration.base_path);
+    let uri_str = format!("{}/v1/indexer/script/unsubscribe", configuration.base_path);
     let mut req_builder = configuration
         .client
         .request(reqwest::Method::POST, &uri_str);
@@ -789,7 +820,7 @@ pub async fn indexer_service_unsubscribe_for_scripts(
     if let Some(ref user_agent) = configuration.user_agent {
         req_builder = req_builder.header(reqwest::header::USER_AGENT, user_agent.clone());
     }
-    req_builder = req_builder.json(&p_body);
+    req_builder = req_builder.json(&p_unsubscribe_for_scripts_request);
 
     let req = req_builder.build()?;
     let resp = configuration.client.execute(req).await?;
