@@ -73,6 +73,26 @@ impl Input {
             is_onchain,
         }
     }
+
+    pub(crate) fn outpoint(&self) -> OutPoint {
+        self.outpoint
+    }
+
+    pub(crate) fn pk(&self) -> XOnlyPublicKey {
+        self.pk
+    }
+
+    pub(crate) fn spend_info(&self) -> &(ScriptBuf, taproot::ControlBlock) {
+        &self.spend_info
+    }
+
+    pub(crate) fn tapscripts(&self) -> &[ScriptBuf] {
+        &self.tapscripts
+    }
+
+    pub(crate) fn is_onchain(&self) -> bool {
+        self.is_onchain
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -90,6 +110,10 @@ pub struct Intent {
 }
 
 impl Intent {
+    pub fn new(proof: Psbt, message: IntentMessage) -> Self {
+        Self { proof, message }
+    }
+
     pub fn serialize_proof(&self) -> String {
         let base64 = base64::engine::GeneralPurpose::new(
             &base64::alphabet::STANDARD,
@@ -246,7 +270,7 @@ where
     })
 }
 
-fn build_proof_psbt(
+pub(crate) fn build_proof_psbt(
     message: &IntentMessage,
     inputs: &[Input],
     outputs: &[Output],
@@ -385,6 +409,22 @@ pub struct IntentMessage {
 }
 
 impl IntentMessage {
+    pub(crate) fn new(
+        intent_message_type: IntentMessageType,
+        onchain_output_indexes: Vec<usize>,
+        valid_at: u64,
+        expire_at: u64,
+        own_cosigner_pks: Vec<PublicKey>,
+    ) -> Self {
+        Self {
+            intent_message_type,
+            onchain_output_indexes,
+            valid_at,
+            expire_at,
+            own_cosigner_pks,
+        }
+    }
+
     pub fn encode(&self) -> Result<String, Error> {
         // TODO: Probably should get rid of `serde` and `serde_json` if we serialize manually.
         serde_json::to_string(self)
@@ -400,7 +440,7 @@ pub enum IntentMessageType {
     Delete,
 }
 
-mod taptree {
+pub(crate) mod taptree {
     use bitcoin::ScriptBuf;
     use std::io::Write;
     use std::io::{self};
