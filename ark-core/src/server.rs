@@ -18,6 +18,8 @@ use bitcoin::XOnlyPublicKey;
 use musig::musig;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 /// An aggregate public nonce per shared internal (non-leaf) node in the VTXO tree.
 #[derive(Debug, Clone)]
@@ -318,7 +320,12 @@ pub struct VirtualTxOutPoint {
 
 impl VirtualTxOutPoint {
     pub fn is_recoverable(&self) -> bool {
-        self.is_swept && !self.is_spent
+        let current_timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("valid duration")
+            .as_secs() as i64;
+
+        (self.is_swept && !self.is_spent) || current_timestamp > self.expires_at
     }
 }
 

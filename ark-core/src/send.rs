@@ -83,6 +83,10 @@ impl VtxoInput {
     pub fn spend_info(&self) -> (&ScriptBuf, &ControlBlock) {
         (&self.spend_script, &self.control_block)
     }
+
+    pub fn script_pubkey(&self) -> ScriptBuf {
+        self.script_pubkey.clone()
+    }
 }
 
 #[derive(Debug, Clone)]
