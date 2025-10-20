@@ -123,10 +123,6 @@ impl VtxoInput {
 pub struct NonceKps(HashMap<Txid, (Option<musig::SecretNonce>, musig::PublicNonce)>);
 
 impl NonceKps {
-    pub fn get_pk(&mut self, txid: &Txid) -> Option<musig::PublicNonce> {
-        self.0.get(txid).map(|(_, pk)| pk).copied()
-    }
-
     /// Take ownership of the [`musig::SecretNonce`] for the transaction identified by `txid`.
     ///
     /// The caller must take ownership because the [`musig::SecretNonce`] ensures that it can only
