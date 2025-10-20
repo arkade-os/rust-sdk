@@ -163,7 +163,7 @@ where
                         .broadcast_package(&[parent_tx, &child_tx])
                         .await?;
 
-                    Ok(Some(bump_txid))
+                    Ok(Some(parent_txid))
                 } else {
                     tracing::debug!(
                         %parent_txid,

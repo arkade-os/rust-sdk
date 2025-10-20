@@ -182,7 +182,7 @@ arkd-init:
 
     set -euxo pipefail
 
-    curl -s --data-binary '{"password" : "password"}' -H "Content-Type: application/json" {{ arkd_admin_url }}/v1/admin/wallet/unlock
+    curl -fsS --data-binary '{"password" : "password"}' -H "Content-Type: application/json" {{ arkd_admin_url }}/v1/admin/wallet/unlock
 
     echo "Unlocked arkd wallet"
 
@@ -206,7 +206,7 @@ arkd-fund n:
     set -euxo pipefail
 
     for i in {1..{{ n }}}; do
-        address=$(curl -s -X 'POST' \
+        address=$(curl -fsS -X 'POST' \
                     {{ arkd_wallet_url }}/v1/wallet/derive-addresses \
                     -H 'accept: application/json' \
                     -H 'Content-Type: application/json' \
@@ -257,11 +257,11 @@ _create-arkd:
     echo "Waiting for arkd wallet seed to be ready..."
 
     for ((i=0; i<30; i+=1)); do
-      seed=$(curl -s {{ arkd_admin_url }}/v1/admin/wallet/seed | jq .seed -r)
+      seed=$(curl -fsS {{ arkd_admin_url }}/v1/admin/wallet/seed | jq .seed -r)
 
       if [ -n "$seed" ]; then
         echo "arkd wallet seed is ready! Creating wallet"
-        curl -v --data-binary "{\"seed\": \"$seed\", \"password\": \"password\"}" -H "Content-Type: application/json" {{ arkd_admin_url }}/v1/admin/wallet/create
+        curl -fsS --data-binary "{\"seed\": \"$seed\", \"password\": \"password\"}" -H "Content-Type: application/json" {{ arkd_admin_url }}/v1/admin/wallet/create
         exit 0
       fi
       sleep 1
@@ -277,7 +277,7 @@ _wait-until-arkd-is-initialized:
     echo "Waiting for arkd wallet to be initialized..."
 
     for ((i=0; i<30; i+=1)); do
-      res=$(curl -s {{ arkd_admin_url }}/v1/admin/wallet/status)
+      res=$(curl -fsS {{ arkd_admin_url }}/v1/admin/wallet/status)
 
       if echo "$res" | jq -e '.initialized == true and .unlocked == true and .synced == true' > /dev/null; then
         echo "arkd wallet is initialized!"

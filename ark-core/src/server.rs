@@ -610,7 +610,7 @@ pub fn parse_sequence_number(value: i64) -> Result<bitcoin::Sequence, Error> {
     /// number of blocks or a number of seconds.
     ///
     /// - A value below 512 is considered a number of blocks.
-    /// - A value over 512 is considered a number of seconds.
+    /// - A value of 512 or more is considered a number of seconds.
     const ARBITRARY_SEQUENCE_THRESHOLD: i64 = 512;
 
     let sequence = if value.is_negative() {
@@ -618,7 +618,10 @@ pub fn parse_sequence_number(value: i64) -> Result<bitcoin::Sequence, Error> {
     } else if value < ARBITRARY_SEQUENCE_THRESHOLD {
         bitcoin::Sequence::from_height(value as u16)
     } else {
-        bitcoin::Sequence::from_seconds_ceil(value as u32).map_err(Error::ad_hoc)?
+        let secs = u32::try_from(value)
+            .map_err(|_| Error::ad_hoc(format!("sequence seconds overflow: {value}")))?;
+
+        bitcoin::Sequence::from_seconds_ceil(secs).map_err(Error::ad_hoc)?
     };
 
     Ok(sequence)
