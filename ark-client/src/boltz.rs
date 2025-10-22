@@ -57,6 +57,14 @@ pub struct ReverseSwapResult {
     pub invoice: Bolt11Invoice,
 }
 
+#[derive(Clone, Debug)]
+pub struct ClaimVhtlcResult {
+    pub swap_id: String,
+    pub claim_txid: Txid,
+    pub claim_amount: Amount,
+    pub preimage: [u8; 32],
+}
+
 impl<B, W, S> Client<B, W, S>
 where
     B: Blockchain,
@@ -578,7 +586,7 @@ where
     }
 
     /// Wait for the VHTLC associated with a reverse submarine swap to be funded, then claim it.
-    pub async fn wait_for_vhtlc(&self, swap_id: &str) -> Result<(), Error> {
+    pub async fn wait_for_vhtlc(&self, swap_id: &str) -> Result<ClaimVhtlcResult, Error> {
         use futures::StreamExt;
 
         let swap = self
@@ -772,7 +780,12 @@ where
 
         tracing::info!(txid = %ark_txid, "Spent VHTLC");
 
-        Ok(())
+        Ok(ClaimVhtlcResult {
+            swap_id: swap_id.to_string(),
+            claim_txid: ark_txid,
+            claim_amount,
+            preimage: swap.preimage,
+        })
     }
 
     /// Use Boltz's API to learn about updates for a particular swap.
