@@ -176,9 +176,33 @@ where
         while let Some(status_result) = stream.next().await {
             match status_result {
                 Ok(status) => {
-                    tracing::debug!(current = ?status, "Swap status");
-                    if status == SwapStatus::InvoicePaid {
-                        return Ok(());
+                    tracing::debug!(swap_id, current = ?status, "Swap status");
+                    match status {
+                        SwapStatus::InvoicePaid => {
+                            return Ok(());
+                        }
+                        SwapStatus::InvoiceExpired => {
+                            return Err(Error::ad_hoc(format!(
+                                "invoice expired for swap {swap_id}"
+                            )));
+                        }
+                        SwapStatus::Error { error } => {
+                            tracing::error!(
+                                swap_id,
+                                "Got error from swap updates subscription: {error}"
+                            );
+                        }
+                        // TODO: We may still need to handle some of these explicitly.
+                        SwapStatus::InvoiceSet
+                        | SwapStatus::InvoicePending
+                        | SwapStatus::Created
+                        | SwapStatus::TransactionMempool
+                        | SwapStatus::TransactionConfirmed
+                        | SwapStatus::TransactionRefunded
+                        | SwapStatus::TransactionFailed
+                        | SwapStatus::TransactionClaimed
+                        | SwapStatus::InvoiceFailedToPay
+                        | SwapStatus::SwapExpired => {}
                     }
                 }
                 Err(e) => return Err(e),
