@@ -632,11 +632,30 @@ where
             match status_result {
                 Ok(status) => {
                     tracing::debug!(current = ?status, "Swap status");
-                    if matches!(
-                        status,
-                        SwapStatus::TransactionMempool | SwapStatus::TransactionConfirmed
-                    ) {
-                        break;
+
+                    match status {
+                        SwapStatus::TransactionMempool | SwapStatus::TransactionConfirmed => break,
+                        SwapStatus::InvoiceExpired => {
+                            return Err(Error::ad_hoc(format!(
+                                "invoice expired for swap {swap_id}"
+                            )));
+                        }
+                        SwapStatus::Error { error } => {
+                            tracing::error!(
+                                swap_id,
+                                "Got error from swap updates subscription: {error}"
+                            );
+                        }
+                        // TODO: We may still need to handle some of these explicitly.
+                        SwapStatus::Created
+                        | SwapStatus::TransactionRefunded
+                        | SwapStatus::TransactionFailed
+                        | SwapStatus::TransactionClaimed
+                        | SwapStatus::InvoiceSet
+                        | SwapStatus::InvoicePending
+                        | SwapStatus::InvoicePaid
+                        | SwapStatus::InvoiceFailedToPay
+                        | SwapStatus::SwapExpired => {}
                     }
                 }
                 Err(e) => return Err(e),
