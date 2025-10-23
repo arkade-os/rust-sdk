@@ -30,7 +30,7 @@ pub async fn reverse_swap() {
     let (alice, _) = set_up_client("alice".to_string(), nigiri.clone(), secp.clone()).await;
 
     let invoice_amount = Amount::from_sat(1_000);
-    let res = alice.get_ln_invoice(invoice_amount).await.unwrap();
+    let res = alice.get_ln_invoice(invoice_amount, None).await.unwrap();
 
     tracing::info!(invoice = %res.invoice, swap_id = res.swap_id, "Generated Boltz reverse swap invoice");
 

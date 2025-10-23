@@ -511,7 +511,11 @@ where
     ///
     /// - A `ReverseSwapResult`, including an identifier for the reverse swap and the
     ///   [`Bolt11Invoice`] to be paid.
-    pub async fn get_ln_invoice(&self, amount: Amount) -> Result<ReverseSwapResult, Error> {
+    pub async fn get_ln_invoice(
+        &self,
+        amount: Amount,
+        expiry_secs: Option<u64>,
+    ) -> Result<ReverseSwapResult, Error> {
         let preimage: [u8; 32] = musig::rand::random();
         let preimage_hash_sha256 = sha256::Hash::hash(&preimage);
         let preimage_hash = ripemd160::Hash::hash(preimage_hash_sha256.as_byte_array());
@@ -524,6 +528,7 @@ where
             invoice_amount: amount,
             claim_public_key: claim_public_key.into(),
             preimage_hash: preimage_hash_sha256,
+            invoice_expiry: expiry_secs,
         };
 
         let url = format!("{}/v2/swap/reverse", self.inner.boltz_url);
@@ -979,6 +984,10 @@ struct CreateReverseSwapRequest {
     invoice_amount: Amount,
     claim_public_key: PublicKey,
     preimage_hash: sha256::Hash,
+    /// The expiry will be this number of seconds in the future.
+    ///
+    /// If not provided, the generated invoice will have the default expiry set by Boltz.
+    invoice_expiry: Option<u64>,
 }
 
 #[serde_as]

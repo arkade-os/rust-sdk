@@ -351,7 +351,7 @@ async fn main() -> Result<()> {
         }
         Commands::LightningInvoice { amount } => {
             let res = client
-                .get_ln_invoice(Amount::from_sat(*amount))
+                .get_ln_invoice(Amount::from_sat(*amount), None)
                 .await
                 .map_err(|e| anyhow!(e))?;
 
