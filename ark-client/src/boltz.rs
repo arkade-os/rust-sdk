@@ -592,7 +592,7 @@ where
         let swap = ReverseSwapData {
             id: response.id.clone(),
             status: SwapStatus::Created,
-            preimage,
+            preimage: Some(preimage),
             vhtlc_address: response.lockup_address,
             preimage_hash,
             refund_public_key: response.refund_public_key,
@@ -614,7 +614,383 @@ where
         })
     }
 
+    /// Generate a BOLT11 invoice using a provided SHA256 preimage hash for a reverse submarine
+    /// swap via Boltz. This allows receiving Lightning payments when the preimage is managed
+    /// externally.
+    ///
+    /// # Arguments
+    ///
+    /// - `amount`: the expected [`Amount`] to be received.
+    /// - `preimage_hash_sha256`: the SHA256 hash of the preimage. The preimage itself is not stored
+    ///   and must be provided later when claiming via [`Self::claim_vhtlc`].
+    ///
+    /// # Returns
+    ///
+    /// - A [`ReverseSwapResult`], including an identifier for the reverse swap and the
+    ///   [`Bolt11Invoice`] to be paid.
+    ///
+    /// # Note
+    ///
+    /// After calling this method, use [`Self::wait_for_vhtlc_funding`] to wait for the VHTLC to
+    /// be funded, then [`Self::claim_vhtlc`] with the preimage to claim the funds.
+    pub async fn get_ln_invoice_from_hash(
+        &self,
+        amount: Amount,
+        expiry_secs: Option<u64>,
+        preimage_hash_sha256: sha256::Hash,
+    ) -> Result<ReverseSwapResult, Error> {
+        let preimage_hash = ripemd160::Hash::hash(preimage_hash_sha256.as_byte_array());
+
+        let claim_public_key = self.inner.kp.public_key();
+
+        let request = CreateReverseSwapRequest {
+            from: Asset::Btc,
+            to: Asset::Ark,
+            invoice_amount: amount,
+            claim_public_key: claim_public_key.into(),
+            preimage_hash: preimage_hash_sha256,
+            invoice_expiry: expiry_secs,
+        };
+
+        let url = format!("{}/v2/swap/reverse", self.inner.boltz_url);
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| Error::ad_hoc(e.to_string()))
+            .context("failed to send reverse swap request")?;
+
+        if !response.status().is_success() {
+            let error_text = response
+                .text()
+                .await
+                .map_err(|e| Error::ad_hoc(e.to_string()))
+                .context("failed to read error text")?;
+
+            return Err(Error::ad_hoc(format!(
+                "failed to create reverse swap: {error_text}"
+            )));
+        }
+
+        let response: CreateReverseSwapResponse = response
+            .json()
+            .await
+            .map_err(|e| Error::ad_hoc(e.to_string()))
+            .context("failed to deserialize reverse swap response")?;
+
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(Error::ad_hoc)
+            .context("failed to compute created_at")?;
+
+        let swap = ReverseSwapData {
+            id: response.id.clone(),
+            status: SwapStatus::Created,
+            preimage: None, // Preimage not known at creation time
+            vhtlc_address: response.lockup_address,
+            preimage_hash,
+            refund_public_key: response.refund_public_key,
+            amount: response.onchain_amount,
+            claim_public_key: claim_public_key.into(),
+            timeout_block_heights: response.timeout_block_heights,
+            created_at: created_at.as_secs(),
+        };
+
+        self.swap_storage()
+            .insert_reverse(response.id.clone(), swap.clone())
+            .await
+            .context("failed to persist swap data")?;
+
+        Ok(ReverseSwapResult {
+            swap_id: swap.id,
+            invoice: response.invoice,
+            amount: response.onchain_amount,
+        })
+    }
+
+    /// Wait for the VHTLC associated with a reverse submarine swap to be funded.
+    ///
+    /// This method only waits for the funding transaction to be detected (in mempool or confirmed).
+    /// It does not claim the VHTLC. Use [`Self::claim_vhtlc`] to claim after the preimage is known.
+    ///
+    /// # Arguments
+    ///
+    /// - `swap_id`: The unique identifier for the reverse swap.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` when the VHTLC funding transaction is detected.
+    pub async fn wait_for_vhtlc_funding(&self, swap_id: &str) -> Result<(), Error> {
+        use futures::StreamExt;
+
+        let stream = self.subscribe_to_swap_updates(swap_id.to_string());
+        tokio::pin!(stream);
+
+        while let Some(status_result) = stream.next().await {
+            match status_result {
+                Ok(status) => {
+                    tracing::debug!(swap_id, current = ?status, "Swap status");
+
+                    match status {
+                        SwapStatus::TransactionMempool | SwapStatus::TransactionConfirmed => {
+                            tracing::debug!(swap_id, "VHTLC funding detected");
+                            return Ok(());
+                        }
+                        SwapStatus::InvoiceExpired => {
+                            return Err(Error::ad_hoc(format!(
+                                "invoice expired for swap {swap_id}"
+                            )));
+                        }
+                        SwapStatus::Error { error } => {
+                            tracing::error!(
+                                swap_id,
+                                "Got error from swap updates subscription: {error}"
+                            );
+                        }
+                        // TODO: We may still need to handle some of these explicitly.
+                        SwapStatus::Created
+                        | SwapStatus::TransactionRefunded
+                        | SwapStatus::TransactionFailed
+                        | SwapStatus::TransactionClaimed
+                        | SwapStatus::InvoiceSet
+                        | SwapStatus::InvoicePending
+                        | SwapStatus::InvoicePaid
+                        | SwapStatus::InvoiceFailedToPay
+                        | SwapStatus::SwapExpired => {}
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Err(Error::ad_hoc("Status stream ended unexpectedly"))
+    }
+
+    /// Claim a funded VHTLC for a reverse submarine swap using the preimage.
+    ///
+    /// This method should be called after the VHTLC has been funded (after
+    /// [`Self::wait_for_vhtlc_funding`] returns) and the preimage is known.
+    ///
+    /// # Arguments
+    ///
+    /// - `swap_id`: The unique identifier for the reverse swap.
+    /// - `preimage`: The 32-byte preimage that unlocks the VHTLC.
+    ///
+    /// # Returns
+    ///
+    /// Returns a [`ClaimVhtlcResult`] with details about the claim transaction.
+    pub async fn claim_vhtlc(
+        &self,
+        swap_id: &str,
+        preimage: [u8; 32],
+    ) -> Result<ClaimVhtlcResult, Error> {
+        let swap = self
+            .swap_storage()
+            .get_reverse(swap_id)
+            .await
+            .context("failed to get reverse swap data")?
+            .ok_or_else(|| Error::ad_hoc(format!("reverse swap data not found: {swap_id}")))?;
+
+        // Verify the preimage matches the stored hash
+        let preimage_hash_sha256 = sha256::Hash::hash(&preimage);
+        let preimage_hash = ripemd160::Hash::hash(preimage_hash_sha256.as_byte_array());
+
+        if preimage_hash != swap.preimage_hash {
+            return Err(Error::ad_hoc(format!(
+                "preimage does not match stored hash for swap {swap_id}"
+            )));
+        }
+
+        tracing::debug!(swap_id, "Claiming VHTLC with verified preimage");
+
+        let timeout_block_heights = swap.timeout_block_heights;
+
+        let vhtlc = VhtlcScript::new(
+            VhtlcOptions {
+                sender: swap.refund_public_key.into(),
+                receiver: swap.claim_public_key.into(),
+                server: self.server_info.signer_pk.into(),
+                preimage_hash: swap.preimage_hash,
+                refund_locktime: timeout_block_heights.refund,
+                unilateral_claim_delay: parse_sequence_number(
+                    timeout_block_heights.unilateral_claim as i64,
+                )
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
+                unilateral_refund_delay: parse_sequence_number(
+                    timeout_block_heights.unilateral_refund as i64,
+                )
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral refund timeout: {e}")))?,
+                unilateral_refund_without_receiver_delay: parse_sequence_number(
+                    timeout_block_heights.unilateral_refund_without_receiver as i64,
+                )
+                .map_err(|e| {
+                    Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
+                })?,
+            },
+            self.server_info.network,
+        )
+        .map_err(Error::ad_hoc)
+        .context("failed to build VHTLC script")?;
+
+        let vhtlc_address = vhtlc.address();
+        if vhtlc_address != swap.vhtlc_address {
+            return Err(Error::ad_hoc(format!(
+                "VHTLC address ({vhtlc_address}) does not match swap address ({})",
+                swap.vhtlc_address
+            )));
+        }
+
+        // TODO: Ideally we can skip this if the vout is always the same (probably 0).
+        let vhtlc_outpoint = {
+            let request = GetVtxosRequest::new_for_addresses(&[vhtlc_address]);
+
+            let list = timeout_op(
+                self.inner.timeout,
+                self.network_client().list_vtxos(request),
+            )
+            .await
+            .context("failed to fetch VHTLC")?
+            .map_err(Error::ark_server)
+            .context("failed to fetch VHTLC")?;
+
+            // We expect a single outpoint.
+            let all = list.all();
+            let vhtlc_outpoint = all.first().ok_or_else(|| {
+                Error::ad_hoc(format!("no outpoint found for address {vhtlc_address}"))
+            })?;
+
+            vhtlc_outpoint.clone()
+        };
+
+        let (claim_address, _) = self
+            .get_offchain_address()
+            .context("failed to get offchain address")?;
+        let claim_amount = swap.amount;
+
+        let outputs = vec![(&claim_address, claim_amount)];
+
+        let spend_info = vhtlc.taproot_spend_info();
+        let script_ver = (vhtlc.claim_script(), LeafVersion::TapScript);
+        let control_block = spend_info
+            .control_block(&script_ver)
+            .ok_or(Error::ad_hoc("control block not found for claim script"))?;
+
+        let script_pubkey = vhtlc.script_pubkey();
+
+        let vhtlc_input = VtxoInput::new(
+            script_ver.0,
+            None,
+            control_block,
+            vhtlc.tapscripts(),
+            script_pubkey,
+            claim_amount,
+            vhtlc_outpoint.outpoint,
+        );
+
+        let OffchainTransactions {
+            mut ark_tx,
+            checkpoint_txs,
+        } = build_offchain_transactions(
+            &outputs,
+            None,
+            std::slice::from_ref(&vhtlc_input),
+            &self.server_info,
+        )
+        .map_err(Error::from)
+        .context("failed to build offchain TXs")?;
+
+        let sign_fn = |input: &mut psbt::Input,
+                       msg: secp256k1::Message|
+         -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+            // Add preimage to PSBT input.
+            {
+                // Initialized with a 1, because we only have one witness element: the preimage.
+                let mut bytes = vec![1];
+
+                let length = VarInt::from(preimage.len() as u64);
+
+                length
+                    .consensus_encode(&mut bytes)
+                    .expect("valid length encoding");
+
+                bytes.write_all(&preimage).expect("valid preimage encoding");
+
+                input.unknown.insert(
+                    psbt::raw::Key {
+                        type_value: 222,
+                        key: VTXO_CONDITION_KEY.to_vec(),
+                    },
+                    bytes,
+                );
+            }
+
+            let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, self.kp());
+            let pk = self.kp().x_only_public_key().0;
+
+            Ok((sig, pk))
+        };
+
+        sign_ark_transaction(sign_fn, &mut ark_tx, 0)
+            .map_err(Error::from)
+            .context("failed to sign Ark TX")?;
+
+        let ark_txid = ark_tx.unsigned_tx.compute_txid();
+
+        let res = self
+            .network_client()
+            .submit_offchain_transaction_request(ark_tx, checkpoint_txs)
+            .await
+            .map_err(Error::from)
+            .context("failed to submit offchain TXs")?;
+
+        let mut checkpoint_psbt = res
+            .signed_checkpoint_txs
+            .first()
+            .ok_or_else(|| Error::ad_hoc("no checkpoint PSBTs found"))?
+            .clone();
+
+        sign_checkpoint_transaction(sign_fn, &mut checkpoint_psbt)
+            .map_err(Error::from)
+            .context("failed to sign checkpoint TX")?;
+
+        timeout_op(
+            self.inner.timeout,
+            self.network_client()
+                .finalize_offchain_transaction(ark_txid, vec![checkpoint_psbt]),
+        )
+        .await
+        .context("failed to finalize offchain transaction")?
+        .map_err(Error::ark_server)
+        .context("failed to finalize offchain transaction")?;
+
+        tracing::info!(swap_id, txid = %ark_txid, "Claimed VHTLC");
+
+        // Update storage to persist the preimage
+        let mut updated_swap = swap.clone();
+        updated_swap.preimage = Some(preimage);
+        self.swap_storage()
+            .insert_reverse(swap_id.to_string(), updated_swap)
+            .await
+            .context("failed to update swap data with preimage")?;
+
+        Ok(ClaimVhtlcResult {
+            swap_id: swap_id.to_string(),
+            claim_txid: ark_txid,
+            claim_amount,
+            preimage,
+        })
+    }
+
     /// Wait for the VHTLC associated with a reverse submarine swap to be funded, then claim it.
+    ///
+    /// # Note
+    ///
+    /// This method requires that the preimage was stored when creating the reverse swap (i.e., via
+    /// [`Self::get_ln_invoice`]). If the swap was created with [`Self::get_ln_invoice_from_hash`],
+    /// use [`Self::wait_for_vhtlc_funding`] followed by [`Self::claim_vhtlc`] instead.
     pub async fn wait_for_vhtlc(&self, swap_id: &str) -> Result<ClaimVhtlcResult, Error> {
         use futures::StreamExt;
 
@@ -624,6 +1000,14 @@ where
             .await
             .context("failed to get reverse swap data")?
             .ok_or_else(|| Error::ad_hoc(format!("reverse swap data not found: {swap_id}")))?;
+
+        // Ensure the preimage is available in storage
+        let preimage = swap.preimage.ok_or_else(|| {
+            Error::ad_hoc(format!(
+                "preimage not found in storage for swap {swap_id}. \
+                 Use wait_for_vhtlc_funding and claim_vhtlc instead."
+            ))
+        })?;
 
         let stream = self.subscribe_to_swap_updates(swap_id.to_string());
         tokio::pin!(stream);
@@ -768,15 +1152,13 @@ where
                 // Initialized with a 1, because we only have one witness element: the preimage.
                 let mut bytes = vec![1];
 
-                let length = VarInt::from(swap.preimage.len() as u64);
+                let length = VarInt::from(preimage.len() as u64);
 
                 length
                     .consensus_encode(&mut bytes)
                     .expect("valid length encoding");
 
-                bytes
-                    .write_all(&swap.preimage)
-                    .expect("valid preimage encoding");
+                bytes.write_all(&preimage).expect("valid preimage encoding");
 
                 input.unknown.insert(
                     psbt::raw::Key {
@@ -832,7 +1214,7 @@ where
             swap_id: swap_id.to_string(),
             claim_txid: ark_txid,
             claim_amount,
-            preimage: swap.preimage,
+            preimage,
         })
     }
 
@@ -936,8 +1318,8 @@ pub struct SubmarineSwapData {
 pub struct ReverseSwapData {
     /// Unique swap identifier.
     pub id: String,
-    /// Preimage for the swap.
-    pub preimage: [u8; 32],
+    /// Preimage for the swap (optional, may not be known at creation time).
+    pub preimage: Option<[u8; 32]>,
     /// The preimage hash of the BOLT11 invoice.
     pub preimage_hash: ripemd160::Hash,
     /// Public key of the receiving party.

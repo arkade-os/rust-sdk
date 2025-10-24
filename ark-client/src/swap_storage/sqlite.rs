@@ -350,7 +350,7 @@ mod tests {
         ReverseSwapData {
             id: id.to_string(),
             status: SwapStatus::Created,
-            preimage: [1u8; 32],
+            preimage: Some([1u8; 32]),
             vhtlc_address: ArkAddress::decode("tark1qqellv77udfmr20tun8dvju5vgudpf9vxe8jwhthrkn26fz96pawqfdy8nk05rsmrf8h94j26905e7n6sng8y059z8ykn2j5xcuw4xt846qj6x").unwrap(),
             preimage_hash: ripemd160::Hash::from_slice(&[2u8; 20]).unwrap(),
             refund_public_key: PublicKey::from_str(
