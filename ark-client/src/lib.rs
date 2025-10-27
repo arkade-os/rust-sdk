@@ -239,6 +239,11 @@ pub struct SpendStatus {
     pub spend_txid: Option<Txid>,
 }
 
+pub struct AddressVtxos {
+    pub spendable: Vec<VirtualTxOutPoint>,
+    pub spent: Vec<VirtualTxOutPoint>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ListVtxo {
     pub spendable: Vec<(Vec<VirtualTxOutPoint>, Vtxo)>,
@@ -464,6 +469,21 @@ where
         let address = self.get_boarding_address()?;
 
         Ok(vec![address])
+    }
+
+    pub async fn get_vtxos(&self, ark_addresses: &[ArkAddress]) -> Result<AddressVtxos, Error> {
+        let request = GetVtxosRequest::new_for_addresses(ark_addresses);
+        let list = timeout_op(
+            self.inner.timeout,
+            self.network_client().list_vtxos(request),
+        )
+        .await
+        .context("Failed to fetch list of VTXOs")??;
+
+        Ok(AddressVtxos {
+            spendable: list.spendable().to_vec(),
+            spent: list.spent().to_vec(),
+        })
     }
 
     pub async fn list_vtxos(&self, include_recoverable_vtxos: bool) -> Result<ListVtxo, Error> {
