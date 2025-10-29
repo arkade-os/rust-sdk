@@ -15,15 +15,15 @@ use serde::Serialize;
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ScheduledSession {
     #[serde(rename = "duration", skip_serializing_if = "Option::is_none")]
-    pub duration: Option<i64>,
+    pub duration: Option<String>,
     #[serde(rename = "fees", skip_serializing_if = "Option::is_none")]
     pub fees: Option<models::FeeInfo>,
     #[serde(rename = "nextEndTime", skip_serializing_if = "Option::is_none")]
-    pub next_end_time: Option<i64>,
+    pub next_end_time: Option<String>,
     #[serde(rename = "nextStartTime", skip_serializing_if = "Option::is_none")]
-    pub next_start_time: Option<i64>,
+    pub next_start_time: Option<String>,
     #[serde(rename = "period", skip_serializing_if = "Option::is_none")]
-    pub period: Option<i64>,
+    pub period: Option<String>,
 }
 
 impl ScheduledSession {

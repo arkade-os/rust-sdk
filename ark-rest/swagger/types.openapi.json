@@ -47,8 +47,7 @@
         "type": "object",
         "properties": {
           "batchExpiry": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "id": {
             "type": "string"
@@ -66,8 +65,7 @@
         "type": "object",
         "properties": {
           "cutoffDate": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "pubkey": {
             "type": "string"
@@ -190,23 +188,19 @@
         "type": "object",
         "properties": {
           "duration": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "fees": {
             "$ref": "#/components/schemas/FeeInfo"
           },
           "nextEndTime": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "nextStartTime": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "period": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           }
         }
       },
@@ -398,12 +392,10 @@
             }
           },
           "createdAt": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "expiresAt": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "isPreconfirmed": {
             "type": "boolean"

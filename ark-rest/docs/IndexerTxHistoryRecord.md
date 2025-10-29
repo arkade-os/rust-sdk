@@ -6,7 +6,7 @@
 | ------------------- | ----------------------------------------------------- | ----------- | ---------- |
 | **amount**          | Option<**i32**>                                       |             | [optional] |
 | **commitment_txid** | Option<**String**>                                    |             | [optional] |
-| **created_at**      | Option<**i64**>                                       |             | [optional] |
+| **created_at**      | Option<**String**>                                    |             | [optional] |
 | **is_settled**      | Option<**bool**>                                      |             | [optional] |
 | **settled_by**      | Option<**String**>                                    |             | [optional] |
 | **r#type**          | Option<[**models::IndexerTxType**](IndexerTxType.md)> |             | [optional] |

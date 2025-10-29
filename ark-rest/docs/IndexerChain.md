@@ -4,7 +4,7 @@
 
 | Name           | Type                                                                | Description                                                            | Notes      |
 | -------------- | ------------------------------------------------------------------- | ---------------------------------------------------------------------- | ---------- |
-| **expires_at** | Option<**i64**>                                                     |                                                                        | [optional] |
+| **expires_at** | Option<**String**>                                                  |                                                                        | [optional] |
 | **spends**     | Option<**Vec<String>**>                                             | txids of the transactions in the chain used as input of the current tx | [optional] |
 | **txid**       | Option<**String**>                                                  |                                                                        | [optional] |
 | **r#type**     | Option<[**models::IndexerChainedTxType**](IndexerChainedTxType.md)> |                                                                        | [optional] |

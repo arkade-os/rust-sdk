@@ -19,7 +19,7 @@ pub struct IndexerTxHistoryRecord {
     #[serde(rename = "commitmentTxid", skip_serializing_if = "Option::is_none")]
     pub commitment_txid: Option<String>,
     #[serde(rename = "createdAt", skip_serializing_if = "Option::is_none")]
-    pub created_at: Option<i64>,
+    pub created_at: Option<String>,
     #[serde(rename = "isSettled", skip_serializing_if = "Option::is_none")]
     pub is_settled: Option<bool>,
     #[serde(rename = "settledBy", skip_serializing_if = "Option::is_none")]

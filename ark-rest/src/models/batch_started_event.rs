@@ -15,7 +15,7 @@ use serde::Serialize;
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BatchStartedEvent {
     #[serde(rename = "batchExpiry", skip_serializing_if = "Option::is_none")]
-    pub batch_expiry: Option<i64>,
+    pub batch_expiry: Option<String>,
     #[serde(rename = "id", skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[serde(rename = "intentIdHashes", skip_serializing_if = "Option::is_none")]

@@ -17,9 +17,9 @@ pub struct GetCommitmentTxResponse {
     #[serde(rename = "batches", skip_serializing_if = "Option::is_none")]
     pub batches: Option<std::collections::HashMap<String, models::IndexerBatch>>,
     #[serde(rename = "endedAt", skip_serializing_if = "Option::is_none")]
-    pub ended_at: Option<i64>,
+    pub ended_at: Option<String>,
     #[serde(rename = "startedAt", skip_serializing_if = "Option::is_none")]
-    pub started_at: Option<i64>,
+    pub started_at: Option<String>,
     #[serde(rename = "totalInputAmount", skip_serializing_if = "Option::is_none")]
     pub total_input_amount: Option<i32>,
     #[serde(rename = "totalInputVtxos", skip_serializing_if = "Option::is_none")]

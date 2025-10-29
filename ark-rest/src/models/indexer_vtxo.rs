@@ -21,9 +21,9 @@ pub struct IndexerVtxo {
     #[serde(rename = "commitmentTxids", skip_serializing_if = "Option::is_none")]
     pub commitment_txids: Option<Vec<String>>,
     #[serde(rename = "createdAt", skip_serializing_if = "Option::is_none")]
-    pub created_at: Option<i64>,
+    pub created_at: Option<String>,
     #[serde(rename = "expiresAt", skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<i64>,
+    pub expires_at: Option<String>,
     #[serde(rename = "isPreconfirmed", skip_serializing_if = "Option::is_none")]
     pub is_preconfirmed: Option<bool>,
     #[serde(rename = "isSpent", skip_serializing_if = "Option::is_none")]

@@ -15,7 +15,7 @@ use serde::Serialize;
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 pub struct IndexerChain {
     #[serde(rename = "expiresAt", skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<i64>,
+    pub expires_at: Option<String>,
     /// txids of the transactions in the chain used as input of the current tx
     #[serde(rename = "spends", skip_serializing_if = "Option::is_none")]
     pub spends: Option<Vec<String>>,

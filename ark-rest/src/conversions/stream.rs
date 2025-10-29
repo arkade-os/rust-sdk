@@ -61,6 +61,8 @@ impl TryFrom<models::BatchStartedEvent> for BatchStartedEvent {
         let expiry = event
             .batch_expiry
             .ok_or_else(|| ConversionError("Missing batch_expiry".to_string()))?;
+        let expiry = i64::from_str(expiry.as_str())
+            .map_err(|e| ConversionError(format!("Could not parse expiry {e:#}")))?;
         Ok(BatchStartedEvent {
             id: event
                 .id
