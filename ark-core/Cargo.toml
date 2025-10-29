@@ -18,3 +18,4 @@ tracing = "0.1.37"
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 getrandom = { version = "0.2", features = ["wasm-bindgen", "js"] }
 getrandom2 = { package = "getrandom", version = "0.3.1", features = ["wasm_js"] }
+web-sys = { version = "0.3.77", features = ["Window", "Performance"] }
