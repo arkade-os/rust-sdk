@@ -972,7 +972,7 @@ where
         let mut updated_swap = swap.clone();
         updated_swap.preimage = Some(preimage);
         self.swap_storage()
-            .insert_reverse(swap_id.to_string(), updated_swap)
+            .update_reverse(swap_id, updated_swap)
             .await
             .context("failed to update swap data with preimage")?;
 
