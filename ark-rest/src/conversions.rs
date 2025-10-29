@@ -352,10 +352,12 @@ impl TryFrom<IndexerVtxo> for ark_core::server::VirtualTxOutPoint {
             .map_err(|e| ConversionError(format!("Could not parse expires_at: {e:#}")))?;
 
         // Parse amount
-        let amount_val = value
+        let amount_str = value
             .amount
             .ok_or_else(|| ConversionError("Missing amount".to_string()))?;
-        let amount = Amount::from_sat(amount_val as u64);
+        let amount_val = u64::from_str(&amount_str)
+            .map_err(|e| ConversionError(format!("Could not parse amount: {e:#}")))?;
+        let amount = Amount::from_sat(amount_val);
 
         // Parse script
         let script_str = value

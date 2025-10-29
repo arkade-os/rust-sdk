@@ -22,7 +22,7 @@ pub struct WithdrawRequest {
     #[serde(rename = "all", skip_serializing_if = "Option::is_none")]
     pub all: Option<bool>,
     #[serde(rename = "amount", skip_serializing_if = "Option::is_none")]
-    pub amount: Option<i32>,
+    pub amount: Option<String>,
 }
 
 impl WithdrawRequest {

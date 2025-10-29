@@ -4,7 +4,7 @@
 
 | Name                | Type                                                  | Description | Notes      |
 | ------------------- | ----------------------------------------------------- | ----------- | ---------- |
-| **amount**          | Option<**i32**>                                       |             | [optional] |
+| **amount**          | Option<**String**>                                    |             | [optional] |
 | **commitment_txid** | Option<**String**>                                    |             | [optional] |
 | **created_at**      | Option<**String**>                                    |             | [optional] |
 | **is_settled**      | Option<**bool**>                                      |             | [optional] |

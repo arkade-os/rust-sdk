@@ -4,7 +4,7 @@
 
 | Name                 | Type                                        | Description | Notes      |
 | -------------------- | ------------------------------------------- | ----------- | ---------- |
-| **amount**           | Option<**i32**>                             |             | [optional] |
+| **amount**           | Option<**String**>                          |             | [optional] |
 | **ark_txid**         | Option<**String**>                          |             | [optional] |
 | **commitment_txids** | Option<**Vec<String>**>                     |             | [optional] |
 | **created_at**       | Option<**String**>                          |             | [optional] |

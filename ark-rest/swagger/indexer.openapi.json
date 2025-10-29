@@ -1183,8 +1183,7 @@
         "type": "object",
         "properties": {
           "amount": {
-            "type": "integer",
-            "format": "uint64"
+            "type": "string"
           },
           "commitmentTxid": {
             "type": "string"
@@ -1221,8 +1220,7 @@
         "type": "object",
         "properties": {
           "amount": {
-            "type": "integer",
-            "format": "uint64"
+            "type": "string"
           },
           "arkTxid": {
             "type": "string"

@@ -15,7 +15,7 @@ use serde::Serialize;
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 pub struct IndexerVtxo {
     #[serde(rename = "amount", skip_serializing_if = "Option::is_none")]
-    pub amount: Option<i32>,
+    pub amount: Option<String>,
     #[serde(rename = "arkTxid", skip_serializing_if = "Option::is_none")]
     pub ark_txid: Option<String>,
     #[serde(rename = "commitmentTxids", skip_serializing_if = "Option::is_none")]

@@ -15,7 +15,7 @@ use serde::Serialize;
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 pub struct IndexerTxHistoryRecord {
     #[serde(rename = "amount", skip_serializing_if = "Option::is_none")]
-    pub amount: Option<i32>,
+    pub amount: Option<String>,
     #[serde(rename = "commitmentTxid", skip_serializing_if = "Option::is_none")]
     pub commitment_txid: Option<String>,
     #[serde(rename = "createdAt", skip_serializing_if = "Option::is_none")]
