@@ -49,6 +49,12 @@ pub struct SubmarineSwapResult {
     pub txid: Txid,
     pub amount: Amount,
 }
+#[derive(Clone, Debug)]
+pub struct PreparedSubmarineSwap {
+    pub swap_id: String,
+    pub address: ArkAddress,
+    pub amount: Amount,
+}
 
 #[derive(Clone, Debug)]
 pub struct ReverseSwapResult {
@@ -71,6 +77,102 @@ where
     W: BoardingWallet + OnchainWallet,
     S: SwapStorage + 'static,
 {
+    /// Creates a reverse swap for a BOLT11 invoice by performing a submarine swap via Boltz. This
+    /// allows to make Lightning payments with an Ark wallet.
+    ///
+    /// Note: this does not send the payment yet. If you want a function paying the invoice
+    /// immediately please use [`pay_ln_invoice`]
+    ///
+    /// # Arguments
+    ///
+    /// - `invoice`: a [`Bolt11Invoice`] to be paid.
+    ///
+    /// # Returns
+    ///
+    /// - A [`SubmarineSwapResult`], including an identifier for the swap and the TXID of the Ark
+    ///   transaction that funds the VHTLC.
+    pub async fn prepare_submarine_swap(
+        &self,
+        invoice: Bolt11Invoice,
+    ) -> Result<PreparedSubmarineSwap, Error> {
+        let refund_public_key = self.inner.kp.public_key();
+
+        let preimage_hash = invoice.payment_hash();
+        let preimage_hash = ripemd160::Hash::hash(preimage_hash.as_byte_array());
+
+        let request = CreateSubmarineSwapRequest {
+            from: Asset::Ark,
+            to: Asset::Btc,
+            invoice,
+            refund_public_key: refund_public_key.into(),
+        };
+        let url = format!("{}/v2/swap/submarine", self.inner.boltz_url);
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| Error::ad_hoc(e.to_string()))
+            .context("failed to send submarine swap request")?;
+
+        if !response.status().is_success() {
+            let error_text = response
+                .text()
+                .await
+                .map_err(|e| Error::ad_hoc(e.to_string()))
+                .context("failed to read error text")?;
+
+            return Err(Error::ad_hoc(format!(
+                "failed to create submarine swap: {error_text}"
+            )));
+        }
+
+        let swap_response: CreateSubmarineSwapResponse = response
+            .json()
+            .await
+            .map_err(|e| Error::ad_hoc(e.to_string()))
+            .context("failed to deserialize submarine swap response")?;
+
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(Error::ad_hoc)
+            .context("failed to compute created_at")?;
+
+        self.swap_storage()
+            .insert_submarine(
+                swap_response.id.clone(),
+                SubmarineSwapData {
+                    id: swap_response.id.clone(),
+                    status: SwapStatus::Created,
+                    preimage_hash,
+                    refund_public_key: refund_public_key.into(),
+                    claim_public_key: swap_response.claim_public_key,
+                    vhtlc_address: swap_response.address,
+                    timeout_block_heights: swap_response.timeout_block_heights,
+                    amount: swap_response.expected_amount,
+                    invoice: request.invoice.clone(),
+                    created_at: created_at.as_secs(),
+                },
+            )
+            .await?;
+
+        let vhtlc_address = swap_response.address;
+        let amount = swap_response.expected_amount;
+        tracing::info!(
+            swap_id = swap_response.id,
+            expected_amount = amount.to_string(),
+            "Submarine Swap Created"
+        );
+
+        Ok(PreparedSubmarineSwap {
+            swap_id: swap_response.id,
+            address: vhtlc_address,
+            amount,
+        })
+    }
+
     // Submarine swap.
 
     /// Pay a BOLT11 invoice by performing a submarine swap via Boltz. This allows to make Lightning
