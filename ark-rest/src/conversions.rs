@@ -7,7 +7,6 @@ use bitcoin::base64;
 use bitcoin::base64::Engine;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Amount;
-use bitcoin::Network;
 use bitcoin::OutPoint;
 use bitcoin::Psbt;
 use bitcoin::ScriptBuf;
@@ -177,9 +176,9 @@ impl TryFrom<GetInfoResponse> for ark_core::server::Info {
         let network_str = response
             .network
             .ok_or_else(|| ConversionError("Missing network".to_string()))?;
-        let network = network_str
-            .parse::<Network>()
+        let network = ark_core::server::Network::from_str(&network_str)
             .map_err(|e| ConversionError(format!("Invalid network '{network_str}': {e}")))?;
+        let network = bitcoin::Network::from(network);
 
         // Parse session_duration
         let session_duration_str = response

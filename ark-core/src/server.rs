@@ -8,7 +8,6 @@ use bitcoin::hex::DisplayHex;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::taproot::Signature;
 use bitcoin::Amount;
-use bitcoin::Network;
 use bitcoin::OutPoint;
 use bitcoin::Psbt;
 use bitcoin::ScriptBuf;
@@ -18,6 +17,7 @@ use bitcoin::XOnlyPublicKey;
 use musig::musig;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::str::FromStr;
 
 /// An aggregate public nonce per shared internal (non-leaf) node in the VTXO tree.
 #[derive(Debug, Clone)]
@@ -344,7 +344,7 @@ pub struct Info {
     pub forfeit_pk: PublicKey,
     pub forfeit_address: bitcoin::Address,
     pub checkpoint_tapscript: ScriptBuf,
-    pub network: Network,
+    pub network: bitcoin::Network,
     pub session_duration: u64,
     pub unilateral_exit_delay: bitcoin::Sequence,
     pub boarding_exit_delay: bitcoin::Sequence,
@@ -611,6 +611,46 @@ pub struct IndexerPage {
     pub current: i32,
     pub next: i32,
     pub total: i32,
+}
+
+#[derive(Clone, Debug)]
+pub enum Network {
+    Bitcoin,
+    Testnet,
+    Testnet4,
+    Signet,
+    Regtest,
+    Mutinynet,
+}
+
+impl From<Network> for bitcoin::Network {
+    fn from(value: Network) -> Self {
+        match value {
+            Network::Bitcoin => bitcoin::Network::Bitcoin,
+            Network::Testnet => bitcoin::Network::Testnet,
+            Network::Testnet4 => bitcoin::Network::Testnet4,
+            Network::Signet => bitcoin::Network::Signet,
+            Network::Regtest => bitcoin::Network::Regtest,
+            Network::Mutinynet => bitcoin::Network::Signet,
+        }
+    }
+}
+
+impl FromStr for Network {
+    type Err = String;
+
+    #[inline]
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "bitcoin" => Ok(Network::Bitcoin),
+            "testnet" => Ok(Network::Testnet),
+            "testnet4" => Ok(Network::Testnet4),
+            "signet" => Ok(Network::Signet),
+            "regtest" => Ok(Network::Regtest),
+            "mutinynet" => Ok(Network::Mutinynet),
+            _ => Err(format!("Unsupported network {}", s.to_owned())),
+        }
+    }
 }
 
 pub fn parse_sequence_number(value: i64) -> Result<bitcoin::Sequence, Error> {
