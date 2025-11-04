@@ -517,7 +517,7 @@ where
 
                 vtxos
                     .spendable
-                    .push((list.spendable().to_vec(), vtxo.clone()));
+                    .push((list.spendable_without_recoverable().to_vec(), vtxo.clone()));
             }
         }
 

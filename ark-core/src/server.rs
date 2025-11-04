@@ -420,6 +420,9 @@ impl ListVtxo {
         &self.spendable
     }
 
+    /// Collect all unspent VTXOs, including recoverable ones.
+    ///
+    /// Useful when building a VTXO set that can be settled.
     pub fn spendable_with_recoverable(&self) -> Vec<VirtualTxOutPoint> {
         let mut spendable = self.spendable.clone();
 
@@ -433,6 +436,18 @@ impl ListVtxo {
         spendable.append(&mut recoverable_vtxos);
 
         spendable
+    }
+
+    /// Collect all unspent VTXOs, excluding recoverable ones.
+    ///
+    /// Useful when building a VTXO set that can be sent offchain, since recoverable VTXOs can only
+    /// be settled.
+    pub fn spendable_without_recoverable(&self) -> Vec<VirtualTxOutPoint> {
+        self.spendable
+            .clone()
+            .into_iter()
+            .filter(|v| !v.is_recoverable())
+            .collect::<Vec<_>>()
     }
 }
 
