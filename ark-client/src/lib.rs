@@ -42,6 +42,9 @@ mod send_vtxo;
 mod unilateral_exit;
 mod utils;
 
+pub use boltz::ReverseSwapData;
+pub use boltz::SubmarineSwapData;
+pub use boltz::TimeoutBlockHeights;
 pub use error::Error;
 pub use lightning_invoice;
 pub use swap_storage::InMemorySwapStorage;
