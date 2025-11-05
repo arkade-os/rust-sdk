@@ -49,12 +49,6 @@ pub struct SubmarineSwapResult {
     pub txid: Txid,
     pub amount: Amount,
 }
-#[derive(Clone, Debug)]
-pub struct PreparedSubmarineSwap {
-    pub swap_id: String,
-    pub address: ArkAddress,
-    pub amount: Amount,
-}
 
 #[derive(Clone, Debug)]
 pub struct ReverseSwapResult {
@@ -77,11 +71,15 @@ where
     W: BoardingWallet + OnchainWallet,
     S: SwapStorage + 'static,
 {
-    /// Creates a reverse swap for a BOLT11 invoice by performing a submarine swap via Boltz. This
-    /// allows to make Lightning payments with an Ark wallet.
+    // Submarine swap.
+
+    /// Prepare the payment of a BOLT11 invoice by setting up a submarine swap via Boltz.
     ///
-    /// Note: this does not send the payment yet. If you want a function paying the invoice
-    /// immediately please use [`pay_ln_invoice`]
+    /// This function does not execute the payment itself. Once you are ready for payment you
+    /// will have to send the required `amount` to the `vhtlc_address`.
+    ///
+    /// If you are looking for a function which pays the invoice immediately, consider using
+    /// [`Client::pay_ln_invoice`] instead.
     ///
     /// # Arguments
     ///
@@ -89,12 +87,11 @@ where
     ///
     /// # Returns
     ///
-    /// - A [`SubmarineSwapResult`], including an identifier for the swap and the TXID of the Ark
-    ///   transaction that funds the VHTLC.
-    pub async fn prepare_submarine_swap(
+    /// - A [`SubmarineSwapData`] object, including an identifier for the swap.
+    pub async fn prepare_ln_invoice_payment(
         &self,
         invoice: Bolt11Invoice,
-    ) -> Result<PreparedSubmarineSwap, Error> {
+    ) -> Result<SubmarineSwapData, Error> {
         let refund_public_key = self.inner.kp.public_key();
 
         let preimage_hash = invoice.payment_hash();
@@ -140,40 +137,32 @@ where
             .map_err(Error::ad_hoc)
             .context("failed to compute created_at")?;
 
+        let data = SubmarineSwapData {
+            id: swap_response.id.clone(),
+            status: SwapStatus::Created,
+            preimage_hash,
+            refund_public_key: refund_public_key.into(),
+            claim_public_key: swap_response.claim_public_key,
+            vhtlc_address: swap_response.address,
+            timeout_block_heights: swap_response.timeout_block_heights,
+            amount: swap_response.expected_amount,
+            invoice: request.invoice.clone(),
+            created_at: created_at.as_secs(),
+        };
+
         self.swap_storage()
-            .insert_submarine(
-                swap_response.id.clone(),
-                SubmarineSwapData {
-                    id: swap_response.id.clone(),
-                    status: SwapStatus::Created,
-                    preimage_hash,
-                    refund_public_key: refund_public_key.into(),
-                    claim_public_key: swap_response.claim_public_key,
-                    vhtlc_address: swap_response.address,
-                    timeout_block_heights: swap_response.timeout_block_heights,
-                    amount: swap_response.expected_amount,
-                    invoice: request.invoice.clone(),
-                    created_at: created_at.as_secs(),
-                },
-            )
+            .insert_submarine(swap_response.id.clone(), data.clone())
             .await?;
 
-        let vhtlc_address = swap_response.address;
-        let amount = swap_response.expected_amount;
         tracing::info!(
             swap_id = swap_response.id,
-            expected_amount = amount.to_string(),
-            "Submarine Swap Created"
+            vhtlc_address = %data.vhtlc_address,
+            expected_amount = %data.amount,
+            "Prepared Lightning invoice payment"
         );
 
-        Ok(PreparedSubmarineSwap {
-            swap_id: swap_response.id,
-            address: vhtlc_address,
-            amount,
-        })
+        Ok(data)
     }
-
-    // Submarine swap.
 
     /// Pay a BOLT11 invoice by performing a submarine swap via Boltz. This allows to make Lightning
     /// payments with an Ark wallet.
