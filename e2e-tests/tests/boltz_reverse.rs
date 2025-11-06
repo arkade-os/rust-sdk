@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use crate::common::wait_until_balance;
+use ark_client::SwapAmount;
 use bitcoin::key::Secp256k1;
 use bitcoin::Amount;
 use common::init_tracing;
@@ -29,7 +30,7 @@ pub async fn reverse_swap() {
 
     let (alice, _) = set_up_client("alice".to_string(), nigiri.clone(), secp.clone()).await;
 
-    let invoice_amount = Amount::from_sat(1_000);
+    let invoice_amount = SwapAmount::invoice(Amount::from_sat(1_000));
     let res = alice.get_ln_invoice(invoice_amount, None).await.unwrap();
 
     tracing::info!(invoice = %res.invoice, swap_id = res.swap_id, "Generated Boltz reverse swap invoice");

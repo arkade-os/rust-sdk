@@ -44,6 +44,7 @@ mod utils;
 
 pub use boltz::ReverseSwapData;
 pub use boltz::SubmarineSwapData;
+pub use boltz::SwapAmount;
 pub use boltz::TimeoutBlockHeights;
 pub use error::Error;
 pub use lightning_invoice;

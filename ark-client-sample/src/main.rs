@@ -14,6 +14,7 @@ use ark_client::Blockchain;
 use ark_client::Error;
 use ark_client::OfflineClient;
 use ark_client::SqliteSwapStorage;
+use ark_client::SwapAmount;
 use ark_core::history;
 use ark_core::server::SubscriptionResponse;
 use ark_core::ArkAddress;
@@ -350,8 +351,9 @@ async fn main() -> Result<()> {
             );
         }
         Commands::LightningInvoice { amount } => {
+            let invoice_amount = SwapAmount::invoice(Amount::from_sat(*amount));
             let res = client
-                .get_ln_invoice(Amount::from_sat(*amount), None)
+                .get_ln_invoice(invoice_amount, None)
                 .await
                 .map_err(|e| anyhow!(e))?;
 

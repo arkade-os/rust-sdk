@@ -626,7 +626,7 @@ where
     ///   [`Bolt11Invoice`] to be paid.
     pub async fn get_ln_invoice(
         &self,
-        amount: Amount,
+        amount: SwapAmount,
         expiry_secs: Option<u64>,
     ) -> Result<ReverseSwapResult, Error> {
         let preimage: [u8; 32] = musig::rand::random();
@@ -635,10 +635,16 @@ where
 
         let claim_public_key = self.inner.kp.public_key();
 
+        let (invoice_amount, onchain_amount) = match amount {
+            SwapAmount::Invoice(amount) => (Some(amount), None),
+            SwapAmount::Vhtlc(amount) => (None, Some(amount)),
+        };
+
         let request = CreateReverseSwapRequest {
             from: Asset::Btc,
             to: Asset::Ark,
-            invoice_amount: amount,
+            invoice_amount,
+            onchain_amount,
             claim_public_key: claim_public_key.into(),
             preimage_hash: preimage_hash_sha256,
             invoice_expiry: expiry_secs,
@@ -724,7 +730,7 @@ where
     /// be funded, then [`Self::claim_vhtlc`] with the preimage to claim the funds.
     pub async fn get_ln_invoice_from_hash(
         &self,
-        amount: Amount,
+        amount: SwapAmount,
         expiry_secs: Option<u64>,
         preimage_hash_sha256: sha256::Hash,
     ) -> Result<ReverseSwapResult, Error> {
@@ -732,10 +738,16 @@ where
 
         let claim_public_key = self.inner.kp.public_key();
 
+        let (invoice_amount, onchain_amount) = match amount {
+            SwapAmount::Invoice(amount) => (Some(amount), None),
+            SwapAmount::Vhtlc(amount) => (None, Some(amount)),
+        };
+
         let request = CreateReverseSwapRequest {
             from: Asset::Btc,
             to: Asset::Ark,
-            invoice_amount: amount,
+            invoice_amount,
+            onchain_amount,
             claim_public_key: claim_public_key.into(),
             preimage_hash: preimage_hash_sha256,
             invoice_expiry: expiry_secs,
@@ -1374,6 +1386,24 @@ where
     }
 }
 
+/// The amount to be shared with Boltz when creating a reverse submarine swap.
+pub enum SwapAmount {
+    /// Use this value if you need to set the value to be sent by the payer on Lightning.
+    Invoice(Amount),
+    /// Use this value if you need to set the value to be received by the payee on Arkade.
+    Vhtlc(Amount),
+}
+
+impl SwapAmount {
+    pub fn invoice(amount: Amount) -> Self {
+        Self::Invoice(amount)
+    }
+
+    pub fn vhtlc(amount: Amount) -> Self {
+        Self::Vhtlc(amount)
+    }
+}
+
 /// Data related to a submarine swap.
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1495,7 +1525,10 @@ enum Asset {
 struct CreateReverseSwapRequest {
     from: Asset,
     to: Asset,
-    invoice_amount: Amount,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    invoice_amount: Option<Amount>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    onchain_amount: Option<Amount>,
     claim_public_key: PublicKey,
     preimage_hash: sha256::Hash,
     /// The expiry will be this number of seconds in the future.
