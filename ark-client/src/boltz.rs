@@ -385,10 +385,9 @@ where
 
         let vhtlc_input = VtxoInput::new(
             script_ver.0,
-            Some(
-                LockTime::from_height(swap_data.timeout_block_heights.refund)
-                    .map_err(|e| Error::ad_hoc(format!("invalid block height: {e}")))?,
-            ),
+            Some(LockTime::from_consensus(
+                swap_data.timeout_block_heights.refund,
+            )),
             control_block,
             vhtlc.tapscripts(),
             script_pubkey,
@@ -527,10 +526,9 @@ where
 
         let vhtlc_input = VtxoInput::new(
             script_ver.0,
-            Some(
-                LockTime::from_height(swap_data.timeout_block_heights.refund)
-                    .map_err(|e| Error::ad_hoc(format!("invalid block height: {e}")))?,
-            ),
+            Some(LockTime::from_consensus(
+                swap_data.timeout_block_heights.refund,
+            )),
             control_block,
             vhtlc.tapscripts(),
             script_pubkey,
@@ -1503,6 +1501,7 @@ struct CreateReverseSwapRequest {
     /// The expiry will be this number of seconds in the future.
     ///
     /// If not provided, the generated invoice will have the default expiry set by Boltz.
+    #[serde(skip_serializing_if = "Option::is_none")]
     invoice_expiry: Option<u64>,
 }
 
