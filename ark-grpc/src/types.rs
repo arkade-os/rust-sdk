@@ -98,13 +98,18 @@ impl TryFrom<generated::ark::v1::GetInfoResponse> for server::Info {
 
 impl From<generated::ark::v1::FeeInfo> for FeeInfo {
     fn from(value: generated::ark::v1::FeeInfo) -> Self {
+        let intent_fee = value
+            .intent_fee
+            .map(|i| IntentFeeInfo {
+                offchain_input: server::parse_fee_amount(Some(i.offchain_input)),
+                offchain_output: server::parse_fee_amount(Some(i.offchain_output)),
+                onchain_input: server::parse_fee_amount(Some(i.onchain_input)),
+                onchain_output: server::parse_fee_amount(Some(i.onchain_output)),
+            })
+            .unwrap_or_default();
+
         FeeInfo {
-            intent_fee: value.intent_fee.map(|i| IntentFeeInfo {
-                offchain_input: i.offchain_input,
-                offchain_output: i.offchain_output,
-                onchain_input: i.onchain_input,
-                onchain_output: i.onchain_output,
-            }),
+            intent_fee,
             tx_fee_rate: value.tx_fee_rate,
         }
     }

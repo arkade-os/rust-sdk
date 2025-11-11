@@ -360,18 +360,20 @@ pub struct Info {
     pub digest: String,
 }
 
-// FIXME: Use proper types.
+/// Fee information from the server.
 #[derive(Clone, Debug)]
 pub struct FeeInfo {
-    pub intent_fee: Option<IntentFeeInfo>,
+    pub intent_fee: IntentFeeInfo,
     pub tx_fee_rate: String,
 }
-#[derive(Clone, Debug)]
+
+/// Intent fee information.
+#[derive(Clone, Debug, Default)]
 pub struct IntentFeeInfo {
-    pub offchain_input: String,
-    pub offchain_output: String,
-    pub onchain_input: String,
-    pub onchain_output: String,
+    pub offchain_input: Amount,
+    pub offchain_output: Amount,
+    pub onchain_input: Amount,
+    pub onchain_output: Amount,
 }
 
 #[derive(Clone, Debug)]
@@ -688,4 +690,18 @@ pub fn parse_sequence_number(value: i64) -> Result<bitcoin::Sequence, Error> {
     };
 
     Ok(sequence)
+}
+
+/// Parse a fee amount string as satoshis. Returns Amount::ZERO for empty or missing strings.
+pub fn parse_fee_amount(amount_str: Option<String>) -> Amount {
+    amount_str
+        .and_then(|s| {
+            if s.is_empty() {
+                None
+            } else {
+                s.parse::<u64>().ok()
+            }
+        })
+        .map(Amount::from_sat)
+        .unwrap_or(Amount::ZERO)
 }
