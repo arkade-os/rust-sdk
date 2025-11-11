@@ -684,6 +684,10 @@ where
             .map_err(Error::ad_hoc)
             .context("failed to compute created_at")?;
 
+        let swap_amount = response.onchain_amount.or(onchain_amount).ok_or_else(|| {
+            Error::ad_hoc("onchain_amount not provided by Boltz and not specified in request")
+        })?;
+
         let swap = ReverseSwapData {
             id: response.id.clone(),
             status: SwapStatus::Created,
@@ -691,7 +695,7 @@ where
             vhtlc_address: response.lockup_address,
             preimage_hash,
             refund_public_key: response.refund_public_key,
-            amount: response.onchain_amount,
+            amount: swap_amount,
             claim_public_key: claim_public_key.into(),
             timeout_block_heights: response.timeout_block_heights,
             created_at: created_at.as_secs(),
@@ -705,7 +709,7 @@ where
         Ok(ReverseSwapResult {
             swap_id: swap.id,
             invoice: response.invoice,
-            amount: response.onchain_amount,
+            amount: swap_amount,
         })
     }
 
@@ -787,6 +791,10 @@ where
             .map_err(Error::ad_hoc)
             .context("failed to compute created_at")?;
 
+        let swap_amount = response.onchain_amount.or(onchain_amount).ok_or_else(|| {
+            Error::ad_hoc("onchain_amount not provided by Boltz and not specified in request")
+        })?;
+
         let swap = ReverseSwapData {
             id: response.id.clone(),
             status: SwapStatus::Created,
@@ -794,7 +802,7 @@ where
             vhtlc_address: response.lockup_address,
             preimage_hash,
             refund_public_key: response.refund_public_key,
-            amount: response.onchain_amount,
+            amount: swap_amount,
             claim_public_key: claim_public_key.into(),
             timeout_block_heights: response.timeout_block_heights,
             created_at: created_at.as_secs(),
@@ -808,7 +816,7 @@ where
         Ok(ReverseSwapResult {
             swap_id: swap.id,
             invoice: response.invoice,
-            amount: response.onchain_amount,
+            amount: swap_amount,
         })
     }
 
@@ -1548,7 +1556,7 @@ struct CreateReverseSwapResponse {
     refund_public_key: PublicKey,
     timeout_block_heights: TimeoutBlockHeights,
     invoice: Bolt11Invoice,
-    onchain_amount: Amount,
+    onchain_amount: Option<Amount>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1614,7 +1622,7 @@ mod tests {
 
         // Verify the deserialized fields
         assert_eq!(response.id, "vqhG2fJtNY4H");
-        assert_eq!(response.onchain_amount, Amount::from_sat(996));
+        assert_eq!(response.onchain_amount, Some(Amount::from_sat(996)));
         assert_eq!(
             response.refund_public_key,
             PublicKey::from_str(
