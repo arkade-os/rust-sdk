@@ -333,7 +333,7 @@ impl VirtualTxOutPoint {
             performance.now() as i64
         };
 
-        (self.is_swept && !self.is_spent) || current_timestamp > self.expires_at
+        (self.is_swept || current_timestamp > self.expires_at) && !self.is_spent
     }
 }
 
