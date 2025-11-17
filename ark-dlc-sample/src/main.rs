@@ -1405,14 +1405,7 @@ async fn settle(
     let vtxo_inputs = virtual_tx_outpoints
         .spendable
         .into_iter()
-        .map(|(outpoint, vtxo)| {
-            batch::VtxoInput::new(
-                vtxo,
-                outpoint.amount,
-                outpoint.outpoint,
-                outpoint.is_recoverable(),
-            )
-        })
+        .map(|(outpoint, vtxo)| batch::VtxoInput::new(vtxo, outpoint.amount, outpoint.outpoint))
         .collect::<Vec<_>>();
 
     let signed_forfeit_psbts = if !vtxo_inputs.is_empty() {

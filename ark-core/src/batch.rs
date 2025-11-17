@@ -88,16 +88,14 @@ pub struct VtxoInput {
     amount: Amount,
     /// Where the VTXO would end up on the blockchain if it were to become a UTXO.
     outpoint: OutPoint,
-    is_recoverable: bool,
 }
 
 impl VtxoInput {
-    pub fn new(vtxo: Vtxo, amount: Amount, outpoint: OutPoint, is_recoverable: bool) -> Self {
+    pub fn new(vtxo: Vtxo, amount: Amount, outpoint: OutPoint) -> Self {
         Self {
             vtxo,
             amount,
             outpoint,
-            is_recoverable,
         }
     }
 
@@ -370,14 +368,8 @@ where
         vtxo,
         amount: vtxo_amount,
         outpoint: virtual_tx_outpoint,
-        is_recoverable,
     } in vtxo_inputs.iter()
     {
-        if *is_recoverable {
-            // Recoverable VTXOs don't need to be forfeited.
-            continue;
-        }
-
         let connector_outpoint = connector_index.get(virtual_tx_outpoint).ok_or_else(|| {
             Error::ad_hoc(format!(
                 "connector outpoint missing for virtual TX outpoint {virtual_tx_outpoint}"
@@ -584,12 +576,10 @@ fn derive_vtxo_connector_map(
     connector_outpoints.sort_by(|a, b| a.txid.cmp(&b.txid).then(a.vout.cmp(&b.vout)));
 
     // Get virtual TX outpoints that need forfeiting (excluding recoverable ones).
-    let mut virtual_tx_outpoints = Vec::new();
-    for vtxo_input in vtxo_inputs.iter() {
-        if !vtxo_input.is_recoverable {
-            virtual_tx_outpoints.push(vtxo_input.outpoint);
-        }
-    }
+    let mut virtual_tx_outpoints = vtxo_inputs
+        .iter()
+        .map(|vtxo_input| vtxo_input.outpoint)
+        .collect::<Vec<_>>();
 
     // Sort virtual TX outpoints for deterministic ordering.
     virtual_tx_outpoints.sort_by(|a, b| a.txid.cmp(&b.txid).then(a.vout.cmp(&b.vout)));
