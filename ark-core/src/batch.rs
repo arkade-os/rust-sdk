@@ -361,7 +361,7 @@ where
 
     let connector_amount = dust;
 
-    let connector_index = derive_vtxo_connector_map(vtxo_inputs, connectors_leaves)?;
+    let connector_index = derive_vtxo_connector_map(vtxo_inputs, connectors_leaves, dust)?;
 
     let mut signed_forfeit_psbts = Vec::new();
     for VtxoInput {
@@ -370,6 +370,11 @@ where
         outpoint: virtual_tx_outpoint,
     } in vtxo_inputs.iter()
     {
+        if *vtxo_amount <= dust {
+            // Sub-dust VTXOs don't need to be forfeited.
+            continue;
+        }
+
         let connector_outpoint = connector_index.get(virtual_tx_outpoint).ok_or_else(|| {
             Error::ad_hoc(format!(
                 "connector outpoint missing for virtual TX outpoint {virtual_tx_outpoint}"
@@ -556,6 +561,7 @@ where
 fn derive_vtxo_connector_map(
     vtxo_inputs: &[VtxoInput],
     connectors_leaves: &[&Psbt],
+    dust: Amount,
 ) -> Result<HashMap<OutPoint, OutPoint>, Error> {
     // Collect all connector outpoints (non-anchor outputs).
     let mut connector_outpoints = Vec::new();
@@ -575,10 +581,10 @@ fn derive_vtxo_connector_map(
     // Sort connector outpoints for deterministic ordering
     connector_outpoints.sort_by(|a, b| a.txid.cmp(&b.txid).then(a.vout.cmp(&b.vout)));
 
-    // Get virtual TX outpoints that need forfeiting (excluding recoverable ones).
+    // Get virtual TX outpoints that need forfeiting (excluding sub-dust ones).
     let mut virtual_tx_outpoints = vtxo_inputs
         .iter()
-        .map(|vtxo_input| vtxo_input.outpoint)
+        .filter_map(|vtxo_input| (vtxo_input.amount > dust).then_some(vtxo_input.outpoint))
         .collect::<Vec<_>>();
 
     // Sort virtual TX outpoints for deterministic ordering.
