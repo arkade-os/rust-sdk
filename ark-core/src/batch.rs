@@ -110,10 +110,6 @@ impl VtxoInput {
     pub fn outpoint(&self) -> OutPoint {
         self.outpoint
     }
-
-    pub fn is_recoverable(&self) -> bool {
-        self.is_recoverable
-    }
 }
 
 /// A nonce key pair per tree transaction output that we are a part of in the batch.
@@ -759,11 +755,6 @@ pub fn prepare_delegation_psbts(
     const FORFEIT_TX_VTXO_INDEX: usize = 0;
 
     for vtxo_input in vtxo_inputs.iter() {
-        if vtxo_input.is_recoverable() {
-            // Recoverable VTXOs don't need to be forfeited
-            continue;
-        }
-
         let vtxo = vtxo_input.vtxo();
         let vtxo_amount = vtxo_input.amount();
         let virtual_tx_outpoint = vtxo_input.outpoint();
@@ -888,11 +879,6 @@ pub fn prepare_shared_delegation_psbts(
     const FORFEIT_TX_VTXO_INDEX: usize = 0;
 
     for vtxo_input in vtxo_inputs.iter() {
-        if vtxo_input.is_recoverable() {
-            // Recoverable VTXOs don't need to be forfeited
-            continue;
-        }
-
         let vtxo = vtxo_input.vtxo();
         let vtxo_amount = vtxo_input.amount();
         let virtual_tx_outpoint = vtxo_input.outpoint();
@@ -1098,12 +1084,11 @@ where
     // Sign the forfeit PSBTs
     const FORFEIT_TX_VTXO_INDEX: usize = 0;
 
-    for (forfeit_psbt, vtxo_input) in delegation_psbts.forfeit_psbts.iter_mut().zip(
-        delegation_psbts
-            .vtxo_inputs
-            .iter()
-            .filter(|v| !v.is_recoverable()),
-    ) {
+    for (forfeit_psbt, vtxo_input) in delegation_psbts
+        .forfeit_psbts
+        .iter_mut()
+        .zip(delegation_psbts.vtxo_inputs.iter())
+    {
         let vtxo = vtxo_input.vtxo();
 
         let prevouts = forfeit_psbt
@@ -1314,12 +1299,11 @@ pub fn sign_shared_delegation_psbts(
     // Sign the forfeit PSBTs
     const FORFEIT_TX_VTXO_INDEX: usize = 0;
 
-    for (forfeit_psbt, vtxo_input) in delegation_psbts.forfeit_psbts.iter_mut().zip(
-        delegation_psbts
-            .vtxo_inputs
-            .iter()
-            .filter(|v| !v.is_recoverable()),
-    ) {
+    for (forfeit_psbt, vtxo_input) in delegation_psbts
+        .forfeit_psbts
+        .iter_mut()
+        .zip(delegation_psbts.vtxo_inputs.iter())
+    {
         let vtxo = vtxo_input.vtxo();
 
         let prevouts = forfeit_psbt

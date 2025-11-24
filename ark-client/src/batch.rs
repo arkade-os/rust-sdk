@@ -1274,9 +1274,7 @@ where
 
         let mut completed_forfeit_psbts = Vec::new();
 
-        for (partial_forfeit_psbt, vtxo_input) in partial_forfeit_txs
-            .iter()
-            .zip(vtxo_inputs.iter().filter(|v| !v.is_recoverable()))
+        for (partial_forfeit_psbt, vtxo_input) in partial_forfeit_txs.iter().zip(vtxo_inputs.iter())
         {
             let connector_outpoint =
                 connector_index.get(&vtxo_input.outpoint()).ok_or_else(|| {
@@ -2021,13 +2019,7 @@ fn derive_vtxo_connector_map(
     // Sort connector outpoints for deterministic ordering
     connector_outpoints.sort_by(|a, b| a.txid.cmp(&b.txid).then(a.vout.cmp(&b.vout)));
 
-    // Get virtual TX outpoints that need forfeiting (excluding recoverable ones).
-    let mut virtual_tx_outpoints = Vec::new();
-    for vtxo_input in vtxo_inputs.iter() {
-        if !vtxo_input.is_recoverable() {
-            virtual_tx_outpoints.push(vtxo_input.outpoint());
-        }
-    }
+    let mut virtual_tx_outpoints = vtxo_inputs.iter().map(|v| v.outpoint()).collect::<Vec<_>>();
 
     // Sort virtual TX outpoints for deterministic ordering.
     virtual_tx_outpoints.sort_by(|a, b| a.txid.cmp(&b.txid).then(a.vout.cmp(&b.vout)));
