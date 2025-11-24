@@ -74,14 +74,6 @@ impl Input {
         }
     }
 
-    pub(crate) fn outpoint(&self) -> OutPoint {
-        self.outpoint
-    }
-
-    pub(crate) fn pk(&self) -> XOnlyPublicKey {
-        self.pk
-    }
-
     pub(crate) fn spend_info(&self) -> &(ScriptBuf, taproot::ControlBlock) {
         &self.spend_info
     }

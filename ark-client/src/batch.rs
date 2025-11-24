@@ -29,6 +29,8 @@ use bitcoin::hashes::sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::hex::DisplayHex;
 use bitcoin::key::Keypair;
+use bitcoin::key::Secp256k1;
+use bitcoin::psbt;
 use bitcoin::secp256k1;
 use bitcoin::secp256k1::schnorr;
 use bitcoin::secp256k1::PublicKey;
@@ -234,13 +236,21 @@ where
         )?;
 
         // Step 2: Sign the PSBTs using ark-core
-        batch::sign_delegation_psbts(&mut delegation_psbts, &[*self.kp()])?;
+        let mut intent_psbt = delegation_psbts.intent_psbt.clone();
+
+        let sign_fn = |_: &mut psbt::Input,
+                       msg: secp256k1::Message|
+         -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+            let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, self.kp());
+            let pk = self.kp().x_only_public_key().0;
+
+            Ok((sig, pk))
+        };
+
+        batch::sign_delegation_psbts(sign_fn, &mut intent_psbt, &mut delegation_psbts)?;
 
         // Create Intent from the signed delegation PSBTs
-        let intent = intent::Intent::new(
-            delegation_psbts.intent_psbt,
-            delegation_psbts.intent_message,
-        );
+        let intent = intent::Intent::new(intent_psbt, delegation_psbts.intent_message);
 
         Ok(Delegate {
             intent,

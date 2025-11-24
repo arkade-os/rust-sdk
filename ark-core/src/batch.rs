@@ -16,6 +16,7 @@ use bitcoin::absolute::LockTime;
 use bitcoin::hashes::Hash;
 use bitcoin::key::Keypair;
 use bitcoin::key::Secp256k1;
+use bitcoin::psbt;
 use bitcoin::secp256k1;
 use bitcoin::secp256k1::schnorr;
 use bitcoin::secp256k1::PublicKey;
@@ -679,7 +680,6 @@ pub fn prepare_delegation_psbts(
     dust: Amount,
 ) -> Result<DelegationPsbts, Error> {
     use crate::intent;
-    use bitcoin::psbt::PsbtSighashType;
 
     // Convert inputs to intent::Input format
     let intent_inputs = {
@@ -747,8 +747,37 @@ pub fn prepare_delegation_psbts(
     );
 
     // Build the intent PSBT (unsigned)
-    let (intent_psbt, _fake_input) =
+    let (mut intent_psbt, _fake_input) =
         intent::build_proof_psbt(&intent_message, &intent_inputs, &outputs)?;
+
+    // Sign the intent PSBT
+    for (i, proof_input) in intent_psbt.inputs.iter_mut().enumerate() {
+        if i == 0 {
+            let (script, control_block) = intent_inputs[0].spend_info().clone();
+
+            proof_input.tap_scripts =
+                BTreeMap::from_iter([(control_block, (script, taproot::LeafVersion::TapScript))]);
+        } else {
+            let (script, control_block) = intent_inputs[i - 1].spend_info().clone();
+
+            let tap_tree =
+                crate::intent::taptree::TapTree(intent_inputs[i - 1].tapscripts().to_vec());
+            let bytes = tap_tree
+                .encode()
+                .map_err(Error::ad_hoc)
+                .with_context(|| format!("failed to encode taptree for input {i}"))?;
+
+            proof_input.unknown.insert(
+                psbt::raw::Key {
+                    type_value: 222,
+                    key: crate::VTXO_TAPROOT_KEY.to_vec(),
+                },
+                bytes,
+            );
+            proof_input.tap_scripts =
+                BTreeMap::from_iter([(control_block, (script, taproot::LeafVersion::TapScript))]);
+        };
+    }
 
     // Build unsigned forfeit PSBTs
     let mut forfeit_psbts = Vec::new();
@@ -783,8 +812,9 @@ pub fn prepare_delegation_psbts(
         });
 
         // Set sighash type to SIGHASH_ALL | ANYONECANPAY
-        forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX].sighash_type =
-            Some(PsbtSighashType::from(TapSighashType::AllPlusAnyoneCanPay));
+        forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX].sighash_type = Some(
+            psbt::PsbtSighashType::from(TapSighashType::AllPlusAnyoneCanPay),
+        );
 
         let (forfeit_script, forfeit_control_block) = vtxo.forfeit_spend_info()?;
         let leaf_version = forfeit_control_block.leaf_version;
@@ -814,121 +844,46 @@ pub fn prepare_delegation_psbts(
 /// # Errors
 ///
 /// Returns an error if signing fails.
-pub fn sign_delegation_psbts(
+pub fn sign_delegation_psbts<S>(
+    mut sign_fn: S,
+    intent_psbt: &mut Psbt,
     delegation_psbts: &mut DelegationPsbts,
-    signing_kps: &[Keypair],
-) -> Result<(), Error> {
-    use crate::intent;
-    use bitcoin::psbt;
-
-    let secp = Secp256k1::new();
-
-    // Sign the intent PSBT
-    for (i, proof_input) in delegation_psbts.intent_psbt.inputs.iter_mut().enumerate() {
-        if i == 0 {
-            let (script, control_block) = delegation_psbts.intent_inputs[0].spend_info().clone();
-
-            proof_input.tap_scripts =
-                BTreeMap::from_iter([(control_block, (script, taproot::LeafVersion::TapScript))]);
-        } else {
-            let (script, control_block) =
-                delegation_psbts.intent_inputs[i - 1].spend_info().clone();
-
-            let tap_tree = crate::intent::taptree::TapTree(
-                delegation_psbts.intent_inputs[i - 1].tapscripts().to_vec(),
-            );
-            let bytes = tap_tree
-                .encode()
-                .map_err(Error::ad_hoc)
-                .with_context(|| format!("failed to encode taptree for input {i}"))?;
-
-            proof_input.unknown.insert(
-                psbt::raw::Key {
-                    type_value: 222,
-                    key: crate::VTXO_TAPROOT_KEY.to_vec(),
-                },
-                bytes,
-            );
-            proof_input.tap_scripts =
-                BTreeMap::from_iter([(control_block, (script, taproot::LeafVersion::TapScript))]);
-        };
-    }
-
-    let prevouts = delegation_psbts
-        .intent_psbt
+) -> Result<(), Error>
+where
+    S: FnMut(
+        &mut psbt::Input,
+        secp256k1::Message,
+    ) -> Result<(schnorr::Signature, XOnlyPublicKey), Error>,
+{
+    let prevouts = intent_psbt
         .inputs
         .iter()
         .filter_map(|i| i.witness_utxo.clone())
         .collect::<Vec<_>>();
 
-    // Add fake input to the inputs list for signing
-    let inputs = [
-        delegation_psbts.intent_inputs.clone(),
-        vec![intent::Input::new(
-            OutPoint {
-                txid: delegation_psbts.intent_psbt.unsigned_tx.input[0]
-                    .previous_output
-                    .txid,
-                vout: 0,
-            },
-            bitcoin::Sequence::ZERO,
-            TxOut {
-                value: Amount::ZERO,
-                script_pubkey: prevouts[0].script_pubkey.clone(),
-            },
-            Vec::new(),
-            delegation_psbts.intent_inputs[0].pk(),
-            delegation_psbts.intent_inputs[0].spend_info().clone(),
-            false,
-        )],
-    ]
-    .concat();
-
-    for (i, proof_input) in delegation_psbts.intent_psbt.inputs.iter_mut().enumerate() {
-        let input = inputs
-            .iter()
-            .find(|input| {
-                input.outpoint()
-                    == delegation_psbts.intent_psbt.unsigned_tx.input[i].previous_output
-            })
-            .expect("witness utxo");
-
+    for (i, psbt_input) in intent_psbt.inputs.iter_mut().enumerate() {
         let prevouts = Prevouts::All(&prevouts);
 
         let (_, (script, leaf_version)) =
-            proof_input.tap_scripts.first_key_value().expect("a value");
+            psbt_input.tap_scripts.first_key_value().expect("a value");
 
         let leaf_hash = TapLeafHash::from_script(script, *leaf_version);
 
-        let tap_sighash = SighashCache::new(&delegation_psbts.intent_psbt.unsigned_tx)
+        let tap_sighash = SighashCache::new(&intent_psbt.unsigned_tx)
             .taproot_script_spend_signature_hash(i, &prevouts, leaf_hash, TapSighashType::Default)
             .map_err(Error::crypto)
             .with_context(|| format!("failed to compute sighash for intent input {i}"))?;
 
         let msg = secp256k1::Message::from_digest(tap_sighash.to_raw_hash().to_byte_array());
 
-        let pk = input.pk();
-
-        let signing_kp = signing_kps
-            .iter()
-            .find(|kp| {
-                let (xonly_pk, _) = kp.x_only_public_key();
-                xonly_pk == pk
-            })
-            .ok_or_else(|| Error::ad_hoc("Could not find suitable kp for pk"))?;
-
-        let sig = secp.sign_schnorr_no_aux_rand(&msg, signing_kp);
-
-        secp.verify_schnorr(&sig, &msg, &pk)
-            .map_err(Error::crypto)
-            .context("failed to verify intent vtxo signature")?;
+        let (sig, pk) = sign_fn(psbt_input, msg)?;
 
         let sig = taproot::Signature {
             signature: sig,
             sighash_type: TapSighashType::Default,
         };
 
-        proof_input.tap_script_sigs = BTreeMap::from_iter([((pk, leaf_hash), sig)]);
+        psbt_input.tap_script_sigs.insert((pk, leaf_hash), sig);
     }
 
     // Sign the forfeit PSBTs
@@ -966,27 +921,16 @@ pub fn sign_delegation_psbts(
 
         let msg = secp256k1::Message::from_digest(tap_sighash.to_raw_hash().to_byte_array());
 
-        let pk = vtxo.owner_pk();
-        let signing_kp = signing_kps
-            .iter()
-            .find(|kp| {
-                let (xonly_pk, _) = kp.x_only_public_key();
-                xonly_pk == pk
-            })
-            .ok_or_else(|| Error::ad_hoc("Could not find suitable kp for forfeit signing"))?;
-
-        let sig = secp.sign_schnorr_no_aux_rand(&msg, signing_kp);
-
-        secp.verify_schnorr(&sig, &msg, &pk)
-            .map_err(|e| Error::ad_hoc(format!("failed to verify forfeit signature: {e}")))?;
+        let (sig, pk) = sign_fn(&mut forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX], msg)?;
 
         let sig = taproot::Signature {
             signature: sig,
             sighash_type: TapSighashType::AllPlusAnyoneCanPay,
         };
 
-        forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX].tap_script_sigs =
-            BTreeMap::from_iter([((pk, leaf_hash), sig)]);
+        forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX]
+            .tap_script_sigs
+            .insert((pk, leaf_hash), sig);
     }
 
     Ok(())
