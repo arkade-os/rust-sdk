@@ -225,7 +225,7 @@ where
             script_pubkey: to_address.to_p2tr_script_pubkey(),
         })];
 
-        let delegation_psbts = batch::prepare_delegation_psbts(
+        let delegate_psbts = batch::prepare_delegate_psbts(
             vtxo_inputs.clone(),
             onchain_inputs.clone(),
             outputs.clone(),
@@ -234,15 +234,12 @@ where
             server_info.dust,
         )?;
 
-        // Create Intent from the signed delegation PSBTs
-        let intent = intent::Intent::new(
-            delegation_psbts.intent_psbt,
-            delegation_psbts.intent_message,
-        );
+        // Create Intent from the signed delegate PSBTs
+        let intent = intent::Intent::new(delegate_psbts.intent_psbt, delegate_psbts.intent_message);
 
         Ok(Delegate {
             intent,
-            partial_forfeit_txs: delegation_psbts.forfeit_psbts,
+            partial_forfeit_txs: delegate_psbts.forfeit_psbts,
             vtxo_inputs,
             outputs,
             delegate_cosigner_pk,
@@ -264,12 +261,12 @@ where
             Ok((sig, pk))
         };
 
-        batch::sign_delegation_psbts(sign_fn, intent_psbt, forfeit_psbts)?;
+        batch::sign_delegate_psbts(sign_fn, intent_psbt, forfeit_psbts)?;
 
         Ok(())
     }
 
-    /// Settle a delegation by completing the batch protocol using pre-signed data.
+    /// Settle a delegate by completing the batch protocol using pre-signed data.
     ///
     /// This method allows Bob to settle Alice's VTXOs using the pre-signed intent and forfeit
     /// transactions from the [`Delegate`] struct.

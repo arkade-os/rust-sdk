@@ -629,17 +629,17 @@ fn extract_cosigner_pks_from_vtxo_psbt(psbt: &Psbt) -> Result<Vec<PublicKey>, Er
 }
 
 // =============================================================================
-// Delegation API
+// Delegate API
 // =============================================================================
 
-/// Contains all the PSBTs and metadata needed for delegation settlement.
+/// Contains all the PSBTs and metadata needed for settlement via delegate.
 ///
 /// This struct supports a three-party flow where:
 /// 1. Bob prepares the unsigned PSBTs
 /// 2. Alice signs the PSBTs
 /// 3. Bob completes the settlement using Alice's signatures
 #[derive(Debug, Clone)]
-pub struct DelegationPsbts {
+pub struct DelegatePsbts {
     /// The unsigned intent PSBT
     pub intent_psbt: Psbt,
     /// The intent message to be registered
@@ -654,9 +654,9 @@ pub struct DelegationPsbts {
     pub outputs: Vec<crate::intent::Output>,
 }
 
-/// Prepare unsigned intent and forfeit PSBTs for delegation.
+/// Prepare unsigned intent and forfeit PSBTs for delegate.
 ///
-/// This is step 1 of the delegation flow. Bob can prepare these PSBTs and send them to Alice
+/// This is step 1 of the delegate flow. Bob can prepare these PSBTs and send them to Alice
 /// for signing.
 ///
 /// # Arguments
@@ -670,15 +670,15 @@ pub struct DelegationPsbts {
 ///
 /// # Returns
 ///
-/// A [`DelegationPsbts`] struct containing unsigned PSBTs ready for signing.
-pub fn prepare_delegation_psbts(
+/// A [`DelegatePsbts`] struct containing unsigned PSBTs ready for signing.
+pub fn prepare_delegate_psbts(
     vtxo_inputs: Vec<VtxoInput>,
     onchain_inputs: Vec<OnChainInput>,
     outputs: Vec<crate::intent::Output>,
     cosigner_pks: Vec<PublicKey>,
     server_forfeit_address: &Address,
     dust: Amount,
-) -> Result<DelegationPsbts, Error> {
+) -> Result<DelegatePsbts, Error> {
     use crate::intent;
 
     // Convert inputs to intent::Input format
@@ -824,7 +824,7 @@ pub fn prepare_delegation_psbts(
         forfeit_psbts.push(forfeit_psbt);
     }
 
-    Ok(DelegationPsbts {
+    Ok(DelegatePsbts {
         intent_psbt,
         intent_message,
         forfeit_psbts,
@@ -834,17 +834,12 @@ pub fn prepare_delegation_psbts(
     })
 }
 
-/// Sign delegation PSBTs with a keypair.
-///
-/// # Arguments
-///
-/// * `delegation_psbts` - The unsigned PSBTs prepared by Bob
-/// * `signing_kps` - Keypairs to sign with (for VTXO inputs)
+/// Sign delegate PSBTs.
 ///
 /// # Errors
 ///
 /// Returns an error if signing fails.
-pub fn sign_delegation_psbts<S>(
+pub fn sign_delegate_psbts<S>(
     mut sign_fn: S,
     intent_psbt: &mut Psbt,
     forfeit_psbts: &mut [Psbt],
