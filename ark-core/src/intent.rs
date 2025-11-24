@@ -93,7 +93,7 @@ pub enum Output {
 
 #[derive(Debug, Clone)]
 pub struct Intent {
-    proof: Psbt,
+    pub proof: Psbt,
     message: IntentMessage,
 }
 

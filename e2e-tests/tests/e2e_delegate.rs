@@ -55,9 +55,16 @@ pub async fn e2e_delegate() {
     // TODO: Not sure why we have to wait longer here.
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
-    let delegate = alice
+    let mut delegate = alice
         .generate_delegate(bob_delegate_cosigner_pk, false)
         .await
+        .unwrap();
+
+    alice
+        .sign_delegate_psbts(
+            &mut delegate.intent.proof,
+            &mut delegate.partial_forfeit_txs,
+        )
         .unwrap();
 
     tracing::info!(

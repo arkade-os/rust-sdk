@@ -847,7 +847,7 @@ pub fn prepare_delegation_psbts(
 pub fn sign_delegation_psbts<S>(
     mut sign_fn: S,
     intent_psbt: &mut Psbt,
-    delegation_psbts: &mut DelegationPsbts,
+    forfeit_psbts: &mut [Psbt],
 ) -> Result<(), Error>
 where
     S: FnMut(
@@ -889,13 +889,7 @@ where
     // Sign the forfeit PSBTs
     const FORFEIT_TX_VTXO_INDEX: usize = 0;
 
-    for (forfeit_psbt, vtxo_input) in delegation_psbts
-        .forfeit_psbts
-        .iter_mut()
-        .zip(delegation_psbts.vtxo_inputs.iter())
-    {
-        let vtxo = vtxo_input.vtxo();
-
+    for forfeit_psbt in forfeit_psbts {
         let prevouts = forfeit_psbt
             .inputs
             .iter()
@@ -903,12 +897,15 @@ where
             .collect::<Vec<_>>();
         let prevouts = Prevouts::All(&prevouts);
 
-        let (forfeit_script, _) = vtxo.forfeit_spend_info()?;
-        let (_, (_, leaf_version)) = forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX]
-            .tap_scripts
-            .first_key_value()
-            .expect("tap scripts");
-        let leaf_hash = TapLeafHash::from_script(&forfeit_script, *leaf_version);
+        let psbt_input = forfeit_psbt
+            .inputs
+            .get_mut(FORFEIT_TX_VTXO_INDEX)
+            .expect("input at index");
+
+        let (_, (forfeit_script, leaf_version)) =
+            psbt_input.tap_scripts.first_key_value().expect("one entry");
+
+        let leaf_hash = TapLeafHash::from_script(forfeit_script, *leaf_version);
 
         let tap_sighash = SighashCache::new(&forfeit_psbt.unsigned_tx)
             .taproot_script_spend_signature_hash(
