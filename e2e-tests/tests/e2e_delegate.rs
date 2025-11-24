@@ -61,16 +61,12 @@ pub async fn e2e_delegate() {
         .unwrap();
 
     alice
-        .sign_delegate_psbts(
-            &mut delegate.intent.proof,
-            &mut delegate.partial_forfeit_txs,
-        )
+        .sign_delegate_psbts(&mut delegate.intent.proof, &mut delegate.forfeit_psbts)
         .unwrap();
 
     tracing::info!(
         delegate_cosigner_pk = %bob_delegate_cosigner_pk,
-        vtxo_inputs_count = delegate.vtxo_inputs.len(),
-        partial_forfeit_txs_count = delegate.partial_forfeit_txs.len(),
+        partial_forfeit_txs_count = delegate.forfeit_psbts.len(),
         "Alice generated delegate"
     );
 

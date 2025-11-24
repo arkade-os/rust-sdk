@@ -1,6 +1,7 @@
 use crate::anchor_output;
 use crate::conversions::from_musig_xonly;
 use crate::conversions::to_musig_pk;
+use crate::intent::Intent;
 use crate::server::NoncePks;
 use crate::server::PartialSigTree;
 use crate::server::TreeTxNoncePks;
@@ -628,41 +629,28 @@ fn extract_cosigner_pks_from_vtxo_psbt(psbt: &Psbt) -> Result<Vec<PublicKey>, Er
     Ok(cosigner_pks)
 }
 
-// =============================================================================
-// Delegate API
-// =============================================================================
-
-/// Contains all the PSBTs and metadata needed for settlement via delegate.
+/// A delegate contains all the information necessary for another party to settle VTXOs on behalf of
+/// the owner.
 ///
-/// This struct supports a three-party flow where:
-/// 1. Bob prepares the unsigned PSBTs
-/// 2. Alice signs the PSBTs
-/// 3. Bob completes the settlement using Alice's signatures
+/// The owner pre-signs the intent and forfeit transactions, allowing another party to complete the
+/// settlement at a later time.
 #[derive(Debug, Clone)]
-pub struct DelegatePsbts {
-    /// The unsigned intent PSBT
-    pub intent_psbt: Psbt,
-    /// The intent message to be registered
-    pub intent_message: crate::intent::IntentMessage,
-    /// Partial forfeit PSBTs (one per non-recoverable VTXO input)
+pub struct Delegate {
+    pub intent: Intent,
+    /// Partial forfeit transactions signed with SIGHASH_ALL | ANYONECANPAY.
     pub forfeit_psbts: Vec<Psbt>,
-    /// Intent inputs (needed for signing)
-    pub intent_inputs: Vec<crate::intent::Input>,
-    /// VTXO inputs being delegated
-    pub vtxo_inputs: Vec<VtxoInput>,
-    /// Outputs for the settlement
-    pub outputs: Vec<crate::intent::Output>,
+    /// The cosigner public key of the party who will execute the settlement as the delegate.
+    pub delegate_cosigner_pk: PublicKey,
 }
 
 /// Prepare unsigned intent and forfeit PSBTs for delegate.
 ///
-/// This is step 1 of the delegate flow. Bob can prepare these PSBTs and send them to Alice
-/// for signing.
+/// This is step 1 of the delegate flow. Bob can prepare these PSBTs and send them to Alice for
+/// signing.
 ///
 /// # Arguments
 ///
 /// * `vtxo_inputs` - VTXO inputs to be settled
-/// * `onchain_inputs` - Onchain inputs to be settled
 /// * `outputs` - Desired outputs (typically back to the owner's address)
 /// * `cosigner_pks` - Public keys of cosigners who will participate in the settlement
 /// * `server_forfeit_address` - Address where forfeits are sent
@@ -670,56 +658,37 @@ pub struct DelegatePsbts {
 ///
 /// # Returns
 ///
-/// A [`DelegatePsbts`] struct containing unsigned PSBTs ready for signing.
+/// A [`Delegate`] struct containing unsigned PSBTs ready for signing.
 pub fn prepare_delegate_psbts(
     vtxo_inputs: Vec<VtxoInput>,
-    onchain_inputs: Vec<OnChainInput>,
     outputs: Vec<crate::intent::Output>,
-    cosigner_pks: Vec<PublicKey>,
+    delegate_cosigner_pk: PublicKey,
     server_forfeit_address: &Address,
+    // TODO: Handle sub-dust amounts (they can be settled!).
     dust: Amount,
-) -> Result<DelegatePsbts, Error> {
+) -> Result<Delegate, Error> {
     use crate::intent;
 
     // Convert inputs to intent::Input format
-    let intent_inputs = {
-        let boarding_inputs = onchain_inputs.iter().map(|o| {
-            intent::Input::new(
-                o.outpoint(),
-                o.boarding_output().exit_delay(),
+    let intent_inputs = vtxo_inputs
+        .iter()
+        .map(|v| {
+            Ok(intent::Input::new(
+                v.outpoint(),
+                v.vtxo().exit_delay(),
                 TxOut {
-                    value: o.amount(),
-                    script_pubkey: o.boarding_output().script_pubkey(),
+                    value: v.amount(),
+                    script_pubkey: v.vtxo().script_pubkey(),
                 },
-                o.boarding_output().tapscripts(),
-                o.boarding_output().owner_pk(),
-                o.boarding_output().forfeit_spend_info(),
-                true,
-            )
-        });
-
-        let vtxo_inputs_iter = vtxo_inputs
-            .iter()
-            .map(|v| {
-                Ok(intent::Input::new(
-                    v.outpoint(),
-                    v.vtxo().exit_delay(),
-                    TxOut {
-                        value: v.amount(),
-                        script_pubkey: v.vtxo().script_pubkey(),
-                    },
-                    v.vtxo().tapscripts(),
-                    v.vtxo().owner_pk(),
-                    v.vtxo()
-                        .forfeit_spend_info()
-                        .context("failed to get forfeit spend info")?,
-                    false,
-                ))
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
-
-        boarding_inputs.chain(vtxo_inputs_iter).collect::<Vec<_>>()
-    };
+                v.vtxo().tapscripts(),
+                v.vtxo().owner_pk(),
+                v.vtxo()
+                    .forfeit_spend_info()
+                    .context("failed to get forfeit spend info")?,
+                false,
+            ))
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
 
     // Determine onchain output indexes
     let mut onchain_output_indexes = Vec::new();
@@ -743,7 +712,7 @@ pub fn prepare_delegate_psbts(
         onchain_output_indexes,
         now,
         expire_at,
-        cosigner_pks.clone(),
+        vec![delegate_cosigner_pk],
     );
 
     // Build the intent PSBT (unsigned)
@@ -824,13 +793,12 @@ pub fn prepare_delegate_psbts(
         forfeit_psbts.push(forfeit_psbt);
     }
 
-    Ok(DelegatePsbts {
-        intent_psbt,
-        intent_message,
+    let intent = Intent::new(intent_psbt, intent_message);
+
+    Ok(Delegate {
+        intent,
         forfeit_psbts,
-        intent_inputs,
-        vtxo_inputs,
-        outputs,
+        delegate_cosigner_pk,
     })
 }
 

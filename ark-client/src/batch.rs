@@ -14,9 +14,9 @@ use ark_core::batch::create_and_sign_forfeit_txs;
 use ark_core::batch::generate_nonce_tree;
 use ark_core::batch::sign_batch_tree_tx;
 use ark_core::batch::sign_commitment_psbt;
+use ark_core::batch::Delegate;
 use ark_core::batch::NonceKps;
 use ark_core::intent;
-use ark_core::intent::Intent;
 use ark_core::server::BatchTreeEventType;
 use ark_core::server::PartialSigTree;
 use ark_core::server::StreamEvent;
@@ -207,15 +207,20 @@ where
         delegate_cosigner_pk: PublicKey,
         select_recoverable_vtxos: bool,
     ) -> Result<Delegate, Error> {
-        // Get off-chain address and send all funds to this address
+        // Get off-chain address and send all funds to this address.
         let (to_address, _) = self.get_offchain_address()?;
 
-        let (onchain_inputs, vtxo_inputs, total_amount) = self
+        // Simply collect all VTXOs that can be settled.
+        let (_, vtxo_inputs, _) = self
             .fetch_commitment_transaction_inputs(select_recoverable_vtxos)
             .await?;
 
-        if onchain_inputs.is_empty() && vtxo_inputs.is_empty() {
-            return Err(Error::ad_hoc("no inputs to delegate"));
+        let total_amount = vtxo_inputs
+            .iter()
+            .fold(Amount::ZERO, |acc, v| acc + v.amount());
+
+        if vtxo_inputs.is_empty() {
+            return Err(Error::ad_hoc("no inputs to settle via delegate"));
         }
 
         let server_info = &self.server_info;
@@ -225,25 +230,15 @@ where
             script_pubkey: to_address.to_p2tr_script_pubkey(),
         })];
 
-        let delegate_psbts = batch::prepare_delegate_psbts(
+        let delegate = batch::prepare_delegate_psbts(
             vtxo_inputs.clone(),
-            onchain_inputs.clone(),
             outputs.clone(),
-            vec![delegate_cosigner_pk],
+            delegate_cosigner_pk,
             &server_info.forfeit_address,
             server_info.dust,
         )?;
 
-        // Create Intent from the signed delegate PSBTs
-        let intent = intent::Intent::new(delegate_psbts.intent_psbt, delegate_psbts.intent_message);
-
-        Ok(Delegate {
-            intent,
-            partial_forfeit_txs: delegate_psbts.forfeit_psbts,
-            vtxo_inputs,
-            outputs,
-            delegate_cosigner_pk,
-        })
+        Ok(delegate)
     }
 
     /// Sign a set of delegate PSBTs, including the intent PSBT and the forfeit PSBTs.
@@ -340,9 +335,9 @@ where
         let mut batch_id: Option<String> = None;
 
         let vtxo_input_outpoints = delegate
-            .vtxo_inputs
+            .forfeit_psbts
             .iter()
-            .map(|i| i.outpoint())
+            .map(|psbt| psbt.unsigned_tx.input[0].previous_output)
             .collect::<Vec<_>>();
 
         let topics = vtxo_input_outpoints
@@ -395,14 +390,7 @@ where
 
                             batch_id = Some(e.id);
 
-                            step = match delegate
-                                .outputs
-                                .iter()
-                                .any(|o| matches!(o, intent::Output::Offchain(_)))
-                            {
-                                true => Step::BatchStarted,
-                                false => Step::BatchSigningStarted,
-                            };
+                            step = Step::BatchStarted;
 
                             batch_expiry = Some(e.batch_expiry);
                         } else {
@@ -663,32 +651,24 @@ where
                             "Batch finalization started (delegate)"
                         );
 
-                        let signed_forfeit_psbts = if !delegate.vtxo_inputs.is_empty() {
-                            let chunks =
-                                connectors_graph_chunks.take().ok_or(Error::ark_server(
-                                    "received batch finalization event without connectors",
-                                ))?;
+                        let chunks = connectors_graph_chunks.take().ok_or(Error::ark_server(
+                            "received batch finalization event without connectors",
+                        ))?;
 
-                            let connectors_graph = TxGraph::new(chunks)
-                                .map_err(Error::from)
-                                .context(
-                                "failed to build connectors graph before completing forfeit TXs",
-                            )?;
+                        let connectors_graph = TxGraph::new(chunks).map_err(Error::from).context(
+                            "failed to build connectors graph before completing forfeit TXs",
+                        )?;
 
-                            tracing::debug!(
-                                batch_id = e.id,
-                                "Completing delegated forfeit transactions"
-                            );
+                        tracing::debug!(
+                            batch_id = e.id,
+                            "Completing delegated forfeit transactions"
+                        );
 
-                            self.complete_delegated_forfeit_txs(
-                                &delegate.partial_forfeit_txs,
-                                &delegate.vtxo_inputs,
-                                &connectors_graph.leaves(),
-                                server_info.dust,
-                            )?
-                        } else {
-                            Vec::new()
-                        };
+                        let signed_forfeit_psbts = self.complete_delegated_forfeit_txs(
+                            &delegate.forfeit_psbts,
+                            &connectors_graph.leaves(),
+                            server_info.dust,
+                        )?;
 
                         network_client
                             .submit_signed_forfeit_txs(signed_forfeit_psbts, None)
@@ -734,25 +714,30 @@ where
     /// Complete the delegated forfeit transactions by adding connector inputs and finalizing them.
     fn complete_delegated_forfeit_txs(
         &self,
-        partial_forfeit_txs: &[Psbt],
-        vtxo_inputs: &[batch::VtxoInput],
+        forfeit_psbts: &[Psbt],
         connectors_leaves: &[&Psbt],
         _dust: Amount,
     ) -> Result<Vec<Psbt>, Error> {
         const FORFEIT_TX_CONNECTOR_INDEX: usize = 0;
         const FORFEIT_TX_VTXO_INDEX: usize = 1;
 
-        let connector_index = derive_vtxo_connector_map(vtxo_inputs, connectors_leaves)?;
+        let connector_index = derive_vtxo_connector_map(
+            forfeit_psbts
+                .iter()
+                .map(|psbt| psbt.unsigned_tx.input[0].previous_output)
+                .collect(),
+            connectors_leaves,
+        )?;
 
         let mut completed_forfeit_psbts = Vec::new();
 
-        for (partial_forfeit_psbt, vtxo_input) in partial_forfeit_txs.iter().zip(vtxo_inputs.iter())
-        {
+        for forfeit_psbt in forfeit_psbts.iter() {
+            let virtual_tx_outpoint = forfeit_psbt.unsigned_tx.input[0].previous_output;
+
             let connector_outpoint =
-                connector_index.get(&vtxo_input.outpoint()).ok_or_else(|| {
+                connector_index.get(&virtual_tx_outpoint).ok_or_else(|| {
                     Error::ad_hoc(format!(
-                        "connector outpoint missing for virtual TX outpoint {}",
-                        vtxo_input.outpoint()
+                        "connector outpoint missing for virtual TX outpoint {virtual_tx_outpoint}",
                     ))
                 })?;
 
@@ -761,8 +746,7 @@ where
                 .find(|l| l.unsigned_tx.compute_txid() == connector_outpoint.txid)
                 .ok_or_else(|| {
                     Error::ad_hoc(format!(
-                        "connector PSBT missing for virtual TX outpoint {}",
-                        vtxo_input.outpoint()
+                        "connector PSBT missing for virtual TX outpoint {virtual_tx_outpoint}",
                     ))
                 })?;
 
@@ -772,13 +756,12 @@ where
                 .get(connector_outpoint.vout as usize)
                 .ok_or_else(|| {
                     Error::ad_hoc(format!(
-                        "connector output missing for virtual TX outpoint {}",
-                        vtxo_input.outpoint()
+                        "connector output missing for virtual TX outpoint {virtual_tx_outpoint}",
                     ))
                 })?;
 
             // Add the connector input to the partial forfeit transaction
-            let mut completed_tx = partial_forfeit_psbt.unsigned_tx.clone();
+            let mut completed_tx = forfeit_psbt.unsigned_tx.clone();
             completed_tx.input.insert(
                 FORFEIT_TX_CONNECTOR_INDEX,
                 TxIn {
@@ -792,14 +775,14 @@ where
             })?;
 
             // Copy the VTXO input data from the partial PSBT
-            completed_psbt.inputs[FORFEIT_TX_VTXO_INDEX] = partial_forfeit_psbt.inputs[0].clone();
+            completed_psbt.inputs[FORFEIT_TX_VTXO_INDEX] = forfeit_psbt.inputs[0].clone();
 
             // Add connector input data
             completed_psbt.inputs[FORFEIT_TX_CONNECTOR_INDEX].witness_utxo =
                 Some(connector_output.clone());
 
             // Copy outputs from partial PSBT
-            completed_psbt.outputs = partial_forfeit_psbt.outputs.clone();
+            completed_psbt.outputs = forfeit_psbt.outputs.clone();
 
             completed_forfeit_psbts.push(completed_psbt);
         }
@@ -1468,9 +1451,9 @@ where
     }
 }
 
-/// Build a map between VTXOs and their corresponding connector outputs.
+/// Build a map between virtual TX outpoints and their corresponding connector outputs.
 fn derive_vtxo_connector_map(
-    vtxo_inputs: &[batch::VtxoInput],
+    mut virtual_tx_outpoints: Vec<bitcoin::OutPoint>,
     connectors_leaves: &[&Psbt],
 ) -> Result<HashMap<bitcoin::OutPoint, bitcoin::OutPoint>, Error> {
     // Collect all connector outpoints (non-anchor outputs).
@@ -1490,8 +1473,6 @@ fn derive_vtxo_connector_map(
 
     // Sort connector outpoints for deterministic ordering
     connector_outpoints.sort_by(|a, b| a.txid.cmp(&b.txid).then(a.vout.cmp(&b.vout)));
-
-    let mut virtual_tx_outpoints = vtxo_inputs.iter().map(|v| v.outpoint()).collect::<Vec<_>>();
 
     // Sort virtual TX outpoints for deterministic ordering.
     virtual_tx_outpoints.sort_by(|a, b| a.txid.cmp(&b.txid).then(a.vout.cmp(&b.vout)));
@@ -1527,22 +1508,4 @@ enum BatchOutputType {
         change_address: ArkAddress,
         change_amount: Amount,
     },
-}
-
-/// A delegate contains all the information necessary for another party to settle VTXOs on behalf
-/// of the owner.
-///
-/// The owner pre-signs the intent and forfeit transactions, allowing another party to complete
-/// the settlement at a later time.
-#[derive(Debug, Clone)]
-pub struct Delegate {
-    pub intent: Intent,
-    /// Partial forfeit transactions signed with SIGHASH_ALL | ANYONECANPAY.
-    pub partial_forfeit_txs: Vec<Psbt>,
-    /// The inputs being delegated.
-    pub vtxo_inputs: Vec<batch::VtxoInput>,
-    /// The outputs for the settlement.
-    pub outputs: Vec<intent::Output>,
-    /// The cosigner public key to be used by the delegate.
-    pub delegate_cosigner_pk: PublicKey,
 }
