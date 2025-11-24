@@ -234,16 +234,7 @@ where
         )?;
 
         // Step 2: Sign the PSBTs using ark-core
-        let sign_for_onchain_pk_fn = |pk: &XOnlyPublicKey,
-                                      msg: &secp256k1::Message|
-         -> Result<schnorr::Signature, ark_core::Error> {
-            self.inner
-                .wallet
-                .sign_for_pk(pk, msg)
-                .map_err(|e| ark_core::Error::ad_hoc(e.to_string()))
-        };
-
-        batch::sign_delegation_psbts(&mut delegation_psbts, &[*self.kp()], sign_for_onchain_pk_fn)?;
+        batch::sign_delegation_psbts(&mut delegation_psbts, &[*self.kp()])?;
 
         // Create Intent from the signed delegation PSBTs
         let intent = intent::Intent::new(
@@ -255,7 +246,6 @@ where
             intent,
             partial_forfeit_txs: delegation_psbts.forfeit_psbts,
             vtxo_inputs,
-            onchain_inputs,
             outputs,
             delegate_cosigner_pk,
         })
@@ -685,16 +675,8 @@ where
                             Vec::new()
                         };
 
-                        let commitment_psbt = if !delegate.onchain_inputs.is_empty() {
-                            return Err(Error::ad_hoc(
-                                "delegated settlement with onchain inputs is not yet supported",
-                            ));
-                        } else {
-                            None
-                        };
-
                         network_client
-                            .submit_signed_forfeit_txs(signed_forfeit_psbts, commitment_psbt)
+                            .submit_signed_forfeit_txs(signed_forfeit_psbts, None)
                             .await?;
 
                         step = step.next();
@@ -1544,7 +1526,6 @@ pub struct Delegate {
     pub partial_forfeit_txs: Vec<Psbt>,
     /// The inputs being delegated.
     pub vtxo_inputs: Vec<batch::VtxoInput>,
-    pub onchain_inputs: Vec<batch::OnChainInput>,
     /// The outputs for the settlement.
     pub outputs: Vec<intent::Output>,
     /// The cosigner public key to be used by the delegate.

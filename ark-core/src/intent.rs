@@ -89,10 +89,6 @@ impl Input {
     pub(crate) fn tapscripts(&self) -> &[ScriptBuf] {
         &self.tapscripts
     }
-
-    pub(crate) fn is_onchain(&self) -> bool {
-        self.is_onchain
-    }
 }
 
 #[derive(Debug, Clone)]

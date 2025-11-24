@@ -806,26 +806,18 @@ pub fn prepare_delegation_psbts(
 
 /// Sign delegation PSBTs with a keypair.
 ///
-/// This is step 2 of the delegation flow. Alice receives the unsigned PSBTs from Bob, signs them,
-/// and returns them.
-///
 /// # Arguments
 ///
 /// * `delegation_psbts` - The unsigned PSBTs prepared by Bob
 /// * `signing_kps` - Keypairs to sign with (for VTXO inputs)
-/// * `sign_for_onchain_pk_fn` - Function to sign for onchain inputs (e.g., boarding outputs)
 ///
 /// # Errors
 ///
 /// Returns an error if signing fails.
-pub fn sign_delegation_psbts<F>(
+pub fn sign_delegation_psbts(
     delegation_psbts: &mut DelegationPsbts,
     signing_kps: &[Keypair],
-    sign_for_onchain_pk_fn: F,
-) -> Result<(), Error>
-where
-    F: Fn(&XOnlyPublicKey, &secp256k1::Message) -> Result<schnorr::Signature, Error>,
-{
+) -> Result<(), Error> {
     use crate::intent;
     use bitcoin::psbt;
 
@@ -917,44 +909,26 @@ where
 
         let pk = input.pk();
 
-        match input.is_onchain() {
-            true => {
-                let sig = sign_for_onchain_pk_fn(&pk, &msg)?;
+        let signing_kp = signing_kps
+            .iter()
+            .find(|kp| {
+                let (xonly_pk, _) = kp.x_only_public_key();
+                xonly_pk == pk
+            })
+            .ok_or_else(|| Error::ad_hoc("Could not find suitable kp for pk"))?;
 
-                secp.verify_schnorr(&sig, &msg, &pk)
-                    .map_err(Error::crypto)
-                    .context("failed to verify intent boarding output signature")?;
+        let sig = secp.sign_schnorr_no_aux_rand(&msg, signing_kp);
 
-                let sig = taproot::Signature {
-                    signature: sig,
-                    sighash_type: TapSighashType::Default,
-                };
+        secp.verify_schnorr(&sig, &msg, &pk)
+            .map_err(Error::crypto)
+            .context("failed to verify intent vtxo signature")?;
 
-                proof_input.tap_script_sigs = BTreeMap::from_iter([((pk, leaf_hash), sig)]);
-            }
-            false => {
-                let signing_kp = signing_kps
-                    .iter()
-                    .find(|kp| {
-                        let (xonly_pk, _) = kp.x_only_public_key();
-                        xonly_pk == pk
-                    })
-                    .ok_or_else(|| Error::ad_hoc("Could not find suitable kp for pk"))?;
-
-                let sig = secp.sign_schnorr_no_aux_rand(&msg, signing_kp);
-
-                secp.verify_schnorr(&sig, &msg, &pk)
-                    .map_err(Error::crypto)
-                    .context("failed to verify intent vtxo signature")?;
-
-                let sig = taproot::Signature {
-                    signature: sig,
-                    sighash_type: TapSighashType::Default,
-                };
-
-                proof_input.tap_script_sigs = BTreeMap::from_iter([((pk, leaf_hash), sig)]);
-            }
+        let sig = taproot::Signature {
+            signature: sig,
+            sighash_type: TapSighashType::Default,
         };
+
+        proof_input.tap_script_sigs = BTreeMap::from_iter([((pk, leaf_hash), sig)]);
     }
 
     // Sign the forfeit PSBTs

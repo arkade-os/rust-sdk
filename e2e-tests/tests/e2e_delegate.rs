@@ -63,7 +63,6 @@ pub async fn e2e_delegate() {
     tracing::info!(
         delegate_cosigner_pk = %bob_delegate_cosigner_pk,
         vtxo_inputs_count = delegate.vtxo_inputs.len(),
-        onchain_inputs_count = delegate.onchain_inputs.len(),
         partial_forfeit_txs_count = delegate.partial_forfeit_txs.len(),
         "Alice generated delegate"
     );
