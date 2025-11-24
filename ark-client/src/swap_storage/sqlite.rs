@@ -231,6 +231,28 @@ impl SwapStorage for SqliteSwapStorage {
         Ok(())
     }
 
+    async fn update_reverse(&self, id: &str, data: ReverseSwapData) -> Result<(), Error> {
+        // Serialize and save back
+        let data_json = serde_json::to_string(&data)
+            .map_err(|e| Error::consumer(format!("Failed to serialize reverse swap data: {e}")))?;
+
+        let now = Self::current_timestamp();
+
+        let result = sqlx::query("UPDATE reverse_swaps SET data = ?, updated_at = ? WHERE id = ?")
+            .bind(&data_json)
+            .bind(now)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| Error::consumer(format!("Failed to update reverse swap: {e}")))?;
+
+        if result.rows_affected() == 0 {
+            return Err(Error::consumer(format!("Reverse swap not found: {id}")));
+        }
+
+        Ok(())
+    }
+
     async fn list_all_submarine(&self) -> Result<Vec<SubmarineSwapData>, Error> {
         let rows: Vec<SqliteRow> =
             sqlx::query("SELECT data FROM submarine_swaps ORDER BY created_at ASC")
@@ -350,7 +372,7 @@ mod tests {
         ReverseSwapData {
             id: id.to_string(),
             status: SwapStatus::Created,
-            preimage: [1u8; 32],
+            preimage: Some([1u8; 32]),
             vhtlc_address: ArkAddress::decode("tark1qqellv77udfmr20tun8dvju5vgudpf9vxe8jwhthrkn26fz96pawqfdy8nk05rsmrf8h94j26905e7n6sng8y059z8ykn2j5xcuw4xt846qj6x").unwrap(),
             preimage_hash: ripemd160::Hash::from_slice(&[2u8; 20]).unwrap(),
             refund_public_key: PublicKey::from_str(

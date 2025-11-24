@@ -4,11 +4,11 @@
 
 | Name                 | Type                                                      | Description | Notes      |
 | -------------------- | --------------------------------------------------------- | ----------- | ---------- |
-| **amount**           | Option<**i32**>                                           |             | [optional] |
+| **amount**           | Option<**String**>                                        |             | [optional] |
 | **ark_txid**         | Option<**String**>                                        |             | [optional] |
 | **commitment_txids** | Option<**Vec<String>**>                                   |             | [optional] |
-| **created_at**       | Option<**i64**>                                           |             | [optional] |
-| **expires_at**       | Option<**i64**>                                           |             | [optional] |
+| **created_at**       | Option<**String**>                                        |             | [optional] |
+| **expires_at**       | Option<**String**>                                        |             | [optional] |
 | **is_preconfirmed**  | Option<**bool**>                                          |             | [optional] |
 | **is_spent**         | Option<**bool**>                                          |             | [optional] |
 | **is_swept**         | Option<**bool**>                                          |             | [optional] |

@@ -86,6 +86,12 @@ impl SwapStorage for InMemorySwapStorage {
         }
     }
 
+    async fn update_reverse(&self, id: &str, data: ReverseSwapData) -> Result<(), Error> {
+        let mut swaps = self.reverse_swaps.lock().expect("lock");
+        swaps.insert(id.to_string(), data);
+        Ok(())
+    }
+
     async fn list_all_submarine(&self) -> Result<Vec<SubmarineSwapData>, Error> {
         let swaps = self.submarine_swaps.lock().expect("lock");
         Ok(swaps.values().cloned().collect())

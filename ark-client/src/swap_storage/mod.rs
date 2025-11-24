@@ -93,6 +93,16 @@ pub trait SwapStorage: Send + Sync {
     /// Returns an error if the swap doesn't exist or cannot be updated.
     async fn update_status_reverse(&self, id: &str, status: SwapStatus) -> Result<(), Error>;
 
+    /// Update an existing reverse submarine swap.
+    ///
+    /// # Arguments
+    /// * `id` - The unique identifier of the swap to update
+    /// * `data` - The new swap data to set
+    ///
+    /// # Errors
+    /// Returns an error if the swap doesn't exist or cannot be updated.
+    async fn update_reverse(&self, id: &str, data: ReverseSwapData) -> Result<(), Error>;
+
     /// List all stored submarine swaps.
     ///
     /// # Returns

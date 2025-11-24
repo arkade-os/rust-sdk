@@ -7,7 +7,6 @@ use bitcoin::base64;
 use bitcoin::base64::Engine;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Amount;
-use bitcoin::Network;
 use bitcoin::OutPoint;
 use bitcoin::Psbt;
 use bitcoin::ScriptBuf;
@@ -34,10 +33,10 @@ impl TryFrom<crate::models::IntentFeeInfo> for ark_core::server::IntentFeeInfo {
 
     fn try_from(value: crate::models::IntentFeeInfo) -> Result<Self, Self::Error> {
         Ok(ark_core::server::IntentFeeInfo {
-            offchain_input: value.offchain_input.unwrap_or_default(),
-            offchain_output: value.offchain_output.unwrap_or_default(),
-            onchain_input: value.onchain_input.unwrap_or_default(),
-            onchain_output: value.onchain_output.unwrap_or_default(),
+            offchain_input: ark_core::server::parse_fee_amount(value.offchain_input),
+            offchain_output: ark_core::server::parse_fee_amount(value.offchain_output),
+            onchain_input: ark_core::server::parse_fee_amount(value.onchain_input),
+            onchain_output: ark_core::server::parse_fee_amount(value.onchain_output),
         })
     }
 }
@@ -49,7 +48,8 @@ impl TryFrom<crate::models::FeeInfo> for ark_core::server::FeeInfo {
         let intent_fee = value
             .intent_fee
             .map(ark_core::server::IntentFeeInfo::try_from)
-            .transpose()?;
+            .transpose()?
+            .unwrap_or_default();
 
         let tx_fee_rate = value.tx_fee_rate.unwrap_or_default();
 
@@ -64,18 +64,29 @@ impl TryFrom<crate::models::ScheduledSession> for ark_core::server::ScheduledSes
     type Error = ConversionError;
 
     fn try_from(value: crate::models::ScheduledSession) -> Result<Self, Self::Error> {
-        let next_start_time = value
+        let next_start_time_str = value
             .next_start_time
             .ok_or_else(|| ConversionError("Missing next_start_time".to_string()))?;
-        let next_end_time = value
+        let next_start_time = i64::from_str(&next_start_time_str)
+            .map_err(|e| ConversionError(format!("Could not parse next_start_time: {e:#}")))?;
+
+        let next_end_time_str = value
             .next_end_time
             .ok_or_else(|| ConversionError("Missing next_end_time".to_string()))?;
-        let period = value
+        let next_end_time = i64::from_str(&next_end_time_str)
+            .map_err(|e| ConversionError(format!("Could not parse next_end_time: {e:#}")))?;
+
+        let period_str = value
             .period
             .ok_or_else(|| ConversionError("Missing period".to_string()))?;
-        let duration = value
+        let period = i64::from_str(&period_str)
+            .map_err(|e| ConversionError(format!("Could not parse period: {e:#}")))?;
+
+        let duration_str = value
             .duration
             .ok_or_else(|| ConversionError("Missing duration".to_string()))?;
+        let duration = i64::from_str(&duration_str)
+            .map_err(|e| ConversionError(format!("Could not parse duration: {e:#}")))?;
 
         let fees = value
             .fees
@@ -103,9 +114,11 @@ impl TryFrom<crate::models::DeprecatedSigner> for ark_core::server::DeprecatedSi
             .parse::<PublicKey>()
             .map_err(|e| ConversionError(format!("Invalid pubkey '{pubkey_str}': {e}")))?;
 
-        let cutoff_date = value.cutoff_date.ok_or_else(|| {
+        let cutoff_date_str = value.cutoff_date.ok_or_else(|| {
             ConversionError("Missing cutoff_date in deprecated signer".to_string())
         })?;
+        let cutoff_date = i64::from_str(&cutoff_date_str)
+            .map_err(|e| ConversionError(format!("Could not parse cutoff_date: {e:#}")))?;
 
         Ok(ark_core::server::DeprecatedSigner { pk, cutoff_date })
     }
@@ -144,35 +157,44 @@ impl TryFrom<GetInfoResponse> for ark_core::server::Info {
         })?;
 
         // Parse unilateral_exit_delay
-        let unilateral_exit_delay_val = response
+        let unilateral_exit_delay_str = response
             .unilateral_exit_delay
             .ok_or_else(|| ConversionError("Missing unilateral_exit_delay".to_string()))?;
+        let unilateral_exit_delay_val = i64::from_str(&unilateral_exit_delay_str).map_err(|e| {
+            ConversionError(format!("Could not parse unilateral_exit_delay: {e:#}"))
+        })?;
         let unilateral_exit_delay = parse_sequence_number(unilateral_exit_delay_val)?;
 
         // Parse boarding_exit_delay
-        let boarding_exit_delay_val = response
+        let boarding_exit_delay_str = response
             .boarding_exit_delay
             .ok_or_else(|| ConversionError("Missing boarding_exit_delay".to_string()))?;
+        let boarding_exit_delay_val = i64::from_str(&boarding_exit_delay_str)
+            .map_err(|e| ConversionError(format!("Could not parse boarding_exit_delay: {e:#}")))?;
         let boarding_exit_delay = parse_sequence_number(boarding_exit_delay_val)?;
 
         // Parse network
         let network_str = response
             .network
             .ok_or_else(|| ConversionError("Missing network".to_string()))?;
-        let network = network_str
-            .parse::<Network>()
+        let network = ark_core::server::Network::from_str(&network_str)
             .map_err(|e| ConversionError(format!("Invalid network '{network_str}': {e}")))?;
+        let network = bitcoin::Network::from(network);
 
         // Parse session_duration
-        let session_duration = response
+        let session_duration_str = response
             .session_duration
-            .ok_or_else(|| ConversionError("Missing session_duration".to_string()))?
+            .ok_or_else(|| ConversionError("Missing session_duration".to_string()))?;
+        let session_duration = i64::from_str(&session_duration_str)
+            .map_err(|e| ConversionError(format!("Could not parse session_duration: {e:#}")))?
             as u64;
 
         // Parse dust
-        let dust_val = response
+        let dust_str = response
             .dust
             .ok_or_else(|| ConversionError("Missing dust".to_string()))?;
+        let dust_val = i64::from_str(&dust_str)
+            .map_err(|e| ConversionError(format!("Could not parse dust: {e:#}")))?;
         let dust = Amount::from_sat(dust_val as u64);
 
         // Parse forfeit_address
@@ -202,25 +224,49 @@ impl TryFrom<GetInfoResponse> for ark_core::server::Info {
         let digest = response.digest.unwrap_or_default();
 
         // Parse utxo amount limits
-        let utxo_min_amount = match response.utxo_min_amount {
-            Some(val) if val >= 0 => Some(Amount::from_sat(val as u64)),
-            _ => None,
-        };
+        let utxo_min_amount = response
+            .utxo_min_amount
+            .and_then(|s| i64::from_str(&s).ok())
+            .and_then(|val| {
+                if val >= 0 {
+                    Some(Amount::from_sat(val as u64))
+                } else {
+                    None
+                }
+            });
 
-        let utxo_max_amount = match response.utxo_max_amount {
-            Some(val) if val >= 0 => Some(Amount::from_sat(val as u64)),
-            _ => None,
-        };
+        let utxo_max_amount = response
+            .utxo_max_amount
+            .and_then(|s| i64::from_str(&s).ok())
+            .and_then(|val| {
+                if val >= 0 {
+                    Some(Amount::from_sat(val as u64))
+                } else {
+                    None
+                }
+            });
 
-        let vtxo_min_amount = match response.vtxo_min_amount {
-            Some(val) if val >= 0 => Some(Amount::from_sat(val as u64)),
-            _ => None,
-        };
+        let vtxo_min_amount = response
+            .vtxo_min_amount
+            .and_then(|s| i64::from_str(&s).ok())
+            .and_then(|val| {
+                if val >= 0 {
+                    Some(Amount::from_sat(val as u64))
+                } else {
+                    None
+                }
+            });
 
-        let vtxo_max_amount = match response.vtxo_max_amount {
-            Some(val) if val >= 0 => Some(Amount::from_sat(val as u64)),
-            _ => None,
-        };
+        let vtxo_max_amount = response
+            .vtxo_max_amount
+            .and_then(|s| i64::from_str(&s).ok())
+            .and_then(|val| {
+                if val >= 0 {
+                    Some(Amount::from_sat(val as u64))
+                } else {
+                    None
+                }
+            });
 
         // Parse fees
         let fees = response
@@ -293,19 +339,25 @@ impl TryFrom<IndexerVtxo> for ark_core::server::VirtualTxOutPoint {
         let outpoint = OutPoint { txid, vout };
 
         // Parse timestamps
-        let created_at = value
+        let created_at_str = value
             .created_at
             .ok_or_else(|| ConversionError("Missing created_at".to_string()))?;
+        let created_at = i64::from_str(&created_at_str)
+            .map_err(|e| ConversionError(format!("Could not parse created_at: {e:#}")))?;
 
-        let expires_at = value
+        let expires_at_str = value
             .expires_at
             .ok_or_else(|| ConversionError("Missing expires_at".to_string()))?;
+        let expires_at = i64::from_str(&expires_at_str)
+            .map_err(|e| ConversionError(format!("Could not parse expires_at: {e:#}")))?;
 
         // Parse amount
-        let amount_val = value
+        let amount_str = value
             .amount
             .ok_or_else(|| ConversionError("Missing amount".to_string()))?;
-        let amount = Amount::from_sat(amount_val as u64);
+        let amount_val = u64::from_str(&amount_str)
+            .map_err(|e| ConversionError(format!("Could not parse amount: {e:#}")))?;
+        let amount = Amount::from_sat(amount_val);
 
         // Parse script
         let script_str = value

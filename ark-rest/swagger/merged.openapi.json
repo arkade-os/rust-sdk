@@ -48,8 +48,7 @@
         "type": "object",
         "properties": {
           "batchExpiry": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "id": {
             "type": "string"
@@ -67,8 +66,7 @@
         "type": "object",
         "properties": {
           "cutoffDate": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "pubkey": {
             "type": "string"
@@ -191,23 +189,19 @@
         "type": "object",
         "properties": {
           "duration": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "fees": {
             "$ref": "#/components/schemas/FeeInfo"
           },
           "nextEndTime": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "nextStartTime": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "period": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           }
         }
       },
@@ -386,8 +380,7 @@
         "type": "object",
         "properties": {
           "amount": {
-            "type": "integer",
-            "format": "uint64"
+            "type": "string"
           },
           "arkTxid": {
             "type": "string"
@@ -399,12 +392,10 @@
             }
           },
           "createdAt": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "expiresAt": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "isPreconfirmed": {
             "type": "boolean"
@@ -545,8 +536,7 @@
         "type": "object",
         "properties": {
           "boardingExitDelay": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "checkpointTapscript": {
             "type": "string"
@@ -561,8 +551,7 @@
             "type": "string"
           },
           "dust": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "fees": {
             "$ref": "#/components/schemas/FeeInfo"
@@ -586,36 +575,30 @@
             }
           },
           "sessionDuration": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "signerPubkey": {
             "type": "string"
           },
           "unilateralExitDelay": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "utxoMaxAmount": {
-            "type": "integer",
-            "description": "-1 means no limit (default), 0 means boarding not allowed",
-            "format": "int64"
+            "type": "string",
+            "description": "-1 means no limit (default), 0 means boarding not allowed"
           },
           "utxoMinAmount": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "version": {
             "type": "string"
           },
           "vtxoMaxAmount": {
-            "type": "integer",
-            "description": "-1 means no limit (default)",
-            "format": "int64"
+            "type": "string",
+            "description": "-1 means no limit (default)"
           },
           "vtxoMinAmount": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           }
         }
       },
@@ -836,12 +819,10 @@
             }
           },
           "endedAt": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "startedAt": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "totalInputAmount": {
             "type": "integer",
@@ -1102,8 +1083,7 @@
         "type": "object",
         "properties": {
           "expiresAt": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "swept": {
             "type": "boolean"
@@ -1123,8 +1103,7 @@
         "type": "object",
         "properties": {
           "expiresAt": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "spends": {
             "type": "array",
@@ -1277,15 +1256,13 @@
         "type": "object",
         "properties": {
           "amount": {
-            "type": "integer",
-            "format": "uint64"
+            "type": "string"
           },
           "commitmentTxid": {
             "type": "string"
           },
           "createdAt": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "isSettled": {
             "type": "boolean"
@@ -1316,8 +1293,7 @@
         "type": "object",
         "properties": {
           "amount": {
-            "type": "integer",
-            "format": "uint64"
+            "type": "string"
           },
           "arkTxid": {
             "type": "string"
@@ -1329,12 +1305,10 @@
             }
           },
           "createdAt": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "expiresAt": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "isPreconfirmed": {
             "type": "boolean"
@@ -1565,8 +1539,7 @@
             "description": "if all=true, amount is ignored and all available balance is withdrawn including connectors account funds\nmust be used carefully to not make connectors utxos unspendable, making forfeit txs invalid"
           },
           "amount": {
-            "type": "integer",
-            "format": "uint64"
+            "type": "string"
           }
         }
       },

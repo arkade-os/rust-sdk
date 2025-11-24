@@ -8,7 +8,6 @@ use bitcoin::hex::DisplayHex;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::taproot::Signature;
 use bitcoin::Amount;
-use bitcoin::Network;
 use bitcoin::OutPoint;
 use bitcoin::Psbt;
 use bitcoin::ScriptBuf;
@@ -18,8 +17,7 @@ use bitcoin::XOnlyPublicKey;
 use musig::musig;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
+use std::str::FromStr;
 
 /// An aggregate public nonce per shared internal (non-leaf) node in the VTXO tree.
 #[derive(Debug, Clone)]
@@ -320,10 +318,20 @@ pub struct VirtualTxOutPoint {
 
 impl VirtualTxOutPoint {
     pub fn is_recoverable(&self) -> bool {
-        let current_timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        let current_timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
             .expect("valid duration")
             .as_secs() as i64;
+
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        let current_timestamp = {
+            let window = web_sys::window().expect("should have a window in this context");
+            let performance = window
+                .performance()
+                .expect("performance should be available");
+            performance.now() as i64
+        };
 
         (self.is_swept && !self.is_spent) || current_timestamp > self.expires_at
     }
@@ -336,7 +344,7 @@ pub struct Info {
     pub forfeit_pk: PublicKey,
     pub forfeit_address: bitcoin::Address,
     pub checkpoint_tapscript: ScriptBuf,
-    pub network: Network,
+    pub network: bitcoin::Network,
     pub session_duration: u64,
     pub unilateral_exit_delay: bitcoin::Sequence,
     pub boarding_exit_delay: bitcoin::Sequence,
@@ -352,18 +360,20 @@ pub struct Info {
     pub digest: String,
 }
 
-// FIXME: Use proper types.
+/// Fee information from the server.
 #[derive(Clone, Debug)]
 pub struct FeeInfo {
-    pub intent_fee: Option<IntentFeeInfo>,
+    pub intent_fee: IntentFeeInfo,
     pub tx_fee_rate: String,
 }
-#[derive(Clone, Debug)]
+
+/// Intent fee information.
+#[derive(Clone, Debug, Default)]
 pub struct IntentFeeInfo {
-    pub offchain_input: String,
-    pub offchain_output: String,
-    pub onchain_input: String,
-    pub onchain_output: String,
+    pub offchain_input: Amount,
+    pub offchain_output: Amount,
+    pub onchain_input: Amount,
+    pub onchain_output: Amount,
 }
 
 #[derive(Clone, Debug)]
@@ -412,6 +422,9 @@ impl ListVtxo {
         &self.spendable
     }
 
+    /// Collect all unspent VTXOs, including recoverable ones.
+    ///
+    /// Useful when building a VTXO set that can be settled.
     pub fn spendable_with_recoverable(&self) -> Vec<VirtualTxOutPoint> {
         let mut spendable = self.spendable.clone();
 
@@ -425,6 +438,18 @@ impl ListVtxo {
         spendable.append(&mut recoverable_vtxos);
 
         spendable
+    }
+
+    /// Collect all unspent VTXOs, excluding recoverable ones.
+    ///
+    /// Useful when building a VTXO set that can be sent offchain, since recoverable VTXOs can only
+    /// be settled.
+    pub fn spendable_without_recoverable(&self) -> Vec<VirtualTxOutPoint> {
+        self.spendable
+            .clone()
+            .into_iter()
+            .filter(|v| !v.is_recoverable())
+            .collect::<Vec<_>>()
     }
 }
 
@@ -605,6 +630,46 @@ pub struct IndexerPage {
     pub total: i32,
 }
 
+#[derive(Clone, Debug)]
+pub enum Network {
+    Bitcoin,
+    Testnet,
+    Testnet4,
+    Signet,
+    Regtest,
+    Mutinynet,
+}
+
+impl From<Network> for bitcoin::Network {
+    fn from(value: Network) -> Self {
+        match value {
+            Network::Bitcoin => bitcoin::Network::Bitcoin,
+            Network::Testnet => bitcoin::Network::Testnet,
+            Network::Testnet4 => bitcoin::Network::Testnet4,
+            Network::Signet => bitcoin::Network::Signet,
+            Network::Regtest => bitcoin::Network::Regtest,
+            Network::Mutinynet => bitcoin::Network::Signet,
+        }
+    }
+}
+
+impl FromStr for Network {
+    type Err = String;
+
+    #[inline]
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "bitcoin" => Ok(Network::Bitcoin),
+            "testnet" => Ok(Network::Testnet),
+            "testnet4" => Ok(Network::Testnet4),
+            "signet" => Ok(Network::Signet),
+            "regtest" => Ok(Network::Regtest),
+            "mutinynet" => Ok(Network::Mutinynet),
+            _ => Err(format!("Unsupported network {}", s.to_owned())),
+        }
+    }
+}
+
 pub fn parse_sequence_number(value: i64) -> Result<bitcoin::Sequence, Error> {
     /// The threshold that determines whether an expiry or exit delay should be parsed as a
     /// number of blocks or a number of seconds.
@@ -625,4 +690,18 @@ pub fn parse_sequence_number(value: i64) -> Result<bitcoin::Sequence, Error> {
     };
 
     Ok(sequence)
+}
+
+/// Parse a fee amount string as satoshis. Returns Amount::ZERO for empty or missing strings.
+pub fn parse_fee_amount(amount_str: Option<String>) -> Amount {
+    amount_str
+        .and_then(|s| {
+            if s.is_empty() {
+                None
+            } else {
+                s.parse::<u64>().ok()
+            }
+        })
+        .map(Amount::from_sat)
+        .unwrap_or(Amount::ZERO)
 }

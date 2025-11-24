@@ -746,12 +746,10 @@
             }
           },
           "endedAt": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "startedAt": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "totalInputAmount": {
             "type": "integer",
@@ -1012,8 +1010,7 @@
         "type": "object",
         "properties": {
           "expiresAt": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "swept": {
             "type": "boolean"
@@ -1033,8 +1030,7 @@
         "type": "object",
         "properties": {
           "expiresAt": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "spends": {
             "type": "array",
@@ -1187,15 +1183,13 @@
         "type": "object",
         "properties": {
           "amount": {
-            "type": "integer",
-            "format": "uint64"
+            "type": "string"
           },
           "commitmentTxid": {
             "type": "string"
           },
           "createdAt": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "isSettled": {
             "type": "boolean"
@@ -1226,8 +1220,7 @@
         "type": "object",
         "properties": {
           "amount": {
-            "type": "integer",
-            "format": "uint64"
+            "type": "string"
           },
           "arkTxid": {
             "type": "string"
@@ -1239,12 +1232,10 @@
             }
           },
           "createdAt": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "expiresAt": {
-            "type": "integer",
-            "format": "int64"
+            "type": "string"
           },
           "isPreconfirmed": {
             "type": "boolean"

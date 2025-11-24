@@ -123,13 +123,29 @@ where
             .fetch_commitment_transaction_inputs(select_recoverable_vtxos)
             .await?;
 
+        let onchain_fee = self
+            .server_info
+            .fees
+            .as_ref()
+            .map(|f| f.intent_fee.onchain_output)
+            .unwrap_or(Amount::ZERO);
+
+        // Deduct fee from the requested amount.
+        let net_to_amount = to_amount.checked_sub(onchain_fee).ok_or_else(|| {
+            Error::coin_select(
+                "cannot deduct fees from offboard amount ({onchain_fee} > {to_amount})",
+            )
+        })?;
+
         let change_amount = total_amount.checked_sub(to_amount).ok_or_else(|| {
             Error::coin_select("cannot afford to send {to_amount}, only have {total_amount}")
         })?;
 
         tracing::info!(
             %to_address,
-            %to_amount,
+            gross_amount = %to_amount,
+            net_amount = %net_to_amount,
+            fee = %onchain_fee,
             change_address = %change_address.encode(),
             %change_amount,
             ?boarding_inputs,
@@ -143,7 +159,7 @@ where
                 vtxo_inputs.clone(),
                 BatchOutputType::OffBoard {
                     to_address: to_address.clone(),
-                    to_amount,
+                    to_amount: net_to_amount,
                     change_address,
                     change_amount,
                 },

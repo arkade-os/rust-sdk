@@ -15,7 +15,7 @@ use serde::Serialize;
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DeprecatedSigner {
     #[serde(rename = "cutoffDate", skip_serializing_if = "Option::is_none")]
-    pub cutoff_date: Option<i64>,
+    pub cutoff_date: Option<String>,
     #[serde(rename = "pubkey", skip_serializing_if = "Option::is_none")]
     pub pubkey: Option<String>,
 }

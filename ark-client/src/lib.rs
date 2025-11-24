@@ -42,6 +42,10 @@ mod send_vtxo;
 mod unilateral_exit;
 mod utils;
 
+pub use boltz::ReverseSwapData;
+pub use boltz::SubmarineSwapData;
+pub use boltz::SwapAmount;
+pub use boltz::TimeoutBlockHeights;
 pub use error::Error;
 pub use lightning_invoice;
 pub use swap_storage::InMemorySwapStorage;
@@ -237,6 +241,11 @@ pub struct ExplorerUtxo {
 #[derive(Clone, Copy, Debug)]
 pub struct SpendStatus {
     pub spend_txid: Option<Txid>,
+}
+
+pub struct AddressVtxos {
+    pub spendable: Vec<VirtualTxOutPoint>,
+    pub spent: Vec<VirtualTxOutPoint>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -466,6 +475,21 @@ where
         Ok(vec![address])
     }
 
+    pub async fn get_vtxos(&self, ark_addresses: &[ArkAddress]) -> Result<AddressVtxos, Error> {
+        let request = GetVtxosRequest::new_for_addresses(ark_addresses);
+        let list = timeout_op(
+            self.inner.timeout,
+            self.network_client().list_vtxos(request),
+        )
+        .await
+        .context("Failed to fetch list of VTXOs")??;
+
+        Ok(AddressVtxos {
+            spendable: list.spendable().to_vec(),
+            spent: list.spent().to_vec(),
+        })
+    }
+
     pub async fn list_vtxos(&self, include_recoverable_vtxos: bool) -> Result<ListVtxo, Error> {
         let addresses = self.get_offchain_addresses()?;
 
@@ -497,7 +521,7 @@ where
 
                 vtxos
                     .spendable
-                    .push((list.spendable().to_vec(), vtxo.clone()));
+                    .push((list.spendable_without_recoverable().to_vec(), vtxo.clone()));
             }
         }
 

@@ -15,7 +15,7 @@ use serde::Serialize;
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 pub struct IndexerBatch {
     #[serde(rename = "expiresAt", skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<i64>,
+    pub expires_at: Option<String>,
     #[serde(rename = "swept", skip_serializing_if = "Option::is_none")]
     pub swept: Option<bool>,
     #[serde(rename = "totalOutputAmount", skip_serializing_if = "Option::is_none")]

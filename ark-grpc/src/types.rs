@@ -14,46 +14,6 @@ use bitcoin::OutPoint;
 use bitcoin::ScriptBuf;
 use std::str::FromStr;
 
-#[derive(Clone, Debug)]
-pub enum Network {
-    Bitcoin,
-    Testnet,
-    Testnet4,
-    Signet,
-    Regtest,
-    Mutinynet,
-}
-
-impl From<Network> for bitcoin::Network {
-    fn from(value: Network) -> Self {
-        match value {
-            Network::Bitcoin => bitcoin::Network::Bitcoin,
-            Network::Testnet => bitcoin::Network::Testnet,
-            Network::Testnet4 => bitcoin::Network::Testnet4,
-            Network::Signet => bitcoin::Network::Signet,
-            Network::Regtest => bitcoin::Network::Regtest,
-            Network::Mutinynet => bitcoin::Network::Signet,
-        }
-    }
-}
-
-impl FromStr for Network {
-    type Err = String;
-
-    #[inline]
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "bitcoin" => Ok(Network::Bitcoin),
-            "testnet" => Ok(Network::Testnet),
-            "testnet4" => Ok(Network::Testnet4),
-            "signet" => Ok(Network::Signet),
-            "regtest" => Ok(Network::Regtest),
-            "mutinynet" => Ok(Network::Mutinynet),
-            _ => Err(format!("Unsupported network {}", s.to_owned())),
-        }
-    }
-}
-
 impl TryFrom<generated::ark::v1::GetInfoResponse> for server::Info {
     type Error = Error;
 
@@ -61,7 +21,8 @@ impl TryFrom<generated::ark::v1::GetInfoResponse> for server::Info {
         let signer_pk = value.signer_pubkey.parse().map_err(Error::conversion)?;
         let forfeit_pk = value.forfeit_pubkey.parse().map_err(Error::conversion)?;
 
-        let network = Network::from_str(value.network.as_str()).map_err(Error::conversion)?;
+        let network =
+            server::Network::from_str(value.network.as_str()).map_err(Error::conversion)?;
         let network = bitcoin::Network::from(network);
 
         let forfeit_address: Address<NetworkUnchecked> =
@@ -137,13 +98,18 @@ impl TryFrom<generated::ark::v1::GetInfoResponse> for server::Info {
 
 impl From<generated::ark::v1::FeeInfo> for FeeInfo {
     fn from(value: generated::ark::v1::FeeInfo) -> Self {
+        let intent_fee = value
+            .intent_fee
+            .map(|i| IntentFeeInfo {
+                offchain_input: server::parse_fee_amount(Some(i.offchain_input)),
+                offchain_output: server::parse_fee_amount(Some(i.offchain_output)),
+                onchain_input: server::parse_fee_amount(Some(i.onchain_input)),
+                onchain_output: server::parse_fee_amount(Some(i.onchain_output)),
+            })
+            .unwrap_or_default();
+
         FeeInfo {
-            intent_fee: value.intent_fee.map(|i| IntentFeeInfo {
-                offchain_input: i.offchain_input,
-                offchain_output: i.offchain_output,
-                onchain_input: i.onchain_input,
-                onchain_output: i.onchain_output,
-            }),
+            intent_fee,
             tx_fee_rate: value.tx_fee_rate,
         }
     }

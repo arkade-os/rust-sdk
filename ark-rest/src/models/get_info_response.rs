@@ -15,7 +15,7 @@ use serde::Serialize;
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GetInfoResponse {
     #[serde(rename = "boardingExitDelay", skip_serializing_if = "Option::is_none")]
-    pub boarding_exit_delay: Option<i64>,
+    pub boarding_exit_delay: Option<String>,
     #[serde(
         rename = "checkpointTapscript",
         skip_serializing_if = "Option::is_none"
@@ -26,7 +26,7 @@ pub struct GetInfoResponse {
     #[serde(rename = "digest", skip_serializing_if = "Option::is_none")]
     pub digest: Option<String>,
     #[serde(rename = "dust", skip_serializing_if = "Option::is_none")]
-    pub dust: Option<i64>,
+    pub dust: Option<String>,
     #[serde(rename = "fees", skip_serializing_if = "Option::is_none")]
     pub fees: Option<models::FeeInfo>,
     #[serde(rename = "forfeitAddress", skip_serializing_if = "Option::is_none")]
@@ -40,26 +40,26 @@ pub struct GetInfoResponse {
     #[serde(rename = "serviceStatus", skip_serializing_if = "Option::is_none")]
     pub service_status: Option<std::collections::HashMap<String, String>>,
     #[serde(rename = "sessionDuration", skip_serializing_if = "Option::is_none")]
-    pub session_duration: Option<i64>,
+    pub session_duration: Option<String>,
     #[serde(rename = "signerPubkey", skip_serializing_if = "Option::is_none")]
     pub signer_pubkey: Option<String>,
     #[serde(
         rename = "unilateralExitDelay",
         skip_serializing_if = "Option::is_none"
     )]
-    pub unilateral_exit_delay: Option<i64>,
+    pub unilateral_exit_delay: Option<String>,
     /// -1 means no limit (default), 0 means boarding not allowed
     #[serde(rename = "utxoMaxAmount", skip_serializing_if = "Option::is_none")]
-    pub utxo_max_amount: Option<i64>,
+    pub utxo_max_amount: Option<String>,
     #[serde(rename = "utxoMinAmount", skip_serializing_if = "Option::is_none")]
-    pub utxo_min_amount: Option<i64>,
+    pub utxo_min_amount: Option<String>,
     #[serde(rename = "version", skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     /// -1 means no limit (default)
     #[serde(rename = "vtxoMaxAmount", skip_serializing_if = "Option::is_none")]
-    pub vtxo_max_amount: Option<i64>,
+    pub vtxo_max_amount: Option<String>,
     #[serde(rename = "vtxoMinAmount", skip_serializing_if = "Option::is_none")]
-    pub vtxo_min_amount: Option<i64>,
+    pub vtxo_min_amount: Option<String>,
 }
 
 impl GetInfoResponse {

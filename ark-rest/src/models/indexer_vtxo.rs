@@ -15,15 +15,15 @@ use serde::Serialize;
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 pub struct IndexerVtxo {
     #[serde(rename = "amount", skip_serializing_if = "Option::is_none")]
-    pub amount: Option<i32>,
+    pub amount: Option<String>,
     #[serde(rename = "arkTxid", skip_serializing_if = "Option::is_none")]
     pub ark_txid: Option<String>,
     #[serde(rename = "commitmentTxids", skip_serializing_if = "Option::is_none")]
     pub commitment_txids: Option<Vec<String>>,
     #[serde(rename = "createdAt", skip_serializing_if = "Option::is_none")]
-    pub created_at: Option<i64>,
+    pub created_at: Option<String>,
     #[serde(rename = "expiresAt", skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<i64>,
+    pub expires_at: Option<String>,
     #[serde(rename = "isPreconfirmed", skip_serializing_if = "Option::is_none")]
     pub is_preconfirmed: Option<bool>,
     #[serde(rename = "isSpent", skip_serializing_if = "Option::is_none")]

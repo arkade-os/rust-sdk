@@ -4,7 +4,7 @@
 
 | Name                 | Type                    | Description | Notes      |
 | -------------------- | ----------------------- | ----------- | ---------- |
-| **batch_expiry**     | Option<**i64**>         |             | [optional] |
+| **batch_expiry**     | Option<**String**>      |             | [optional] |
 | **id**               | Option<**String**>      |             | [optional] |
 | **intent_id_hashes** | Option<**Vec<String>**> |             | [optional] |
 
