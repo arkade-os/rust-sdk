@@ -617,9 +617,9 @@ pub struct Delegate {
 ///
 /// # Arguments
 ///
-/// * `vtxo_inputs` - VTXO inputs to be settled
+/// * `intent_inputs` - VTXO inputs to be settled
 /// * `outputs` - Desired outputs (typically back to the owner's address)
-/// * `cosigner_pks` - Public keys of cosigners who will participate in the settlement
+/// * `delegate_cosigner_pk` - Public keys of cosigner who will participate in the settlement
 /// * `server_forfeit_address` - Address where forfeits are sent
 /// * `dust` - Dust amount for connectors
 ///
