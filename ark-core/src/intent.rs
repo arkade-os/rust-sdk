@@ -6,8 +6,6 @@ use bitcoin::base64;
 use bitcoin::base64::Engine;
 use bitcoin::hashes::sha256;
 use bitcoin::hashes::Hash;
-use bitcoin::key::Keypair;
-use bitcoin::key::Secp256k1;
 use bitcoin::opcodes::all::*;
 use bitcoin::psbt;
 use bitcoin::psbt::PsbtSighashType;
@@ -44,11 +42,6 @@ pub struct Input {
     witness_utxo: TxOut,
     // We do not serialize this.
     tapscripts: Vec<ScriptBuf>,
-    // TODO: I think including this assumes that the input is always singlesig.
-    //
-    // For a more general VTXO, the requirement here is that we sign a spend path that does not
-    // involve the server (proving unilateral ownership of the VTXO, I guess).
-    pk: XOnlyPublicKey,
     spend_info: (ScriptBuf, taproot::ControlBlock),
     is_onchain: bool,
 }
@@ -59,7 +52,6 @@ impl Input {
         sequence: Sequence,
         witness_utxo: TxOut,
         tapscripts: Vec<ScriptBuf>,
-        pk: XOnlyPublicKey,
         spend_info: (ScriptBuf, taproot::ControlBlock),
         is_onchain: bool,
     ) -> Self {
@@ -68,17 +60,28 @@ impl Input {
             sequence,
             witness_utxo,
             tapscripts,
-            pk,
             spend_info,
             is_onchain,
         }
     }
 
-    pub(crate) fn spend_info(&self) -> &(ScriptBuf, taproot::ControlBlock) {
+    pub fn script_pubkey(&self) -> &ScriptBuf {
+        &self.witness_utxo.script_pubkey
+    }
+
+    pub fn amount(&self) -> Amount {
+        self.witness_utxo.value
+    }
+
+    pub fn spend_info(&self) -> &(ScriptBuf, taproot::ControlBlock) {
         &self.spend_info
     }
 
-    pub(crate) fn tapscripts(&self) -> &[ScriptBuf] {
+    pub fn outpoint(&self) -> OutPoint {
+        self.outpoint
+    }
+
+    pub fn tapscripts(&self) -> &[ScriptBuf] {
         &self.tapscripts
     }
 }
@@ -118,15 +121,22 @@ impl Intent {
     }
 }
 
-pub fn make_intent<F>(
-    signing_kps: &[Keypair],
-    sign_for_onchain_pk_fn: F,
+pub fn make_intent<SV, SO>(
+    sign_for_vtxo_fn: SV,
+    sign_for_onchain_fn: SO,
     inputs: Vec<Input>,
     outputs: Vec<Output>,
     own_cosigner_pks: Vec<PublicKey>,
 ) -> Result<Intent, Error>
 where
-    F: Fn(&XOnlyPublicKey, &secp256k1::Message) -> Result<schnorr::Signature, Error>,
+    SV: Fn(
+        &mut psbt::Input,
+        secp256k1::Message,
+    ) -> Result<(schnorr::Signature, XOnlyPublicKey), Error>,
+    SO: Fn(
+        &mut psbt::Input,
+        secp256k1::Message,
+    ) -> Result<(schnorr::Signature, XOnlyPublicKey), Error>,
 {
     let mut onchain_output_indexes = Vec::new();
     for (i, output) in outputs.iter().enumerate() {
@@ -157,8 +167,9 @@ where
         if i == 0 {
             let (script, control_block) = inputs[0].spend_info.clone();
 
-            proof_input.tap_scripts =
-                BTreeMap::from_iter([(control_block, (script, taproot::LeafVersion::TapScript))]);
+            proof_input
+                .tap_scripts
+                .insert(control_block, (script, taproot::LeafVersion::TapScript));
         } else {
             let (script, control_block) = inputs[i - 1].spend_info.clone();
 
@@ -175,12 +186,11 @@ where
                 },
                 bytes,
             );
-            proof_input.tap_scripts =
-                BTreeMap::from_iter([(control_block, (script, taproot::LeafVersion::TapScript))]);
+            proof_input
+                .tap_scripts
+                .insert(control_block, (script, taproot::LeafVersion::TapScript));
         };
     }
-
-    let secp = Secp256k1::new();
 
     let prevouts = proof_psbt
         .inputs
@@ -210,46 +220,17 @@ where
 
         let msg = secp256k1::Message::from_digest(tap_sighash.to_raw_hash().to_byte_array());
 
-        let pk = input.pk;
-
-        match input.is_onchain {
-            true => {
-                let sig = sign_for_onchain_pk_fn(&pk, &msg)?;
-
-                secp.verify_schnorr(&sig, &msg, &pk)
-                    .map_err(Error::crypto)
-                    .context("failed to verify own proof of funds boarding output signature")?;
-
-                let sig = taproot::Signature {
-                    signature: sig,
-                    sighash_type: TapSighashType::Default,
-                };
-
-                proof_input.tap_script_sigs = BTreeMap::from_iter([((pk, leaf_hash), sig)]);
-            }
-            false => {
-                let signing_kp = signing_kps
-                    .iter()
-                    .find(|kp| {
-                        let (xonly_ok, _) = kp.x_only_public_key();
-                        xonly_ok == pk
-                    })
-                    .ok_or_else(|| Error::ad_hoc("Could not find suitable kp for pk"))?;
-
-                let sig = secp.sign_schnorr_no_aux_rand(&msg, signing_kp);
-
-                secp.verify_schnorr(&sig, &msg, &pk)
-                    .map_err(Error::crypto)
-                    .context("failed to verify own proof of funds vtxo signature")?;
-
-                let sig = taproot::Signature {
-                    signature: sig,
-                    sighash_type: TapSighashType::Default,
-                };
-
-                proof_input.tap_script_sigs = BTreeMap::from_iter([((pk, leaf_hash), sig)]);
-            }
+        let (sig, pk) = match input.is_onchain {
+            true => sign_for_onchain_fn(proof_input, msg)?,
+            false => sign_for_vtxo_fn(proof_input, msg)?,
         };
+
+        let sig = taproot::Signature {
+            signature: sig,
+            sighash_type: TapSighashType::Default,
+        };
+
+        proof_input.tap_script_sigs = BTreeMap::from_iter([((pk, leaf_hash), sig)]);
     }
 
     Ok(Intent {

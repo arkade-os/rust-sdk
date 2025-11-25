@@ -1,6 +1,7 @@
 use crate::anchor_output;
 use crate::conversions::from_musig_xonly;
 use crate::conversions::to_musig_pk;
+use crate::intent;
 use crate::intent::Intent;
 use crate::server::NoncePks;
 use crate::server::PartialSigTree;
@@ -10,7 +11,6 @@ use crate::BoardingOutput;
 use crate::Error;
 use crate::ErrorContext;
 use crate::TxGraph;
-use crate::Vtxo;
 use crate::VTXO_COSIGNER_PSBT_KEY;
 use crate::VTXO_INPUT_INDEX;
 use bitcoin::absolute::LockTime;
@@ -67,42 +67,6 @@ impl OnChainInput {
 
     pub fn boarding_output(&self) -> &BoardingOutput {
         &self.boarding_output
-    }
-
-    pub fn amount(&self) -> Amount {
-        self.amount
-    }
-
-    pub fn outpoint(&self) -> OutPoint {
-        self.outpoint
-    }
-}
-
-/// Either a confirmed VTXO that needs to be renewed, or an pre-confirmed VTXO that needs
-/// confirmation.
-///
-/// Alternatively, the owner of this VTXO may decide to spend it into a vanilla UTXO.
-#[derive(Debug, Clone)]
-pub struct VtxoInput {
-    /// The information needed to spend the VTXO, besides the amount.
-    vtxo: Vtxo,
-    /// The amount of coins locked in the VTXO.
-    amount: Amount,
-    /// Where the VTXO would end up on the blockchain if it were to become a UTXO.
-    outpoint: OutPoint,
-}
-
-impl VtxoInput {
-    pub fn new(vtxo: Vtxo, amount: Amount, outpoint: OutPoint) -> Self {
-        Self {
-            vtxo,
-            amount,
-            outpoint,
-        }
-    }
-
-    pub fn vtxo(&self) -> &Vtxo {
-        &self.vtxo
     }
 
     pub fn amount(&self) -> Amount {
@@ -345,16 +309,19 @@ pub fn sign_batch_tree_tx(
 
 /// Build and sign a forfeit transaction per [`VtxoInput`] to be used in an upcoming commitment
 /// transaction.
-pub fn create_and_sign_forfeit_txs<F>(
-    vtxo_inputs: &[VtxoInput],
+pub fn create_and_sign_forfeit_txs<S>(
+    mut sign_fn: S,
+    vtxo_inputs: &[intent::Input],
     connectors_leaves: &[&Psbt],
     server_forfeit_address: &Address,
     // As defined by the server.
     dust: Amount,
-    sign: F,
 ) -> Result<Vec<Psbt>, Error>
 where
-    F: Fn(&secp256k1::Message, &Vtxo) -> (schnorr::Signature, XOnlyPublicKey),
+    S: FnMut(
+        &mut psbt::Input,
+        secp256k1::Message,
+    ) -> Result<(schnorr::Signature, XOnlyPublicKey), Error>,
 {
     const FORFEIT_TX_CONNECTOR_INDEX: usize = 0;
     const FORFEIT_TX_VTXO_INDEX: usize = 1;
@@ -366,20 +333,17 @@ where
     let connector_index = derive_vtxo_connector_map(vtxo_inputs, connectors_leaves, dust)?;
 
     let mut signed_forfeit_psbts = Vec::new();
-    for VtxoInput {
-        vtxo,
-        amount: vtxo_amount,
-        outpoint: virtual_tx_outpoint,
-    } in vtxo_inputs.iter()
-    {
-        if *vtxo_amount <= dust {
+    for vtxo_input in vtxo_inputs.iter() {
+        if vtxo_input.amount() <= dust {
             // Sub-dust VTXOs don't need to be forfeited.
             continue;
         }
 
-        let connector_outpoint = connector_index.get(virtual_tx_outpoint).ok_or_else(|| {
+        let outpoint = vtxo_input.outpoint();
+
+        let connector_outpoint = connector_index.get(&outpoint).ok_or_else(|| {
             Error::ad_hoc(format!(
-                "connector outpoint missing for virtual TX outpoint {virtual_tx_outpoint}"
+                "connector outpoint missing for virtual TX outpoint {outpoint}"
             ))
         })?;
 
@@ -388,7 +352,7 @@ where
             .find(|l| l.unsigned_tx.compute_txid() == connector_outpoint.txid)
             .ok_or_else(|| {
                 Error::ad_hoc(format!(
-                    "connector PSBT missing for virtual TX outpoint {virtual_tx_outpoint}"
+                    "connector PSBT missing for virtual TX outpoint {outpoint}"
                 ))
             })?;
 
@@ -398,12 +362,12 @@ where
             .get(connector_outpoint.vout as usize)
             .ok_or_else(|| {
                 Error::ad_hoc(format!(
-                    "connector output missing for virtual TX outpoint {virtual_tx_outpoint}"
+                    "connector output missing for virtual TX outpoint {outpoint}"
                 ))
             })?;
 
         let forfeit_output = TxOut {
-            value: *vtxo_amount + connector_amount,
+            value: vtxo_input.amount() + connector_amount,
             script_pubkey: server_forfeit_address.script_pubkey(),
         };
 
@@ -416,7 +380,7 @@ where
                     ..Default::default()
                 },
                 TxIn {
-                    previous_output: *virtual_tx_outpoint,
+                    previous_output: outpoint,
                     ..Default::default()
                 },
             ],
@@ -428,20 +392,22 @@ where
             Some(connector_output.clone());
 
         forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX].witness_utxo = Some(TxOut {
-            value: *vtxo_amount,
-            script_pubkey: vtxo.script_pubkey(),
+            value: vtxo_input.amount(),
+            script_pubkey: vtxo_input.script_pubkey().clone(),
         });
 
         forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX].sighash_type =
             Some(TapSighashType::Default.into());
 
-        let (forfeit_script, forfeit_control_block) = vtxo.forfeit_spend_info()?;
+        let (forfeit_script, forfeit_control_block) = vtxo_input.spend_info();
 
         let leaf_version = forfeit_control_block.leaf_version;
-        forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX].tap_scripts = BTreeMap::from_iter([(
-            forfeit_control_block,
-            (forfeit_script.clone(), leaf_version),
-        )]);
+        forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX]
+            .tap_scripts
+            .insert(
+                forfeit_control_block.clone(),
+                (forfeit_script.clone(), leaf_version),
+            );
 
         let prevouts = forfeit_psbt
             .inputs
@@ -450,7 +416,7 @@ where
             .collect::<Vec<_>>();
         let prevouts = Prevouts::All(&prevouts);
 
-        let leaf_hash = TapLeafHash::from_script(&forfeit_script, leaf_version);
+        let leaf_hash = TapLeafHash::from_script(forfeit_script, leaf_version);
 
         let tap_sighash = SighashCache::new(&forfeit_psbt.unsigned_tx)
             .taproot_script_spend_signature_hash(
@@ -463,7 +429,7 @@ where
 
         let msg = secp256k1::Message::from_digest(tap_sighash.to_raw_hash().to_byte_array());
 
-        let (sig, pk) = sign(&msg, vtxo);
+        let (sig, pk) = sign_fn(&mut forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX], msg)?;
 
         secp.verify_schnorr(&sig, &msg, &pk)
             .map_err(Error::crypto)
@@ -474,8 +440,9 @@ where
             sighash_type: TapSighashType::Default,
         };
 
-        forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX].tap_script_sigs =
-            BTreeMap::from_iter([((pk, leaf_hash), sig)]);
+        forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX]
+            .tap_script_sigs
+            .insert((pk, leaf_hash), sig);
 
         signed_forfeit_psbts.push(forfeit_psbt.clone());
     }
@@ -551,7 +518,7 @@ where
                     sighash_type: TapSighashType::Default,
                 };
 
-                input.tap_script_sigs = BTreeMap::from_iter([((pk, leaf_hash), sig)]);
+                input.tap_script_sigs.insert((pk, leaf_hash), sig);
             }
         }
     }
@@ -561,7 +528,7 @@ where
 
 /// Build a map between VTXOs and their corresponding connector outputs.
 fn derive_vtxo_connector_map(
-    vtxo_inputs: &[VtxoInput],
+    vtxo_inputs: &[intent::Input],
     connectors_leaves: &[&Psbt],
     dust: Amount,
 ) -> Result<HashMap<OutPoint, OutPoint>, Error> {
@@ -586,7 +553,7 @@ fn derive_vtxo_connector_map(
     // Get virtual TX outpoints that need forfeiting (excluding sub-dust ones).
     let mut virtual_tx_outpoints = vtxo_inputs
         .iter()
-        .filter_map(|vtxo_input| (vtxo_input.amount > dust).then_some(vtxo_input.outpoint))
+        .filter_map(|vtxo_input| (vtxo_input.amount() > dust).then_some(vtxo_input.outpoint()))
         .collect::<Vec<_>>();
 
     // Sort virtual TX outpoints for deterministic ordering.
@@ -660,44 +627,13 @@ pub struct Delegate {
 ///
 /// A [`Delegate`] struct containing unsigned PSBTs ready for signing.
 pub fn prepare_delegate_psbts(
-    vtxo_inputs: Vec<VtxoInput>,
-    outputs: Vec<crate::intent::Output>,
+    intent_inputs: Vec<intent::Input>,
+    outputs: Vec<intent::Output>,
     delegate_cosigner_pk: PublicKey,
     server_forfeit_address: &Address,
     // TODO: Handle sub-dust amounts (they can be settled!).
     dust: Amount,
 ) -> Result<Delegate, Error> {
-    use crate::intent;
-
-    // Convert inputs to intent::Input format
-    let intent_inputs = vtxo_inputs
-        .iter()
-        .map(|v| {
-            Ok(intent::Input::new(
-                v.outpoint(),
-                v.vtxo().exit_delay(),
-                TxOut {
-                    value: v.amount(),
-                    script_pubkey: v.vtxo().script_pubkey(),
-                },
-                v.vtxo().tapscripts(),
-                v.vtxo().owner_pk(),
-                v.vtxo()
-                    .forfeit_spend_info()
-                    .context("failed to get forfeit spend info")?,
-                false,
-            ))
-        })
-        .collect::<Result<Vec<_>, Error>>()?;
-
-    // Determine onchain output indexes
-    let mut onchain_output_indexes = Vec::new();
-    for (i, output) in outputs.iter().enumerate() {
-        if matches!(output, intent::Output::Onchain(_)) {
-            onchain_output_indexes.push(i);
-        }
-    }
-
     // Create intent message
     let now = std::time::SystemTime::now();
     let now = now
@@ -709,7 +645,7 @@ pub fn prepare_delegate_psbts(
 
     let intent_message = intent::IntentMessage::new(
         intent::IntentMessageType::Register,
-        onchain_output_indexes,
+        Vec::new(),
         now,
         expire_at,
         vec![delegate_cosigner_pk],
@@ -729,8 +665,7 @@ pub fn prepare_delegate_psbts(
         } else {
             let (script, control_block) = intent_inputs[i - 1].spend_info().clone();
 
-            let tap_tree =
-                crate::intent::taptree::TapTree(intent_inputs[i - 1].tapscripts().to_vec());
+            let tap_tree = intent::taptree::TapTree(intent_inputs[i - 1].tapscripts().to_vec());
             let bytes = tap_tree
                 .encode()
                 .map_err(Error::ad_hoc)
@@ -752,10 +687,9 @@ pub fn prepare_delegate_psbts(
     let mut forfeit_psbts = Vec::new();
     const FORFEIT_TX_VTXO_INDEX: usize = 0;
 
-    for vtxo_input in vtxo_inputs.iter() {
-        let vtxo = vtxo_input.vtxo();
-        let vtxo_amount = vtxo_input.amount();
-        let virtual_tx_outpoint = vtxo_input.outpoint();
+    for intent_input in intent_inputs.iter() {
+        let vtxo_amount = intent_input.amount();
+        let virtual_tx_outpoint = intent_input.outpoint();
         let connector_amount = dust;
 
         // Create partial forfeit transaction with only the VTXO input
@@ -777,7 +711,7 @@ pub fn prepare_delegate_psbts(
 
         forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX].witness_utxo = Some(TxOut {
             value: vtxo_amount,
-            script_pubkey: vtxo.script_pubkey(),
+            script_pubkey: intent_input.script_pubkey().clone(),
         });
 
         // Set sighash type to SIGHASH_ALL | ANYONECANPAY
@@ -785,10 +719,14 @@ pub fn prepare_delegate_psbts(
             psbt::PsbtSighashType::from(TapSighashType::AllPlusAnyoneCanPay),
         );
 
-        let (forfeit_script, forfeit_control_block) = vtxo.forfeit_spend_info()?;
+        let (forfeit_script, forfeit_control_block) = intent_input.spend_info();
         let leaf_version = forfeit_control_block.leaf_version;
-        forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX].tap_scripts =
-            BTreeMap::from_iter([(forfeit_control_block, (forfeit_script, leaf_version))]);
+        forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX]
+            .tap_scripts
+            .insert(
+                forfeit_control_block.clone(),
+                (forfeit_script.clone(), leaf_version),
+            );
 
         forfeit_psbts.push(forfeit_psbt);
     }

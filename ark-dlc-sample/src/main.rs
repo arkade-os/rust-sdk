@@ -1178,7 +1178,6 @@ async fn settle(
                         script_pubkey: boarding_output.script_pubkey(),
                     },
                     boarding_output.tapscripts(),
-                    boarding_output.owner_pk(),
                     boarding_output.exit_spend_info(),
                     true,
                 )
@@ -1198,7 +1197,6 @@ async fn settle(
                         script_pubkey: vtxo.script_pubkey(),
                     },
                     vtxo.tapscripts(),
-                    vtxo.owner_pk(),
                     vtxo.exit_spend_info()?,
                     false,
                 ))
@@ -1223,16 +1221,26 @@ async fn settle(
         .collect::<Vec<_>>();
 
     let signing_kp = Keypair::from_secret_key(&secp, &sk);
-    let sign_for_onchain_pk_fn = |_: &XOnlyPublicKey,
-                                  msg: &secp256k1::Message|
-     -> Result<schnorr::Signature, ark_core::Error> {
-        Ok(secp.sign_schnorr_no_aux_rand(msg, &signing_kp))
+
+    let sign_for_vtxo_fn = |_: &mut psbt::Input,
+                            msg: secp256k1::Message|
+     -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+        let sig = secp.sign_schnorr_no_aux_rand(&msg, &signing_kp);
+        Ok((sig, signing_kp.public_key().into()))
     };
+
+    let sign_for_onchain_fn =
+        |_: &mut psbt::Input,
+         msg: secp256k1::Message|
+         -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+            let sig = secp.sign_schnorr_no_aux_rand(&msg, &signing_kp);
+            Ok((sig, signing_kp.public_key().into()))
+        };
 
     let signing_kp = Keypair::from_secret_key(&secp, &sk);
     let intent = intent::make_intent(
-        &[signing_kp],
-        sign_for_onchain_pk_fn,
+        sign_for_vtxo_fn,
+        sign_for_onchain_fn,
         batch_inputs,
         batch_outputs,
         own_cosigner_pks.clone(),
@@ -1405,22 +1413,37 @@ async fn settle(
     let vtxo_inputs = virtual_tx_outpoints
         .spendable
         .into_iter()
-        .map(|(outpoint, vtxo)| batch::VtxoInput::new(vtxo, outpoint.amount, outpoint.outpoint))
-        .collect::<Vec<_>>();
+        .map(|(virtual_tx_outpoint, vtxo)| {
+            let spend_info = vtxo.forfeit_spend_info()?;
+
+            anyhow::Ok(intent::Input::new(
+                virtual_tx_outpoint.outpoint,
+                vtxo.exit_delay(),
+                TxOut {
+                    value: virtual_tx_outpoint.amount,
+                    script_pubkey: vtxo.script_pubkey(),
+                },
+                vtxo.tapscripts(),
+                spend_info,
+                false,
+            ))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     let signed_forfeit_psbts = if !vtxo_inputs.is_empty() {
         let connectors_graph = TxGraph::new(connectors_graph_chunks)?;
 
         create_and_sign_forfeit_txs(
+            |_, msg| {
+                let sig = secp.sign_schnorr_no_aux_rand(&msg, &signing_kp);
+                let pk = signing_kp.x_only_public_key().0;
+
+                Ok((sig, pk))
+            },
             vtxo_inputs.as_slice(),
             &connectors_graph.leaves(),
             &server_info.forfeit_address,
             server_info.dust,
-            |msg, _vtxo| {
-                let sig = secp.sign_schnorr_no_aux_rand(msg, &signing_kp);
-                let pk = signing_kp.x_only_public_key().0;
-                (sig, pk)
-            },
         )?
     } else {
         Vec::new()

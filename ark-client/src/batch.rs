@@ -21,7 +21,6 @@ use ark_core::server::BatchTreeEventType;
 use ark_core::server::PartialSigTree;
 use ark_core::server::StreamEvent;
 use ark_core::ArkAddress;
-use ark_core::ErrorContext as _;
 use ark_core::TxGraph;
 use backon::ExponentialBuilder;
 use backon::Retryable;
@@ -795,7 +794,7 @@ where
     async fn fetch_commitment_transaction_inputs(
         &self,
         select_recoverable_vtxos: bool,
-    ) -> Result<(Vec<batch::OnChainInput>, Vec<batch::VtxoInput>, Amount), Error> {
+    ) -> Result<(Vec<batch::OnChainInput>, Vec<intent::Input>, Amount), Error> {
         // Get all known boarding outputs.
         let boarding_outputs = self.inner.wallet.get_boarding_outputs()?;
 
@@ -862,15 +861,23 @@ where
                 virtual_tx_outpoints
                     .into_iter()
                     .map(|virtual_tx_outpoint| {
-                        batch::VtxoInput::new(
-                            vtxo.clone(),
-                            virtual_tx_outpoint.amount,
+                        let spend_info = vtxo.forfeit_spend_info()?;
+
+                        Ok(intent::Input::new(
                             virtual_tx_outpoint.outpoint,
-                        )
+                            vtxo.exit_delay(),
+                            TxOut {
+                                value: virtual_tx_outpoint.amount,
+                                script_pubkey: vtxo.script_pubkey(),
+                            },
+                            vtxo.tapscripts(),
+                            spend_info,
+                            false,
+                        ))
                     })
                     .collect::<Vec<_>>()
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, ark_core::Error>>()?;
 
         Ok((boarding_inputs, vtxo_inputs, total_amount))
     }
@@ -879,7 +886,7 @@ where
         &self,
         rng: &mut R,
         onchain_inputs: Vec<batch::OnChainInput>,
-        vtxo_inputs: Vec<batch::VtxoInput>,
+        vtxo_inputs: Vec<intent::Input>,
         output_type: BatchOutputType,
     ) -> Result<Txid, Error>
     where
@@ -910,34 +917,14 @@ where
                         script_pubkey: o.boarding_output().script_pubkey(),
                     },
                     o.boarding_output().tapscripts(),
-                    o.boarding_output().owner_pk(),
                     o.boarding_output().forfeit_spend_info(),
                     true,
                 )
             });
 
-            let vtxo_inputs = vtxo_inputs
-                .clone()
-                .into_iter()
-                .map(|v| {
-                    Ok(intent::Input::new(
-                        v.outpoint(),
-                        v.vtxo().exit_delay(),
-                        TxOut {
-                            value: v.amount(),
-                            script_pubkey: v.vtxo().script_pubkey(),
-                        },
-                        v.vtxo().tapscripts(),
-                        v.vtxo().owner_pk(),
-                        v.vtxo()
-                            .forfeit_spend_info()
-                            .context("failed to get exit spend info")?,
-                        false,
-                    ))
-                })
-                .collect::<Result<Vec<_>, Error>>()?;
-
-            boarding_inputs.chain(vtxo_inputs).collect::<Vec<_>>()
+            boarding_inputs
+                .chain(vtxo_inputs.clone())
+                .collect::<Vec<_>>()
         };
 
         let mut outputs = vec![];
@@ -977,18 +964,46 @@ where
             .map(|k| k.public_key())
             .collect::<Vec<_>>();
 
-        let sign_for_onchain_pk_fn = |pk: &XOnlyPublicKey,
-                                      msg: &secp256k1::Message|
-         -> Result<schnorr::Signature, ark_core::Error> {
-            self.inner
-                .wallet
-                .sign_for_pk(pk, msg)
-                .map_err(|e| ark_core::Error::ad_hoc(e.to_string()))
-        };
+        let secp = Secp256k1::new();
+
+        let sign_for_vtxo_fn =
+            |_: &mut psbt::Input,
+             msg: secp256k1::Message|
+             -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+                let sig = secp.sign_schnorr_no_aux_rand(&msg, self.kp());
+
+                Ok((sig, self.kp().public_key().into()))
+            };
+
+        let sign_for_onchain_fn =
+            |input: &mut psbt::Input,
+             msg: secp256k1::Message|
+             -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+                let onchain_input = onchain_inputs
+                    .iter()
+                    .find(|o| {
+                        Some(o.boarding_output().script_pubkey())
+                            == input.witness_utxo.clone().map(|w| w.script_pubkey)
+                    })
+                    .ok_or_else(|| {
+                        ark_core::Error::ad_hoc(
+                            "could not find signing key for onchain input: {input:?}",
+                        )
+                    })?;
+
+                let owner_pk = onchain_input.boarding_output().owner_pk();
+                let sig = self
+                    .inner
+                    .wallet
+                    .sign_for_pk(&owner_pk, &msg)
+                    .map_err(|e| ark_core::Error::ad_hoc(e.to_string()))?;
+
+                Ok((sig, owner_pk))
+            };
 
         let intent = intent::make_intent(
-            &[*self.kp()],
-            sign_for_onchain_pk_fn,
+            sign_for_vtxo_fn,
+            sign_for_onchain_fn,
             inputs,
             outputs.clone(),
             own_cosigner_pks.clone(),
@@ -1348,15 +1363,16 @@ where
                             tracing::debug!(batch_id = e.id, "Batch finalization started");
 
                             create_and_sign_forfeit_txs(
+                                |_, msg| {
+                                    let sig = self.secp().sign_schnorr_no_aux_rand(&msg, self.kp());
+                                    let pk = self.kp().x_only_public_key().0;
+
+                                    Ok((sig, pk))
+                                },
                                 vtxo_inputs.as_slice(),
                                 &connectors_graph.leaves(),
                                 &server_info.forfeit_address,
                                 server_info.dust,
-                                |msg, _vtxo| {
-                                    let sig = self.secp().sign_schnorr_no_aux_rand(msg, self.kp());
-                                    let pk = self.kp().x_only_public_key().0;
-                                    (sig, pk)
-                                },
                             )
                             .map_err(Error::from)?
                         } else {
