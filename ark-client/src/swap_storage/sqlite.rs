@@ -1,15 +1,15 @@
 use super::SwapStorage;
+use crate::Error;
 use crate::boltz::ReverseSwapData;
 use crate::boltz::SubmarineSwapData;
 use crate::boltz::SwapStatus;
-use crate::Error;
 use async_trait::async_trait;
-use sqlx::sqlite::SqliteConnectOptions;
-use sqlx::sqlite::SqlitePoolOptions;
-use sqlx::sqlite::SqliteRow;
 use sqlx::Pool;
 use sqlx::Row;
 use sqlx::Sqlite;
+use sqlx::sqlite::SqliteConnectOptions;
+use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::sqlite::SqliteRow;
 use std::path::Path;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
@@ -334,10 +334,10 @@ impl SwapStorage for SqliteSwapStorage {
 mod tests {
     use super::*;
     use ark_core::ArkAddress;
-    use bitcoin::hashes::ripemd160;
-    use bitcoin::hashes::Hash;
     use bitcoin::Amount;
     use bitcoin::PublicKey;
+    use bitcoin::hashes::Hash;
+    use bitcoin::hashes::ripemd160;
     use lightning_invoice::Bolt11Invoice;
     use std::str::FromStr;
     use tempfile::TempDir;

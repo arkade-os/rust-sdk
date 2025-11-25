@@ -2,12 +2,12 @@
 
 use crate::common::wait_until_balance;
 use ark_client::wallet::OnchainWallet;
+use bitcoin::Amount;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::key::Secp256k1;
-use bitcoin::Amount;
+use common::Nigiri;
 use common::init_tracing;
 use common::set_up_client;
-use common::Nigiri;
 use rand::thread_rng;
 use std::str::FromStr;
 use std::sync::Arc;

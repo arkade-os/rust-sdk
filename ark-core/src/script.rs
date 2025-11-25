@@ -1,7 +1,7 @@
-use bitcoin::opcodes::all::*;
-use bitcoin::taproot::TaprootSpendInfo;
 use bitcoin::ScriptBuf;
 use bitcoin::XOnlyPublicKey;
+use bitcoin::opcodes::all::*;
+use bitcoin::taproot::TaprootSpendInfo;
 use std::fmt;
 
 /// A conventional 2-of-2 multisignature [`ScriptBuf`].
@@ -86,8 +86,8 @@ impl std::error::Error for InvalidCsvSigScriptError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin::locktime;
     use bitcoin::XOnlyPublicKey;
+    use bitcoin::locktime;
     use std::str::FromStr;
 
     #[test]
