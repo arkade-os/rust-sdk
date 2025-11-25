@@ -1,7 +1,10 @@
 [package]
 name = "ark-client-sample"
 version = "0.7.0"
-edition = "2021"
+edition = { workspace = true }
+
+[lints]
+workspace = true
 
 [dependencies]
 anyhow = "1"

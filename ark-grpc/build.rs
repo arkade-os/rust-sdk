@@ -1,8 +1,10 @@
 /// To generate updated proto objects:
 /// run `RUSTFLAGS="--cfg genproto" cargo build`
+#[allow(clippy::unnecessary_wraps)]
 fn main() -> std::io::Result<()> {
     #[cfg(genproto)]
     generate_protos()?;
+
     Ok(())
 }
 

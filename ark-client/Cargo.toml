@@ -1,12 +1,12 @@
 [package]
 name = "ark-client"
 version = "0.7.0"
-edition = "2021"
-license = "MIT"
+edition = { workspace = true }
+license = { workspace = true }
 description = "Main client library for interacting with Ark servers"
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(genproto)'] }
+[lints]
+workspace = true
 
 [dependencies]
 ark-core = { path = "../ark-core", version = "0.7.0" }

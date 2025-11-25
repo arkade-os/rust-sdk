@@ -1,8 +1,5 @@
+use crate::Error;
 use crate::generated;
-use crate::generated::ark::v1::ark_service_client::ArkServiceClient;
-use crate::generated::ark::v1::get_subscription_response;
-use crate::generated::ark::v1::indexer_service_client::IndexerServiceClient;
-use crate::generated::ark::v1::indexer_tx_history_record::Key;
 use crate::generated::ark::v1::ConfirmRegistrationRequest;
 use crate::generated::ark::v1::GetEventStreamRequest;
 use crate::generated::ark::v1::GetInfoRequest;
@@ -17,9 +14,13 @@ use crate::generated::ark::v1::SubmitTreeNoncesRequest;
 use crate::generated::ark::v1::SubmitTreeSignaturesRequest;
 use crate::generated::ark::v1::SubscribeForScriptsRequest;
 use crate::generated::ark::v1::UnsubscribeForScriptsRequest;
-use crate::Error;
+use crate::generated::ark::v1::ark_service_client::ArkServiceClient;
+use crate::generated::ark::v1::get_subscription_response;
+use crate::generated::ark::v1::indexer_service_client::IndexerServiceClient;
+use crate::generated::ark::v1::indexer_tx_history_record::Key;
+use ark_core::ArkAddress;
+use ark_core::TxGraphChunk;
 use ark_core::history;
-use ark_core::server::parse_sequence_number;
 use ark_core::server::ArkTransaction;
 use ark_core::server::BatchFailed;
 use ark_core::server::BatchFinalizationEvent;
@@ -52,18 +53,17 @@ use ark_core::server::VirtualTxOutPoint;
 use ark_core::server::VirtualTxsResponse;
 use ark_core::server::VtxoChain;
 use ark_core::server::VtxoChains;
-use ark_core::ArkAddress;
-use ark_core::TxGraphChunk;
+use ark_core::server::parse_sequence_number;
 use async_stream::stream;
 use base64::Engine;
-use bitcoin::hex::FromHex;
-use bitcoin::secp256k1::PublicKey;
-use bitcoin::taproot::Signature;
 use bitcoin::OutPoint;
 use bitcoin::Psbt;
 use bitcoin::ScriptBuf;
 use bitcoin::SignedAmount;
 use bitcoin::Txid;
+use bitcoin::hex::FromHex;
+use bitcoin::secp256k1::PublicKey;
+use bitcoin::taproot::Signature;
 use futures::Stream;
 use futures::StreamExt;
 use futures::TryStreamExt;
@@ -518,7 +518,8 @@ impl Client {
     pub async fn get_subscription(
         &self,
         subscription_id: String,
-    ) -> Result<impl Stream<Item = Result<SubscriptionResponse, Error>> + Unpin, Error> {
+    ) -> Result<impl Stream<Item = Result<SubscriptionResponse, Error>> + Unpin + use<>, Error>
+    {
         let mut client = self.indexer_client()?;
 
         let response = client

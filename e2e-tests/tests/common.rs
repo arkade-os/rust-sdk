@@ -1,20 +1,15 @@
 #![allow(clippy::unwrap_used)]
 
 use ark_bdk_wallet::Wallet;
-use ark_client::error::Error;
-use ark_client::wallet::Persistence;
 use ark_client::Blockchain;
 use ark_client::Client;
 use ark_client::ExplorerUtxo;
 use ark_client::InMemorySwapStorage;
 use ark_client::OfflineClient;
 use ark_client::SpendStatus;
+use ark_client::error::Error;
+use ark_client::wallet::Persistence;
 use ark_core::BoardingOutput;
-use bitcoin::hex::FromHex;
-use bitcoin::key::Keypair;
-use bitcoin::key::Secp256k1;
-use bitcoin::secp256k1::All;
-use bitcoin::secp256k1::SecretKey;
 use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::Network;
@@ -22,6 +17,11 @@ use bitcoin::OutPoint;
 use bitcoin::Transaction;
 use bitcoin::Txid;
 use bitcoin::XOnlyPublicKey;
+use bitcoin::hex::FromHex;
+use bitcoin::key::Keypair;
+use bitcoin::key::Secp256k1;
+use bitcoin::secp256k1::All;
+use bitcoin::secp256k1::SecretKey;
 use rand::thread_rng;
 use regex::Regex;
 use std::collections::HashMap;
@@ -320,7 +320,7 @@ impl Persistence for InMemoryDb {
     ) -> Result<(), Error> {
         self.boarding_outputs
             .write()
-            .unwrap()
+            .map_err(|e| Error::consumer(format!("failed to get write lock: {e}")))?
             .insert(boarding_output, sk);
 
         Ok(())
@@ -330,7 +330,7 @@ impl Persistence for InMemoryDb {
         Ok(self
             .boarding_outputs
             .read()
-            .unwrap()
+            .map_err(|e| Error::consumer(format!("failed to get read lock: {e}")))?
             .keys()
             .cloned()
             .collect())
@@ -340,7 +340,7 @@ impl Persistence for InMemoryDb {
         let maybe_sk = self
             .boarding_outputs
             .read()
-            .unwrap()
+            .map_err(|e| Error::consumer(format!("failed to get read lock: {e}")))?
             .iter()
             .find_map(|(b, sk)| if b.owner_pk() == *pk { Some(*sk) } else { None });
         let secret_key = maybe_sk.unwrap();

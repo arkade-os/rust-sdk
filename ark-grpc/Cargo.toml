@@ -1,12 +1,12 @@
 [package]
 name = "ark-grpc"
 version = "0.7.0"
-edition = "2021"
-license = "MIT"
+edition = { workspace = true }
+license = { workspace = true }
 description = "gRPC client for Ark server communication"
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(genproto)'] }
+[lints]
+workspace = true
 
 [dependencies]
 ark-core = { path = "../ark-core", version = "0.7.0" }

@@ -1,3 +1,5 @@
+use crate::Blockchain;
+use crate::Client;
 use crate::coin_select::coin_select_for_onchain;
 use crate::error::Error;
 use crate::error::ErrorContext;
@@ -6,13 +8,11 @@ use crate::utils::sleep;
 use crate::utils::timeout_op;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
-use crate::Blockchain;
-use crate::Client;
 use ark_core::build_unilateral_exit_tree_txids;
 use ark_core::unilateral_exit;
+use ark_core::unilateral_exit::UnilateralExitTree;
 use ark_core::unilateral_exit::create_unilateral_exit_transaction;
 use ark_core::unilateral_exit::sign_unilateral_exit_tree;
-use ark_core::unilateral_exit::UnilateralExitTree;
 use backon::ExponentialBuilder;
 use backon::Retryable;
 use bitcoin::Address;
@@ -193,9 +193,6 @@ where
                 );
 
                 return Ok(Some(parent_txid));
-            } else {
-                // This transaction was already found on the blockchain.
-                continue;
             }
         }
 

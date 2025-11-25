@@ -1,21 +1,6 @@
 use crate::Error;
 use crate::ErrorContext;
 use crate::VTXO_TAPROOT_KEY;
-use bitcoin::absolute::LockTime;
-use bitcoin::base64;
-use bitcoin::base64::Engine;
-use bitcoin::hashes::sha256;
-use bitcoin::hashes::Hash;
-use bitcoin::opcodes::all::*;
-use bitcoin::psbt;
-use bitcoin::psbt::PsbtSighashType;
-use bitcoin::secp256k1;
-use bitcoin::secp256k1::schnorr;
-use bitcoin::secp256k1::PublicKey;
-use bitcoin::sighash::Prevouts;
-use bitcoin::sighash::SighashCache;
-use bitcoin::taproot;
-use bitcoin::transaction::Version;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
 use bitcoin::Psbt;
@@ -29,6 +14,21 @@ use bitcoin::TxOut;
 use bitcoin::Txid;
 use bitcoin::Witness;
 use bitcoin::XOnlyPublicKey;
+use bitcoin::absolute::LockTime;
+use bitcoin::base64;
+use bitcoin::base64::Engine;
+use bitcoin::hashes::Hash;
+use bitcoin::hashes::sha256;
+use bitcoin::opcodes::all::*;
+use bitcoin::psbt;
+use bitcoin::psbt::PsbtSighashType;
+use bitcoin::secp256k1;
+use bitcoin::secp256k1::PublicKey;
+use bitcoin::secp256k1::schnorr;
+use bitcoin::sighash::Prevouts;
+use bitcoin::sighash::SighashCache;
+use bitcoin::taproot;
+use bitcoin::transaction::Version;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::time::SystemTime;
@@ -281,7 +281,7 @@ pub(crate) fn build_proof_psbt(
                 sequence: Sequence::ZERO,
                 witness: Witness::default(),
             }],
-            output: vec![output.clone()],
+            output: vec![output],
         }
     };
 
@@ -344,7 +344,7 @@ pub(crate) fn build_proof_psbt(
         psbt
     };
 
-    let mut first_input_modified = first_input.clone();
+    let mut first_input_modified = first_input;
     first_input_modified.outpoint = fake_outpoint;
 
     Ok((to_sign_psbt, first_input_modified))

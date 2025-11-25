@@ -1,9 +1,15 @@
-use crate::script::csv_sig_script;
-use crate::script::multisig_script;
-use crate::script::tr_script_pubkey;
 use crate::Error;
 use crate::ExplorerUtxo;
 use crate::UNSPENDABLE_KEY;
+use crate::script::csv_sig_script;
+use crate::script::multisig_script;
+use crate::script::tr_script_pubkey;
+use bitcoin::Address;
+use bitcoin::Amount;
+use bitcoin::Network;
+use bitcoin::OutPoint;
+use bitcoin::ScriptBuf;
+use bitcoin::XOnlyPublicKey;
 use bitcoin::key::PublicKey;
 use bitcoin::key::Secp256k1;
 use bitcoin::key::Verification;
@@ -12,12 +18,6 @@ use bitcoin::taproot;
 use bitcoin::taproot::LeafVersion;
 use bitcoin::taproot::TaprootBuilder;
 use bitcoin::taproot::TaprootSpendInfo;
-use bitcoin::Address;
-use bitcoin::Amount;
-use bitcoin::Network;
-use bitcoin::OutPoint;
-use bitcoin::ScriptBuf;
-use bitcoin::XOnlyPublicKey;
 use std::time::Duration;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -40,7 +40,9 @@ impl BoardingOutput {
     where
         C: Verification,
     {
-        let unspendable_key: PublicKey = UNSPENDABLE_KEY.parse().expect("valid key");
+        let unspendable_key: PublicKey = UNSPENDABLE_KEY
+            .parse()
+            .map_err(|e| Error::ad_hoc(format!("invalid unspendable key: {e}")))?;
         let (unspendable_key, _) = unspendable_key.inner.x_only_public_key();
 
         let multisig_script = multisig_script(server, owner);
@@ -48,14 +50,15 @@ impl BoardingOutput {
 
         let spend_info = TaprootBuilder::new()
             .add_leaf(1, multisig_script)
-            .expect("valid multisig leaf")
+            .map_err(|e| Error::ad_hoc(format!("invalid multisig leaf: {e}")))?
             .add_leaf(1, exit_script)
-            .expect("valid exit leaf")
+            .map_err(|e| Error::ad_hoc(format!("invalid exit leaf: {e}")))?
             .finalize(secp, unspendable_key)
-            .expect("can be finalized");
+            .map_err(|_| Error::ad_hoc("failed to finalize taproot builder"))?;
 
         let script_pubkey = tr_script_pubkey(&spend_info);
-        let address = Address::from_script(&script_pubkey, network).expect("valid script");
+        let address = Address::from_script(&script_pubkey, network)
+            .map_err(|e| Error::ad_hoc(format!("invalid script: {e}")))?;
 
         Ok(Self {
             server,

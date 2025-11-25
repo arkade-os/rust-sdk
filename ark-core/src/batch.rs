@@ -1,3 +1,9 @@
+use crate::BoardingOutput;
+use crate::Error;
+use crate::ErrorContext;
+use crate::TxGraph;
+use crate::VTXO_COSIGNER_PSBT_KEY;
+use crate::VTXO_INPUT_INDEX;
 use crate::anchor_output;
 use crate::conversions::from_musig_xonly;
 use crate::conversions::to_musig_pk;
@@ -7,24 +13,6 @@ use crate::server::NoncePks;
 use crate::server::PartialSigTree;
 use crate::server::TreeTxNoncePks;
 use crate::tree_tx_output_script::TreeTxOutputScript;
-use crate::BoardingOutput;
-use crate::Error;
-use crate::ErrorContext;
-use crate::TxGraph;
-use crate::VTXO_COSIGNER_PSBT_KEY;
-use crate::VTXO_INPUT_INDEX;
-use bitcoin::absolute::LockTime;
-use bitcoin::hashes::Hash;
-use bitcoin::key::Keypair;
-use bitcoin::key::Secp256k1;
-use bitcoin::psbt;
-use bitcoin::secp256k1;
-use bitcoin::secp256k1::schnorr;
-use bitcoin::secp256k1::PublicKey;
-use bitcoin::sighash::Prevouts;
-use bitcoin::sighash::SighashCache;
-use bitcoin::taproot;
-use bitcoin::transaction;
 use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
@@ -36,6 +24,18 @@ use bitcoin::TxIn;
 use bitcoin::TxOut;
 use bitcoin::Txid;
 use bitcoin::XOnlyPublicKey;
+use bitcoin::absolute::LockTime;
+use bitcoin::hashes::Hash;
+use bitcoin::key::Keypair;
+use bitcoin::key::Secp256k1;
+use bitcoin::psbt;
+use bitcoin::secp256k1;
+use bitcoin::secp256k1::PublicKey;
+use bitcoin::secp256k1::schnorr;
+use bitcoin::sighash::Prevouts;
+use bitcoin::sighash::SighashCache;
+use bitcoin::taproot;
+use bitcoin::transaction;
 use musig::musig;
 use rand::CryptoRng;
 use rand::Rng;
@@ -136,7 +136,7 @@ where
             // different version of `rand`. I think it's not worth the hassle at this stage,
             // particularly because this duplicated dependency will go away anyway.
             let session_id = musig::SessionSecretRand::new();
-            let extra_rand = rng.gen();
+            let extra_rand = rng.r#gen();
 
             let msg = tree_tx_sighash(tx, &batch_tree_tx_map, commitment_tx)?;
 
@@ -228,7 +228,6 @@ pub fn aggregate_nonces(tree_tx_nonce_pks: TreeTxNoncePks) -> musig::AggregatedN
 
 /// Use `own_cosigner_kp` to sign each batch tree transaction output that we are a part, using
 /// `our_nonce_kps` to provide our share of each aggregate nonce.
-#[allow(clippy::too_many_arguments)]
 pub fn sign_batch_tree_tx(
     tree_txid: Txid,
     vtxo_tree_expiry: bitcoin::Sequence,
@@ -250,7 +249,7 @@ pub fn sign_batch_tree_tx(
 
     let own_cosigner_kp =
         ::musig::Keypair::from_seckey_slice(&secp_musig, &own_cosigner_kp.secret_bytes())
-            .expect("valid keypair");
+            .map_err(|e| Error::ad_hoc(format!("invalid keypair: {e}")))?;
 
     let batch_tree_tx_map = batch_tree_tx_graph.as_map();
 
@@ -282,7 +281,7 @@ pub fn sign_batch_tree_tx(
 
     let tweak = ::musig::Scalar::from(
         ::musig::SecretKey::from_slice(sweep_tap_tree.tap_tweak().as_byte_array())
-            .expect("valid conversion"),
+            .map_err(|e| Error::ad_hoc(format!("invalid tweak: {e}")))?,
     );
 
     key_agg_cache

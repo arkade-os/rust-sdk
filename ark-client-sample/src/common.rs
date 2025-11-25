@@ -3,8 +3,8 @@
 use ark_client::error::Error;
 use ark_client::wallet::Persistence;
 use ark_core::BoardingOutput;
-use bitcoin::secp256k1::SecretKey;
 use bitcoin::XOnlyPublicKey;
+use bitcoin::secp256k1::SecretKey;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
@@ -21,7 +21,7 @@ impl Persistence for InMemoryDb {
     ) -> Result<(), Error> {
         self.boarding_outputs
             .write()
-            .unwrap()
+            .map_err(|e| Error::consumer(format!("failed to get write lock: {e}")))?
             .insert(boarding_output, sk);
 
         Ok(())
@@ -31,7 +31,7 @@ impl Persistence for InMemoryDb {
         Ok(self
             .boarding_outputs
             .read()
-            .unwrap()
+            .map_err(|e| Error::consumer(format!("failed to get read lock: {e}")))?
             .keys()
             .cloned()
             .collect())
@@ -41,10 +41,12 @@ impl Persistence for InMemoryDb {
         let maybe_sk = self
             .boarding_outputs
             .read()
-            .unwrap()
+            .map_err(|e| Error::consumer(format!("failed to get read lock: {e}")))?
             .iter()
             .find_map(|(b, sk)| if b.owner_pk() == *pk { Some(*sk) } else { None });
-        let secret_key = maybe_sk.unwrap();
+
+        let secret_key =
+            maybe_sk.ok_or_else(|| Error::consumer(format!("could not find SK for PK {pk}")))?;
         Ok(secret_key)
     }
 }

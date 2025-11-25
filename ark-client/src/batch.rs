@@ -1,38 +1,29 @@
+use crate::Blockchain;
+use crate::Client;
+use crate::Error;
+use crate::ExplorerUtxo;
 use crate::error::ErrorContext as _;
 use crate::swap_storage::SwapStorage;
 use crate::utils::sleep;
 use crate::utils::timeout_op;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
-use crate::Blockchain;
-use crate::Client;
-use crate::Error;
-use crate::ExplorerUtxo;
+use ark_core::ArkAddress;
+use ark_core::TxGraph;
 use ark_core::batch;
+use ark_core::batch::Delegate;
+use ark_core::batch::NonceKps;
 use ark_core::batch::aggregate_nonces;
 use ark_core::batch::create_and_sign_forfeit_txs;
 use ark_core::batch::generate_nonce_tree;
 use ark_core::batch::sign_batch_tree_tx;
 use ark_core::batch::sign_commitment_psbt;
-use ark_core::batch::Delegate;
-use ark_core::batch::NonceKps;
 use ark_core::intent;
 use ark_core::server::BatchTreeEventType;
 use ark_core::server::PartialSigTree;
 use ark_core::server::StreamEvent;
-use ark_core::ArkAddress;
-use ark_core::TxGraph;
 use backon::ExponentialBuilder;
 use backon::Retryable;
-use bitcoin::hashes::sha256;
-use bitcoin::hashes::Hash;
-use bitcoin::hex::DisplayHex;
-use bitcoin::key::Keypair;
-use bitcoin::key::Secp256k1;
-use bitcoin::psbt;
-use bitcoin::secp256k1;
-use bitcoin::secp256k1::schnorr;
-use bitcoin::secp256k1::PublicKey;
 use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::Psbt;
@@ -40,6 +31,15 @@ use bitcoin::TxIn;
 use bitcoin::TxOut;
 use bitcoin::Txid;
 use bitcoin::XOnlyPublicKey;
+use bitcoin::hashes::Hash;
+use bitcoin::hashes::sha256;
+use bitcoin::hex::DisplayHex;
+use bitcoin::key::Keypair;
+use bitcoin::key::Secp256k1;
+use bitcoin::psbt;
+use bitcoin::secp256k1;
+use bitcoin::secp256k1::PublicKey;
+use bitcoin::secp256k1::schnorr;
 use futures::StreamExt;
 use jiff::Timestamp;
 use rand::CryptoRng;
@@ -230,8 +230,8 @@ where
         })];
 
         let delegate = batch::prepare_delegate_psbts(
-            vtxo_inputs.clone(),
-            outputs.clone(),
+            vtxo_inputs,
+            outputs,
             delegate_cosigner_pk,
             &server_info.forfeit_address,
             server_info.dust,
@@ -416,7 +416,7 @@ where
                                     None => {
                                         return Err(Error::ark_server(
                                             "received unexpected VTXO graph chunk",
-                                        ))
+                                        ));
                                     }
                                 };
                             }
@@ -430,7 +430,7 @@ where
                                     None => {
                                         return Err(Error::ark_server(
                                             "received unexpected connectors graph chunk",
-                                        ))
+                                        ));
                                     }
                                 };
                             }
@@ -1112,7 +1112,7 @@ where
                                     None => {
                                         return Err(Error::ark_server(
                                             "received unexpected VTXO graph chunk",
-                                        ))
+                                        ));
                                     }
                                 };
                             }
@@ -1126,7 +1126,7 @@ where
                                     None => {
                                         return Err(Error::ark_server(
                                             "received unexpected connectors graph chunk",
-                                        ))
+                                        ));
                                     }
                                 };
                             }

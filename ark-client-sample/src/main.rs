@@ -4,23 +4,20 @@
 mod common;
 
 use crate::common::InMemoryDb;
-use anyhow::anyhow;
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::anyhow;
+use anyhow::bail;
 use ark_bdk_wallet::Wallet;
-use ark_client::lightning_invoice::Bolt11Invoice;
 use ark_client::Blockchain;
 use ark_client::Error;
 use ark_client::OfflineClient;
 use ark_client::SqliteSwapStorage;
 use ark_client::SwapAmount;
+use ark_client::lightning_invoice::Bolt11Invoice;
+use ark_core::ArkAddress;
 use ark_core::history;
 use ark_core::server::SubscriptionResponse;
-use ark_core::ArkAddress;
-use bitcoin::address::NetworkUnchecked;
-use bitcoin::key::Secp256k1;
-use bitcoin::secp256k1::SecretKey;
 use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::Denomination;
@@ -28,6 +25,9 @@ use bitcoin::Network;
 use bitcoin::OutPoint;
 use bitcoin::Transaction;
 use bitcoin::Txid;
+use bitcoin::address::NetworkUnchecked;
+use bitcoin::key::Secp256k1;
+use bitcoin::secp256k1::SecretKey;
 use clap::Parser;
 use clap::Subcommand;
 use esplora_client::OutputStatus;
@@ -152,12 +152,13 @@ struct Config {
 }
 
 #[tokio::main]
+#[allow(clippy::unwrap_in_result)]
 async fn main() -> Result<()> {
     init_tracing();
 
     rustls::crypto::ring::default_provider()
         .install_default()
-        .expect("to be able to install crypto providers");
+        .map_err(|_| anyhow!("failed to install crypto providers"))?;
 
     let cli = Cli::parse();
     let secp = Secp256k1::new();
