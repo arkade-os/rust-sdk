@@ -30,7 +30,6 @@ impl ArkAddress {
         let hrp = match network {
             Network::Bitcoin => "ark",
             Network::Testnet | Network::Testnet4 | Network::Signet | Network::Regtest => "tark",
-            _ => "tark",
         };
 
         let hrp = Hrp::parse_unchecked(hrp);
