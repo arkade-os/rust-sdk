@@ -768,7 +768,7 @@ where
         }
     }
 
-    fn network_client(&self) -> ark_grpc::Client {
+    pub fn network_client(&self) -> ark_grpc::Client {
         self.inner.network_client.clone()
     }
 
