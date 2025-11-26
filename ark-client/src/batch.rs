@@ -14,6 +14,7 @@ use ark_core::batch;
 use ark_core::batch::Delegate;
 use ark_core::batch::NonceKps;
 use ark_core::batch::aggregate_nonces;
+use ark_core::batch::complete_delegate_forfeit_txs;
 use ark_core::batch::create_and_sign_forfeit_txs;
 use ark_core::batch::generate_nonce_tree;
 use ark_core::batch::sign_batch_tree_tx;
@@ -27,7 +28,6 @@ use backon::Retryable;
 use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::Psbt;
-use bitcoin::TxIn;
 use bitcoin::TxOut;
 use bitcoin::Txid;
 use bitcoin::XOnlyPublicKey;
@@ -663,10 +663,9 @@ where
                             "Completing delegated forfeit transactions"
                         );
 
-                        let signed_forfeit_psbts = self.complete_delegated_forfeit_txs(
+                        let signed_forfeit_psbts = complete_delegate_forfeit_txs(
                             &delegate.forfeit_psbts,
                             &connectors_graph.leaves(),
-                            server_info.dust,
                         )?;
 
                         network_client
@@ -708,85 +707,6 @@ where
                 }
             }
         }
-    }
-
-    /// Complete the delegated forfeit transactions by adding connector inputs and finalizing them.
-    fn complete_delegated_forfeit_txs(
-        &self,
-        forfeit_psbts: &[Psbt],
-        connectors_leaves: &[&Psbt],
-        _dust: Amount,
-    ) -> Result<Vec<Psbt>, Error> {
-        const FORFEIT_TX_CONNECTOR_INDEX: usize = 0;
-        const FORFEIT_TX_VTXO_INDEX: usize = 1;
-
-        let connector_index = derive_vtxo_connector_map(
-            forfeit_psbts
-                .iter()
-                .map(|psbt| psbt.unsigned_tx.input[0].previous_output)
-                .collect(),
-            connectors_leaves,
-        )?;
-
-        let mut completed_forfeit_psbts = Vec::new();
-
-        for forfeit_psbt in forfeit_psbts.iter() {
-            let virtual_tx_outpoint = forfeit_psbt.unsigned_tx.input[0].previous_output;
-
-            let connector_outpoint =
-                connector_index.get(&virtual_tx_outpoint).ok_or_else(|| {
-                    Error::ad_hoc(format!(
-                        "connector outpoint missing for virtual TX outpoint {virtual_tx_outpoint}",
-                    ))
-                })?;
-
-            let connector_psbt = connectors_leaves
-                .iter()
-                .find(|l| l.unsigned_tx.compute_txid() == connector_outpoint.txid)
-                .ok_or_else(|| {
-                    Error::ad_hoc(format!(
-                        "connector PSBT missing for virtual TX outpoint {virtual_tx_outpoint}",
-                    ))
-                })?;
-
-            let connector_output = connector_psbt
-                .unsigned_tx
-                .output
-                .get(connector_outpoint.vout as usize)
-                .ok_or_else(|| {
-                    Error::ad_hoc(format!(
-                        "connector output missing for virtual TX outpoint {virtual_tx_outpoint}",
-                    ))
-                })?;
-
-            // Add the connector input to the partial forfeit transaction
-            let mut completed_tx = forfeit_psbt.unsigned_tx.clone();
-            completed_tx.input.insert(
-                FORFEIT_TX_CONNECTOR_INDEX,
-                TxIn {
-                    previous_output: *connector_outpoint,
-                    ..Default::default()
-                },
-            );
-
-            let mut completed_psbt = Psbt::from_unsigned_tx(completed_tx).map_err(|e| {
-                Error::ad_hoc(format!("failed to create PSBT from unsigned tx: {e}"))
-            })?;
-
-            // Copy the VTXO input data from the partial PSBT
-            completed_psbt.inputs[FORFEIT_TX_VTXO_INDEX] = forfeit_psbt.inputs[0].clone();
-
-            // Add connector input data
-            completed_psbt.inputs[FORFEIT_TX_CONNECTOR_INDEX].witness_utxo =
-                Some(connector_output.clone());
-
-            // Copy outputs from partial PSBT
-            completed_psbt.outputs = forfeit_psbt.outputs.clone();
-
-            completed_forfeit_psbts.push(completed_psbt);
-        }
-
-        Ok(completed_forfeit_psbts)
     }
 
     /// Get all the [`batch::OnChainInput`]s and [`batch::VtxoInput`]s that can be used to join an
@@ -1465,52 +1385,6 @@ where
             }
         }
     }
-}
-
-/// Build a map between virtual TX outpoints and their corresponding connector outputs.
-fn derive_vtxo_connector_map(
-    mut virtual_tx_outpoints: Vec<bitcoin::OutPoint>,
-    connectors_leaves: &[&Psbt],
-) -> Result<HashMap<bitcoin::OutPoint, bitcoin::OutPoint>, Error> {
-    // Collect all connector outpoints (non-anchor outputs).
-    let mut connector_outpoints = Vec::new();
-    for psbt in connectors_leaves.iter() {
-        for (vout, output) in psbt.unsigned_tx.output.iter().enumerate() {
-            // Skip anchor outputs.
-            if output.value == Amount::ZERO {
-                continue;
-            }
-            connector_outpoints.push(bitcoin::OutPoint {
-                txid: psbt.unsigned_tx.compute_txid(),
-                vout: vout as u32,
-            });
-        }
-    }
-
-    // Sort connector outpoints for deterministic ordering
-    connector_outpoints.sort_by(|a, b| a.txid.cmp(&b.txid).then(a.vout.cmp(&b.vout)));
-
-    // Sort virtual TX outpoints for deterministic ordering.
-    virtual_tx_outpoints.sort_by(|a, b| a.txid.cmp(&b.txid).then(a.vout.cmp(&b.vout)));
-
-    // Ensure we have matching counts.
-    if virtual_tx_outpoints.len() != connector_outpoints.len() {
-        return Err(Error::ad_hoc(format!(
-            "mismatch between VTXO count ({}) and connector count ({})",
-            virtual_tx_outpoints.len(),
-            connector_outpoints.len()
-        )));
-    }
-
-    // Create mapping by position.
-    let mut map = HashMap::new();
-    for (virtual_tx_outpoint, connector_outpoint) in
-        virtual_tx_outpoints.iter().zip(connector_outpoints.iter())
-    {
-        map.insert(*virtual_tx_outpoint, *connector_outpoint);
-    }
-
-    Ok(map)
 }
 
 enum BatchOutputType {
