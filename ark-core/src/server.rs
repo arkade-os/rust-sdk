@@ -317,6 +317,10 @@ pub struct VirtualTxOutPoint {
 }
 
 impl VirtualTxOutPoint {
+    // TODO: Our definition of recoverable is not quite correct.
+    //
+    // Outputs that are expired but not yet swept, are not "recoverable" and can still be forfeited.
+    // The rule is that recoverable VTXOs (including sub-dust) cannot be forfeited.
     pub fn is_recoverable(&self) -> bool {
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         let current_timestamp = std::time::SystemTime::now()
