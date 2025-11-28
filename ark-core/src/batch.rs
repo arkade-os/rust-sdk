@@ -333,7 +333,7 @@ where
 
     let mut signed_forfeit_psbts = Vec::new();
     for vtxo_input in vtxo_inputs.iter() {
-        if vtxo_input.amount() <= dust {
+        if vtxo_input.amount() <= dust || vtxo_input.is_swept() {
             // Sub-dust VTXOs don't need to be forfeited.
             continue;
         }
@@ -549,10 +549,13 @@ fn derive_vtxo_connector_map(
     // Sort connector outpoints for deterministic ordering
     connector_outpoints.sort_by(|a, b| a.txid.cmp(&b.txid).then(a.vout.cmp(&b.vout)));
 
-    // Get virtual TX outpoints that need forfeiting (excluding sub-dust ones).
+    // Get virtual TX outpoints that need forfeiting (excluding sub-dust and swept).
     let mut virtual_tx_outpoints = vtxo_inputs
         .iter()
-        .filter_map(|vtxo_input| (vtxo_input.amount() > dust).then_some(vtxo_input.outpoint()))
+        .filter_map(|vtxo_input| {
+            ((vtxo_input.amount() > dust) && !vtxo_input.is_swept())
+                .then_some(vtxo_input.outpoint())
+        })
         .collect::<Vec<_>>();
 
     // Sort virtual TX outpoints for deterministic ordering.

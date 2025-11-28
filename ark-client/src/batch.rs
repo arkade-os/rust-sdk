@@ -793,6 +793,7 @@ where
                             vtxo.tapscripts(),
                             spend_info,
                             false,
+                            virtual_tx_outpoint.is_swept,
                         ))
                     })
                     .collect::<Vec<_>>()
@@ -839,6 +840,7 @@ where
                     o.boarding_output().tapscripts(),
                     o.boarding_output().forfeit_spend_info(),
                     true,
+                    false,
                 )
             });
 
