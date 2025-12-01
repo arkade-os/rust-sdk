@@ -1,0 +1,14 @@
+name: flutter_wallet_example
+description: A simple Flutter wallet example using the Ark Rust SDK
+publish_to: 'none'
+version: 0.1.0
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
