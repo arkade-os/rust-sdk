@@ -6,16 +6,16 @@
 
 use crate::ArkAddress;
 use crate::UNSPENDABLE_KEY;
-use bitcoin::hashes::ripemd160;
-use bitcoin::hashes::Hash;
-use bitcoin::opcodes::all::*;
-use bitcoin::taproot::TaprootBuilder;
-use bitcoin::taproot::TaprootSpendInfo;
 use bitcoin::Network;
 use bitcoin::PublicKey;
 use bitcoin::ScriptBuf;
 use bitcoin::Sequence;
 use bitcoin::XOnlyPublicKey;
+use bitcoin::hashes::Hash;
+use bitcoin::hashes::ripemd160;
+use bitcoin::opcodes::all::*;
+use bitcoin::taproot::TaprootBuilder;
+use bitcoin::taproot::TaprootSpendInfo;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -471,12 +471,12 @@ impl VhtlcScript {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin::hex::DisplayHex;
-    use bitcoin::hex::FromHex;
     use bitcoin::Network;
     use bitcoin::PublicKey;
     use bitcoin::Sequence;
     use bitcoin::XOnlyPublicKey;
+    use bitcoin::hex::DisplayHex;
+    use bitcoin::hex::FromHex;
     use serde::Deserialize;
     use serde::Serialize;
     use std::collections::HashMap;
@@ -690,11 +690,11 @@ mod tests {
                 .to_lower_hex_string();
 
             assert_eq!(
-            unilateral_refund_without_receiver_hex,
-            test_case.scripts.unilateral_refund_without_receiver_script,
-            "Unilateral refund without receiver script hex mismatch for test case: {}. Our impl includes CLTV locktime, fixture expects only CSV",
-            test_case.description
-        );
+                unilateral_refund_without_receiver_hex,
+                test_case.scripts.unilateral_refund_without_receiver_script,
+                "Unilateral refund without receiver script hex mismatch for test case: {}. Our impl includes CLTV locktime, fixture expects only CSV",
+                test_case.description
+            );
 
             // Test 2: Verify taproot information
             let taproot_info = vhtlc.taproot_spend_info();
@@ -799,12 +799,12 @@ mod tests {
                 .to_sequence();
             if let Err(e) = refund_without_receiver_delay_result {
                 assert!(
-                e.contains(&test_case.error),
-                "Expected error containing '{}', got '{}' for refund without receiver delay in test case: {}",
-                test_case.error,
-                e,
-                test_case.description
-            );
+                    e.contains(&test_case.error),
+                    "Expected error containing '{}', got '{}' for refund without receiver delay in test case: {}",
+                    test_case.error,
+                    e,
+                    test_case.description
+                );
                 continue;
             }
 

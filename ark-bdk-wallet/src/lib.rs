@@ -13,18 +13,18 @@ use bdk_wallet::KeychainKind;
 use bdk_wallet::SignOptions;
 use bdk_wallet::TxOrdering;
 use bdk_wallet::Wallet as BdkWallet;
-use bitcoin::bip32::Xpriv;
-use bitcoin::key::Keypair;
-use bitcoin::key::Secp256k1;
-use bitcoin::secp256k1::schnorr::Signature;
-use bitcoin::secp256k1::All;
-use bitcoin::secp256k1::Message;
 use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::FeeRate;
 use bitcoin::Network;
 use bitcoin::Psbt;
 use bitcoin::XOnlyPublicKey;
+use bitcoin::bip32::Xpriv;
+use bitcoin::key::Keypair;
+use bitcoin::key::Secp256k1;
+use bitcoin::secp256k1::All;
+use bitcoin::secp256k1::Message;
+use bitcoin::secp256k1::schnorr::Signature;
 use jiff::Timestamp;
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -92,7 +92,7 @@ where
         let info = self
             .inner
             .write()
-            .expect("write lock")
+            .map_err(|e| Error::consumer(format!("failed to get write lock: {e}")))?
             .next_unused_address(KeychainKind::External);
 
         Ok(info.address)
@@ -102,7 +102,7 @@ where
         let request = self
             .inner
             .read()
-            .expect("read lock")
+            .map_err(|e| Error::consumer(format!("failed to get read lock: {e}")))?
             .start_full_scan()
             .inspect({
                 let mut stdout = std::io::stdout();
@@ -139,7 +139,11 @@ where
     }
 
     fn balance(&self) -> Result<Balance, Error> {
-        let balance = self.inner.read().expect("read lock").balance();
+        let balance = self
+            .inner
+            .read()
+            .map_err(|e| Error::consumer(format!("failed to get read lock: {e}")))?
+            .balance();
 
         Ok(Balance {
             immature: balance.immature,
@@ -155,7 +159,10 @@ where
         amount: Amount,
         fee_rate: FeeRate,
     ) -> Result<Psbt, Error> {
-        let wallet = &mut self.inner.write().expect("write lock");
+        let wallet = &mut self
+            .inner
+            .write()
+            .map_err(|e| Error::consumer(format!("failed to get write lock: {e}")))?;
         let mut b = wallet.build_tx();
         b.ordering(TxOrdering::Untouched);
         b.add_recipient(address.script_pubkey(), amount);
@@ -175,7 +182,7 @@ where
         let finalized = self
             .inner
             .read()
-            .expect("read lock")
+            .map_err(|e| Error::consumer(format!("failed to get read lock: {e}")))?
             .sign(psbt, options)
             .map_err(Error::wallet)?;
 
@@ -183,7 +190,10 @@ where
     }
 
     fn select_coins(&self, target_amount: Amount) -> Result<UtxoCoinSelection, Error> {
-        let wallet = self.inner.read().expect("read lock");
+        let wallet = self
+            .inner
+            .read()
+            .map_err(|e| Error::consumer(format!("failed to get read lock: {e}")))?;
 
         // Get all unspent UTXOs
         let utxos = wallet.list_unspent();

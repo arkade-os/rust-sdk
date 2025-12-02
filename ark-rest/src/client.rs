@@ -1,3 +1,4 @@
+use crate::Error;
 use crate::apis;
 use crate::apis::ark_service_api::ark_service_confirm_registration;
 use crate::apis::ark_service_api::ark_service_delete_intent;
@@ -20,7 +21,7 @@ use crate::models::SubmitTreeNoncesRequest;
 use crate::models::SubmitTreeSignaturesRequest;
 use crate::models::SubscribeForScriptsRequest;
 use crate::models::UnsubscribeForScriptsRequest;
-use crate::Error;
+use ark_core::ArkAddress;
 use ark_core::server::FinalizeOffchainTxResponse;
 use ark_core::server::GetVtxosRequest;
 use ark_core::server::GetVtxosRequestFilter;
@@ -34,15 +35,14 @@ use ark_core::server::SubmitOffchainTxResponse;
 use ark_core::server::SubscriptionResponse;
 use ark_core::server::VirtualTxOutPoint;
 use ark_core::server::VirtualTxsResponse;
-use ark_core::ArkAddress;
+use bitcoin::Psbt;
+use bitcoin::Txid;
 use bitcoin::base64;
 use bitcoin::base64::Engine;
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::Psbt;
-use bitcoin::Txid;
-use futures::stream;
 use futures::Stream;
 use futures::StreamExt;
+use futures::stream;
 
 pub struct Client {
     configuration: apis::configuration::Configuration,

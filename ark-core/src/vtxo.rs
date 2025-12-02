@@ -1,12 +1,17 @@
+use crate::Error;
+use crate::ErrorContext;
+use crate::ExplorerUtxo;
+use crate::UNSPENDABLE_KEY;
 use crate::ark_address::ArkAddress;
 use crate::script::csv_sig_script;
 use crate::script::multisig_script;
 use crate::script::tr_script_pubkey;
 use crate::server::VirtualTxOutPoint;
-use crate::Error;
-use crate::ErrorContext;
-use crate::ExplorerUtxo;
-use crate::UNSPENDABLE_KEY;
+use bitcoin::Address;
+use bitcoin::Amount;
+use bitcoin::Network;
+use bitcoin::ScriptBuf;
+use bitcoin::XOnlyPublicKey;
 use bitcoin::key::PublicKey;
 use bitcoin::key::Secp256k1;
 use bitcoin::key::Verification;
@@ -15,11 +20,6 @@ use bitcoin::taproot;
 use bitcoin::taproot::LeafVersion;
 use bitcoin::taproot::TaprootBuilder;
 use bitcoin::taproot::TaprootSpendInfo;
-use bitcoin::Address;
-use bitcoin::Amount;
-use bitcoin::Network;
-use bitcoin::ScriptBuf;
-use bitcoin::XOnlyPublicKey;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -59,7 +59,9 @@ impl Vtxo {
     where
         C: Verification,
     {
-        let unspendable_key: PublicKey = UNSPENDABLE_KEY.parse().expect("valid key");
+        let unspendable_key: PublicKey = UNSPENDABLE_KEY
+            .parse()
+            .map_err(|e| Error::ad_hoc(format!("invalid unspendable key: {e}")))?;
         let (unspendable_key, _) = unspendable_key.inner.x_only_public_key();
 
         let leaf_distribution = calculate_leaf_depths(scripts.len());
@@ -81,7 +83,8 @@ impl Vtxo {
         };
 
         let script_pubkey = tr_script_pubkey(&spend_info);
-        let address = Address::from_script(&script_pubkey, network).expect("valid script");
+        let address = Address::from_script(&script_pubkey, network)
+            .map_err(|e| Error::ad_hoc(format!("invalid script: {e}")))?;
 
         Ok(Self {
             server_forfeit,

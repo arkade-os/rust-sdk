@@ -13,3 +13,26 @@ members = [
 ]
 
 resolver = "2"
+
+[workspace.package]
+license = "MIT"
+edition = "2024"
+
+[workspace.lints.rust]
+unused-import-braces = "warn"
+unused-qualifications = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(genproto)'] }
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+unnecessary_wraps = "warn"
+unused_async = "warn"
+wildcard_enum_match_arm = "warn"
+redundant_else = "warn"
+redundant_clone = "warn"
+unwrap_in_result = "warn"
+unwrap_used = "warn"
+too_many_arguments = "allow" # Don't care.
+large_enum_variant = "allow" # Don't care.

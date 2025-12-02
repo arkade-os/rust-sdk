@@ -1,7 +1,10 @@
 [package]
 name = "ark-bdk-wallet"
 version = "0.7.0"
-edition = "2021"
+edition = { workspace = true }
+
+[lints]
+workspace = true
 
 [dependencies]
 anyhow = "1"
@@ -9,7 +12,7 @@ ark-client = { path = "../ark-client", default-features = false }
 ark-core = { path = "../ark-core" }
 async-stream = "0.3"
 bdk_wallet = "1.0.0"
-bitcoin = { version = "0.32.4", features = ["rand"] }
+bitcoin = { version = "0.32.7", features = ["rand"] }
 jiff = "0.2.1"
 tracing = "0.1.37"
 

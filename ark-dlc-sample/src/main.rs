@@ -1,37 +1,45 @@
-use anyhow::anyhow;
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::anyhow;
+use anyhow::bail;
+use ark_core::ArkAddress;
+use ark_core::BoardingOutput;
+use ark_core::ExplorerUtxo;
+use ark_core::TxGraph;
+use ark_core::Vtxo;
 use ark_core::batch;
 use ark_core::batch::aggregate_nonces;
 use ark_core::batch::create_and_sign_forfeit_txs;
 use ark_core::batch::generate_nonce_tree;
 use ark_core::batch::sign_batch_tree_tx;
 use ark_core::batch::sign_commitment_psbt;
-use ark_core::boarding_output::list_boarding_outpoints;
 use ark_core::boarding_output::BoardingOutpoints;
+use ark_core::boarding_output::list_boarding_outpoints;
 use ark_core::intent;
 use ark_core::script::csv_sig_script;
 use ark_core::script::multisig_script;
 use ark_core::send;
+use ark_core::send::OffchainTransactions;
 use ark_core::send::build_offchain_transactions;
 use ark_core::send::sign_ark_transaction;
 use ark_core::send::sign_checkpoint_transaction;
-use ark_core::send::OffchainTransactions;
 use ark_core::server;
 use ark_core::server::BatchTreeEventType;
 use ark_core::server::GetVtxosRequest;
 use ark_core::server::StreamEvent;
 use ark_core::server::VirtualTxOutPoint;
-use ark_core::vtxo::list_virtual_tx_outpoints;
 use ark_core::vtxo::VirtualTxOutPoints;
-use ark_core::ArkAddress;
-use ark_core::BoardingOutput;
-use ark_core::ExplorerUtxo;
-use ark_core::TxGraph;
-use ark_core::Vtxo;
-use bitcoin::hashes::sha256;
+use ark_core::vtxo::list_virtual_tx_outpoints;
+use bitcoin::Amount;
+use bitcoin::OutPoint;
+use bitcoin::Psbt;
+use bitcoin::ScriptBuf;
+use bitcoin::Transaction;
+use bitcoin::TxOut;
+use bitcoin::Txid;
+use bitcoin::XOnlyPublicKey;
 use bitcoin::hashes::Hash;
+use bitcoin::hashes::sha256;
 use bitcoin::hex::DisplayHex;
 use bitcoin::key::Keypair;
 use bitcoin::key::Secp256k1;
@@ -41,34 +49,27 @@ use bitcoin::opcodes::all::OP_CLTV;
 use bitcoin::opcodes::all::OP_DROP;
 use bitcoin::psbt;
 use bitcoin::secp256k1;
-use bitcoin::secp256k1::schnorr;
 use bitcoin::secp256k1::SecretKey;
-use bitcoin::Amount;
-use bitcoin::OutPoint;
-use bitcoin::Psbt;
-use bitcoin::ScriptBuf;
-use bitcoin::Transaction;
-use bitcoin::TxOut;
-use bitcoin::Txid;
-use bitcoin::XOnlyPublicKey;
+use bitcoin::secp256k1::schnorr;
 use esplora_client::FromHex;
 use futures::StreamExt;
-use rand::thread_rng;
 use rand::Rng;
+use rand::thread_rng;
 use regex::Regex;
 use std::collections::HashMap;
 use std::process::Command;
 use std::time::Duration;
 use tokio::task::block_in_place;
-use zkp::musig::new_musig_nonce_pair;
 use zkp::musig::MusigAggNonce;
 use zkp::musig::MusigKeyAggCache;
 use zkp::musig::MusigSession;
 use zkp::musig::MusigSessionId;
+use zkp::musig::new_musig_nonce_pair;
 
 const RUN_REFUND_SCENARIO: bool = false;
 
 #[tokio::main]
+#[allow(clippy::unwrap_in_result)]
 async fn main() -> Result<()> {
     init_tracing();
 
@@ -483,15 +484,15 @@ async fn main() -> Result<()> {
         .context("one sig")?;
     let input_sig = input.get_mut();
 
-    let adaptor_sig =
-        zkp::schnorr::Signature::from_slice(input_sig.signature.as_ref()).expect("valid sig");
+    let adaptor_sig = zkp::schnorr::Signature::from_slice(input_sig.signature.as_ref())
+        .context("invalid signature")?;
 
-    let adaptor = zkp::Tweak::from_slice(attestation.as_ref()).expect("valid tweak");
+    let adaptor = zkp::Tweak::from_slice(attestation.as_ref()).context("invalid tweak")?;
 
     // Complete the adaptor signature, producing a valid signature for this CET.
 
     let sig = zkp::musig::adapt(adaptor_sig, adaptor, unlocked_virtual_cet_parity);
-    let sig = schnorr::Signature::from_slice(sig.as_ref()).expect("valid sig");
+    let sig = schnorr::Signature::from_slice(sig.as_ref()).context("invalid signature")?;
 
     input_sig.signature = sig;
 
@@ -513,15 +514,15 @@ async fn main() -> Result<()> {
         .context("one sig")?;
     let input_sig = input.get_mut();
 
-    let adaptor_sig =
-        zkp::schnorr::Signature::from_slice(input_sig.signature.as_ref()).expect("valid sig");
+    let adaptor_sig = zkp::schnorr::Signature::from_slice(input_sig.signature.as_ref())
+        .context("invalid signature")?;
 
-    let adaptor = zkp::Tweak::from_slice(attestation.as_ref()).expect("valid tweak");
+    let adaptor = zkp::Tweak::from_slice(attestation.as_ref()).context("invalid tweak")?;
 
     // Complete the adaptor signature, producing a valid signature for this checkpoint transaction.
 
     let sig = zkp::musig::adapt(adaptor_sig, adaptor, unlocked_checkpoint_parity);
-    let sig = schnorr::Signature::from_slice(sig.as_ref()).expect("valid sig");
+    let sig = schnorr::Signature::from_slice(sig.as_ref()).context("invalid signature")?;
 
     input_sig.signature = sig;
 
@@ -715,7 +716,7 @@ fn sign_refund_offchain_transactions(
 
         let (alice_musig_nonce, alice_musig_pub_nonce) = {
             let session_id = MusigSessionId::new(&mut rng);
-            let extra_rand = rng.gen();
+            let extra_rand = rng.r#gen();
             new_musig_nonce_pair(
                 &zkp,
                 session_id,
@@ -731,7 +732,7 @@ fn sign_refund_offchain_transactions(
 
         let (bob_musig_nonce, bob_musig_pub_nonce) = {
             let session_id = MusigSessionId::new(&mut rng);
-            let extra_rand = rng.gen();
+            let extra_rand = rng.r#gen();
             new_musig_nonce_pair(
                 &zkp,
                 session_id,
@@ -754,14 +755,14 @@ fn sign_refund_offchain_transactions(
             let musig_session = MusigSession::new(&zkp, musig_key_agg_cache, musig_agg_nonce, msg);
 
             let alice_kp = zkp::Keypair::from_seckey_slice(&zkp, &alice_kp.secret_bytes())
-                .expect("valid keypair");
+                .map_err(ark_core::Error::ad_hoc)?;
 
             let alice_sig = musig_session
                 .partial_sign(&zkp, alice_musig_nonce, &alice_kp, musig_key_agg_cache)
                 .map_err(ark_core::Error::ad_hoc)?;
 
             let bob_kp = zkp::Keypair::from_seckey_slice(&zkp, &bob_kp.secret_bytes())
-                .expect("valid keypair");
+                .map_err(ark_core::Error::ad_hoc)?;
 
             let bob_sig = musig_session
                 .partial_sign(&zkp, bob_musig_nonce, &bob_kp, musig_key_agg_cache)
@@ -786,7 +787,7 @@ fn sign_refund_offchain_transactions(
 
         let (alice_musig_nonce, alice_musig_pub_nonce) = {
             let session_id = MusigSessionId::new(&mut rng);
-            let extra_rand = rng.gen();
+            let extra_rand = rng.r#gen();
             new_musig_nonce_pair(
                 &zkp,
                 session_id,
@@ -802,7 +803,7 @@ fn sign_refund_offchain_transactions(
 
         let (bob_musig_nonce, bob_musig_pub_nonce) = {
             let session_id = MusigSessionId::new(&mut rng);
-            let extra_rand = rng.gen();
+            let extra_rand = rng.r#gen();
             new_musig_nonce_pair(
                 &zkp,
                 session_id,
@@ -825,14 +826,14 @@ fn sign_refund_offchain_transactions(
             let musig_session = MusigSession::new(&zkp, musig_key_agg_cache, musig_agg_nonce, msg);
 
             let alice_kp = zkp::Keypair::from_seckey_slice(&zkp, &alice_kp.secret_bytes())
-                .expect("valid keypair");
+                .map_err(ark_core::Error::ad_hoc)?;
 
             let alice_sig = musig_session
                 .partial_sign(&zkp, alice_musig_nonce, &alice_kp, musig_key_agg_cache)
                 .map_err(ark_core::Error::ad_hoc)?;
 
             let bob_kp = zkp::Keypair::from_seckey_slice(&zkp, &bob_kp.secret_bytes())
-                .expect("valid keypair");
+                .map_err(ark_core::Error::ad_hoc)?;
 
             let bob_sig = musig_session
                 .partial_sign(&zkp, bob_musig_nonce, &bob_kp, musig_key_agg_cache)
@@ -900,7 +901,7 @@ fn sign_cet_offchain_txs(
 
         let (alice_musig_nonce, alice_musig_pub_nonce) = {
             let session_id = MusigSessionId::new(&mut rng);
-            let extra_rand = rng.gen();
+            let extra_rand = rng.r#gen();
             new_musig_nonce_pair(
                 &zkp,
                 session_id,
@@ -916,7 +917,7 @@ fn sign_cet_offchain_txs(
 
         let (bob_musig_nonce, bob_musig_pub_nonce) = {
             let session_id = MusigSessionId::new(&mut rng);
-            let extra_rand = rng.gen();
+            let extra_rand = rng.r#gen();
             new_musig_nonce_pair(
                 &zkp,
                 session_id,
@@ -948,14 +949,14 @@ fn sign_cet_offchain_txs(
             musig_nonce_parity = Some(musig_session.nonce_parity());
 
             let alice_kp = zkp::Keypair::from_seckey_slice(&zkp, &alice_kp.secret_bytes())
-                .expect("valid keypair");
+                .map_err(ark_core::Error::ad_hoc)?;
 
             let alice_sig = musig_session
                 .partial_sign(&zkp, alice_musig_nonce, &alice_kp, musig_key_agg_cache)
                 .map_err(ark_core::Error::ad_hoc)?;
 
             let bob_kp = zkp::Keypair::from_seckey_slice(&zkp, &bob_kp.secret_bytes())
-                .expect("valid keypair");
+                .map_err(ark_core::Error::ad_hoc)?;
 
             let bob_sig = musig_session
                 .partial_sign(&zkp, bob_musig_nonce, &bob_kp, musig_key_agg_cache)
@@ -981,7 +982,7 @@ fn sign_cet_offchain_txs(
 
         let (alice_musig_nonce, alice_musig_pub_nonce) = {
             let session_id = MusigSessionId::new(&mut rng);
-            let extra_rand = rng.gen();
+            let extra_rand = rng.r#gen();
             new_musig_nonce_pair(
                 &zkp,
                 session_id,
@@ -997,7 +998,7 @@ fn sign_cet_offchain_txs(
 
         let (bob_musig_nonce, bob_musig_pub_nonce) = {
             let session_id = MusigSessionId::new(&mut rng);
-            let extra_rand = rng.gen();
+            let extra_rand = rng.r#gen();
             new_musig_nonce_pair(
                 &zkp,
                 session_id,
@@ -1029,14 +1030,14 @@ fn sign_cet_offchain_txs(
             musig_nonce_parity = Some(musig_session.nonce_parity());
 
             let alice_kp = zkp::Keypair::from_seckey_slice(&zkp, &alice_kp.secret_bytes())
-                .expect("valid keypair");
+                .map_err(ark_core::Error::ad_hoc)?;
 
             let alice_sig = musig_session
                 .partial_sign(&zkp, alice_musig_nonce, &alice_kp, musig_key_agg_cache)
                 .map_err(ark_core::Error::ad_hoc)?;
 
             let bob_kp = zkp::Keypair::from_seckey_slice(&zkp, &bob_kp.secret_bytes())
-                .expect("valid keypair");
+                .map_err(ark_core::Error::ad_hoc)?;
 
             let bob_sig = musig_session
                 .partial_sign(&zkp, bob_musig_nonce, &bob_kp, musig_key_agg_cache)
@@ -1178,7 +1179,6 @@ async fn settle(
                         script_pubkey: boarding_output.script_pubkey(),
                     },
                     boarding_output.tapscripts(),
-                    boarding_output.owner_pk(),
                     boarding_output.exit_spend_info(),
                     true,
                 )
@@ -1198,7 +1198,6 @@ async fn settle(
                         script_pubkey: vtxo.script_pubkey(),
                     },
                     vtxo.tapscripts(),
-                    vtxo.owner_pk(),
                     vtxo.exit_spend_info()?,
                     false,
                 ))
@@ -1223,16 +1222,26 @@ async fn settle(
         .collect::<Vec<_>>();
 
     let signing_kp = Keypair::from_secret_key(&secp, &sk);
-    let sign_for_onchain_pk_fn = |_: &XOnlyPublicKey,
-                                  msg: &secp256k1::Message|
-     -> Result<schnorr::Signature, ark_core::Error> {
-        Ok(secp.sign_schnorr_no_aux_rand(msg, &signing_kp))
+
+    let sign_for_vtxo_fn = |_: &mut psbt::Input,
+                            msg: secp256k1::Message|
+     -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+        let sig = secp.sign_schnorr_no_aux_rand(&msg, &signing_kp);
+        Ok((sig, signing_kp.public_key().into()))
     };
+
+    let sign_for_onchain_fn =
+        |_: &mut psbt::Input,
+         msg: secp256k1::Message|
+         -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+            let sig = secp.sign_schnorr_no_aux_rand(&msg, &signing_kp);
+            Ok((sig, signing_kp.public_key().into()))
+        };
 
     let signing_kp = Keypair::from_secret_key(&secp, &sk);
     let intent = intent::make_intent(
-        &[signing_kp],
-        sign_for_onchain_pk_fn,
+        sign_for_vtxo_fn,
+        sign_for_onchain_fn,
         batch_inputs,
         batch_outputs,
         own_cosigner_pks.clone(),
@@ -1405,29 +1414,37 @@ async fn settle(
     let vtxo_inputs = virtual_tx_outpoints
         .spendable
         .into_iter()
-        .map(|(outpoint, vtxo)| {
-            batch::VtxoInput::new(
-                vtxo,
-                outpoint.amount,
-                outpoint.outpoint,
-                outpoint.is_recoverable(),
-            )
+        .map(|(virtual_tx_outpoint, vtxo)| {
+            let spend_info = vtxo.forfeit_spend_info()?;
+
+            anyhow::Ok(intent::Input::new(
+                virtual_tx_outpoint.outpoint,
+                vtxo.exit_delay(),
+                TxOut {
+                    value: virtual_tx_outpoint.amount,
+                    script_pubkey: vtxo.script_pubkey(),
+                },
+                vtxo.tapscripts(),
+                spend_info,
+                false,
+            ))
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()?;
 
     let signed_forfeit_psbts = if !vtxo_inputs.is_empty() {
         let connectors_graph = TxGraph::new(connectors_graph_chunks)?;
 
         create_and_sign_forfeit_txs(
+            |_, msg| {
+                let sig = secp.sign_schnorr_no_aux_rand(&msg, &signing_kp);
+                let pk = signing_kp.x_only_public_key().0;
+
+                Ok((sig, pk))
+            },
             vtxo_inputs.as_slice(),
             &connectors_graph.leaves(),
             &server_info.forfeit_address,
             server_info.dust,
-            |msg, _vtxo| {
-                let sig = secp.sign_schnorr_no_aux_rand(msg, &signing_kp);
-                let pk = signing_kp.x_only_public_key().0;
-                (sig, pk)
-            },
         )?
     } else {
         Vec::new()

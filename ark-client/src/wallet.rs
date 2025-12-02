@@ -1,15 +1,15 @@
 use crate::error::Error;
 use ark_core::BoardingOutput;
 use ark_core::UtxoCoinSelection;
-use bitcoin::secp256k1::schnorr::Signature;
-use bitcoin::secp256k1::Message;
-use bitcoin::secp256k1::SecretKey;
 use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::FeeRate;
 use bitcoin::Network;
 use bitcoin::Psbt;
 use bitcoin::XOnlyPublicKey;
+use bitcoin::secp256k1::Message;
+use bitcoin::secp256k1::SecretKey;
+use bitcoin::secp256k1::schnorr::Signature;
 
 pub trait BoardingWallet {
     fn new_boarding_output(
@@ -27,7 +27,7 @@ pub trait BoardingWallet {
 pub trait OnchainWallet {
     fn get_onchain_address(&self) -> Result<Address, Error>;
 
-    fn sync(&self) -> impl std::future::Future<Output = Result<(), Error>>;
+    fn sync(&self) -> impl Future<Output = Result<(), Error>>;
 
     fn balance(&self) -> Result<Balance, Error>;
 

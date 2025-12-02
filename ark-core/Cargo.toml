@@ -1,13 +1,16 @@
 [package]
 name = "ark-core"
 version = "0.7.0"
-edition = "2021"
-license = "MIT"
+edition = { workspace = true }
+license = { workspace = true }
 description = "Core types and utilities for Ark"
+
+[lints]
+workspace = true
 
 [dependencies]
 bech32 = "0.11"
-bitcoin = { version = "0.32.4", features = ["base64", "rand", "serde"] }
+bitcoin = { version = "0.32.7", features = ["base64", "rand", "serde"] }
 musig = { package = "ark-secp256k1", path = "../ark-rust-secp256k1", features = ["serde", "rand"] }
 rand = "0.8"
 serde = { version = "1.0", features = ["derive"] }

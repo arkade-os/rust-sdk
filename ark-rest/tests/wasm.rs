@@ -57,5 +57,8 @@ async fn test_get_offchain_address() {
 
     let ark_address = vtxo.to_ark_address();
     let address_string = ark_address.encode();
-    assert_eq!(address_string, "tark1qqv6a8wylu3mdllwr20hwvcx89aslhctyp6eranf8pmqau97rtze0qdgw2t9vuuqwhzsm4qfvjyatltmefu8q0gh02m535j9w85dhanp087p46");
+    assert_eq!(
+        address_string,
+        "tark1qqv6a8wylu3mdllwr20hwvcx89aslhctyp6eranf8pmqau97rtze0qdgw2t9vuuqwhzsm4qfvjyatltmefu8q0gh02m535j9w85dhanp087p46"
+    );
 }

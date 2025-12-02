@@ -1,12 +1,9 @@
 //! Messages exchanged between the client and the Ark server.
 
-use crate::tx_graph::TxGraphChunk;
 use crate::ArkAddress;
 use crate::Error;
 use crate::ErrorContext;
-use bitcoin::hex::DisplayHex;
-use bitcoin::secp256k1::PublicKey;
-use bitcoin::taproot::Signature;
+use crate::tx_graph::TxGraphChunk;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
 use bitcoin::Psbt;
@@ -14,6 +11,9 @@ use bitcoin::ScriptBuf;
 use bitcoin::Transaction;
 use bitcoin::Txid;
 use bitcoin::XOnlyPublicKey;
+use bitcoin::hex::DisplayHex;
+use bitcoin::secp256k1::PublicKey;
+use bitcoin::taproot::Signature;
 use musig::musig;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -333,7 +333,7 @@ impl VirtualTxOutPoint {
             performance.now() as i64
         };
 
-        (self.is_swept && !self.is_spent) || current_timestamp > self.expires_at
+        (self.is_swept || current_timestamp > self.expires_at) && !self.is_spent
     }
 }
 

@@ -1,25 +1,2 @@
-# Inspired by https://github.com/EmbarkStudios/rust-ecosystem/pull/68.
-[build]
-rustflags = [
-  "-Wclippy::disallowed_methods",
-  "-Wclippy::dbg_macro",
-  "-Wclippy::print_stderr",
-  "-Wclippy::print_stdout",
-  "-Wunused-import-braces",
-  "-Wunused-qualifications",
-  "-Wclippy::unwrap_used",
-]
-
-[target.'cfg(feature = "cargo-clippy")']
-rustflags = [
-  "-Wclippy::disallowed_methods",
-  "-Wclippy::dbg_macro",
-  "-Wclippy::print_stderr",
-  "-Wclippy::print_stdout",
-  "-Wunused-import-braces",
-  "-Wunused-qualifications",
-  "-Wclippy::unwrap_used",
-]
-
 [target.wasm32-unknown-unknown]
 rustflags = ['--cfg', 'getrandom_backend="wasm_js"']

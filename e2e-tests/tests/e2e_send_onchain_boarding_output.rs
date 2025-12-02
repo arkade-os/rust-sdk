@@ -1,11 +1,11 @@
 #![allow(clippy::unwrap_used)]
 
+use bitcoin::Amount;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::key::Secp256k1;
-use bitcoin::Amount;
+use common::Nigiri;
 use common::init_tracing;
 use common::set_up_client;
-use common::Nigiri;
 use std::str::FromStr;
 use std::sync::Arc;
 

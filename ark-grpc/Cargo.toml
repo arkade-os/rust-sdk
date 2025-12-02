@@ -1,18 +1,18 @@
 [package]
 name = "ark-grpc"
 version = "0.7.0"
-edition = "2021"
-license = "MIT"
+edition = { workspace = true }
+license = { workspace = true }
 description = "gRPC client for Ark server communication"
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(genproto)'] }
+[lints]
+workspace = true
 
 [dependencies]
 ark-core = { path = "../ark-core", version = "0.7.0" }
 async-stream = { version = "0.3", default-features = false }
 base64 = { version = "0.22", default-features = false }
-bitcoin = { version = "0.32", default-features = false }
+bitcoin = { version = "0.32.7", default-features = false }
 futures = { version = "0.3", default-features = false }
 log = "0.4"
 prost = { version = "0.14", default-features = false, features = ["std"] }

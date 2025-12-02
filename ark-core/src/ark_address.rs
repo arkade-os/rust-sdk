@@ -1,10 +1,10 @@
 use crate::Error;
 use bech32::Bech32m;
 use bech32::Hrp;
-use bitcoin::key::TweakedPublicKey;
 use bitcoin::Network;
 use bitcoin::ScriptBuf;
 use bitcoin::XOnlyPublicKey;
+use bitcoin::key::TweakedPublicKey;
 use std::str::FromStr;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -29,7 +29,7 @@ impl ArkAddress {
     pub fn new(network: Network, server: XOnlyPublicKey, vtxo_tap_key: TweakedPublicKey) -> Self {
         let hrp = match network {
             Network::Bitcoin => "ark",
-            _ => "tark",
+            Network::Testnet | Network::Testnet4 | Network::Signet | Network::Regtest => "tark",
         };
 
         let hrp = Hrp::parse_unchecked(hrp);

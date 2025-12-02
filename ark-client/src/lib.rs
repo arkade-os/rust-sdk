@@ -3,28 +3,28 @@ use crate::utils::sleep;
 use crate::utils::timeout_op;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
+use ark_core::ArkAddress;
+use ark_core::UtxoCoinSelection;
+use ark_core::Vtxo;
 use ark_core::build_anchor_tx;
 use ark_core::history;
+use ark_core::history::OutgoingTransaction;
 use ark_core::history::generate_incoming_vtxo_transaction_history;
 use ark_core::history::generate_outgoing_vtxo_transaction_history;
 use ark_core::history::sort_transactions_by_created_at;
-use ark_core::history::OutgoingTransaction;
 use ark_core::server;
 use ark_core::server::GetVtxosRequest;
 use ark_core::server::SubscriptionResponse;
 use ark_core::server::VirtualTxOutPoint;
-use ark_core::ArkAddress;
-use ark_core::UtxoCoinSelection;
-use ark_core::Vtxo;
 use ark_grpc::VtxoChainResponse;
-use bitcoin::key::Keypair;
-use bitcoin::key::Secp256k1;
-use bitcoin::secp256k1::All;
 use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
 use bitcoin::Transaction;
 use bitcoin::Txid;
+use bitcoin::key::Keypair;
+use bitcoin::key::Secp256k1;
+use bitcoin::secp256k1::All;
 use futures::Future;
 use futures::Stream;
 use jiff::Timestamp;
@@ -319,7 +319,6 @@ where
     W: BoardingWallet + OnchainWallet,
     S: SwapStorage,
 {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: String,
         kp: Keypair,
@@ -667,10 +666,10 @@ where
             &boarding_commitment_transactions,
         )?;
 
-        let outgoing_txs = generate_outgoing_vtxo_transaction_history(
-            &vtxos.spent_outpoints(),
-            &vtxos.spendable_outpoints(),
-        )?;
+        let spent_outpoints = vtxos.spent_outpoints();
+        let spendable_outpoints = vtxos.spendable_outpoints();
+        let outgoing_txs =
+            generate_outgoing_vtxo_transaction_history(&spent_outpoints, &spendable_outpoints)?;
 
         let mut outgoing_transactions = vec![];
         for tx in outgoing_txs {
@@ -768,7 +767,7 @@ where
         }
     }
 
-    fn network_client(&self) -> ark_grpc::Client {
+    pub fn network_client(&self) -> ark_grpc::Client {
         self.inner.network_client.clone()
     }
 

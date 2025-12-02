@@ -1,10 +1,10 @@
-use crate::server::VirtualTxOutPoint;
 use crate::Error;
+use crate::server::VirtualTxOutPoint;
 use bitcoin::Amount;
 use bitcoin::SignedAmount;
 use bitcoin::Txid;
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Transaction {
@@ -247,15 +247,15 @@ pub fn generate_outgoing_vtxo_transaction_history(
             continue;
         }
 
-        if spent_vtxo.spent_by.is_some() {
-            if let Some(ark_txid) = spent_vtxo.ark_txid {
-                match vtxos_by_spent_by.entry(ark_txid) {
-                    Entry::Occupied(mut occupied_entry) => {
-                        occupied_entry.get_mut().push(spent_vtxo.clone());
-                    }
-                    Entry::Vacant(e) => {
-                        e.insert(vec![spent_vtxo.clone()]);
-                    }
+        if spent_vtxo.spent_by.is_some()
+            && let Some(ark_txid) = spent_vtxo.ark_txid
+        {
+            match vtxos_by_spent_by.entry(ark_txid) {
+                Entry::Occupied(mut occupied_entry) => {
+                    occupied_entry.get_mut().push(spent_vtxo.clone());
+                }
+                Entry::Vacant(e) => {
+                    e.insert(vec![spent_vtxo.clone()]);
                 }
             }
         }

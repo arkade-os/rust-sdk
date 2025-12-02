@@ -1,26 +1,26 @@
+use crate::Blockchain;
+use crate::Client;
+use crate::Error;
 use crate::error::ErrorContext;
 use crate::swap_storage::SwapStorage;
 use crate::utils::timeout_op;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
-use crate::Blockchain;
-use crate::Client;
-use crate::Error;
+use ark_core::ArkAddress;
+use ark_core::ErrorContext as _;
 use ark_core::coin_select::select_vtxos;
 use ark_core::send;
+use ark_core::send::OffchainTransactions;
 use ark_core::send::build_offchain_transactions;
 use ark_core::send::sign_ark_transaction;
 use ark_core::send::sign_checkpoint_transaction;
-use ark_core::send::OffchainTransactions;
-use ark_core::ArkAddress;
-use ark_core::ErrorContext as _;
+use bitcoin::Amount;
+use bitcoin::Txid;
+use bitcoin::XOnlyPublicKey;
 use bitcoin::key::Secp256k1;
 use bitcoin::psbt;
 use bitcoin::secp256k1;
 use bitcoin::secp256k1::schnorr;
-use bitcoin::Amount;
-use bitcoin::Txid;
-use bitcoin::XOnlyPublicKey;
 
 impl<B, W, S> Client<B, W, S>
 where

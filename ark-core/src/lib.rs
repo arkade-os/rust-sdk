@@ -28,10 +28,10 @@ pub use error::ErrorContext;
 pub use script::extract_sequence_from_csv_sig_script;
 pub use tx_graph::TxGraph;
 pub use tx_graph::TxGraphChunk;
-pub use unilateral_exit::build_anchor_tx;
-pub use unilateral_exit::build_unilateral_exit_tree_txids;
 pub use unilateral_exit::SelectedUtxo;
 pub use unilateral_exit::UtxoCoinSelection;
+pub use unilateral_exit::build_anchor_tx;
+pub use unilateral_exit::build_unilateral_exit_tree_txids;
 pub use vtxo::Vtxo;
 
 pub const UNSPENDABLE_KEY: &str =
