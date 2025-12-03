@@ -118,6 +118,7 @@ pub async fn e2e_multisig_delegate() {
         msig_output.tapscripts(),
         msig_output.bob_alice_spend_info(),
         false,
+        false,
     );
 
     let mut delegate = batch::prepare_delegate_psbts(

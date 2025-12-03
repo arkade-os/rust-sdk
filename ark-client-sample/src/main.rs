@@ -250,7 +250,7 @@ async fn main() -> Result<()> {
             let _ = client.get_boarding_address();
 
             let maybe_batch_tx = client
-                .settle(&mut rng, false)
+                .settle(&mut rng, true)
                 .await
                 .map_err(|e| anyhow!(e))?;
             match maybe_batch_tx {

@@ -44,6 +44,7 @@ pub struct Input {
     tapscripts: Vec<ScriptBuf>,
     spend_info: (ScriptBuf, taproot::ControlBlock),
     is_onchain: bool,
+    is_swept: bool,
 }
 
 impl Input {
@@ -54,6 +55,7 @@ impl Input {
         tapscripts: Vec<ScriptBuf>,
         spend_info: (ScriptBuf, taproot::ControlBlock),
         is_onchain: bool,
+        is_swept: bool,
     ) -> Self {
         Self {
             outpoint,
@@ -62,6 +64,7 @@ impl Input {
             tapscripts,
             spend_info,
             is_onchain,
+            is_swept,
         }
     }
 
@@ -83,6 +86,10 @@ impl Input {
 
     pub fn tapscripts(&self) -> &[ScriptBuf] {
         &self.tapscripts
+    }
+
+    pub fn is_swept(&self) -> bool {
+        self.is_swept
     }
 }
 

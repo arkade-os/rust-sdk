@@ -1181,6 +1181,7 @@ async fn settle(
                     boarding_output.tapscripts(),
                     boarding_output.exit_spend_info(),
                     true,
+                    false,
                 )
             },
         );
@@ -1200,6 +1201,7 @@ async fn settle(
                     vtxo.tapscripts(),
                     vtxo.exit_spend_info()?,
                     false,
+                    virtual_tx_outpoint.is_swept,
                 ))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1427,6 +1429,7 @@ async fn settle(
                 vtxo.tapscripts(),
                 spend_info,
                 false,
+                virtual_tx_outpoint.is_swept,
             ))
         })
         .collect::<Result<Vec<_>, _>>()?;
