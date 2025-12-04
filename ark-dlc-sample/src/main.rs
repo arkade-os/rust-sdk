@@ -333,10 +333,10 @@ async fn main() -> Result<()> {
     sign_ark_transaction(
         |_,
          msg: secp256k1::Message|
-         -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+         -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
             let sig = secp.sign_schnorr_no_aux_rand(&msg, &alice_kp);
 
-            Ok((sig, alice_xonly_pk))
+            Ok(vec![(sig, alice_xonly_pk)])
         },
         &mut dlc_virtual_tx,
         0, // Alice's DLC-funding virtual TX input.
@@ -346,10 +346,10 @@ async fn main() -> Result<()> {
     sign_ark_transaction(
         |_,
          msg: secp256k1::Message|
-         -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+         -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
             let sig = secp.sign_schnorr_no_aux_rand(&msg, &bob_kp);
 
-            Ok((sig, bob_xonly_pk))
+            Ok(vec![(sig, bob_xonly_pk)])
         },
         &mut dlc_virtual_tx,
         1, // Bob's DLC-funding virtual TX input.
@@ -368,10 +368,10 @@ async fn main() -> Result<()> {
     sign_checkpoint_transaction(
         |_,
          msg: secp256k1::Message|
-         -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+         -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
             let sig = secp.sign_schnorr_no_aux_rand(&msg, &alice_kp);
 
-            Ok((sig, alice_xonly_pk))
+            Ok(vec![(sig, alice_xonly_pk)])
         },
         &mut alice_signed_checkpoint_psbt,
     )
@@ -381,10 +381,10 @@ async fn main() -> Result<()> {
     sign_checkpoint_transaction(
         |_,
          msg: secp256k1::Message|
-         -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+         -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
             let sig = secp.sign_schnorr_no_aux_rand(&msg, &bob_kp);
 
-            Ok((sig, bob_xonly_pk))
+            Ok(vec![(sig, bob_xonly_pk)])
         },
         &mut bob_signed_checkpoint_psbt,
     )
@@ -744,36 +744,38 @@ fn sign_refund_offchain_transactions(
             )?
         };
 
-        let sign_fn = |_: &mut psbt::Input,
-                       msg: secp256k1::Message|
-         -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
-            let musig_agg_nonce =
-                MusigAggNonce::new(&zkp, &[alice_musig_pub_nonce, bob_musig_pub_nonce]);
-            let msg =
-                zkp::Message::from_digest_slice(msg.as_ref()).map_err(ark_core::Error::ad_hoc)?;
+        let sign_fn =
+            |_: &mut psbt::Input,
+             msg: secp256k1::Message|
+             -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
+                let musig_agg_nonce =
+                    MusigAggNonce::new(&zkp, &[alice_musig_pub_nonce, bob_musig_pub_nonce]);
+                let msg = zkp::Message::from_digest_slice(msg.as_ref())
+                    .map_err(ark_core::Error::ad_hoc)?;
 
-            let musig_session = MusigSession::new(&zkp, musig_key_agg_cache, musig_agg_nonce, msg);
+                let musig_session =
+                    MusigSession::new(&zkp, musig_key_agg_cache, musig_agg_nonce, msg);
 
-            let alice_kp = zkp::Keypair::from_seckey_slice(&zkp, &alice_kp.secret_bytes())
-                .map_err(ark_core::Error::ad_hoc)?;
+                let alice_kp = zkp::Keypair::from_seckey_slice(&zkp, &alice_kp.secret_bytes())
+                    .map_err(ark_core::Error::ad_hoc)?;
 
-            let alice_sig = musig_session
-                .partial_sign(&zkp, alice_musig_nonce, &alice_kp, musig_key_agg_cache)
-                .map_err(ark_core::Error::ad_hoc)?;
+                let alice_sig = musig_session
+                    .partial_sign(&zkp, alice_musig_nonce, &alice_kp, musig_key_agg_cache)
+                    .map_err(ark_core::Error::ad_hoc)?;
 
-            let bob_kp = zkp::Keypair::from_seckey_slice(&zkp, &bob_kp.secret_bytes())
-                .map_err(ark_core::Error::ad_hoc)?;
+                let bob_kp = zkp::Keypair::from_seckey_slice(&zkp, &bob_kp.secret_bytes())
+                    .map_err(ark_core::Error::ad_hoc)?;
 
-            let bob_sig = musig_session
-                .partial_sign(&zkp, bob_musig_nonce, &bob_kp, musig_key_agg_cache)
-                .map_err(ark_core::Error::ad_hoc)?;
+                let bob_sig = musig_session
+                    .partial_sign(&zkp, bob_musig_nonce, &bob_kp, musig_key_agg_cache)
+                    .map_err(ark_core::Error::ad_hoc)?;
 
-            let sig = musig_session.partial_sig_agg(&[alice_sig, bob_sig]);
-            let sig =
-                schnorr::Signature::from_slice(sig.as_ref()).map_err(ark_core::Error::ad_hoc)?;
+                let sig = musig_session.partial_sig_agg(&[alice_sig, bob_sig]);
+                let sig = schnorr::Signature::from_slice(sig.as_ref())
+                    .map_err(ark_core::Error::ad_hoc)?;
 
-            Ok((sig, shared_pk))
-        };
+                Ok(vec![(sig, shared_pk)])
+            };
 
         sign_ark_transaction(sign_fn, &mut refund_virtual_tx, 0)
             .context("signing refund virtual TX")?;
@@ -815,36 +817,38 @@ fn sign_refund_offchain_transactions(
             )?
         };
 
-        let sign_fn = |_: &mut psbt::Input,
-                       msg: secp256k1::Message|
-         -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
-            let musig_agg_nonce =
-                MusigAggNonce::new(&zkp, &[alice_musig_pub_nonce, bob_musig_pub_nonce]);
-            let msg =
-                zkp::Message::from_digest_slice(msg.as_ref()).map_err(ark_core::Error::ad_hoc)?;
+        let sign_fn =
+            |_: &mut psbt::Input,
+             msg: secp256k1::Message|
+             -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
+                let musig_agg_nonce =
+                    MusigAggNonce::new(&zkp, &[alice_musig_pub_nonce, bob_musig_pub_nonce]);
+                let msg = zkp::Message::from_digest_slice(msg.as_ref())
+                    .map_err(ark_core::Error::ad_hoc)?;
 
-            let musig_session = MusigSession::new(&zkp, musig_key_agg_cache, musig_agg_nonce, msg);
+                let musig_session =
+                    MusigSession::new(&zkp, musig_key_agg_cache, musig_agg_nonce, msg);
 
-            let alice_kp = zkp::Keypair::from_seckey_slice(&zkp, &alice_kp.secret_bytes())
-                .map_err(ark_core::Error::ad_hoc)?;
+                let alice_kp = zkp::Keypair::from_seckey_slice(&zkp, &alice_kp.secret_bytes())
+                    .map_err(ark_core::Error::ad_hoc)?;
 
-            let alice_sig = musig_session
-                .partial_sign(&zkp, alice_musig_nonce, &alice_kp, musig_key_agg_cache)
-                .map_err(ark_core::Error::ad_hoc)?;
+                let alice_sig = musig_session
+                    .partial_sign(&zkp, alice_musig_nonce, &alice_kp, musig_key_agg_cache)
+                    .map_err(ark_core::Error::ad_hoc)?;
 
-            let bob_kp = zkp::Keypair::from_seckey_slice(&zkp, &bob_kp.secret_bytes())
-                .map_err(ark_core::Error::ad_hoc)?;
+                let bob_kp = zkp::Keypair::from_seckey_slice(&zkp, &bob_kp.secret_bytes())
+                    .map_err(ark_core::Error::ad_hoc)?;
 
-            let bob_sig = musig_session
-                .partial_sign(&zkp, bob_musig_nonce, &bob_kp, musig_key_agg_cache)
-                .map_err(ark_core::Error::ad_hoc)?;
+                let bob_sig = musig_session
+                    .partial_sign(&zkp, bob_musig_nonce, &bob_kp, musig_key_agg_cache)
+                    .map_err(ark_core::Error::ad_hoc)?;
 
-            let sig = musig_session.partial_sig_agg(&[alice_sig, bob_sig]);
-            let sig =
-                schnorr::Signature::from_slice(sig.as_ref()).map_err(ark_core::Error::ad_hoc)?;
+                let sig = musig_session.partial_sig_agg(&[alice_sig, bob_sig]);
+                let sig = schnorr::Signature::from_slice(sig.as_ref())
+                    .map_err(ark_core::Error::ad_hoc)?;
 
-            Ok((sig, shared_pk))
-        };
+                Ok(vec![(sig, shared_pk)])
+            };
 
         // Normally we would sign this one after communicating with the server, but since this
         // output is owned by two parties we need to do this ahead of time.
@@ -930,44 +934,45 @@ fn sign_cet_offchain_txs(
         };
 
         let mut musig_nonce_parity = None;
-        let sign_fn = |_: &mut psbt::Input,
-                       msg: secp256k1::Message|
-         -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
-            let musig_agg_nonce =
-                MusigAggNonce::new(&zkp, &[alice_musig_pub_nonce, bob_musig_pub_nonce]);
-            let msg =
-                zkp::Message::from_digest_slice(msg.as_ref()).map_err(ark_core::Error::ad_hoc)?;
+        let sign_fn =
+            |_: &mut psbt::Input,
+             msg: secp256k1::Message|
+             -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
+                let musig_agg_nonce =
+                    MusigAggNonce::new(&zkp, &[alice_musig_pub_nonce, bob_musig_pub_nonce]);
+                let msg = zkp::Message::from_digest_slice(msg.as_ref())
+                    .map_err(ark_core::Error::ad_hoc)?;
 
-            let musig_session = MusigSession::with_adaptor(
-                &zkp,
-                musig_key_agg_cache,
-                musig_agg_nonce,
-                msg,
-                adaptor_pk,
-            );
+                let musig_session = MusigSession::with_adaptor(
+                    &zkp,
+                    musig_key_agg_cache,
+                    musig_agg_nonce,
+                    msg,
+                    adaptor_pk,
+                );
 
-            musig_nonce_parity = Some(musig_session.nonce_parity());
+                musig_nonce_parity = Some(musig_session.nonce_parity());
 
-            let alice_kp = zkp::Keypair::from_seckey_slice(&zkp, &alice_kp.secret_bytes())
-                .map_err(ark_core::Error::ad_hoc)?;
+                let alice_kp = zkp::Keypair::from_seckey_slice(&zkp, &alice_kp.secret_bytes())
+                    .map_err(ark_core::Error::ad_hoc)?;
 
-            let alice_sig = musig_session
-                .partial_sign(&zkp, alice_musig_nonce, &alice_kp, musig_key_agg_cache)
-                .map_err(ark_core::Error::ad_hoc)?;
+                let alice_sig = musig_session
+                    .partial_sign(&zkp, alice_musig_nonce, &alice_kp, musig_key_agg_cache)
+                    .map_err(ark_core::Error::ad_hoc)?;
 
-            let bob_kp = zkp::Keypair::from_seckey_slice(&zkp, &bob_kp.secret_bytes())
-                .map_err(ark_core::Error::ad_hoc)?;
+                let bob_kp = zkp::Keypair::from_seckey_slice(&zkp, &bob_kp.secret_bytes())
+                    .map_err(ark_core::Error::ad_hoc)?;
 
-            let bob_sig = musig_session
-                .partial_sign(&zkp, bob_musig_nonce, &bob_kp, musig_key_agg_cache)
-                .map_err(ark_core::Error::ad_hoc)?;
+                let bob_sig = musig_session
+                    .partial_sign(&zkp, bob_musig_nonce, &bob_kp, musig_key_agg_cache)
+                    .map_err(ark_core::Error::ad_hoc)?;
 
-            let sig = musig_session.partial_sig_agg(&[alice_sig, bob_sig]);
-            let sig =
-                schnorr::Signature::from_slice(sig.as_ref()).map_err(ark_core::Error::ad_hoc)?;
+                let sig = musig_session.partial_sig_agg(&[alice_sig, bob_sig]);
+                let sig = schnorr::Signature::from_slice(sig.as_ref())
+                    .map_err(ark_core::Error::ad_hoc)?;
 
-            Ok((sig, shared_pk))
-        };
+                Ok(vec![(sig, shared_pk)])
+            };
 
         sign_ark_transaction(sign_fn, &mut virtual_cet, 0).context("signing virtual CET")?;
 
@@ -1011,44 +1016,45 @@ fn sign_cet_offchain_txs(
         };
 
         let mut musig_nonce_parity = None;
-        let sign_fn = |_: &mut psbt::Input,
-                       msg: secp256k1::Message|
-         -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
-            let musig_agg_nonce =
-                MusigAggNonce::new(&zkp, &[alice_musig_pub_nonce, bob_musig_pub_nonce]);
-            let msg =
-                zkp::Message::from_digest_slice(msg.as_ref()).map_err(ark_core::Error::ad_hoc)?;
+        let sign_fn =
+            |_: &mut psbt::Input,
+             msg: secp256k1::Message|
+             -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
+                let musig_agg_nonce =
+                    MusigAggNonce::new(&zkp, &[alice_musig_pub_nonce, bob_musig_pub_nonce]);
+                let msg = zkp::Message::from_digest_slice(msg.as_ref())
+                    .map_err(ark_core::Error::ad_hoc)?;
 
-            let musig_session = MusigSession::with_adaptor(
-                &zkp,
-                musig_key_agg_cache,
-                musig_agg_nonce,
-                msg,
-                adaptor_pk,
-            );
+                let musig_session = MusigSession::with_adaptor(
+                    &zkp,
+                    musig_key_agg_cache,
+                    musig_agg_nonce,
+                    msg,
+                    adaptor_pk,
+                );
 
-            musig_nonce_parity = Some(musig_session.nonce_parity());
+                musig_nonce_parity = Some(musig_session.nonce_parity());
 
-            let alice_kp = zkp::Keypair::from_seckey_slice(&zkp, &alice_kp.secret_bytes())
-                .map_err(ark_core::Error::ad_hoc)?;
+                let alice_kp = zkp::Keypair::from_seckey_slice(&zkp, &alice_kp.secret_bytes())
+                    .map_err(ark_core::Error::ad_hoc)?;
 
-            let alice_sig = musig_session
-                .partial_sign(&zkp, alice_musig_nonce, &alice_kp, musig_key_agg_cache)
-                .map_err(ark_core::Error::ad_hoc)?;
+                let alice_sig = musig_session
+                    .partial_sign(&zkp, alice_musig_nonce, &alice_kp, musig_key_agg_cache)
+                    .map_err(ark_core::Error::ad_hoc)?;
 
-            let bob_kp = zkp::Keypair::from_seckey_slice(&zkp, &bob_kp.secret_bytes())
-                .map_err(ark_core::Error::ad_hoc)?;
+                let bob_kp = zkp::Keypair::from_seckey_slice(&zkp, &bob_kp.secret_bytes())
+                    .map_err(ark_core::Error::ad_hoc)?;
 
-            let bob_sig = musig_session
-                .partial_sign(&zkp, bob_musig_nonce, &bob_kp, musig_key_agg_cache)
-                .map_err(ark_core::Error::ad_hoc)?;
+                let bob_sig = musig_session
+                    .partial_sign(&zkp, bob_musig_nonce, &bob_kp, musig_key_agg_cache)
+                    .map_err(ark_core::Error::ad_hoc)?;
 
-            let sig = musig_session.partial_sig_agg(&[alice_sig, bob_sig]);
-            let sig =
-                schnorr::Signature::from_slice(sig.as_ref()).map_err(ark_core::Error::ad_hoc)?;
+                let sig = musig_session.partial_sig_agg(&[alice_sig, bob_sig]);
+                let sig = schnorr::Signature::from_slice(sig.as_ref())
+                    .map_err(ark_core::Error::ad_hoc)?;
 
-            Ok((sig, shared_pk))
-        };
+                Ok(vec![(sig, shared_pk)])
+            };
 
         // Normally we would sign this one after communicating with the server, but since this
         // output is owned by two parties we need to do this ahead of time.
@@ -1225,12 +1231,13 @@ async fn settle(
 
     let signing_kp = Keypair::from_secret_key(&secp, &sk);
 
-    let sign_for_vtxo_fn = |_: &mut psbt::Input,
-                            msg: secp256k1::Message|
-     -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
-        let sig = secp.sign_schnorr_no_aux_rand(&msg, &signing_kp);
-        Ok((sig, signing_kp.public_key().into()))
-    };
+    let sign_for_vtxo_fn =
+        |_: &mut psbt::Input,
+         msg: secp256k1::Message|
+         -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
+            let sig = secp.sign_schnorr_no_aux_rand(&msg, &signing_kp);
+            Ok(vec![(sig, signing_kp.public_key().into())])
+        };
 
     let sign_for_onchain_fn =
         |_: &mut psbt::Input,
@@ -1442,7 +1449,7 @@ async fn settle(
                 let sig = secp.sign_schnorr_no_aux_rand(&msg, &signing_kp);
                 let pk = signing_kp.x_only_public_key().0;
 
-                Ok((sig, pk))
+                Ok(vec![(sig, pk)])
             },
             vtxo_inputs.as_slice(),
             &connectors_graph.leaves(),

@@ -165,7 +165,7 @@ arkd-run:
 
     make -C $ARKD_DIR run-light &> {{ arkd_logs }} &
 
-    just _wait-for-log-file {{ arkd_logs }} "started listening at :7070" 30
+    just _wait-for-log-file {{ arkd_logs }} "started listening at :7070" 300
     just _wait-for-log-file {{ arkd_logs }} "started admin listening at :7071" 30
 
     just _create-arkd
@@ -197,7 +197,6 @@ arkd-build:
     make -C $ARKD_DIR build-all
 
     echo "arkd built"
-
 
 # Fund `arkd`'s wallet with `n` utxos.
 arkd-fund n:
@@ -291,6 +290,7 @@ _wait-until-arkd-is-initialized:
     exit 1
 
 # Wait for a specific log pattern in a docker container
+
 # Usage: just _wait-for-docker-log container_name "log_pattern" timeout_seconds
 [positional-arguments]
 _wait-for-docker-log container pattern timeout:
@@ -316,6 +316,7 @@ _wait-for-docker-log container pattern timeout:
     exit 1
 
 # Wait for a specific log pattern in a log file
+
 # Usage: just _wait-for-log-file log_file_path "log_pattern" timeout_seconds
 [positional-arguments]
 _wait-for-log-file file pattern timeout:

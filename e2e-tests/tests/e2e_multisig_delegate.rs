@@ -137,10 +137,10 @@ pub async fn e2e_multisig_delegate() {
     // Sign with Alice's key.
     let sign_fn = |_: &mut psbt::Input,
                    msg: secp256k1::Message|
-     -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+     -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
         let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &alice_msig_output_kp);
 
-        Ok((sig, alice_msig_output_pk.into()))
+        Ok(vec![(sig, alice_msig_output_pk.into())])
     };
 
     batch::sign_delegate_psbts(
@@ -153,10 +153,10 @@ pub async fn e2e_multisig_delegate() {
     // Sign with Bob's key.
     let sign_fn = |_: &mut psbt::Input,
                    msg: secp256k1::Message|
-     -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+     -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
         let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &bob_msig_output_kp);
 
-        Ok((sig, bob_msig_output_pk.into()))
+        Ok(vec![(sig, bob_msig_output_pk.into())])
     };
 
     batch::sign_delegate_psbts(

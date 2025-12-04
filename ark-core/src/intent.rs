@@ -30,7 +30,6 @@ use bitcoin::sighash::SighashCache;
 use bitcoin::taproot;
 use bitcoin::transaction::Version;
 use serde::Serialize;
-use std::collections::BTreeMap;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -139,7 +138,7 @@ where
     SV: Fn(
         &mut psbt::Input,
         secp256k1::Message,
-    ) -> Result<(schnorr::Signature, XOnlyPublicKey), Error>,
+    ) -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, Error>,
     SO: Fn(
         &mut psbt::Input,
         secp256k1::Message,
@@ -227,17 +226,18 @@ where
 
         let msg = secp256k1::Message::from_digest(tap_sighash.to_raw_hash().to_byte_array());
 
-        let (sig, pk) = match input.is_onchain {
-            true => sign_for_onchain_fn(proof_input, msg)?,
+        let sigs = match input.is_onchain {
+            true => vec![sign_for_onchain_fn(proof_input, msg)?],
             false => sign_for_vtxo_fn(proof_input, msg)?,
         };
 
-        let sig = taproot::Signature {
-            signature: sig,
-            sighash_type: TapSighashType::Default,
-        };
-
-        proof_input.tap_script_sigs = BTreeMap::from_iter([((pk, leaf_hash), sig)]);
+        for (sig, pk) in sigs {
+            let sig = taproot::Signature {
+                signature: sig,
+                sighash_type: TapSighashType::Default,
+            };
+            proof_input.tap_script_sigs.insert((pk, leaf_hash), sig);
+        }
     }
 
     Ok(Intent {
@@ -342,10 +342,12 @@ pub(crate) fn build_proof_psbt(
 
         psbt.inputs[0].witness_utxo = Some(to_spend_tx.output[0].clone());
         psbt.inputs[0].sighash_type = Some(PsbtSighashType::from_u32(1));
+        psbt.inputs[0].witness_script = Some(inputs[0].spend_info.0.clone());
 
         for (i, input) in inputs.iter().enumerate() {
             psbt.inputs[i + 1].witness_utxo = Some(input.witness_utxo.clone());
             psbt.inputs[i + 1].sighash_type = Some(PsbtSighashType::from_u32(1));
+            psbt.inputs[i + 1].witness_script = Some(input.spend_info.0.clone());
         }
 
         psbt

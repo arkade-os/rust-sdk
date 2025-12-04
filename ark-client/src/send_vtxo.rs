@@ -9,6 +9,7 @@ use crate::wallet::OnchainWallet;
 use ark_core::ArkAddress;
 use ark_core::ErrorContext as _;
 use ark_core::coin_select::select_vtxos;
+use ark_core::script::extract_checksig_pubkeys;
 use ark_core::send;
 use ark_core::send::OffchainTransactions;
 use ark_core::send::build_offchain_transactions;
@@ -22,11 +23,12 @@ use bitcoin::psbt;
 use bitcoin::secp256k1;
 use bitcoin::secp256k1::schnorr;
 
-impl<B, W, S> Client<B, W, S>
+impl<B, W, S, K> Client<B, W, S, K>
 where
     B: Blockchain,
     W: BoardingWallet + OnchainWallet,
     S: SwapStorage + 'static,
+    K: crate::KeyProvider,
 {
     /// Spend confirmed and pre-confimed VTXOs in an Ark transaction sending the given `amount` to
     /// the given `address`.
@@ -110,16 +112,32 @@ where
         .map_err(Error::from)
         .context("failed to build offchain transactions")?;
 
-        let sign_fn = |_: &mut psbt::Input,
-                       msg: secp256k1::Message|
-         -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
-            let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, self.kp());
-            let pk = self.kp().x_only_public_key().0;
-
-            Ok((sig, pk))
-        };
-
         for i in 0..checkpoint_txs.len() {
+            let sign_fn = |input: &mut psbt::Input,
+                           msg: secp256k1::Message|
+             -> Result<
+                Vec<(schnorr::Signature, XOnlyPublicKey)>,
+                ark_core::Error,
+            > {
+                match &input.witness_script {
+                    None => Err(ark_core::Error::ad_hoc(
+                        "Missing witness script for psbt::Input when signing ark transaction",
+                    )),
+                    Some(script) => {
+                        let mut res = vec![];
+                        let pks = extract_checksig_pubkeys(script);
+                        for pk in pks {
+                            if let Ok(keypair) = self.keypair_by_pk(&pk) {
+                                let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &keypair);
+                                let pk = keypair.x_only_public_key().0;
+                                res.push((sig, pk))
+                            }
+                        }
+                        Ok(res)
+                    }
+                }
+            };
+
             sign_ark_transaction(sign_fn, &mut ark_tx, i)?;
         }
 
@@ -127,12 +145,42 @@ where
 
         let mut res = self
             .network_client()
-            .submit_offchain_transaction_request(ark_tx, checkpoint_txs)
+            .submit_offchain_transaction_request(ark_tx, checkpoint_txs.clone())
             .await
             .map_err(Error::ark_server)
             .context("failed to submit offchain transaction request")?;
 
-        for checkpoint_psbt in res.signed_checkpoint_txs.iter_mut() {
+        for (index, checkpoint_psbt) in res.signed_checkpoint_txs.iter_mut().enumerate() {
+            let sign_fn = |input: &mut psbt::Input,
+                           msg: secp256k1::Message|
+             -> Result<
+                Vec<(schnorr::Signature, XOnlyPublicKey)>,
+                ark_core::Error,
+            > {
+                match &input.witness_script {
+                    None => Err(ark_core::Error::ad_hoc(
+                        "Missing witness script for psbt::Input signing checkpoint tx",
+                    )),
+                    Some(script) => {
+                        let mut res = vec![];
+                        let pks = extract_checksig_pubkeys(script);
+                        for pk in pks {
+                            if let Ok(keypair) = self.keypair_by_pk(&pk) {
+                                let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &keypair);
+                                let pk = keypair.x_only_public_key().0;
+                                res.push((sig, pk));
+                            }
+                        }
+                        Ok(res)
+                    }
+                }
+            };
+
+            // TODO: Maybe it's better to add the signature from the server-signed checkpoint PSBT
+            // instead.
+            checkpoint_psbt.inputs[0].witness_script =
+                checkpoint_txs[index].inputs[0].witness_script.clone();
+
             sign_checkpoint_transaction(sign_fn, checkpoint_psbt)?;
         }
 

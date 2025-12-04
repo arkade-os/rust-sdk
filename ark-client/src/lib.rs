@@ -22,6 +22,7 @@ use bitcoin::Amount;
 use bitcoin::OutPoint;
 use bitcoin::Transaction;
 use bitcoin::Txid;
+use bitcoin::XOnlyPublicKey;
 use bitcoin::key::Keypair;
 use bitcoin::key::Secp256k1;
 use bitcoin::secp256k1::All;
@@ -32,6 +33,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub mod error;
+pub mod key_provider;
 pub mod swap_storage;
 pub mod wallet;
 
@@ -47,6 +49,9 @@ pub use boltz::SubmarineSwapData;
 pub use boltz::SwapAmount;
 pub use boltz::TimeoutBlockHeights;
 pub use error::Error;
+pub use key_provider::Bip32KeyProvider;
+pub use key_provider::KeyProvider;
+pub use key_provider::StaticKeyProvider;
 pub use lightning_invoice;
 pub use swap_storage::InMemorySwapStorage;
 pub use swap_storage::SqliteSwapStorage;
@@ -178,8 +183,8 @@ pub use swap_storage::SwapStorage;
 /// #     }
 /// # }
 /// #
-/// // Initialize the client
-/// async fn init_client() -> Result<Client<MyBlockchain, MyWallet, InMemorySwapStorage>, ark_client::Error> {
+/// // Initialize the client with a static keypair
+/// async fn init_client_with_keypair() -> Result<Client<MyBlockchain, MyWallet, InMemorySwapStorage, ark_client::StaticKeyProvider>, ark_client::Error> {
 ///     // Create a keypair for signing transactions
 ///     let secp = bitcoin::key::Secp256k1::new();
 ///     let secret_key = SecretKey::from_str("your_private_key_here").unwrap();
@@ -190,8 +195,8 @@ pub use swap_storage::SwapStorage;
 ///     let wallet = Arc::new(MyWallet {});
 ///     let timeout = Duration::from_secs(30);
 ///
-///     // Create the offline client
-///     let offline_client = OfflineClient::new(
+///     // Create the offline client (backward compatible method)
+///     let offline_client = OfflineClient::new_with_keypair(
 ///         "my-ark-client".to_string(),
 ///         keypair,
 ///         blockchain,
@@ -207,13 +212,45 @@ pub use swap_storage::SwapStorage;
 ///
 ///     Ok(client)
 /// }
+///
+/// // Initialize the client with a BIP32 HD wallet
+/// # use bitcoin::bip32::{Xpriv, DerivationPath};
+/// async fn init_client_with_bip32() -> Result<Client<MyBlockchain, MyWallet, InMemorySwapStorage, ark_client::Bip32KeyProvider>, ark_client::Error> {
+///     // Create a BIP32 master key and derivation path
+///     let master_key = Xpriv::from_str("xprv...").unwrap();
+///     let derivation_path = DerivationPath::from_str("m/84'/0'/0'/0/0").unwrap();
+///
+///     let key_provider = Arc::new(ark_client::Bip32KeyProvider::new(master_key, derivation_path));
+///
+///     // Initialize blockchain and wallet implementations
+///     let blockchain = Arc::new(MyBlockchain::new("https://esplora.example.com"));
+///     let wallet = Arc::new(MyWallet {});
+///     let timeout = Duration::from_secs(30);
+///
+///     // Create the offline client with BIP32 key provider
+///     let offline_client = OfflineClient::new(
+///         "my-ark-client".to_string(),
+///         key_provider,
+///         blockchain,
+///         wallet,
+///         "https://ark-server.example.com".to_string(),
+///         Arc::new(InMemorySwapStorage::default()),
+///         "http://boltz.example.com".to_string(),
+///         timeout
+///     );
+///
+///     // Connect to the Ark server and get server info
+///     let client = offline_client.connect().await?;
+///
+///     Ok(client)
+/// }
 /// ```
 #[derive(Clone)]
-pub struct OfflineClient<B, W, S> {
+pub struct OfflineClient<B, W, S, K> {
     // TODO: We could introduce a generic interface so that consumers can use either GRPC or REST.
     network_client: ark_grpc::Client,
     pub name: String,
-    pub kp: Keypair,
+    key_provider: Arc<K>,
     blockchain: Arc<B>,
     secp: Secp256k1<All>,
     wallet: Arc<W>,
@@ -225,8 +262,8 @@ pub struct OfflineClient<B, W, S> {
 /// A client to interact with Ark server
 ///
 /// See [`OfflineClient`] docs for details.
-pub struct Client<B, W, S> {
-    inner: OfflineClient<B, W, S>,
+pub struct Client<B, W, S, K> {
+    inner: OfflineClient<B, W, S, K>,
     pub server_info: server::Info,
 }
 
@@ -313,15 +350,30 @@ pub trait Blockchain {
     ) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
-impl<B, W, S> OfflineClient<B, W, S>
+impl<B, W, S, K> OfflineClient<B, W, S, K>
 where
     B: Blockchain,
     W: BoardingWallet + OnchainWallet,
     S: SwapStorage,
+    K: KeyProvider,
 {
+    /// Create a new offline client with a generic key provider
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Client identifier
+    /// * `key_provider` - Implementation of KeyProvider trait (StaticKeyProvider, Bip32KeyProvider,
+    ///   etc.)
+    /// * `blockchain` - Blockchain interface implementation
+    /// * `wallet` - Wallet implementation
+    /// * `ark_server_url` - URL of the Ark server
+    /// * `swap_storage` - Storage implementation for swap data
+    /// * `boltz_url` - URL of the Boltz server
+    /// * `timeout` - Timeout duration for network operations
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: String,
-        kp: Keypair,
+        key_provider: Arc<K>,
         blockchain: Arc<B>,
         wallet: Arc<W>,
         ark_server_url: String,
@@ -336,7 +388,7 @@ where
         Self {
             network_client,
             name,
-            kp,
+            key_provider,
             blockchain,
             secp,
             wallet,
@@ -346,12 +398,51 @@ where
         }
     }
 
+    /// Create a new offline client with a static keypair (backward compatible)
+    ///
+    /// This is a convenience method that wraps a single keypair in a StaticKeyProvider.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Client identifier
+    /// * `kp` - Static keypair for signing
+    /// * `blockchain` - Blockchain interface implementation
+    /// * `wallet` - Wallet implementation
+    /// * `ark_server_url` - URL of the Ark server
+    /// * `swap_storage` - Storage implementation for swap data
+    /// * `boltz_url` - URL of the Boltz server
+    /// * `timeout` - Timeout duration for network operations
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_keypair(
+        name: String,
+        kp: Keypair,
+        blockchain: Arc<B>,
+        wallet: Arc<W>,
+        ark_server_url: String,
+        swap_storage: Arc<S>,
+        boltz_url: String,
+        timeout: Duration,
+    ) -> OfflineClient<B, W, S, StaticKeyProvider> {
+        let key_provider = Arc::new(StaticKeyProvider::new(kp));
+
+        OfflineClient::new(
+            name,
+            key_provider,
+            blockchain,
+            wallet,
+            ark_server_url,
+            swap_storage,
+            boltz_url,
+            timeout,
+        )
+    }
+
     /// Connects to the Ark server and retrieves server information.
     ///
     /// # Errors
     ///
     /// Returns an error if the connection fails or times out.
-    pub async fn connect(mut self) -> Result<Client<B, W, S>, Error> {
+    pub async fn connect(mut self) -> Result<Client<B, W, S, K>, Error> {
         timeout_op(self.timeout, self.network_client.connect())
             .await
             .context("Failed to connect to Ark server")??;
@@ -381,7 +472,7 @@ where
     pub async fn connect_with_retries(
         mut self,
         max_retries: usize,
-    ) -> Result<Client<B, W, S>, Error> {
+    ) -> Result<Client<B, W, S, K>, Error> {
         let mut n_retries = 0;
         while n_retries < max_retries {
             let res = timeout_op(self.timeout, self.network_client.connect())
@@ -419,18 +510,22 @@ where
     }
 }
 
-impl<B, W, S> Client<B, W, S>
+impl<B, W, S, K> Client<B, W, S, K>
 where
     B: Blockchain,
     W: BoardingWallet + OnchainWallet,
     S: SwapStorage + 'static,
+    K: KeyProvider,
 {
-    // At the moment we are always generating the same address.
+    /// Get a new offchain receiving address
+    ///
+    /// For HD wallets, this will derive a new address each time it's called.
+    /// For static key providers, this will always return the same address.
     pub fn get_offchain_address(&self) -> Result<(ArkAddress, Vtxo), Error> {
         let server_info = &self.server_info;
 
         let server_signer = server_info.signer_pk.into();
-        let owner = self.inner.kp.public_key().into();
+        let owner = self.next_keypair()?.public_key().into();
 
         let vtxo = Vtxo::new_default(
             self.secp(),
@@ -771,8 +866,11 @@ where
         self.inner.network_client.clone()
     }
 
-    fn kp(&self) -> &Keypair {
-        &self.inner.kp
+    fn next_keypair(&self) -> Result<Keypair, Error> {
+        self.inner.key_provider.get_next_keypair()
+    }
+    fn keypair_by_pk(&self, pk: &XOnlyPublicKey) -> Result<Keypair, Error> {
+        self.inner.key_provider.get_keypair_for_pk(pk)
     }
 
     fn secp(&self) -> &Secp256k1<All> {

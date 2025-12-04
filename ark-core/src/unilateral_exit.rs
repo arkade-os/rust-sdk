@@ -23,10 +23,11 @@ use bitcoin::XOnlyPublicKey;
 use bitcoin::absolute::LockTime;
 use bitcoin::hashes::Hash;
 use bitcoin::hex::DisplayHex;
-use bitcoin::key::Keypair;
 use bitcoin::key::Secp256k1;
 use bitcoin::opcodes::all::*;
+use bitcoin::psbt;
 use bitcoin::secp256k1;
+use bitcoin::secp256k1::schnorr;
 use bitcoin::sighash::Prevouts;
 use bitcoin::sighash::SighashCache;
 use bitcoin::transaction;
@@ -98,14 +99,20 @@ impl VtxoInput {
 ///
 /// To be able to spend a VTXO, the VTXO itself must be published on-chain, and then we must wait
 /// for the exit delay to pass.
-pub fn create_unilateral_exit_transaction(
-    kp: &Keypair,
+pub fn create_unilateral_exit_transaction<S>(
     to_address: Address,
     to_amount: Amount,
     change_address: Address,
     onchain_inputs: &[OnChainInput],
     vtxo_inputs: &[VtxoInput],
-) -> Result<Transaction, Error> {
+    sign_fn: S,
+) -> Result<Transaction, Error>
+where
+    S: Fn(
+        &mut psbt::Input,
+        secp256k1::Message,
+    ) -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, Error>,
+{
     if onchain_inputs.is_empty() && vtxo_inputs.is_empty() {
         return Err(Error::transaction(
             "cannot create transaction without inputs",
@@ -185,6 +192,7 @@ pub fn create_unilateral_exit_transaction(
             .expect("txout for input");
 
         input.witness_utxo = Some(txout);
+        input.witness_script = Some(todo!("we need to add spend scripts!"))
     }
 
     // Collect all `witness_utxo` entries.
@@ -223,18 +231,23 @@ pub fn create_unilateral_exit_transaction(
 
         let msg = secp256k1::Message::from_digest(tap_sighash.to_raw_hash().to_byte_array());
 
-        let sig = secp.sign_schnorr_no_aux_rand(&msg, kp);
-        let pk = kp.x_only_public_key().0;
+        let sigs = sign_fn(input, msg)?;
 
-        secp.verify_schnorr(&sig, &msg, &pk)
-            .map_err(Error::crypto)
-            .with_context(|| format!("failed to verify own signature for input {i}"))?;
+        let mut witness = Vec::new();
+        for (sig, pk) in sigs.iter() {
+            secp.verify_schnorr(sig, &msg, pk)
+                .map_err(Error::crypto)
+                .with_context(|| format!("failed to verify own signature for input {i}"))?;
 
-        let witness = Witness::from_slice(&[
-            &sig[..],
-            exit_script.as_bytes(),
-            &exit_control_block.serialize(),
-        ]);
+            witness.push(&sig[..]);
+        }
+
+        witness.push(exit_script.as_bytes());
+
+        let control_block = exit_control_block.serialize();
+        witness.push(control_block.as_slice());
+
+        let witness = Witness::from_slice(&witness);
 
         input.final_script_witness = Some(witness);
     }

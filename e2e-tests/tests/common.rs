@@ -7,6 +7,7 @@ use ark_client::ExplorerUtxo;
 use ark_client::InMemorySwapStorage;
 use ark_client::OfflineClient;
 use ark_client::SpendStatus;
+use ark_client::StaticKeyProvider;
 use ark_client::error::Error;
 use ark_client::wallet::Persistence;
 use ark_core::BoardingOutput;
@@ -353,7 +354,7 @@ pub async fn set_up_client(
     nigiri: Arc<Nigiri>,
     secp: Secp256k1<All>,
 ) -> (
-    Client<Nigiri, Wallet<InMemoryDb>, InMemorySwapStorage>,
+    Client<Nigiri, Wallet<InMemoryDb>, InMemorySwapStorage, StaticKeyProvider>,
     Arc<Wallet<InMemoryDb>>,
 ) {
     let mut rng = thread_rng();
@@ -365,7 +366,7 @@ pub async fn set_up_client(
     let wallet = Wallet::new(kp, secp, Network::Regtest, "http://localhost:3000", db).unwrap();
     let wallet = Arc::new(wallet);
 
-    let client = OfflineClient::new(
+    let client = OfflineClient::<_, _, _, StaticKeyProvider>::new_with_keypair(
         name,
         kp,
         nigiri,
@@ -384,7 +385,7 @@ pub async fn set_up_client(
 
 #[allow(unused)]
 pub async fn wait_until_balance(
-    client: &Client<Nigiri, Wallet<InMemoryDb>, InMemorySwapStorage>,
+    client: &Client<Nigiri, Wallet<InMemoryDb>, InMemorySwapStorage, StaticKeyProvider>,
     confirmed_target: Amount,
     pending_target: Amount,
 ) -> Result<(), String> {
