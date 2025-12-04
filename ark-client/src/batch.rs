@@ -46,11 +46,12 @@ use rand::CryptoRng;
 use rand::Rng;
 use std::collections::HashMap;
 
-impl<B, W, S> Client<B, W, S>
+impl<B, W, S, K> Client<B, W, S, K>
 where
     B: Blockchain,
     W: BoardingWallet + OnchainWallet,
     S: SwapStorage + 'static,
+    K: crate::KeyProvider,
 {
     /// Settle _all_ prior VTXOs and boarding outputs into the next batch, generating new confirmed
     /// VTXOs.
@@ -246,14 +247,28 @@ where
         intent_psbt: &mut Psbt,
         forfeit_psbts: &mut [Psbt],
     ) -> Result<(), Error> {
-        let sign_fn = |_: &mut psbt::Input,
-                       msg: secp256k1::Message|
-         -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
-            let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, self.kp());
-            let pk = self.kp().x_only_public_key().0;
-
-            Ok((sig, pk))
-        };
+        let sign_fn =
+            |input: &mut psbt::Input,
+             msg: secp256k1::Message|
+             -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
+                match &input.witness_script {
+                    None => Err(ark_core::Error::ad_hoc(
+                        "Missing witness script for psbt::Input",
+                    )),
+                    Some(script) => {
+                        let mut res = vec![];
+                        let pks = self.magic(script);
+                        for pk in pks {
+                            if let Ok(keypair) = self.keypair_by_pk(&pk) {
+                                let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &keypair);
+                                let pk = keypair.x_only_public_key().0;
+                                res.push((sig, pk));
+                            }
+                        }
+                        Ok(res)
+                    }
+                }
+            };
 
         batch::sign_delegate_psbts(sign_fn, intent_psbt, forfeit_psbts)?;
 
@@ -889,12 +904,25 @@ where
         let secp = Secp256k1::new();
 
         let sign_for_vtxo_fn =
-            |_: &mut psbt::Input,
+            |input: &mut psbt::Input,
              msg: secp256k1::Message|
-             -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
-                let sig = secp.sign_schnorr_no_aux_rand(&msg, self.kp());
-
-                Ok((sig, self.kp().public_key().into()))
+             -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
+                match &input.witness_script {
+                    None => Err(ark_core::Error::ad_hoc(
+                        "Missing witness script in psbt::Input",
+                    )),
+                    Some(script) => {
+                        let pks = self.magic(script);
+                        let mut res = vec![];
+                        for pk in pks {
+                            if let Ok(keypair) = self.keypair_by_pk(&pk) {
+                                let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
+                                res.push((sig, keypair.public_key().into()))
+                            }
+                        }
+                        Ok(res)
+                    }
+                }
             };
 
         let sign_for_onchain_fn =
@@ -1285,11 +1313,24 @@ where
                             tracing::debug!(batch_id = e.id, "Batch finalization started");
 
                             create_and_sign_forfeit_txs(
-                                |_, msg| {
-                                    let sig = self.secp().sign_schnorr_no_aux_rand(&msg, self.kp());
-                                    let pk = self.kp().x_only_public_key().0;
-
-                                    Ok((sig, pk))
+                                |input: &mut psbt::Input, msg: secp256k1::Message| match &input
+                                    .witness_script
+                                {
+                                    None => Err(ark_core::Error::ad_hoc(
+                                        "Missing witness script in psbt::Input",
+                                    )),
+                                    Some(script) => {
+                                        let pks = self.magic(script);
+                                        let mut res = vec![];
+                                        for pk in pks {
+                                            if let Ok(keypair) = self.keypair_by_pk(&pk) {
+                                                let sig =
+                                                    secp.sign_schnorr_no_aux_rand(&msg, &keypair);
+                                                res.push((sig, keypair.public_key().into()))
+                                            }
+                                        }
+                                        Ok(res)
+                                    }
                                 },
                                 vtxo_inputs.as_slice(),
                                 &connectors_graph.leaves(),

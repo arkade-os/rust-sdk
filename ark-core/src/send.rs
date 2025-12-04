@@ -231,8 +231,8 @@ pub fn build_offchain_transactions(
 
         let mut bytes = Vec::new();
 
-        let script = &vtxo_inputs[i].spend_script;
-        let scripts = [script.clone(), checkpoint_script.clone()];
+        let spend_script = &vtxo_inputs[i].spend_script;
+        let scripts = [spend_script.clone(), checkpoint_script.clone()];
 
         for script in scripts {
             // Write the depth (always 1). TODO: Support more depth.
@@ -256,6 +256,7 @@ pub fn build_offchain_transactions(
             },
             bytes,
         );
+        unsigned_ark_psbt.inputs[i].witness_script = Some(spend_script.clone());
     }
 
     Ok(OffchainTransactions {
@@ -377,6 +378,7 @@ fn build_checkpoint_psbt(
         },
         bytes,
     );
+    unsigned_checkpoint_psbt.inputs[0].witness_script = Some(vtxo_spend_script.clone());
 
     Ok((unsigned_checkpoint_psbt, checkpoint_spend_info))
 }
@@ -403,7 +405,7 @@ where
     S: FnOnce(
         &mut psbt::Input,
         secp256k1::Message,
-    ) -> Result<(schnorr::Signature, XOnlyPublicKey), Error>,
+    ) -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, Error>,
 {
     let witness_utxo = [psbt.inputs[0].witness_utxo.clone().expect("witness UTXO")];
     let prevouts = Prevouts::All(&witness_utxo);
@@ -422,14 +424,15 @@ where
 
     let msg = secp256k1::Message::from_digest(tap_sighash.to_raw_hash().to_byte_array());
 
-    let (sig, pk) = sign_fn(psbt_input, msg)?;
+    let sigs = sign_fn(psbt_input, msg)?;
+    for (sig, pk) in sigs {
+        let sig = taproot::Signature {
+            signature: sig,
+            sighash_type: TapSighashType::Default,
+        };
 
-    let sig = taproot::Signature {
-        signature: sig,
-        sighash_type: TapSighashType::Default,
-    };
-
-    psbt_input.tap_script_sigs.insert((pk, leaf_hash), sig);
+        psbt_input.tap_script_sigs.insert((pk, leaf_hash), sig);
+    }
 
     Ok(())
 }
@@ -439,7 +442,7 @@ where
     S: FnOnce(
         &mut psbt::Input,
         secp256k1::Message,
-    ) -> Result<(schnorr::Signature, XOnlyPublicKey), Error>,
+    ) -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, Error>,
 {
     tracing::debug!(index = input_index, "Signing Ark transaction input");
 
@@ -472,14 +475,15 @@ where
 
     let msg = secp256k1::Message::from_digest(tap_sighash.to_raw_hash().to_byte_array());
 
-    let (sig, pk) = sign_fn(psbt_input, msg)?;
+    let sigs = sign_fn(psbt_input, msg)?;
+    for (sig, pk) in sigs {
+        let sig = taproot::Signature {
+            signature: sig,
+            sighash_type: TapSighashType::Default,
+        };
 
-    let sig = taproot::Signature {
-        signature: sig,
-        sighash_type: TapSighashType::Default,
-    };
-
-    psbt_input.tap_script_sigs.insert((pk, leaf_hash), sig);
+        psbt_input.tap_script_sigs.insert((pk, leaf_hash), sig);
+    }
 
     Ok(())
 }

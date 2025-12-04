@@ -1,7 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
 use ark_bdk_wallet::Wallet;
-use ark_client::Blockchain;
 use ark_client::Client;
 use ark_client::ExplorerUtxo;
 use ark_client::InMemorySwapStorage;
@@ -9,6 +8,7 @@ use ark_client::OfflineClient;
 use ark_client::SpendStatus;
 use ark_client::error::Error;
 use ark_client::wallet::Persistence;
+use ark_client::{Blockchain, StaticKeyProvider};
 use ark_core::BoardingOutput;
 use bitcoin::Address;
 use bitcoin::Amount;
@@ -353,7 +353,7 @@ pub async fn set_up_client(
     nigiri: Arc<Nigiri>,
     secp: Secp256k1<All>,
 ) -> (
-    Client<Nigiri, Wallet<InMemoryDb>, InMemorySwapStorage>,
+    Client<Nigiri, Wallet<InMemoryDb>, InMemorySwapStorage, StaticKeyProvider>,
     Arc<Wallet<InMemoryDb>>,
 ) {
     let mut rng = thread_rng();
@@ -365,26 +365,27 @@ pub async fn set_up_client(
     let wallet = Wallet::new(kp, secp, Network::Regtest, "http://localhost:3000", db).unwrap();
     let wallet = Arc::new(wallet);
 
-    let client = OfflineClient::new(
-        name,
-        kp,
-        nigiri,
-        wallet.clone(),
-        "http://localhost:7070".to_string(),
-        Arc::new(InMemorySwapStorage::default()),
-        "http://localhost:9001".to_string(),
-        Duration::from_secs(30),
-    )
-    .connect_with_retries(5)
-    .await
-    .unwrap();
+    let client =
+        OfflineClient::<Nigiri, Wallet<InMemoryDb>, InMemorySwapStorage, StaticKeyProvider>::new_with_keypair(
+            name,
+            kp,
+            nigiri,
+            wallet.clone(),
+            "http://localhost:7070".to_string(),
+            Arc::new(InMemorySwapStorage::default()),
+            "http://localhost:9001".to_string(),
+            Duration::from_secs(30),
+        )
+        .connect_with_retries(5)
+        .await
+        .unwrap();
 
     (client, wallet)
 }
 
 #[allow(unused)]
 pub async fn wait_until_balance(
-    client: &Client<Nigiri, Wallet<InMemoryDb>, InMemorySwapStorage>,
+    client: &Client<Nigiri, Wallet<InMemoryDb>, InMemorySwapStorage, StaticKeyProvider>,
     confirmed_target: Amount,
     pending_target: Amount,
 ) -> Result<(), String> {

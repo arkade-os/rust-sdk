@@ -21,8 +21,8 @@ use std::collections::HashSet;
 /// https://github.com/bitcoindevkit/coin-select.
 ///
 /// TODO: Part of this logic needs to be extracted into `ark-core`.
-pub async fn coin_select_for_onchain<B, W, S>(
-    client: &Client<B, W, S>,
+pub async fn coin_select_for_onchain<B, W, S, K>(
+    client: &Client<B, W, S, K>,
     target_amount: Amount,
 ) -> Result<
     (
@@ -35,6 +35,7 @@ where
     B: Blockchain,
     W: BoardingWallet + OnchainWallet,
     S: SwapStorage + 'static,
+    K: crate::KeyProvider,
 {
     let boarding_outputs = client.inner.wallet.get_boarding_outputs()?;
 

@@ -15,20 +15,23 @@ use ark_core::unilateral_exit::create_unilateral_exit_transaction;
 use ark_core::unilateral_exit::sign_unilateral_exit_tree;
 use backon::ExponentialBuilder;
 use backon::Retryable;
+use bitcoin::key::Secp256k1;
 use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::Transaction;
 use bitcoin::TxOut;
 use bitcoin::Txid;
+use bitcoin::XOnlyPublicKey;
 use std::collections::HashSet;
 
 // TODO: We should not _need_ to connect to the Ark server to perform unilateral exit. Currently we
 // do talk to the Ark server for simplicity.
-impl<B, W, S> Client<B, W, S>
+impl<B, W, S, K> Client<B, W, S, K>
 where
     B: Blockchain,
     W: BoardingWallet + OnchainWallet,
     S: SwapStorage + 'static,
+    K: crate::KeyProvider,
 {
     /// Build the unilateral exit transaction tree for all spendable VTXOs.
     ///
@@ -255,13 +258,22 @@ where
 
         let change_address = self.inner.wallet.get_onchain_address()?;
 
+        let sign = move |kp: XOnlyPublicKey, msg: bitcoin::secp256k1::Message| {
+            let secp = Secp256k1::new();
+            let kp = self
+                .keypair_by_pk(&kp)
+                .map_err(|e| ark_core::Error::ad_hoc(format!("SK for pk not found {e:#}")))?;
+            let sig = secp.sign_schnorr_no_aux_rand(&msg, &kp);
+            let (pk, _) = kp.x_only_public_key();
+            Ok((sig, pk))
+        };
         let tx = create_unilateral_exit_transaction(
-            self.kp(),
             to_address,
             to_amount,
             change_address,
             &onchain_inputs,
             &vtxo_inputs,
+            sign,
         )
         .map_err(Error::from)?;
 

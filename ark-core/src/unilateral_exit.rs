@@ -23,10 +23,10 @@ use bitcoin::XOnlyPublicKey;
 use bitcoin::absolute::LockTime;
 use bitcoin::hashes::Hash;
 use bitcoin::hex::DisplayHex;
-use bitcoin::key::Keypair;
 use bitcoin::key::Secp256k1;
 use bitcoin::opcodes::all::*;
 use bitcoin::secp256k1;
+use bitcoin::secp256k1::schnorr;
 use bitcoin::sighash::Prevouts;
 use bitcoin::sighash::SighashCache;
 use bitcoin::transaction;
@@ -98,14 +98,20 @@ impl VtxoInput {
 ///
 /// To be able to spend a VTXO, the VTXO itself must be published on-chain, and then we must wait
 /// for the exit delay to pass.
-pub fn create_unilateral_exit_transaction(
-    kp: &Keypair,
+pub fn create_unilateral_exit_transaction<S>(
     to_address: Address,
     to_amount: Amount,
     change_address: Address,
     onchain_inputs: &[OnChainInput],
     vtxo_inputs: &[VtxoInput],
-) -> Result<Transaction, Error> {
+    sign_fn: S,
+) -> Result<Transaction, Error>
+where
+    S: Fn(
+        XOnlyPublicKey,
+        secp256k1::Message,
+    ) -> Result<(schnorr::Signature, XOnlyPublicKey), Error>,
+{
     if onchain_inputs.is_empty() && vtxo_inputs.is_empty() {
         return Err(Error::transaction(
             "cannot create transaction without inputs",
@@ -198,16 +204,25 @@ pub fn create_unilateral_exit_transaction(
     for (i, input) in psbt.inputs.iter_mut().enumerate() {
         let outpoint = psbt.unsigned_tx.input[i].previous_output;
 
-        let (exit_script, exit_control_block) = onchain_inputs
+        let (exit_script, pk) = onchain_inputs
             .iter()
-            .find_map(|b| (b.outpoint == outpoint).then(|| Ok(b.boarding_output.exit_spend_info())))
-            .or_else(|| {
-                vtxo_inputs
-                    .iter()
-                    .find_map(|v| (v.outpoint == outpoint).then(|| v.vtxo.exit_spend_info()))
+            .find_map(|b| {
+                (b.outpoint == outpoint).then(|| {
+                    (
+                        Ok(b.boarding_output.exit_spend_info()),
+                        b.boarding_output.owner_pk(),
+                    )
+                })
             })
-            .expect("spend info for input")
-            .context("failed to get exit script for input")?;
+            .or_else(|| {
+                vtxo_inputs.iter().find_map(|v| {
+                    (v.outpoint == outpoint).then(|| (v.vtxo.exit_spend_info(), v.vtxo.owner_pk()))
+                })
+            })
+            .expect("spend info for input");
+
+        let (exit_script, exit_control_block) =
+            exit_script.context("failed to get exit script for input")?;
 
         let leaf_version = exit_control_block.leaf_version;
         let leaf_hash = TapLeafHash::from_script(&exit_script, leaf_version);
@@ -223,8 +238,7 @@ pub fn create_unilateral_exit_transaction(
 
         let msg = secp256k1::Message::from_digest(tap_sighash.to_raw_hash().to_byte_array());
 
-        let sig = secp.sign_schnorr_no_aux_rand(&msg, kp);
-        let pk = kp.x_only_public_key().0;
+        let (sig, pk) = sign_fn(pk, msg)?;
 
         secp.verify_schnorr(&sig, &msg, &pk)
             .map_err(Error::crypto)

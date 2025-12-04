@@ -213,6 +213,7 @@ async fn main() -> Result<()> {
         dlc_vtxo.script_pubkey(),
         dlc_output.value,
         dlc_outpoint,
+        ,
     );
 
     // We build a refund transaction spending from the DLC VTXO.
@@ -239,6 +240,7 @@ async fn main() -> Result<()> {
         dlc_vtxo.script_pubkey(),
         dlc_output.value,
         dlc_outpoint,
+        ,
     );
 
     // We build CETs spending from the DLC VTXO.
@@ -674,6 +676,7 @@ async fn fund_vtxo(
         vtxo.script_pubkey(),
         virtual_tx_outpoint.amount,
         virtual_tx_outpoint.outpoint,
+        ,
     );
 
     Ok(vtxo_input)
@@ -1438,7 +1441,7 @@ async fn settle(
         let connectors_graph = TxGraph::new(connectors_graph_chunks)?;
 
         create_and_sign_forfeit_txs(
-            |_, msg| {
+            |_, msg, _| {
                 let sig = secp.sign_schnorr_no_aux_rand(&msg, &signing_kp);
                 let pk = signing_kp.x_only_public_key().0;
 

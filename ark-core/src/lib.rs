@@ -18,6 +18,7 @@ pub mod vtxo;
 
 mod ark_address;
 mod error;
+mod magic;
 mod tree_tx_output_script;
 mod tx_graph;
 
