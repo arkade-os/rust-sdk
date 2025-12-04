@@ -20,6 +20,7 @@ use ark_core::batch::generate_nonce_tree;
 use ark_core::batch::sign_batch_tree_tx;
 use ark_core::batch::sign_commitment_psbt;
 use ark_core::intent;
+use ark_core::script::extract_checksig_pubkeys;
 use ark_core::server::BatchTreeEventType;
 use ark_core::server::PartialSigTree;
 use ark_core::server::StreamEvent;
@@ -257,7 +258,7 @@ where
                     )),
                     Some(script) => {
                         let mut res = vec![];
-                        let pks = self.magic(script);
+                        let pks = extract_checksig_pubkeys(script);
                         for pk in pks {
                             if let Ok(keypair) = self.keypair_by_pk(&pk) {
                                 let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &keypair);
@@ -912,7 +913,7 @@ where
                         "Missing witness script in psbt::Input when signing intent",
                     )),
                     Some(script) => {
-                        let pks = self.magic(script);
+                        let pks = extract_checksig_pubkeys(script);
                         let mut res = vec![];
                         for pk in pks {
                             if let Ok(keypair) = self.keypair_by_pk(&pk) {
@@ -1320,7 +1321,7 @@ where
                                         "Missing witness script in psbt::Input when signing forfeit",
                                     )),
                                     Some(script) => {
-                                        let pks = self.magic(script);
+                                        let pks = extract_checksig_pubkeys(script);
                                         let mut res = vec![];
                                         for pk in pks {
                                             if let Ok(keypair) = self.keypair_by_pk(&pk) {

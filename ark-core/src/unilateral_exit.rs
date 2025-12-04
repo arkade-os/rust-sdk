@@ -25,6 +25,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::hex::DisplayHex;
 use bitcoin::key::Secp256k1;
 use bitcoin::opcodes::all::*;
+use bitcoin::psbt;
 use bitcoin::secp256k1;
 use bitcoin::secp256k1::schnorr;
 use bitcoin::sighash::Prevouts;
@@ -108,9 +109,9 @@ pub fn create_unilateral_exit_transaction<S>(
 ) -> Result<Transaction, Error>
 where
     S: Fn(
-        XOnlyPublicKey,
+        &mut psbt::Input,
         secp256k1::Message,
-    ) -> Result<(schnorr::Signature, XOnlyPublicKey), Error>,
+    ) -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, Error>,
 {
     if onchain_inputs.is_empty() && vtxo_inputs.is_empty() {
         return Err(Error::transaction(
@@ -191,6 +192,7 @@ where
             .expect("txout for input");
 
         input.witness_utxo = Some(txout);
+        input.witness_script = Some(todo!("we need to add spend scripts!"))
     }
 
     // Collect all `witness_utxo` entries.
@@ -204,25 +206,16 @@ where
     for (i, input) in psbt.inputs.iter_mut().enumerate() {
         let outpoint = psbt.unsigned_tx.input[i].previous_output;
 
-        let (exit_script, pk) = onchain_inputs
+        let (exit_script, exit_control_block) = onchain_inputs
             .iter()
-            .find_map(|b| {
-                (b.outpoint == outpoint).then(|| {
-                    (
-                        Ok(b.boarding_output.exit_spend_info()),
-                        b.boarding_output.owner_pk(),
-                    )
-                })
-            })
+            .find_map(|b| (b.outpoint == outpoint).then(|| Ok(b.boarding_output.exit_spend_info())))
             .or_else(|| {
-                vtxo_inputs.iter().find_map(|v| {
-                    (v.outpoint == outpoint).then(|| (v.vtxo.exit_spend_info(), v.vtxo.owner_pk()))
-                })
+                vtxo_inputs
+                    .iter()
+                    .find_map(|v| (v.outpoint == outpoint).then(|| v.vtxo.exit_spend_info()))
             })
-            .expect("spend info for input");
-
-        let (exit_script, exit_control_block) =
-            exit_script.context("failed to get exit script for input")?;
+            .expect("spend info for input")
+            .context("failed to get exit script for input")?;
 
         let leaf_version = exit_control_block.leaf_version;
         let leaf_hash = TapLeafHash::from_script(&exit_script, leaf_version);
@@ -238,17 +231,23 @@ where
 
         let msg = secp256k1::Message::from_digest(tap_sighash.to_raw_hash().to_byte_array());
 
-        let (sig, pk) = sign_fn(pk, msg)?;
+        let sigs = sign_fn(input, msg)?;
 
-        secp.verify_schnorr(&sig, &msg, &pk)
-            .map_err(Error::crypto)
-            .with_context(|| format!("failed to verify own signature for input {i}"))?;
+        let mut witness = Vec::new();
+        for (sig, pk) in sigs.iter() {
+            secp.verify_schnorr(sig, &msg, pk)
+                .map_err(Error::crypto)
+                .with_context(|| format!("failed to verify own signature for input {i}"))?;
 
-        let witness = Witness::from_slice(&[
-            &sig[..],
-            exit_script.as_bytes(),
-            &exit_control_block.serialize(),
-        ]);
+            witness.push(&sig[..]);
+        }
+
+        witness.push(exit_script.as_bytes());
+
+        let control_block = exit_control_block.serialize();
+        witness.push(control_block.as_slice());
+
+        let witness = Witness::from_slice(&witness);
 
         input.final_script_witness = Some(witness);
     }

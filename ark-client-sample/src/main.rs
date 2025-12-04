@@ -13,6 +13,7 @@ use ark_client::Blockchain;
 use ark_client::Error;
 use ark_client::OfflineClient;
 use ark_client::SqliteSwapStorage;
+use ark_client::StaticKeyProvider;
 use ark_client::SwapAmount;
 use ark_client::lightning_invoice::Bolt11Invoice;
 use ark_core::ArkAddress;
@@ -182,7 +183,7 @@ async fn main() -> Result<()> {
             .await
             .map_err(|e| anyhow!(e))?,
     );
-    let client = OfflineClient::new(
+    let client = OfflineClient::<_, _, _, StaticKeyProvider>::new_with_keypair(
         "sample-client".to_string(),
         kp,
         esplora_client.clone(),

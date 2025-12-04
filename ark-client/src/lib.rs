@@ -17,6 +17,7 @@ use ark_core::server::GetVtxosRequest;
 use ark_core::server::SubscriptionResponse;
 use ark_core::server::VirtualTxOutPoint;
 use ark_grpc::VtxoChainResponse;
+use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
 use bitcoin::Transaction;
@@ -25,7 +26,6 @@ use bitcoin::XOnlyPublicKey;
 use bitcoin::key::Keypair;
 use bitcoin::key::Secp256k1;
 use bitcoin::secp256k1::All;
-use bitcoin::{Address, ScriptBuf};
 use futures::Future;
 use futures::Stream;
 use jiff::Timestamp;
@@ -871,16 +871,6 @@ where
     }
     fn keypair_by_pk(&self, pk: &XOnlyPublicKey) -> Result<Keypair, Error> {
         self.inner.key_provider.get_keypair_for_pk(pk)
-    }
-
-    fn magic(&self, script: &ScriptBuf) -> Vec<XOnlyPublicKey> {
-        let key = self
-            .inner
-            .key_provider
-            .get_next_keypair()
-            .unwrap()
-            .public_key();
-        vec![key.x_only_public_key().0]
     }
 
     fn secp(&self) -> &Secp256k1<All> {

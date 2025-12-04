@@ -1,6 +1,7 @@
 use bitcoin::ScriptBuf;
 use bitcoin::XOnlyPublicKey;
 use bitcoin::opcodes::all::*;
+use bitcoin::script::Instruction;
 use bitcoin::taproot::TaprootSpendInfo;
 use std::fmt;
 
@@ -35,6 +36,40 @@ pub fn tr_script_pubkey(spend_info: &TaprootSpendInfo) -> ScriptBuf {
         .push_opcode(OP_PUSHNUM_1)
         .push_slice(output_key.serialize())
         .into_script()
+}
+
+/// Extracts all [`XOnlyPublicKey`]s from checksig patterns in the script.
+///
+/// Finds all 32-byte data pushes that are immediately followed by
+/// [`OP_CHECKSIG`] or [`OP_CHECKSIGVERIFY`] opcodes.
+///
+/// Returns an empty vector if no matching keys are found.
+pub fn extract_checksig_pubkeys(script: &ScriptBuf) -> Vec<XOnlyPublicKey> {
+    let instructions: Vec<_> = script.instructions().filter_map(|inst| inst.ok()).collect();
+
+    let mut pubkeys = Vec::new();
+
+    for window in instructions.windows(2) {
+        let (push, checksig) = (&window[0], &window[1]);
+
+        // Check if we have a 32-byte push followed by CHECKSIG or CHECKSIGVERIFY
+        if let Instruction::PushBytes(bytes) = push {
+            if bytes.len() != 32 {
+                continue;
+            }
+
+            let is_checksig = matches!(
+                checksig,
+                Instruction::Op(op) if *op == OP_CHECKSIG || *op == OP_CHECKSIGVERIFY
+            );
+
+            if is_checksig && let Ok(pk) = XOnlyPublicKey::from_slice(bytes.as_bytes()) {
+                pubkeys.push(pk);
+            }
+        }
+    }
+
+    pubkeys
 }
 
 pub fn extract_sequence_from_csv_sig_script(
@@ -110,5 +145,60 @@ mod tests {
             parsed,
             locktime::relative::LockTime::from_512_second_intervals(2).into()
         );
+    }
+
+    #[test]
+    fn test_extract_checksig_pubkeys_from_multisig() {
+        let pk_0 = XOnlyPublicKey::from_str(
+            "18845781f631c48f1c9709e23092067d06837f30aa0cd0544ac887fe91ddd166",
+        )
+        .unwrap();
+        let pk_1 = XOnlyPublicKey::from_str(
+            "28845781f631c48f1c9709e23092067d06837f30aa0cd0544ac887fe91ddd166",
+        )
+        .unwrap();
+
+        let script = multisig_script(pk_0, pk_1);
+        let pubkeys = extract_checksig_pubkeys(&script);
+
+        assert_eq!(pubkeys.len(), 2);
+        assert_eq!(pubkeys[0], pk_0);
+        assert_eq!(pubkeys[1], pk_1);
+    }
+
+    #[test]
+    fn test_extract_checksig_pubkeys_from_csv_sig() {
+        let pk = XOnlyPublicKey::from_str(
+            "18845781f631c48f1c9709e23092067d06837f30aa0cd0544ac887fe91ddd166",
+        )
+        .unwrap();
+        let sequence = bitcoin::Sequence::from_seconds_ceil(1024).unwrap();
+
+        let script = csv_sig_script(sequence, pk);
+        let pubkeys = extract_checksig_pubkeys(&script);
+
+        assert_eq!(pubkeys.len(), 1);
+        assert_eq!(pubkeys[0], pk);
+    }
+
+    #[test]
+    fn test_extract_checksig_pubkeys_empty_script() {
+        let script = ScriptBuf::new();
+        let pubkeys = extract_checksig_pubkeys(&script);
+
+        assert!(pubkeys.is_empty());
+    }
+
+    #[test]
+    fn test_extract_checksig_pubkeys_no_checksig() {
+        // Script with only OP_DROP and OP_RETURN, no checksig
+        let script = ScriptBuf::builder()
+            .push_opcode(OP_DROP)
+            .push_opcode(OP_RETURN)
+            .into_script();
+
+        let pubkeys = extract_checksig_pubkeys(&script);
+
+        assert!(pubkeys.is_empty());
     }
 }

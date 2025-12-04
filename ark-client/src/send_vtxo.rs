@@ -9,6 +9,7 @@ use crate::wallet::OnchainWallet;
 use ark_core::ArkAddress;
 use ark_core::ErrorContext as _;
 use ark_core::coin_select::select_vtxos;
+use ark_core::script::extract_checksig_pubkeys;
 use ark_core::send;
 use ark_core::send::OffchainTransactions;
 use ark_core::send::build_offchain_transactions;
@@ -101,7 +102,7 @@ where
 
         let OffchainTransactions {
             mut ark_tx,
-            mut checkpoint_txs,
+            checkpoint_txs,
         } = build_offchain_transactions(
             &[(&address, amount)],
             Some(&change_address),
@@ -124,7 +125,7 @@ where
                     )),
                     Some(script) => {
                         let mut res = vec![];
-                        let pks = self.magic(script);
+                        let pks = extract_checksig_pubkeys(script);
                         for pk in pks {
                             if let Ok(keypair) = self.keypair_by_pk(&pk) {
                                 let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &keypair);
@@ -162,7 +163,7 @@ where
                     )),
                     Some(script) => {
                         let mut res = vec![];
-                        let pks = self.magic(script);
+                        let pks = extract_checksig_pubkeys(script);
                         for pk in pks {
                             if let Ok(keypair) = self.keypair_by_pk(&pk) {
                                 let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &keypair);
