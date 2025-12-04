@@ -407,6 +407,7 @@ where
                 forfeit_control_block.clone(),
                 (forfeit_script.clone(), leaf_version),
             );
+        forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX].witness_script = Some(forfeit_script.clone());
 
         let prevouts = forfeit_psbt
             .inputs

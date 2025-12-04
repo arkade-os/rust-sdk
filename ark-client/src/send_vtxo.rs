@@ -142,14 +142,14 @@ where
 
         let ark_txid = ark_tx.unsigned_tx.compute_txid();
 
-        let res = self
+        let mut res = self
             .network_client()
             .submit_offchain_transaction_request(ark_tx, checkpoint_txs.clone())
             .await
             .map_err(Error::ark_server)
             .context("failed to submit offchain transaction request")?;
 
-        for (index, checkpoint_psbt) in checkpoint_txs.iter_mut().enumerate() {
+        for (index, checkpoint_psbt) in res.signed_checkpoint_txs.iter_mut().enumerate() {
             let sign_fn = |input: &mut psbt::Input,
                            msg: secp256k1::Message|
              -> Result<
@@ -174,10 +174,13 @@ where
                     }
                 }
             };
+
+            // TODO: Maybe it's better to add the signature from the server-signed checkpoint PSBT
+            // instead.
+            checkpoint_psbt.inputs[0].witness_script =
+                checkpoint_txs[index].inputs[0].witness_script.clone();
+
             sign_checkpoint_transaction(sign_fn, checkpoint_psbt)?;
-            checkpoint_psbt
-                .combine(res.signed_checkpoint_txs[index].clone())
-                .map_err(|e| Error::ad_hoc(format!("Failed combining psbts {e:#}")))?;
         }
 
         timeout_op(

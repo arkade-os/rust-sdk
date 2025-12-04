@@ -909,7 +909,7 @@ where
              -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
                 match &input.witness_script {
                     None => Err(ark_core::Error::ad_hoc(
-                        "Missing witness script in psbt::Input",
+                        "Missing witness script in psbt::Input when signing intent",
                     )),
                     Some(script) => {
                         let pks = self.magic(script);
@@ -1317,7 +1317,7 @@ where
                                     .witness_script
                                 {
                                     None => Err(ark_core::Error::ad_hoc(
-                                        "Missing witness script in psbt::Input",
+                                        "Missing witness script in psbt::Input when signing forfeit",
                                     )),
                                     Some(script) => {
                                         let pks = self.magic(script);
