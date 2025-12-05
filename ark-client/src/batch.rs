@@ -654,23 +654,27 @@ where
                             "received batch finalization event without connectors",
                         ))?;
 
-                        let connectors_graph = TxGraph::new(chunks).map_err(Error::from).context(
-                            "failed to build connectors graph before completing forfeit TXs",
-                        )?;
+                        if chunks.is_empty() {
+                            tracing::debug!(batch_id = e.id, "No delegated forfeit transactions");
+                        } else {
+                            let connectors_graph = TxGraph::new(chunks).map_err(Error::from).context(
+                                "failed to build connectors graph before completing forfeit TXs",
+                            )?;
 
-                        tracing::debug!(
-                            batch_id = e.id,
-                            "Completing delegated forfeit transactions"
-                        );
+                            tracing::debug!(
+                                batch_id = e.id,
+                                "Completing delegated forfeit transactions"
+                            );
 
-                        let signed_forfeit_psbts = complete_delegate_forfeit_txs(
-                            &delegate.forfeit_psbts,
-                            &connectors_graph.leaves(),
-                        )?;
+                            let signed_forfeit_psbts = complete_delegate_forfeit_txs(
+                                &delegate.forfeit_psbts,
+                                &connectors_graph.leaves(),
+                            )?;
 
-                        network_client
-                            .submit_signed_forfeit_txs(signed_forfeit_psbts, None)
-                            .await?;
+                            network_client
+                                .submit_signed_forfeit_txs(signed_forfeit_psbts, None)
+                                .await?;
+                        }
 
                         step = step.next();
                     }
@@ -1277,26 +1281,33 @@ where
                                     "received batch finalization event without connectors",
                                 ))?;
 
-                            let connectors_graph =
+                            if chunks.is_empty() {
+                                tracing::debug!(batch_id = e.id, "No forfeit transactions");
+
+                                Vec::new()
+                            } else {
+                                let connectors_graph =
                                 TxGraph::new(chunks).map_err(Error::from).context(
                                     "failed to build connectors graph before signing forfeit TXs",
                                 )?;
 
-                            tracing::debug!(batch_id = e.id, "Batch finalization started");
+                                tracing::debug!(batch_id = e.id, "Batch finalization started");
 
-                            create_and_sign_forfeit_txs(
-                                |_, msg| {
-                                    let sig = self.secp().sign_schnorr_no_aux_rand(&msg, self.kp());
-                                    let pk = self.kp().x_only_public_key().0;
+                                create_and_sign_forfeit_txs(
+                                    |_, msg| {
+                                        let sig =
+                                            self.secp().sign_schnorr_no_aux_rand(&msg, self.kp());
+                                        let pk = self.kp().x_only_public_key().0;
 
-                                    Ok((sig, pk))
-                                },
-                                vtxo_inputs.as_slice(),
-                                &connectors_graph.leaves(),
-                                &server_info.forfeit_address,
-                                server_info.dust,
-                            )
-                            .map_err(Error::from)?
+                                        Ok((sig, pk))
+                                    },
+                                    vtxo_inputs.as_slice(),
+                                    &connectors_graph.leaves(),
+                                    &server_info.forfeit_address,
+                                    server_info.dust,
+                                )
+                                .map_err(Error::from)?
+                            }
                         } else {
                             Vec::new()
                         };
