@@ -423,6 +423,50 @@ pub async fn wait_until_balance(
     Ok(())
 }
 
+/// Set up a client with a specific seed for reproducible key derivation.
+///
+/// This is useful for testing key discovery, where we need to recreate a client
+/// with the same keys.
+pub async fn set_up_client_with_seed(
+    name: String,
+    nigiri: Arc<Nigiri>,
+    secp: Secp256k1<All>,
+    seed: [u8; 32],
+) -> (
+    Client<Nigiri, Wallet<InMemoryDb>, InMemorySwapStorage, Bip32KeyProvider>,
+    Arc<Wallet<InMemoryDb>>,
+) {
+    let mut rng = thread_rng();
+
+    let sk = SecretKey::new(&mut rng);
+    let kp = Keypair::from_secret_key(&secp, &sk);
+
+    let network = Network::Regtest;
+
+    let db = InMemoryDb::default();
+    let wallet = Wallet::new(kp, secp, network, "http://localhost:3000", db).unwrap();
+    let wallet = Arc::new(wallet);
+
+    let xpriv = Xpriv::new_master(network, &seed).unwrap();
+
+    let client = OfflineClient::<_, _, _, Bip32KeyProvider>::new_with_bip32(
+        name,
+        xpriv,
+        None,
+        nigiri,
+        wallet.clone(),
+        "http://localhost:7070".to_string(),
+        Arc::new(InMemorySwapStorage::default()),
+        "http://localhost:9001".to_string(),
+        Duration::from_secs(30),
+    )
+    .connect_with_retries(5)
+    .await
+    .unwrap();
+
+    (client, wallet)
+}
+
 pub fn init_tracing() {
     static TRACING_TEST_SUBSCRIBER: Once = Once::new();
 

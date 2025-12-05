@@ -61,6 +61,41 @@ pub trait KeyProvider: Send + Sync {
     ///
     /// A vector of X-only public keys known to this provider
     fn get_cached_pks(&self) -> Result<Vec<bitcoin::XOnlyPublicKey>, Error>;
+
+    /// Returns true if this provider supports key discovery
+    ///
+    /// HD wallets return true since they can derive and discover previously used keys.
+    /// Static key providers return false (single key, nothing to discover).
+    fn supports_discovery(&self) -> bool {
+        false
+    }
+
+    /// Derive a keypair at a specific index without caching
+    ///
+    /// This is used during discovery to check keys without affecting the provider's state.
+    /// Returns `None` if the provider doesn't support index-based derivation.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - The derivation index (appended to base path for HD wallets)
+    fn derive_at_discovery_index(&self, _index: u32) -> Result<Option<Keypair>, Error> {
+        Ok(None)
+    }
+
+    /// Cache a discovered keypair at the given index
+    ///
+    /// This is called after discovery determines a key is "used" (has VTXOs).
+    /// Also updates next_index if index >= current next_index to avoid collisions.
+    ///
+    /// No-op for providers that don't support discovery.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - The derivation index
+    /// * `kp` - The keypair to cache
+    fn cache_discovered_keypair(&self, _index: u32, _kp: Keypair) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 /// A simple key provider that uses a static keypair
@@ -304,6 +339,42 @@ impl KeyProvider for Bip32KeyProvider {
 
         Ok(cache.keys().copied().collect())
     }
+
+    fn supports_discovery(&self) -> bool {
+        true
+    }
+
+    fn derive_at_discovery_index(&self, index: u32) -> Result<Option<Keypair>, Error> {
+        self.derive_at_index(index).map(Some)
+    }
+
+    fn cache_discovered_keypair(&self, index: u32, kp: Keypair) -> Result<(), Error> {
+        let pk = kp.x_only_public_key().0;
+
+        // Add to cache
+        {
+            let mut cache = self
+                .key_cache
+                .write()
+                .map_err(|e| Error::ad_hoc(format!("Failed to lock key_cache: {e}")))?;
+            cache.insert(pk, (index, kp));
+        }
+
+        // Update next_index if needed (set to index + 1 if >= current)
+        {
+            let mut next = self
+                .next_index
+                .lock()
+                .map_err(|e| Error::ad_hoc(format!("Failed to lock next_index: {e}")))?;
+            if index >= *next {
+                *next = index
+                    .checked_add(1)
+                    .ok_or_else(|| Error::ad_hoc("Key derivation index overflow"))?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 // Implement KeyProvider for Arc<T> where T: KeyProvider
@@ -322,5 +393,17 @@ impl<T: KeyProvider> KeyProvider for Arc<T> {
 
     fn get_cached_pks(&self) -> Result<Vec<bitcoin::XOnlyPublicKey>, Error> {
         (**self).get_cached_pks()
+    }
+
+    fn supports_discovery(&self) -> bool {
+        (**self).supports_discovery()
+    }
+
+    fn derive_at_discovery_index(&self, index: u32) -> Result<Option<Keypair>, Error> {
+        (**self).derive_at_discovery_index(index)
+    }
+
+    fn cache_discovered_keypair(&self, index: u32, kp: Keypair) -> Result<(), Error> {
+        (**self).cache_discovered_keypair(index, kp)
     }
 }
