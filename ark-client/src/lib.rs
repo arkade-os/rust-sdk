@@ -4,6 +4,7 @@ use crate::utils::timeout_op;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use ark_core::ArkAddress;
+use ark_core::DEFAULT_DERIVATION_PATH;
 use ark_core::UtxoCoinSelection;
 use ark_core::Vtxo;
 use ark_core::build_anchor_tx;
@@ -23,12 +24,15 @@ use bitcoin::OutPoint;
 use bitcoin::Transaction;
 use bitcoin::Txid;
 use bitcoin::XOnlyPublicKey;
+use bitcoin::bip32::DerivationPath;
+use bitcoin::bip32::Xpriv;
 use bitcoin::key::Keypair;
 use bitcoin::key::Secp256k1;
 use bitcoin::secp256k1::All;
 use futures::Future;
 use futures::Stream;
 use jiff::Timestamp;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -437,6 +441,47 @@ where
         )
     }
 
+    /// Create a new offline client with an [`Xpriv`]
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Client identifier
+    /// * `xpriv` - BIP32 Xpriv
+    /// * `blockchain` - Blockchain interface implementation
+    /// * `wallet` - Wallet implementation
+    /// * `ark_server_url` - URL of the Ark server
+    /// * `swap_storage` - Storage implementation for swap data
+    /// * `boltz_url` - URL of the Boltz server
+    /// * `timeout` - Timeout duration for network operations
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_bip32(
+        name: String,
+        xpriv: Xpriv,
+        path: Option<DerivationPath>,
+        blockchain: Arc<B>,
+        wallet: Arc<W>,
+        ark_server_url: String,
+        swap_storage: Arc<S>,
+        boltz_url: String,
+        timeout: Duration,
+    ) -> OfflineClient<B, W, S, Bip32KeyProvider> {
+        let path = path.unwrap_or(
+            DerivationPath::from_str(DEFAULT_DERIVATION_PATH).expect("valid derivation path"),
+        );
+        let key_provider = Arc::new(Bip32KeyProvider::new(xpriv, path));
+
+        OfflineClient::new(
+            name,
+            key_provider,
+            blockchain,
+            wallet,
+            ark_server_url,
+            swap_storage,
+            boltz_url,
+            timeout,
+        )
+    }
+
     /// Connects to the Ark server and retrieves server information.
     ///
     /// # Errors
@@ -541,9 +586,26 @@ where
     }
 
     pub fn get_offchain_addresses(&self) -> Result<Vec<(ArkAddress, Vtxo)>, Error> {
-        let address = self.get_offchain_address()?;
+        let server_info = &self.server_info;
+        let server_signer = server_info.signer_pk.into();
 
-        Ok(vec![address])
+        let pks = self.inner.key_provider.get_cached_pks()?;
+
+        pks.into_iter()
+            .map(|owner_pk| {
+                let vtxo = Vtxo::new_default(
+                    self.secp(),
+                    server_signer,
+                    owner_pk,
+                    server_info.unilateral_exit_delay,
+                    server_info.network,
+                )?;
+
+                let ark_address = vtxo.to_ark_address();
+
+                Ok((ark_address, vtxo))
+            })
+            .collect::<Result<Vec<_>, _>>()
     }
 
     // At the moment we are always generating the same address.

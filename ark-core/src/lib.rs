@@ -55,6 +55,8 @@ pub const VTXO_TREE_EXPIRY_PSBT_KEY: [u8; 6] = [101, 120, 112, 105, 114, 121];
 /// The byte value corresponds to the string "cosigner".
 pub const VTXO_COSIGNER_PSBT_KEY: [u8; 8] = [99, 111, 115, 105, 103, 110, 101, 114];
 
+pub const DEFAULT_DERIVATION_PATH: &str = "m/83696968'/11811'/0";
+
 const ANCHOR_SCRIPT_PUBKEY: [u8; 4] = [0x51, 0x02, 0x4e, 0x73];
 
 /// Information a UTXO that may be extracted from an on-chain explorer.

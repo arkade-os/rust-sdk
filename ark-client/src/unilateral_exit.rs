@@ -21,7 +21,6 @@ use bitcoin::Amount;
 use bitcoin::Transaction;
 use bitcoin::TxOut;
 use bitcoin::Txid;
-use bitcoin::XOnlyPublicKey;
 use bitcoin::key::Secp256k1;
 use bitcoin::psbt;
 use std::collections::HashSet;

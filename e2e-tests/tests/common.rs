@@ -1,13 +1,13 @@
 #![allow(clippy::unwrap_used)]
 
 use ark_bdk_wallet::Wallet;
+use ark_client::Bip32KeyProvider;
 use ark_client::Blockchain;
 use ark_client::Client;
 use ark_client::ExplorerUtxo;
 use ark_client::InMemorySwapStorage;
 use ark_client::OfflineClient;
 use ark_client::SpendStatus;
-use ark_client::StaticKeyProvider;
 use ark_client::error::Error;
 use ark_client::wallet::Persistence;
 use ark_core::BoardingOutput;
@@ -18,11 +18,13 @@ use bitcoin::OutPoint;
 use bitcoin::Transaction;
 use bitcoin::Txid;
 use bitcoin::XOnlyPublicKey;
+use bitcoin::bip32::Xpriv;
 use bitcoin::hex::FromHex;
 use bitcoin::key::Keypair;
 use bitcoin::key::Secp256k1;
 use bitcoin::secp256k1::All;
 use bitcoin::secp256k1::SecretKey;
+use rand::Rng;
 use rand::thread_rng;
 use regex::Regex;
 use std::collections::HashMap;
@@ -354,7 +356,7 @@ pub async fn set_up_client(
     nigiri: Arc<Nigiri>,
     secp: Secp256k1<All>,
 ) -> (
-    Client<Nigiri, Wallet<InMemoryDb>, InMemorySwapStorage, StaticKeyProvider>,
+    Client<Nigiri, Wallet<InMemoryDb>, InMemorySwapStorage, Bip32KeyProvider>,
     Arc<Wallet<InMemoryDb>>,
 ) {
     let mut rng = thread_rng();
@@ -362,13 +364,19 @@ pub async fn set_up_client(
     let sk = SecretKey::new(&mut rng);
     let kp = Keypair::from_secret_key(&secp, &sk);
 
+    let network = Network::Regtest;
+
     let db = InMemoryDb::default();
-    let wallet = Wallet::new(kp, secp, Network::Regtest, "http://localhost:3000", db).unwrap();
+    let wallet = Wallet::new(kp, secp, network, "http://localhost:3000", db).unwrap();
     let wallet = Arc::new(wallet);
 
-    let client = OfflineClient::<_, _, _, StaticKeyProvider>::new_with_keypair(
+    let seed: [u8; 32] = rng.r#gen();
+    let xpriv = Xpriv::new_master(network, &seed).unwrap();
+
+    let client = OfflineClient::<_, _, _, Bip32KeyProvider>::new_with_bip32(
         name,
-        kp,
+        xpriv,
+        None,
         nigiri,
         wallet.clone(),
         "http://localhost:7070".to_string(),
@@ -385,7 +393,7 @@ pub async fn set_up_client(
 
 #[allow(unused)]
 pub async fn wait_until_balance(
-    client: &Client<Nigiri, Wallet<InMemoryDb>, InMemorySwapStorage, StaticKeyProvider>,
+    client: &Client<Nigiri, Wallet<InMemoryDb>, InMemorySwapStorage, Bip32KeyProvider>,
     confirmed_target: Amount,
     pending_target: Amount,
 ) -> Result<(), String> {
