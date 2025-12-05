@@ -47,6 +47,20 @@ pub trait KeyProvider: Send + Sync {
     ///
     /// The keypair corresponding to the public key, or an error if not found
     fn get_keypair_for_pk(&self, pk: &bitcoin::XOnlyPublicKey) -> Result<Keypair, Error>;
+
+    /// Get all public keys that this provider currently knows about
+    ///
+    /// For static key providers, this returns the single keypair's public key.
+    /// For HD wallets, this returns all public keys that have been derived and cached
+    /// (i.e., keys generated via `get_next_keypair`).
+    ///
+    /// This is useful for determining which keys are available for signing operations
+    /// without having to search or derive new keys.
+    ///
+    /// # Returns
+    ///
+    /// A vector of X-only public keys known to this provider
+    fn get_cached_pks(&self) -> Result<Vec<bitcoin::XOnlyPublicKey>, Error>;
 }
 
 /// A simple key provider that uses a static keypair
@@ -86,6 +100,10 @@ impl KeyProvider for StaticKeyProvider {
                 "Public key mismatch: requested {pk}, but only have {our_pk}"
             )))
         }
+    }
+
+    fn get_cached_pks(&self) -> Result<Vec<bitcoin::XOnlyPublicKey>, Error> {
+        Ok(vec![self.kp.public_key().into()])
     }
 }
 
@@ -127,7 +145,7 @@ pub struct Bip32KeyProvider {
     next_index: Arc<std::sync::Mutex<u32>>,
     // Cache of derived keys: pk -> (path_index, keypair)
     key_cache:
-        Arc<std::sync::Mutex<std::collections::HashMap<bitcoin::XOnlyPublicKey, (u32, Keypair)>>>,
+        Arc<std::sync::RwLock<std::collections::HashMap<bitcoin::XOnlyPublicKey, (u32, Keypair)>>>,
 }
 
 impl Bip32KeyProvider {
@@ -143,7 +161,7 @@ impl Bip32KeyProvider {
             master_key,
             base_path,
             next_index: Arc::new(std::sync::Mutex::new(0)),
-            key_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            key_cache: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         }
     }
 
@@ -159,7 +177,7 @@ impl Bip32KeyProvider {
             master_key,
             base_path,
             next_index: Arc::new(std::sync::Mutex::new(start_index)),
-            key_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            key_cache: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         }
     }
 
@@ -208,7 +226,7 @@ impl KeyProvider for Bip32KeyProvider {
         {
             let mut cache = self
                 .key_cache
-                .lock()
+                .write()
                 .map_err(|e| Error::ad_hoc(format!("Failed to lock key_cache: {e}")))?;
             cache.insert(pk, (index, kp));
         }
@@ -239,7 +257,7 @@ impl KeyProvider for Bip32KeyProvider {
         {
             let cache = self
                 .key_cache
-                .lock()
+                .read()
                 .map_err(|e| Error::ad_hoc(format!("Failed to lock key_cache: {e}")))?;
             if let Some((_, kp)) = cache.get(pk) {
                 return Ok(*kp);
@@ -264,7 +282,7 @@ impl KeyProvider for Bip32KeyProvider {
                 // Cache it for next time
                 let mut cache = self
                     .key_cache
-                    .lock()
+                    .write()
                     .map_err(|e| Error::ad_hoc(format!("Failed to lock key_cache: {e}")))?;
                 cache.insert(derived_pk, (i, kp));
                 return Ok(kp);
@@ -276,6 +294,15 @@ impl KeyProvider for Bip32KeyProvider {
             Searched indices 0..{current_index}. \
             The key may have been generated outside this provider."
         )))
+    }
+
+    fn get_cached_pks(&self) -> Result<Vec<bitcoin::XOnlyPublicKey>, Error> {
+        let cache = self
+            .key_cache
+            .read()
+            .map_err(|e| Error::ad_hoc(format!("Failed to lock key_cache: {e}")))?;
+
+        Ok(cache.keys().copied().collect())
     }
 }
 
@@ -291,5 +318,9 @@ impl<T: KeyProvider> KeyProvider for Arc<T> {
 
     fn get_keypair_for_pk(&self, pk: &bitcoin::XOnlyPublicKey) -> Result<Keypair, Error> {
         (**self).get_keypair_for_pk(pk)
+    }
+
+    fn get_cached_pks(&self) -> Result<Vec<bitcoin::XOnlyPublicKey>, Error> {
+        (**self).get_cached_pks()
     }
 }
