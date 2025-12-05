@@ -32,6 +32,7 @@ use bitcoin::secp256k1::All;
 use futures::Future;
 use futures::Stream;
 use jiff::Timestamp;
+use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -60,6 +61,12 @@ pub use lightning_invoice;
 pub use swap_storage::InMemorySwapStorage;
 pub use swap_storage::SqliteSwapStorage;
 pub use swap_storage::SwapStorage;
+
+/// Default gap limit for BIP44-style key discovery
+///
+/// This is the number of consecutive unused addresses to scan before
+/// assuming all used addresses have been found.
+pub const DEFAULT_GAP_LIMIT: u32 = 20;
 
 /// A client to interact with Ark Server
 ///
@@ -358,7 +365,7 @@ impl<B, W, S, K> OfflineClient<B, W, S, K>
 where
     B: Blockchain,
     W: BoardingWallet + OnchainWallet,
-    S: SwapStorage,
+    S: SwapStorage + 'static,
     K: KeyProvider,
 {
     /// Create a new offline client with a generic key provider
@@ -548,10 +555,16 @@ where
             "Connected to Ark server"
         );
 
-        Ok(Client {
+        let client = Client {
             inner: self,
             server_info,
-        })
+        };
+
+        if let Err(error) = client.discover_keys(DEFAULT_GAP_LIMIT).await {
+            tracing::warn!(?error, "Failed during key discovery");
+        };
+
+        Ok(client)
     }
 }
 
@@ -606,6 +619,106 @@ where
                 Ok((ark_address, vtxo))
             })
             .collect::<Result<Vec<_>, _>>()
+    }
+
+    /// Discover and cache used keys using BIP44-style gap limit
+    ///
+    /// This method derives keys in batches, checks all at once via list_vtxos,
+    /// caches used ones, and stops when a full batch has no used keys.
+    ///
+    /// Returns the number of discovered keys. No-op for StaticKeyProvider.
+    ///
+    /// # Arguments
+    ///
+    /// * `gap_limit` - Number of consecutive unused addresses before stopping
+    pub async fn discover_keys(&self, gap_limit: u32) -> Result<u32, Error> {
+        if !self.inner.key_provider.supports_discovery() {
+            tracing::debug!("Key provider does not support discovery, skipping");
+            return Ok(0);
+        }
+
+        let server_info = &self.server_info;
+        let server_signer: XOnlyPublicKey = server_info.signer_pk.into();
+
+        let mut start_index = 0u32;
+        let mut discovered_count = 0u32;
+
+        tracing::info!(gap_limit, "Starting key discovery");
+
+        loop {
+            // Generate a batch of gap_limit keys
+            let mut batch: Vec<(u32, Keypair, ArkAddress)> = Vec::with_capacity(gap_limit as usize);
+
+            for i in 0..gap_limit {
+                let index = start_index
+                    .checked_add(i)
+                    .ok_or_else(|| Error::ad_hoc("Key discovery index overflow"))?;
+
+                let kp = match self.inner.key_provider.derive_at_discovery_index(index)? {
+                    Some(kp) => kp,
+                    None => break,
+                };
+
+                let vtxo = Vtxo::new_default(
+                    self.secp(),
+                    server_signer,
+                    kp.x_only_public_key().0,
+                    server_info.unilateral_exit_delay,
+                    server_info.network,
+                )?;
+
+                batch.push((index, kp, vtxo.to_ark_address()));
+            }
+
+            if batch.is_empty() {
+                break;
+            }
+
+            // Query all addresses in batch at once
+            let addresses: Vec<_> = batch.iter().map(|(_, _, addr)| addr.clone()).collect();
+            let request = GetVtxosRequest::new_for_addresses(&addresses);
+            let list = timeout_op(
+                self.inner.timeout,
+                self.network_client().list_vtxos(request),
+            )
+            .await
+            .context("Failed to check addresses for VTXOs")??;
+
+            // Build set of used scripts from response
+            let used_scripts: HashSet<_> = list
+                .spendable()
+                .iter()
+                .chain(list.spent().iter())
+                .map(|vtxo| vtxo.script.clone())
+                .collect();
+
+            // Cache keypairs for used addresses (match by script)
+            let mut found_any = false;
+            for (index, kp, addr) in batch {
+                let script = addr.to_p2tr_script_pubkey();
+                if used_scripts.contains(&script) {
+                    tracing::debug!(index, %addr, "Found used address");
+                    self.inner
+                        .key_provider
+                        .cache_discovered_keypair(index, kp)?;
+                    discovered_count += 1;
+                    found_any = true;
+                }
+            }
+
+            // Stop if no used addresses found in this batch (gap limit reached)
+            if !found_any {
+                break;
+            }
+
+            start_index = start_index
+                .checked_add(gap_limit)
+                .ok_or_else(|| Error::ad_hoc("Key discovery index overflow"))?;
+        }
+
+        tracing::info!(discovered_count, "Key discovery completed");
+
+        Ok(discovered_count)
     }
 
     // At the moment we are always generating the same address.
