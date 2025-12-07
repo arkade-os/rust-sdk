@@ -796,6 +796,14 @@ where
                     .spendable
                     .push((list.spendable_without_recoverable().to_vec(), vtxo.clone()));
             }
+
+            // update keypair cache for used keys if we have any vtxo
+            if !list.all().is_empty() {
+                let used_pk = vtxo.owner_pk();
+                if let Err(err) = self.inner.key_provider.mark_as_used(&used_pk) {
+                    tracing::warn!("Failed updating keypair cache for used keypair: {:?} ", err);
+                }
+            }
         }
 
         Ok(vtxos)

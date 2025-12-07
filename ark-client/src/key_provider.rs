@@ -109,6 +109,10 @@ pub trait KeyProvider: Send + Sync {
     fn cache_discovered_keypair(&self, _index: u32, _kp: Keypair) -> Result<(), Error> {
         Ok(())
     }
+
+    fn mark_as_used(&self, _pk: &bitcoin::XOnlyPublicKey) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 /// A simple key provider that uses a static keypair
@@ -195,8 +199,9 @@ pub struct Bip32KeyProvider {
     next_index: Arc<std::sync::Mutex<u32>>,
     // Cache of derived keys: pk -> (path_index, keypair, used)
     // The `used` flag indicates whether this keypair has been used (has VTXOs)
-    key_cache:
-        Arc<std::sync::RwLock<std::collections::HashMap<bitcoin::XOnlyPublicKey, (u32, Keypair, bool)>>>,
+    key_cache: Arc<
+        std::sync::RwLock<std::collections::HashMap<bitcoin::XOnlyPublicKey, (u32, Keypair, bool)>>,
+    >,
 }
 
 impl Bip32KeyProvider {
@@ -417,6 +422,68 @@ impl KeyProvider for Bip32KeyProvider {
 
         Ok(())
     }
+
+    fn mark_as_used(&self, pk: &bitcoin::XOnlyPublicKey) -> Result<(), Error> {
+        // First check the cache
+        {
+            let maybe_kp = {
+                let mut cache = self
+                    .key_cache
+                    .read()
+                    .map_err(|e| Error::ad_hoc(format!("Failed to lock key_cache: {e}")))?;
+                cache.get(pk).cloned()
+            };
+
+            match maybe_kp {
+                Some((index, kp, false)) => {
+                    let mut cache = self
+                        .key_cache
+                        .write()
+                        .map_err(|e| Error::ad_hoc(format!("Failed to lock key_cache: {e}")))?;
+                    cache.insert(pk.clone(), (index, kp, true));
+                    return Ok(());
+                }
+                Some((_, _, true)) => {
+                    // already marked as used
+                    return Ok(());
+                }
+                _ => {
+                    // no found
+                }
+            }
+        }
+
+        // If not in cache, we need to search. For now, we'll search up to the current index
+        let current_index = {
+            let next_index = self
+                .next_index
+                .lock()
+                .map_err(|e| Error::ad_hoc(format!("Failed to lock next_index: {e}")))?;
+            *next_index
+        };
+
+        // Search through derived keys up to current index
+        for i in 0..current_index {
+            let kp = self.derive_at_index(i)?;
+            let derived_pk = kp.x_only_public_key().0;
+
+            if &derived_pk == pk {
+                // Cache it for next time (assume used since we're looking it up for signing)
+                let mut cache = self
+                    .key_cache
+                    .write()
+                    .map_err(|e| Error::ad_hoc(format!("Failed to lock key_cache: {e}")))?;
+                cache.insert(derived_pk, (i, kp, true));
+                return Ok(());
+            }
+        }
+
+        Err(Error::ad_hoc(format!(
+            "Public key {pk} not found in HD wallet. \
+            Searched indices 0..{current_index}. \
+            The key may have been generated outside this provider."
+        )))
+    }
 }
 
 // Implement KeyProvider for Arc<T> where T: KeyProvider
@@ -447,5 +514,9 @@ impl<T: KeyProvider> KeyProvider for Arc<T> {
 
     fn cache_discovered_keypair(&self, index: u32, kp: Keypair) -> Result<(), Error> {
         (**self).cache_discovered_keypair(index, kp)
+    }
+
+    fn mark_as_used(&self, pk: &bitcoin::XOnlyPublicKey) -> Result<(), Error> {
+        (**self).mark_as_used(pk)
     }
 }
