@@ -93,7 +93,9 @@ where
         &self,
         invoice: Bolt11Invoice,
     ) -> Result<SubmarineSwapData, Error> {
-        let refund_public_key = self.next_keypair()?.public_key();
+        let refund_public_key = self
+            .next_keypair(crate::key_provider::KeypairIndex::New)?
+            .public_key();
 
         let preimage_hash = invoice.payment_hash();
         let preimage_hash = ripemd160::Hash::hash(preimage_hash.as_byte_array());
@@ -180,7 +182,7 @@ where
         &self,
         invoice: Bolt11Invoice,
     ) -> Result<SubmarineSwapResult, Error> {
-        let keypair = self.next_keypair()?;
+        let keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
         let refund_public_key = keypair.public_key();
 
         let preimage_hash = invoice.payment_hash();
@@ -663,7 +665,9 @@ where
         let preimage_hash_sha256 = sha256::Hash::hash(&preimage);
         let preimage_hash = ripemd160::Hash::hash(preimage_hash_sha256.as_byte_array());
 
-        let claim_public_key = self.next_keypair()?.public_key();
+        let claim_public_key = self
+            .next_keypair(crate::key_provider::KeypairIndex::New)?
+            .public_key();
 
         let (invoice_amount, onchain_amount) = match amount {
             SwapAmount::Invoice(amount) => (Some(amount), None),
@@ -770,7 +774,7 @@ where
     ) -> Result<ReverseSwapResult, Error> {
         let preimage_hash = ripemd160::Hash::hash(preimage_hash_sha256.as_byte_array());
 
-        let keypair = self.next_keypair()?;
+        let keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
         let claim_public_key = keypair.public_key();
 
         let (invoice_amount, onchain_amount) = match amount {

@@ -49,6 +49,7 @@ mod send_vtxo;
 mod unilateral_exit;
 mod utils;
 
+use crate::key_provider::KeypairIndex;
 pub use boltz::ReverseSwapData;
 pub use boltz::SubmarineSwapData;
 pub use boltz::SwapAmount;
@@ -583,7 +584,10 @@ where
         let server_info = &self.server_info;
 
         let server_signer = server_info.signer_pk.into();
-        let owner = self.next_keypair()?.public_key().into();
+        let owner = self
+            .next_keypair(KeypairIndex::LastUnused)?
+            .public_key()
+            .into();
 
         let vtxo = Vtxo::new_default(
             self.secp(),
@@ -1041,8 +1045,8 @@ where
         self.inner.network_client.clone()
     }
 
-    fn next_keypair(&self) -> Result<Keypair, Error> {
-        self.inner.key_provider.get_next_keypair()
+    fn next_keypair(&self, keypair_index: KeypairIndex) -> Result<Keypair, Error> {
+        self.inner.key_provider.get_next_keypair(keypair_index)
     }
     fn keypair_by_pk(&self, pk: &XOnlyPublicKey) -> Result<Keypair, Error> {
         self.inner.key_provider.get_keypair_for_pk(pk)

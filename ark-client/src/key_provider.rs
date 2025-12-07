@@ -5,6 +5,13 @@ use bitcoin::key::Keypair;
 use bitcoin::secp256k1::Secp256k1;
 use std::sync::Arc;
 
+pub enum KeypairIndex {
+    /// Increments the index and returns a new keypair
+    New,
+    /// Returns the last unused address
+    LastUnused,
+}
+
 /// Provides keypairs for signing operations
 ///
 /// This trait allows different key management strategies:
@@ -13,15 +20,21 @@ use std::sync::Arc;
 /// - Hardware wallets (future)
 /// - Custom key derivation schemes
 pub trait KeyProvider: Send + Sync {
-    /// Get the next keypair for receiving funds
+    /// Get a keypair for receiving funds
     ///
-    /// For static key providers, this always returns the same keypair.
-    /// For HD wallets, this should derive and return the next unused keypair.
+    /// For static key providers, this always returns the same keypair regardless of the index.
+    /// For HD wallets, behavior depends on the `keypair_index` parameter.
+    ///
+    /// # Arguments
+    ///
+    /// * `keypair_index` - Controls which keypair to return:
+    ///   - `KeypairIndex::New`: Increments the internal index and returns a new keypair
+    ///   - `KeypairIndex::LastUnused`: Returns the last unused keypair without incrementing
     ///
     /// # Returns
     ///
-    /// A keypair to use for the next receiving address
-    fn get_next_keypair(&self) -> Result<Keypair, Error>;
+    /// A keypair to use for receiving funds
+    fn get_next_keypair(&self, keypair_index: KeypairIndex) -> Result<Keypair, Error>;
 
     /// Get a keypair for a specific BIP32 derivation path
     ///
@@ -115,7 +128,7 @@ impl StaticKeyProvider {
 }
 
 impl KeyProvider for StaticKeyProvider {
-    fn get_next_keypair(&self) -> Result<Keypair, Error> {
+    fn get_next_keypair(&self, _: KeypairIndex) -> Result<Keypair, Error> {
         // Static provider always returns the same keypair
         Ok(self.kp)
     }
@@ -154,8 +167,10 @@ impl KeyProvider for StaticKeyProvider {
 /// # use std::str::FromStr;
 /// # use bitcoin::bip32::{Xpriv, DerivationPath};
 /// # use bitcoin::Network;
-/// # use ark_client::Bip32KeyProvider;
-/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # use ark_client::Bip32KeyProvider;/// #
+/// use ark_client::key_provider::KeypairIndex;
+///
+/// fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// // Create from a master key with a base path (e.g., m/84'/0'/0'/0)
 /// let master_key = Xpriv::from_str("xprv...")?;
 /// let base_path = DerivationPath::from_str("m/84'/0'/0'/0")?;
@@ -164,8 +179,8 @@ impl KeyProvider for StaticKeyProvider {
 /// let provider = Bip32KeyProvider::new(master_key, base_path);
 ///
 /// // Get the next receiving keypair (increments index)
-/// let kp1 = provider.get_next_keypair()?; // m/84'/0'/0'/0/0
-/// let kp2 = provider.get_next_keypair()?; // m/84'/0'/0'/0/1
+/// let kp1 = provider.get_next_keypair(KeypairIndex::New)?; // m/84'/0'/0'/0/0
+/// let kp2 = provider.get_next_keypair(KeypairIndex::New)?; // m/84'/0'/0'/0/1
 ///
 /// // Or derive a specific keypair by path
 /// let custom_path = vec![84 + 0x8000_0000, 0x8000_0000, 0x8000_0000, 0, 5];
@@ -178,9 +193,10 @@ pub struct Bip32KeyProvider {
     base_path: DerivationPath,
     // Using std::sync::Mutex for interior mutability across Send + Sync
     next_index: Arc<std::sync::Mutex<u32>>,
-    // Cache of derived keys: pk -> (path_index, keypair)
+    // Cache of derived keys: pk -> (path_index, keypair, used)
+    // The `used` flag indicates whether this keypair has been used (has VTXOs)
     key_cache:
-        Arc<std::sync::RwLock<std::collections::HashMap<bitcoin::XOnlyPublicKey, (u32, Keypair)>>>,
+        Arc<std::sync::RwLock<std::collections::HashMap<bitcoin::XOnlyPublicKey, (u32, Keypair, bool)>>>,
 }
 
 impl Bip32KeyProvider {
@@ -239,34 +255,60 @@ impl Bip32KeyProvider {
 }
 
 impl KeyProvider for Bip32KeyProvider {
-    fn get_next_keypair(&self) -> Result<Keypair, Error> {
-        // Get and increment the next index
-        let index = {
-            let mut next_index = self
-                .next_index
-                .lock()
-                .map_err(|e| Error::ad_hoc(format!("Failed to lock next_index: {e}")))?;
-            let current = *next_index;
-            *next_index = next_index
-                .checked_add(1)
-                .ok_or_else(|| Error::ad_hoc("Key derivation index overflow"))?;
-            current
-        };
+    fn get_next_keypair(&self, keypair_index: KeypairIndex) -> Result<Keypair, Error> {
+        match keypair_index {
+            KeypairIndex::New => {
+                // Get and increment the next index
+                let index = {
+                    let mut next_index = self
+                        .next_index
+                        .lock()
+                        .map_err(|e| Error::ad_hoc(format!("Failed to lock next_index: {e}")))?;
+                    let current = *next_index;
+                    *next_index = next_index
+                        .checked_add(1)
+                        .ok_or_else(|| Error::ad_hoc("Key derivation index overflow"))?;
+                    current
+                };
 
-        // Derive the keypair at this index
-        let kp = self.derive_at_index(index)?;
+                // Derive the keypair at this index
+                let kp = self.derive_at_index(index)?;
 
-        // Cache it for later lookup
-        let pk = kp.x_only_public_key().0;
-        {
-            let mut cache = self
-                .key_cache
-                .write()
-                .map_err(|e| Error::ad_hoc(format!("Failed to lock key_cache: {e}")))?;
-            cache.insert(pk, (index, kp));
+                // Cache it for later lookup (marked as unused)
+                let pk = kp.x_only_public_key().0;
+                {
+                    let mut cache = self
+                        .key_cache
+                        .write()
+                        .map_err(|e| Error::ad_hoc(format!("Failed to lock key_cache: {e}")))?;
+                    cache.insert(pk, (index, kp, false));
+                }
+
+                Ok(kp)
+            }
+            KeypairIndex::LastUnused => {
+                // First, try to find an unused keypair in the cache
+                {
+                    let cache = self
+                        .key_cache
+                        .read()
+                        .map_err(|e| Error::ad_hoc(format!("Failed to lock key_cache: {e}")))?;
+
+                    // Find the unused keypair with the lowest index
+                    let unused: Option<&(u32, Keypair, bool)> = cache
+                        .values()
+                        .filter(|(_, _, used)| !used)
+                        .min_by_key(|(idx, _, _)| *idx);
+
+                    if let Some((_, kp, _)) = unused {
+                        return Ok(*kp);
+                    }
+                }
+
+                // No unused keypair found, derive a new one
+                self.get_next_keypair(KeypairIndex::New)
+            }
         }
-
-        Ok(kp)
     }
 
     fn get_keypair_for_path(&self, path: &[u32]) -> Result<Keypair, Error> {
@@ -294,7 +336,7 @@ impl KeyProvider for Bip32KeyProvider {
                 .key_cache
                 .read()
                 .map_err(|e| Error::ad_hoc(format!("Failed to lock key_cache: {e}")))?;
-            if let Some((_, kp)) = cache.get(pk) {
+            if let Some((_, kp, _)) = cache.get(pk) {
                 return Ok(*kp);
             }
         }
@@ -314,12 +356,12 @@ impl KeyProvider for Bip32KeyProvider {
             let derived_pk = kp.x_only_public_key().0;
 
             if &derived_pk == pk {
-                // Cache it for next time
+                // Cache it for next time (assume used since we're looking it up for signing)
                 let mut cache = self
                     .key_cache
                     .write()
                     .map_err(|e| Error::ad_hoc(format!("Failed to lock key_cache: {e}")))?;
-                cache.insert(derived_pk, (i, kp));
+                cache.insert(derived_pk, (i, kp, true));
                 return Ok(kp);
             }
         }
@@ -351,13 +393,13 @@ impl KeyProvider for Bip32KeyProvider {
     fn cache_discovered_keypair(&self, index: u32, kp: Keypair) -> Result<(), Error> {
         let pk = kp.x_only_public_key().0;
 
-        // Add to cache
+        // Add to cache (marked as used since it was discovered with VTXOs)
         {
             let mut cache = self
                 .key_cache
                 .write()
                 .map_err(|e| Error::ad_hoc(format!("Failed to lock key_cache: {e}")))?;
-            cache.insert(pk, (index, kp));
+            cache.insert(pk, (index, kp, true));
         }
 
         // Update next_index if needed (set to index + 1 if >= current)
@@ -379,8 +421,8 @@ impl KeyProvider for Bip32KeyProvider {
 
 // Implement KeyProvider for Arc<T> where T: KeyProvider
 impl<T: KeyProvider> KeyProvider for Arc<T> {
-    fn get_next_keypair(&self) -> Result<Keypair, Error> {
-        (**self).get_next_keypair()
+    fn get_next_keypair(&self, keypair_index: KeypairIndex) -> Result<Keypair, Error> {
+        (**self).get_next_keypair(keypair_index)
     }
 
     fn get_keypair_for_path(&self, path: &[u32]) -> Result<Keypair, Error> {
