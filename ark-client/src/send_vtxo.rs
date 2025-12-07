@@ -98,7 +98,7 @@ where
             })
             .collect::<Result<Vec<_>, Error>>()?;
 
-        let (change_address, _) = self.get_offchain_address()?;
+        let (change_address, change_address_vtxo) = self.get_offchain_address()?;
 
         let OffchainTransactions {
             mut ark_tx,
@@ -192,6 +192,14 @@ where
         .await?
         .map_err(Error::ark_server)
         .context("failed to finalize offchain transaction")?;
+
+        let used_pk = change_address_vtxo.owner_pk();
+        if let Err(err) = self.inner.key_provider.mark_as_used(&used_pk) {
+            tracing::warn!(
+                "Failed updating keypair cache for used change address: {:?} ",
+                err
+            );
+        }
 
         Ok(ark_txid)
     }
