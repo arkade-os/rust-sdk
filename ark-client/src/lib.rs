@@ -679,7 +679,7 @@ where
             }
 
             // Query all addresses in batch at once
-            let addresses: Vec<_> = batch.iter().map(|(_, _, addr)| addr.clone()).collect();
+            let addresses: Vec<_> = batch.iter().map(|(_, _, addr)| *addr).collect();
             let request = GetVtxosRequest::new_for_addresses(&addresses);
             let list = timeout_op(
                 self.inner.timeout,
@@ -782,19 +782,29 @@ where
             .context("Failed to fetch list of VTXOs")??;
 
             if include_recoverable_vtxos {
-                vtxos
-                    .spent
-                    .push((list.spent_without_recoverable().to_vec(), vtxo.clone()));
+                let spent_without_recoverable = list.spent_without_recoverable();
+                if !spent_without_recoverable.is_empty() {
+                    vtxos.spent.push((spent_without_recoverable, vtxo.clone()));
+                }
 
-                vtxos
-                    .spendable
-                    .push((list.spendable_with_recoverable().to_vec(), vtxo.clone()));
+                let spendable_with_recoverable = list.spendable_with_recoverable();
+                if !spendable_with_recoverable.is_empty() {
+                    vtxos
+                        .spendable
+                        .push((spendable_with_recoverable, vtxo.clone()));
+                }
             } else {
-                vtxos.spent.push((list.spent().to_vec(), vtxo.clone()));
+                let spent = list.spent();
+                if !spent.is_empty() {
+                    vtxos.spent.push((spent.to_vec(), vtxo.clone()));
+                }
 
-                vtxos
-                    .spendable
-                    .push((list.spendable_without_recoverable().to_vec(), vtxo.clone()));
+                let spendable_without_recoverable = list.spendable_without_recoverable();
+                if !spendable_without_recoverable.is_empty() {
+                    vtxos
+                        .spendable
+                        .push((spendable_without_recoverable, vtxo.clone()));
+                }
             }
 
             // update keypair cache for used keys if we have any vtxo

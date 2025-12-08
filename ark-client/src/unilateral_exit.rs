@@ -268,13 +268,19 @@ where
             Some(script) => {
                 let mut res = vec![];
                 let pks = extract_checksig_pubkeys(script);
+
                 for pk in pks {
                     if let Ok(keypair) = self.keypair_by_pk(&pk) {
                         let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &keypair);
                         let pk = keypair.x_only_public_key().0;
                         res.push((sig, pk))
                     }
+
+                    if let Ok(sig) = self.inner.wallet.sign_for_pk(&pk, &msg) {
+                        res.push((sig, pk))
+                    }
                 }
+
                 Ok(res)
             }
         };

@@ -733,6 +733,8 @@ pub fn prepare_delegate_psbts(
                 (forfeit_script.clone(), leaf_version),
             );
 
+        forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX].witness_script = Some(forfeit_script.clone());
+
         forfeit_psbts.push(forfeit_psbt);
     }
 
@@ -903,7 +905,8 @@ where
 
         let msg = secp256k1::Message::from_digest(tap_sighash.to_raw_hash().to_byte_array());
 
-        let sigs = sign_fn(psbt_input, msg)?;
+        let sigs =
+            sign_fn(psbt_input, msg).with_context(|| format!("failed to sign intent input {i}"))?;
         for (sig, pk) in sigs {
             let sig = taproot::Signature {
                 signature: sig,
@@ -946,7 +949,13 @@ where
 
         let msg = secp256k1::Message::from_digest(tap_sighash.to_raw_hash().to_byte_array());
 
-        let sigs = sign_fn(&mut forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX], msg)?;
+        let sigs =
+            sign_fn(&mut forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX], msg).with_context(|| {
+                format!(
+                    "failed to sign forfeit PSBT {}",
+                    forfeit_psbt.unsigned_tx.compute_txid()
+                )
+            })?;
 
         for (sig, pk) in sigs {
             let sig = taproot::Signature {

@@ -346,11 +346,15 @@ impl Persistence for InMemoryDb {
             .map_err(|e| Error::consumer(format!("failed to get read lock: {e}")))?
             .iter()
             .find_map(|(b, sk)| if b.owner_pk() == *pk { Some(*sk) } else { None });
-        let secret_key = maybe_sk.unwrap();
+
+        let secret_key =
+            maybe_sk.ok_or_else(|| Error::consumer(format!("failed to find SK for PK: {pk}")))?;
+
         Ok(secret_key)
     }
 }
 
+#[allow(unused)]
 pub async fn set_up_client(
     name: String,
     nigiri: Arc<Nigiri>,
@@ -427,6 +431,7 @@ pub async fn wait_until_balance(
 ///
 /// This is useful for testing key discovery, where we need to recreate a client
 /// with the same keys.
+#[allow(unused)]
 pub async fn set_up_client_with_seed(
     name: String,
     nigiri: Arc<Nigiri>,

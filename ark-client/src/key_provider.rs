@@ -199,9 +199,16 @@ pub struct Bip32KeyProvider {
     next_index: Arc<std::sync::Mutex<u32>>,
     // Cache of derived keys: pk -> (path_index, keypair, used)
     // The `used` flag indicates whether this keypair has been used (has VTXOs)
-    key_cache: Arc<
-        std::sync::RwLock<std::collections::HashMap<bitcoin::XOnlyPublicKey, (u32, Keypair, bool)>>,
-    >,
+    key_cache:
+        Arc<std::sync::RwLock<std::collections::HashMap<bitcoin::XOnlyPublicKey, KeyCacheValue>>>,
+}
+
+#[derive(Clone, Copy)]
+pub struct KeyCacheValue {
+    path_index: u32,
+    kp: Keypair,
+    /// Indicates whether this keypair has been used (has VTXOs).
+    used: bool,
 }
 
 impl Bip32KeyProvider {
@@ -286,7 +293,14 @@ impl KeyProvider for Bip32KeyProvider {
                         .key_cache
                         .write()
                         .map_err(|e| Error::ad_hoc(format!("Failed to lock key_cache: {e}")))?;
-                    cache.insert(pk, (index, kp, false));
+                    cache.insert(
+                        pk,
+                        KeyCacheValue {
+                            path_index: index,
+                            kp,
+                            used: false,
+                        },
+                    );
                 }
 
                 Ok(kp)
@@ -300,12 +314,12 @@ impl KeyProvider for Bip32KeyProvider {
                         .map_err(|e| Error::ad_hoc(format!("Failed to lock key_cache: {e}")))?;
 
                     // Find the unused keypair with the lowest index
-                    let unused: Option<&(u32, Keypair, bool)> = cache
+                    let unused = cache
                         .values()
-                        .filter(|(_, _, used)| !used)
-                        .min_by_key(|(idx, _, _)| *idx);
+                        .filter(|KeyCacheValue { used, .. }| !used)
+                        .min_by_key(|KeyCacheValue { path_index, .. }| *path_index);
 
-                    if let Some((_, kp, _)) = unused {
+                    if let Some(KeyCacheValue { kp, .. }) = unused {
                         return Ok(*kp);
                     }
                 }
@@ -341,7 +355,7 @@ impl KeyProvider for Bip32KeyProvider {
                 .key_cache
                 .read()
                 .map_err(|e| Error::ad_hoc(format!("Failed to lock key_cache: {e}")))?;
-            if let Some((_, kp, _)) = cache.get(pk) {
+            if let Some(KeyCacheValue { kp, .. }) = cache.get(pk) {
                 return Ok(*kp);
             }
         }
@@ -366,7 +380,14 @@ impl KeyProvider for Bip32KeyProvider {
                     .key_cache
                     .write()
                     .map_err(|e| Error::ad_hoc(format!("Failed to lock key_cache: {e}")))?;
-                cache.insert(derived_pk, (i, kp, true));
+                cache.insert(
+                    derived_pk,
+                    KeyCacheValue {
+                        path_index: i,
+                        kp,
+                        used: true,
+                    },
+                );
                 return Ok(kp);
             }
         }
@@ -404,7 +425,14 @@ impl KeyProvider for Bip32KeyProvider {
                 .key_cache
                 .write()
                 .map_err(|e| Error::ad_hoc(format!("Failed to lock key_cache: {e}")))?;
-            cache.insert(pk, (index, kp, true));
+            cache.insert(
+                pk,
+                KeyCacheValue {
+                    path_index: index,
+                    kp,
+                    used: true,
+                },
+            );
         }
 
         // Update next_index if needed (set to index + 1 if >= current)
@@ -427,23 +455,34 @@ impl KeyProvider for Bip32KeyProvider {
         // First check the cache
         {
             let maybe_kp = {
-                let mut cache = self
+                let cache = self
                     .key_cache
                     .read()
                     .map_err(|e| Error::ad_hoc(format!("Failed to lock key_cache: {e}")))?;
-                cache.get(pk).cloned()
+                cache.get(pk).copied()
             };
 
             match maybe_kp {
-                Some((index, kp, false)) => {
+                Some(KeyCacheValue {
+                    path_index,
+                    kp,
+                    used: false,
+                }) => {
                     let mut cache = self
                         .key_cache
                         .write()
                         .map_err(|e| Error::ad_hoc(format!("Failed to lock key_cache: {e}")))?;
-                    cache.insert(pk.clone(), (index, kp, true));
+                    cache.insert(
+                        *pk,
+                        KeyCacheValue {
+                            path_index,
+                            kp,
+                            used: true,
+                        },
+                    );
                     return Ok(());
                 }
-                Some((_, _, true)) => {
+                Some(KeyCacheValue { used: true, .. }) => {
                     // already marked as used
                     return Ok(());
                 }
@@ -473,7 +512,14 @@ impl KeyProvider for Bip32KeyProvider {
                     .key_cache
                     .write()
                     .map_err(|e| Error::ad_hoc(format!("Failed to lock key_cache: {e}")))?;
-                cache.insert(derived_pk, (i, kp, true));
+                cache.insert(
+                    derived_pk,
+                    KeyCacheValue {
+                        path_index: i,
+                        kp,
+                        used: true,
+                    },
+                );
                 return Ok(());
             }
         }

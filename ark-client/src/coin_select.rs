@@ -7,6 +7,7 @@ use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use ark_core::unilateral_exit;
 use bitcoin::Amount;
+use bitcoin::TxOut;
 use jiff::SignedDuration;
 use jiff::Timestamp;
 use std::collections::HashSet;
@@ -117,9 +118,13 @@ where
                     tracing::debug!(?outpoint, %amount, ?vtxo, "Selected VTXO");
 
                     selected_vtxo_outputs.insert(unilateral_exit::VtxoInput::new(
-                        vtxo.clone(),
-                        *amount,
                         *outpoint,
+                        vtxo.exit_delay(),
+                        TxOut {
+                            value: *amount,
+                            script_pubkey: vtxo.script_pubkey(),
+                        },
+                        vtxo.exit_spend_info()?,
                     ));
                     selected_amount += *amount;
                 }
