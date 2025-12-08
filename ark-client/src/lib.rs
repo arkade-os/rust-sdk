@@ -87,6 +87,7 @@ pub const DEFAULT_GAP_LIMIT: u32 = 20;
 /// # use ark_client::wallet::{Balance, BoardingWallet, OnchainWallet, Persistence};
 /// # use ark_client::InMemorySwapStorage;
 /// # use ark_core::{BoardingOutput, UtxoCoinSelection};
+/// # use ark_client::StaticKeyProvider;
 ///
 /// struct MyBlockchain {}
 /// #
@@ -208,7 +209,7 @@ pub const DEFAULT_GAP_LIMIT: u32 = 20;
 ///     let timeout = Duration::from_secs(30);
 ///
 ///     // Create the offline client (backward compatible method)
-///     let offline_client = OfflineClient::new_with_keypair(
+///     let offline_client = OfflineClient::<MyBlockchain, MyWallet, InMemorySwapStorage, StaticKeyProvider>::new_with_keypair(
 ///         "my-ark-client".to_string(),
 ///         keypair,
 ///         blockchain,

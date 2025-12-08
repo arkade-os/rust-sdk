@@ -171,8 +171,9 @@ impl KeyProvider for StaticKeyProvider {
 /// # use std::str::FromStr;
 /// # use bitcoin::bip32::{Xpriv, DerivationPath};
 /// # use bitcoin::Network;
-/// # use ark_client::Bip32KeyProvider;/// #
-/// use ark_client::key_provider::KeypairIndex;
+/// # use crate::ark_client::KeyProvider;
+/// # use ark_client::Bip32KeyProvider;
+/// # use ark_client::key_provider::KeypairIndex;
 ///
 /// fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// // Create from a master key with a base path (e.g., m/84'/0'/0'/0)
