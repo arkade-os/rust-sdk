@@ -2,7 +2,6 @@ use crate::BoardingOutput;
 use crate::Error;
 use crate::ErrorContext;
 use crate::VTXO_INPUT_INDEX;
-use crate::Vtxo;
 use crate::anchor_output;
 use crate::server;
 use bitcoin::Address;
@@ -23,12 +22,14 @@ use bitcoin::XOnlyPublicKey;
 use bitcoin::absolute::LockTime;
 use bitcoin::hashes::Hash;
 use bitcoin::hex::DisplayHex;
-use bitcoin::key::Keypair;
 use bitcoin::key::Secp256k1;
 use bitcoin::opcodes::all::*;
+use bitcoin::psbt;
 use bitcoin::secp256k1;
+use bitcoin::secp256k1::schnorr;
 use bitcoin::sighash::Prevouts;
 use bitcoin::sighash::SighashCache;
+use bitcoin::taproot;
 use bitcoin::transaction;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -64,28 +65,30 @@ impl OnChainInput {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VtxoInput {
-    /// The information needed to spend the VTXO, besides the amount.
-    vtxo: Vtxo,
-    /// The amount of coins locked in the VTXO.
-    amount: Amount,
-    /// Where the VTXO would end up on the blockchain if it were to become a UTXO.
     outpoint: OutPoint,
+    sequence: Sequence,
+    witness_utxo: TxOut,
+    /// Where the VTXO would end up on the blockchain if it were to become a UTXO.
+    spend_info: (ScriptBuf, taproot::ControlBlock),
 }
 
 impl VtxoInput {
-    pub fn new(vtxo: Vtxo, amount: Amount, outpoint: OutPoint) -> Self {
+    pub fn new(
+        outpoint: OutPoint,
+        sequence: Sequence,
+        witness_utxo: TxOut,
+        spend_info: (ScriptBuf, taproot::ControlBlock),
+    ) -> Self {
         Self {
-            vtxo,
-            amount,
             outpoint,
+            sequence,
+            witness_utxo,
+            spend_info,
         }
     }
 
     pub fn previous_output(&self) -> TxOut {
-        TxOut {
-            value: self.amount,
-            script_pubkey: self.vtxo.script_pubkey(),
-        }
+        self.witness_utxo.clone()
     }
 }
 
@@ -98,14 +101,20 @@ impl VtxoInput {
 ///
 /// To be able to spend a VTXO, the VTXO itself must be published on-chain, and then we must wait
 /// for the exit delay to pass.
-pub fn create_unilateral_exit_transaction(
-    kp: &Keypair,
+pub fn create_unilateral_exit_transaction<S>(
     to_address: Address,
     to_amount: Amount,
     change_address: Address,
     onchain_inputs: &[OnChainInput],
     vtxo_inputs: &[VtxoInput],
-) -> Result<Transaction, Error> {
+    sign_fn: S,
+) -> Result<Transaction, Error>
+where
+    S: Fn(
+        &mut psbt::Input,
+        secp256k1::Message,
+    ) -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, Error>,
+{
     if onchain_inputs.is_empty() && vtxo_inputs.is_empty() {
         return Err(Error::transaction(
             "cannot create transaction without inputs",
@@ -122,7 +131,7 @@ pub fn create_unilateral_exit_transaction(
     let total_amount: Amount = onchain_inputs
         .iter()
         .map(|o| o.amount)
-        .chain(vtxo_inputs.iter().map(|v| v.amount))
+        .chain(vtxo_inputs.iter().map(|v| v.witness_utxo.value))
         .sum();
 
     let change_amount = total_amount.checked_sub(to_amount).ok_or_else(|| {
@@ -147,7 +156,7 @@ pub fn create_unilateral_exit_transaction(
 
         let vtxo_inputs = vtxo_inputs.iter().map(|v| TxIn {
             previous_output: v.outpoint,
-            sequence: v.vtxo.exit_delay(),
+            sequence: v.sequence,
             ..Default::default()
         });
 
@@ -166,25 +175,31 @@ pub fn create_unilateral_exit_transaction(
     for (i, input) in psbt.inputs.iter_mut().enumerate() {
         let outpoint = psbt.unsigned_tx.input[i].previous_output;
 
-        let txout = onchain_inputs
-            .iter()
-            .find_map(|o| {
-                (o.outpoint == outpoint).then_some(TxOut {
-                    value: o.amount,
-                    script_pubkey: o.boarding_output.address().script_pubkey(),
-                })
-            })
-            .or_else(|| {
-                vtxo_inputs.iter().find_map(|v| {
-                    (v.outpoint == outpoint).then_some(TxOut {
-                        value: v.amount,
-                        script_pubkey: v.vtxo.address().script_pubkey(),
-                    })
-                })
-            })
-            .expect("txout for input");
+        for onchain_input in onchain_inputs {
+            if onchain_input.outpoint == outpoint {
+                input.witness_utxo = Some(TxOut {
+                    value: onchain_input.amount,
+                    script_pubkey: onchain_input.boarding_output.address().script_pubkey(),
+                });
 
-        input.witness_utxo = Some(txout);
+                let (script, cb) = onchain_input.boarding_output.exit_spend_info();
+                let leaf_version = cb.leaf_version;
+                input.tap_scripts.insert(cb, (script, leaf_version));
+            }
+        }
+
+        for vtxo_input in vtxo_inputs.iter() {
+            if vtxo_input.outpoint == outpoint {
+                input.witness_utxo = Some(TxOut {
+                    value: vtxo_input.witness_utxo.value,
+                    script_pubkey: vtxo_input.witness_utxo.script_pubkey.clone(),
+                });
+
+                let (script, cb) = vtxo_input.spend_info.clone();
+                let leaf_version = cb.leaf_version;
+                input.tap_scripts.insert(cb, (script, leaf_version));
+            }
+        }
     }
 
     // Collect all `witness_utxo` entries.
@@ -196,20 +211,13 @@ pub fn create_unilateral_exit_transaction(
 
     // Sign each input.
     for (i, input) in psbt.inputs.iter_mut().enumerate() {
-        let outpoint = psbt.unsigned_tx.input[i].previous_output;
+        let (exit_control_block, (exit_script, leaf_version)) = input
+            .tap_scripts
+            .pop_first()
+            .ok_or_else(|| Error::ad_hoc(format!("no exit script found for input {i}")))?;
 
-        let (exit_script, exit_control_block) = onchain_inputs
-            .iter()
-            .find_map(|b| (b.outpoint == outpoint).then(|| Ok(b.boarding_output.exit_spend_info())))
-            .or_else(|| {
-                vtxo_inputs
-                    .iter()
-                    .find_map(|v| (v.outpoint == outpoint).then(|| v.vtxo.exit_spend_info()))
-            })
-            .expect("spend info for input")
-            .context("failed to get exit script for input")?;
+        input.witness_script = Some(exit_script.clone());
 
-        let leaf_version = exit_control_block.leaf_version;
         let leaf_hash = TapLeafHash::from_script(&exit_script, leaf_version);
 
         let tap_sighash = SighashCache::new(&psbt.unsigned_tx)
@@ -223,18 +231,23 @@ pub fn create_unilateral_exit_transaction(
 
         let msg = secp256k1::Message::from_digest(tap_sighash.to_raw_hash().to_byte_array());
 
-        let sig = secp.sign_schnorr_no_aux_rand(&msg, kp);
-        let pk = kp.x_only_public_key().0;
+        let sigs = sign_fn(input, msg)?;
 
-        secp.verify_schnorr(&sig, &msg, &pk)
-            .map_err(Error::crypto)
-            .with_context(|| format!("failed to verify own signature for input {i}"))?;
+        let mut witness = Vec::new();
+        for (sig, pk) in sigs.iter() {
+            secp.verify_schnorr(sig, &msg, pk)
+                .map_err(Error::crypto)
+                .with_context(|| format!("failed to verify own signature for input {i}"))?;
 
-        let witness = Witness::from_slice(&[
-            &sig[..],
-            exit_script.as_bytes(),
-            &exit_control_block.serialize(),
-        ]);
+            witness.push(&sig[..]);
+        }
+
+        witness.push(exit_script.as_bytes());
+
+        let control_block = exit_control_block.serialize();
+        witness.push(control_block.as_slice());
+
+        let witness = Witness::from_slice(&witness);
 
         input.final_script_witness = Some(witness);
     }

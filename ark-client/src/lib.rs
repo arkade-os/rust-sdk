@@ -4,6 +4,7 @@ use crate::utils::timeout_op;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use ark_core::ArkAddress;
+use ark_core::DEFAULT_DERIVATION_PATH;
 use ark_core::UtxoCoinSelection;
 use ark_core::Vtxo;
 use ark_core::build_anchor_tx;
@@ -22,16 +23,22 @@ use bitcoin::Amount;
 use bitcoin::OutPoint;
 use bitcoin::Transaction;
 use bitcoin::Txid;
+use bitcoin::XOnlyPublicKey;
+use bitcoin::bip32::DerivationPath;
+use bitcoin::bip32::Xpriv;
 use bitcoin::key::Keypair;
 use bitcoin::key::Secp256k1;
 use bitcoin::secp256k1::All;
 use futures::Future;
 use futures::Stream;
 use jiff::Timestamp;
+use std::collections::HashSet;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
 pub mod error;
+pub mod key_provider;
 pub mod swap_storage;
 pub mod wallet;
 
@@ -42,15 +49,25 @@ mod send_vtxo;
 mod unilateral_exit;
 mod utils;
 
+use crate::key_provider::KeypairIndex;
 pub use boltz::ReverseSwapData;
 pub use boltz::SubmarineSwapData;
 pub use boltz::SwapAmount;
 pub use boltz::TimeoutBlockHeights;
 pub use error::Error;
+pub use key_provider::Bip32KeyProvider;
+pub use key_provider::KeyProvider;
+pub use key_provider::StaticKeyProvider;
 pub use lightning_invoice;
 pub use swap_storage::InMemorySwapStorage;
 pub use swap_storage::SqliteSwapStorage;
 pub use swap_storage::SwapStorage;
+
+/// Default gap limit for BIP44-style key discovery
+///
+/// This is the number of consecutive unused addresses to scan before
+/// assuming all used addresses have been found.
+pub const DEFAULT_GAP_LIMIT: u32 = 20;
 
 /// A client to interact with Ark Server
 ///
@@ -70,6 +87,7 @@ pub use swap_storage::SwapStorage;
 /// # use ark_client::wallet::{Balance, BoardingWallet, OnchainWallet, Persistence};
 /// # use ark_client::InMemorySwapStorage;
 /// # use ark_core::{BoardingOutput, UtxoCoinSelection};
+/// # use ark_client::StaticKeyProvider;
 ///
 /// struct MyBlockchain {}
 /// #
@@ -178,8 +196,8 @@ pub use swap_storage::SwapStorage;
 /// #     }
 /// # }
 /// #
-/// // Initialize the client
-/// async fn init_client() -> Result<Client<MyBlockchain, MyWallet, InMemorySwapStorage>, ark_client::Error> {
+/// // Initialize the client with a static keypair
+/// async fn init_client_with_keypair() -> Result<Client<MyBlockchain, MyWallet, InMemorySwapStorage, ark_client::StaticKeyProvider>, ark_client::Error> {
 ///     // Create a keypair for signing transactions
 ///     let secp = bitcoin::key::Secp256k1::new();
 ///     let secret_key = SecretKey::from_str("your_private_key_here").unwrap();
@@ -190,8 +208,8 @@ pub use swap_storage::SwapStorage;
 ///     let wallet = Arc::new(MyWallet {});
 ///     let timeout = Duration::from_secs(30);
 ///
-///     // Create the offline client
-///     let offline_client = OfflineClient::new(
+///     // Create the offline client (backward compatible method)
+///     let offline_client = OfflineClient::<MyBlockchain, MyWallet, InMemorySwapStorage, StaticKeyProvider>::new_with_keypair(
 ///         "my-ark-client".to_string(),
 ///         keypair,
 ///         blockchain,
@@ -207,13 +225,45 @@ pub use swap_storage::SwapStorage;
 ///
 ///     Ok(client)
 /// }
+///
+/// // Initialize the client with a BIP32 HD wallet
+/// # use bitcoin::bip32::{Xpriv, DerivationPath};
+/// async fn init_client_with_bip32() -> Result<Client<MyBlockchain, MyWallet, InMemorySwapStorage, ark_client::Bip32KeyProvider>, ark_client::Error> {
+///     // Create a BIP32 master key and derivation path
+///     let master_key = Xpriv::from_str("xprv...").unwrap();
+///     let derivation_path = DerivationPath::from_str("m/84'/0'/0'/0/0").unwrap();
+///
+///     let key_provider = Arc::new(ark_client::Bip32KeyProvider::new(master_key, derivation_path));
+///
+///     // Initialize blockchain and wallet implementations
+///     let blockchain = Arc::new(MyBlockchain::new("https://esplora.example.com"));
+///     let wallet = Arc::new(MyWallet {});
+///     let timeout = Duration::from_secs(30);
+///
+///     // Create the offline client with BIP32 key provider
+///     let offline_client = OfflineClient::new(
+///         "my-ark-client".to_string(),
+///         key_provider,
+///         blockchain,
+///         wallet,
+///         "https://ark-server.example.com".to_string(),
+///         Arc::new(InMemorySwapStorage::default()),
+///         "http://boltz.example.com".to_string(),
+///         timeout
+///     );
+///
+///     // Connect to the Ark server and get server info
+///     let client = offline_client.connect().await?;
+///
+///     Ok(client)
+/// }
 /// ```
 #[derive(Clone)]
-pub struct OfflineClient<B, W, S> {
+pub struct OfflineClient<B, W, S, K> {
     // TODO: We could introduce a generic interface so that consumers can use either GRPC or REST.
     network_client: ark_grpc::Client,
     pub name: String,
-    pub kp: Keypair,
+    key_provider: Arc<K>,
     blockchain: Arc<B>,
     secp: Secp256k1<All>,
     wallet: Arc<W>,
@@ -225,8 +275,8 @@ pub struct OfflineClient<B, W, S> {
 /// A client to interact with Ark server
 ///
 /// See [`OfflineClient`] docs for details.
-pub struct Client<B, W, S> {
-    inner: OfflineClient<B, W, S>,
+pub struct Client<B, W, S, K> {
+    inner: OfflineClient<B, W, S, K>,
     pub server_info: server::Info,
 }
 
@@ -313,15 +363,30 @@ pub trait Blockchain {
     ) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
-impl<B, W, S> OfflineClient<B, W, S>
+impl<B, W, S, K> OfflineClient<B, W, S, K>
 where
     B: Blockchain,
     W: BoardingWallet + OnchainWallet,
-    S: SwapStorage,
+    S: SwapStorage + 'static,
+    K: KeyProvider,
 {
+    /// Create a new offline client with a generic key provider
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Client identifier
+    /// * `key_provider` - Implementation of KeyProvider trait (StaticKeyProvider, Bip32KeyProvider,
+    ///   etc.)
+    /// * `blockchain` - Blockchain interface implementation
+    /// * `wallet` - Wallet implementation
+    /// * `ark_server_url` - URL of the Ark server
+    /// * `swap_storage` - Storage implementation for swap data
+    /// * `boltz_url` - URL of the Boltz server
+    /// * `timeout` - Timeout duration for network operations
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: String,
-        kp: Keypair,
+        key_provider: Arc<K>,
         blockchain: Arc<B>,
         wallet: Arc<W>,
         ark_server_url: String,
@@ -336,7 +401,7 @@ where
         Self {
             network_client,
             name,
-            kp,
+            key_provider,
             blockchain,
             secp,
             wallet,
@@ -346,12 +411,92 @@ where
         }
     }
 
+    /// Create a new offline client with a static keypair (backward compatible)
+    ///
+    /// This is a convenience method that wraps a single keypair in a StaticKeyProvider.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Client identifier
+    /// * `kp` - Static keypair for signing
+    /// * `blockchain` - Blockchain interface implementation
+    /// * `wallet` - Wallet implementation
+    /// * `ark_server_url` - URL of the Ark server
+    /// * `swap_storage` - Storage implementation for swap data
+    /// * `boltz_url` - URL of the Boltz server
+    /// * `timeout` - Timeout duration for network operations
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_keypair(
+        name: String,
+        kp: Keypair,
+        blockchain: Arc<B>,
+        wallet: Arc<W>,
+        ark_server_url: String,
+        swap_storage: Arc<S>,
+        boltz_url: String,
+        timeout: Duration,
+    ) -> OfflineClient<B, W, S, StaticKeyProvider> {
+        let key_provider = Arc::new(StaticKeyProvider::new(kp));
+
+        OfflineClient::new(
+            name,
+            key_provider,
+            blockchain,
+            wallet,
+            ark_server_url,
+            swap_storage,
+            boltz_url,
+            timeout,
+        )
+    }
+
+    /// Create a new offline client with an [`Xpriv`]
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Client identifier
+    /// * `xpriv` - BIP32 Xpriv
+    /// * `blockchain` - Blockchain interface implementation
+    /// * `wallet` - Wallet implementation
+    /// * `ark_server_url` - URL of the Ark server
+    /// * `swap_storage` - Storage implementation for swap data
+    /// * `boltz_url` - URL of the Boltz server
+    /// * `timeout` - Timeout duration for network operations
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_bip32(
+        name: String,
+        xpriv: Xpriv,
+        path: Option<DerivationPath>,
+        blockchain: Arc<B>,
+        wallet: Arc<W>,
+        ark_server_url: String,
+        swap_storage: Arc<S>,
+        boltz_url: String,
+        timeout: Duration,
+    ) -> OfflineClient<B, W, S, Bip32KeyProvider> {
+        let path = path.unwrap_or(
+            DerivationPath::from_str(DEFAULT_DERIVATION_PATH).expect("valid derivation path"),
+        );
+        let key_provider = Arc::new(Bip32KeyProvider::new(xpriv, path));
+
+        OfflineClient::new(
+            name,
+            key_provider,
+            blockchain,
+            wallet,
+            ark_server_url,
+            swap_storage,
+            boltz_url,
+            timeout,
+        )
+    }
+
     /// Connects to the Ark server and retrieves server information.
     ///
     /// # Errors
     ///
     /// Returns an error if the connection fails or times out.
-    pub async fn connect(mut self) -> Result<Client<B, W, S>, Error> {
+    pub async fn connect(mut self) -> Result<Client<B, W, S, K>, Error> {
         timeout_op(self.timeout, self.network_client.connect())
             .await
             .context("Failed to connect to Ark server")??;
@@ -381,7 +526,7 @@ where
     pub async fn connect_with_retries(
         mut self,
         max_retries: usize,
-    ) -> Result<Client<B, W, S>, Error> {
+    ) -> Result<Client<B, W, S, K>, Error> {
         let mut n_retries = 0;
         while n_retries < max_retries {
             let res = timeout_op(self.timeout, self.network_client.connect())
@@ -412,25 +557,38 @@ where
             "Connected to Ark server"
         );
 
-        Ok(Client {
+        let client = Client {
             inner: self,
             server_info,
-        })
+        };
+
+        if let Err(error) = client.discover_keys(DEFAULT_GAP_LIMIT).await {
+            tracing::warn!(?error, "Failed during key discovery");
+        };
+
+        Ok(client)
     }
 }
 
-impl<B, W, S> Client<B, W, S>
+impl<B, W, S, K> Client<B, W, S, K>
 where
     B: Blockchain,
     W: BoardingWallet + OnchainWallet,
     S: SwapStorage + 'static,
+    K: KeyProvider,
 {
-    // At the moment we are always generating the same address.
+    /// Get a new offchain receiving address
+    ///
+    /// For HD wallets, this will derive a new address each time it's called.
+    /// For static key providers, this will always return the same address.
     pub fn get_offchain_address(&self) -> Result<(ArkAddress, Vtxo), Error> {
         let server_info = &self.server_info;
 
         let server_signer = server_info.signer_pk.into();
-        let owner = self.inner.kp.public_key().into();
+        let owner = self
+            .next_keypair(KeypairIndex::LastUnused)?
+            .public_key()
+            .into();
 
         let vtxo = Vtxo::new_default(
             self.secp(),
@@ -446,9 +604,126 @@ where
     }
 
     pub fn get_offchain_addresses(&self) -> Result<Vec<(ArkAddress, Vtxo)>, Error> {
-        let address = self.get_offchain_address()?;
+        let server_info = &self.server_info;
+        let server_signer = server_info.signer_pk.into();
 
-        Ok(vec![address])
+        let pks = self.inner.key_provider.get_cached_pks()?;
+
+        pks.into_iter()
+            .map(|owner_pk| {
+                let vtxo = Vtxo::new_default(
+                    self.secp(),
+                    server_signer,
+                    owner_pk,
+                    server_info.unilateral_exit_delay,
+                    server_info.network,
+                )?;
+
+                let ark_address = vtxo.to_ark_address();
+
+                Ok((ark_address, vtxo))
+            })
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    /// Discover and cache used keys using BIP44-style gap limit
+    ///
+    /// This method derives keys in batches, checks all at once via list_vtxos,
+    /// caches used ones, and stops when a full batch has no used keys.
+    ///
+    /// Returns the number of discovered keys. No-op for StaticKeyProvider.
+    ///
+    /// # Arguments
+    ///
+    /// * `gap_limit` - Number of consecutive unused addresses before stopping
+    pub async fn discover_keys(&self, gap_limit: u32) -> Result<u32, Error> {
+        if !self.inner.key_provider.supports_discovery() {
+            tracing::debug!("Key provider does not support discovery, skipping");
+            return Ok(0);
+        }
+
+        let server_info = &self.server_info;
+        let server_signer: XOnlyPublicKey = server_info.signer_pk.into();
+
+        let mut start_index = 0u32;
+        let mut discovered_count = 0u32;
+
+        tracing::info!(gap_limit, "Starting key discovery");
+
+        loop {
+            // Generate a batch of gap_limit keys
+            let mut batch: Vec<(u32, Keypair, ArkAddress)> = Vec::with_capacity(gap_limit as usize);
+
+            for i in 0..gap_limit {
+                let index = start_index
+                    .checked_add(i)
+                    .ok_or_else(|| Error::ad_hoc("Key discovery index overflow"))?;
+
+                let kp = match self.inner.key_provider.derive_at_discovery_index(index)? {
+                    Some(kp) => kp,
+                    None => break,
+                };
+
+                let vtxo = Vtxo::new_default(
+                    self.secp(),
+                    server_signer,
+                    kp.x_only_public_key().0,
+                    server_info.unilateral_exit_delay,
+                    server_info.network,
+                )?;
+
+                batch.push((index, kp, vtxo.to_ark_address()));
+            }
+
+            if batch.is_empty() {
+                break;
+            }
+
+            // Query all addresses in batch at once
+            let addresses: Vec<_> = batch.iter().map(|(_, _, addr)| *addr).collect();
+            let request = GetVtxosRequest::new_for_addresses(&addresses);
+            let list = timeout_op(
+                self.inner.timeout,
+                self.network_client().list_vtxos(request),
+            )
+            .await
+            .context("Failed to check addresses for VTXOs")??;
+
+            // Build set of used scripts from response
+            let used_scripts: HashSet<_> = list
+                .spendable()
+                .iter()
+                .chain(list.spent().iter())
+                .map(|vtxo| vtxo.script.clone())
+                .collect();
+
+            // Cache keypairs for used addresses (match by script)
+            let mut found_any = false;
+            for (index, kp, addr) in batch {
+                let script = addr.to_p2tr_script_pubkey();
+                if used_scripts.contains(&script) {
+                    tracing::debug!(index, %addr, "Found used address");
+                    self.inner
+                        .key_provider
+                        .cache_discovered_keypair(index, kp)?;
+                    discovered_count += 1;
+                    found_any = true;
+                }
+            }
+
+            // Stop if no used addresses found in this batch (gap limit reached)
+            if !found_any {
+                break;
+            }
+
+            start_index = start_index
+                .checked_add(gap_limit)
+                .ok_or_else(|| Error::ad_hoc("Key discovery index overflow"))?;
+        }
+
+        tracing::info!(discovered_count, "Key discovery completed");
+
+        Ok(discovered_count)
     }
 
     // At the moment we are always generating the same address.
@@ -508,19 +783,37 @@ where
             .context("Failed to fetch list of VTXOs")??;
 
             if include_recoverable_vtxos {
-                vtxos
-                    .spent
-                    .push((list.spent_without_recoverable().to_vec(), vtxo.clone()));
+                let spent_without_recoverable = list.spent_without_recoverable();
+                if !spent_without_recoverable.is_empty() {
+                    vtxos.spent.push((spent_without_recoverable, vtxo.clone()));
+                }
 
-                vtxos
-                    .spendable
-                    .push((list.spendable_with_recoverable().to_vec(), vtxo.clone()));
+                let spendable_with_recoverable = list.spendable_with_recoverable();
+                if !spendable_with_recoverable.is_empty() {
+                    vtxos
+                        .spendable
+                        .push((spendable_with_recoverable, vtxo.clone()));
+                }
             } else {
-                vtxos.spent.push((list.spent().to_vec(), vtxo.clone()));
+                let spent = list.spent();
+                if !spent.is_empty() {
+                    vtxos.spent.push((spent.to_vec(), vtxo.clone()));
+                }
 
-                vtxos
-                    .spendable
-                    .push((list.spendable_without_recoverable().to_vec(), vtxo.clone()));
+                let spendable_without_recoverable = list.spendable_without_recoverable();
+                if !spendable_without_recoverable.is_empty() {
+                    vtxos
+                        .spendable
+                        .push((spendable_without_recoverable, vtxo.clone()));
+                }
+            }
+
+            // update keypair cache for used keys if we have any vtxo
+            if !list.all().is_empty() {
+                let used_pk = vtxo.owner_pk();
+                if let Err(err) = self.inner.key_provider.mark_as_used(&used_pk) {
+                    tracing::warn!("Failed updating keypair cache for used keypair: {:?} ", err);
+                }
             }
         }
 
@@ -771,8 +1064,11 @@ where
         self.inner.network_client.clone()
     }
 
-    fn kp(&self) -> &Keypair {
-        &self.inner.kp
+    fn next_keypair(&self, keypair_index: KeypairIndex) -> Result<Keypair, Error> {
+        self.inner.key_provider.get_next_keypair(keypair_index)
+    }
+    fn keypair_by_pk(&self, pk: &XOnlyPublicKey) -> Result<Keypair, Error> {
+        self.inner.key_provider.get_keypair_for_pk(pk)
     }
 
     fn secp(&self) -> &Secp256k1<All> {

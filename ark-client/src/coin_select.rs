@@ -7,6 +7,7 @@ use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use ark_core::unilateral_exit;
 use bitcoin::Amount;
+use bitcoin::TxOut;
 use jiff::SignedDuration;
 use jiff::Timestamp;
 use std::collections::HashSet;
@@ -21,8 +22,8 @@ use std::collections::HashSet;
 /// https://github.com/bitcoindevkit/coin-select.
 ///
 /// TODO: Part of this logic needs to be extracted into `ark-core`.
-pub async fn coin_select_for_onchain<B, W, S>(
-    client: &Client<B, W, S>,
+pub async fn coin_select_for_onchain<B, W, S, K>(
+    client: &Client<B, W, S, K>,
     target_amount: Amount,
 ) -> Result<
     (
@@ -35,6 +36,7 @@ where
     B: Blockchain,
     W: BoardingWallet + OnchainWallet,
     S: SwapStorage + 'static,
+    K: crate::KeyProvider,
 {
     let boarding_outputs = client.inner.wallet.get_boarding_outputs()?;
 
@@ -116,9 +118,13 @@ where
                     tracing::debug!(?outpoint, %amount, ?vtxo, "Selected VTXO");
 
                     selected_vtxo_outputs.insert(unilateral_exit::VtxoInput::new(
-                        vtxo.clone(),
-                        *amount,
                         *outpoint,
+                        vtxo.exit_delay(),
+                        TxOut {
+                            value: *amount,
+                            script_pubkey: vtxo.script_pubkey(),
+                        },
+                        vtxo.exit_spend_info()?,
                     ));
                     selected_amount += *amount;
                 }

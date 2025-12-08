@@ -11,6 +11,10 @@ use bitcoin::secp256k1::Message;
 use bitcoin::secp256k1::SecretKey;
 use bitcoin::secp256k1::schnorr::Signature;
 
+// TODO: I think we should get rid of `BoardingWallet` and `OnchainWallet` and just use
+// `KeyProvider` for everything! Also, IMO this client doesn't benefit from having an "on-chain
+// wallet" within it.
+
 pub trait BoardingWallet {
     fn new_boarding_output(
         &self,

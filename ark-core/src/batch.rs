@@ -320,7 +320,7 @@ where
     S: FnMut(
         &mut psbt::Input,
         secp256k1::Message,
-    ) -> Result<(schnorr::Signature, XOnlyPublicKey), Error>,
+    ) -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, Error>,
 {
     const FORFEIT_TX_CONNECTOR_INDEX: usize = 0;
     const FORFEIT_TX_VTXO_INDEX: usize = 1;
@@ -407,6 +407,7 @@ where
                 forfeit_control_block.clone(),
                 (forfeit_script.clone(), leaf_version),
             );
+        forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX].witness_script = Some(forfeit_script.clone());
 
         let prevouts = forfeit_psbt
             .inputs
@@ -428,20 +429,22 @@ where
 
         let msg = secp256k1::Message::from_digest(tap_sighash.to_raw_hash().to_byte_array());
 
-        let (sig, pk) = sign_fn(&mut forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX], msg)?;
+        let sigs = sign_fn(&mut forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX], msg)?;
 
-        secp.verify_schnorr(&sig, &msg, &pk)
-            .map_err(Error::crypto)
-            .context("failed to verify own forfeit signature")?;
+        for (sig, pk) in sigs {
+            secp.verify_schnorr(&sig, &msg, &pk)
+                .map_err(Error::crypto)
+                .context("failed to verify own forfeit signature")?;
 
-        let sig = taproot::Signature {
-            signature: sig,
-            sighash_type: TapSighashType::Default,
-        };
+            let sig = taproot::Signature {
+                signature: sig,
+                sighash_type: TapSighashType::Default,
+            };
 
-        forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX]
-            .tap_script_sigs
-            .insert((pk, leaf_hash), sig);
+            forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX]
+                .tap_script_sigs
+                .insert((pk, leaf_hash), sig);
+        }
 
         signed_forfeit_psbts.push(forfeit_psbt.clone());
     }
@@ -730,6 +733,8 @@ pub fn prepare_delegate_psbts(
                 (forfeit_script.clone(), leaf_version),
             );
 
+        forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX].witness_script = Some(forfeit_script.clone());
+
         forfeit_psbts.push(forfeit_psbt);
     }
 
@@ -877,7 +882,7 @@ where
     S: FnMut(
         &mut psbt::Input,
         secp256k1::Message,
-    ) -> Result<(schnorr::Signature, XOnlyPublicKey), Error>,
+    ) -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, Error>,
 {
     let prevouts = intent_psbt
         .inputs
@@ -900,14 +905,16 @@ where
 
         let msg = secp256k1::Message::from_digest(tap_sighash.to_raw_hash().to_byte_array());
 
-        let (sig, pk) = sign_fn(psbt_input, msg)?;
+        let sigs =
+            sign_fn(psbt_input, msg).with_context(|| format!("failed to sign intent input {i}"))?;
+        for (sig, pk) in sigs {
+            let sig = taproot::Signature {
+                signature: sig,
+                sighash_type: TapSighashType::Default,
+            };
 
-        let sig = taproot::Signature {
-            signature: sig,
-            sighash_type: TapSighashType::Default,
-        };
-
-        psbt_input.tap_script_sigs.insert((pk, leaf_hash), sig);
+            psbt_input.tap_script_sigs.insert((pk, leaf_hash), sig);
+        }
     }
 
     // Sign the forfeit PSBTs
@@ -942,16 +949,24 @@ where
 
         let msg = secp256k1::Message::from_digest(tap_sighash.to_raw_hash().to_byte_array());
 
-        let (sig, pk) = sign_fn(&mut forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX], msg)?;
+        let sigs =
+            sign_fn(&mut forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX], msg).with_context(|| {
+                format!(
+                    "failed to sign forfeit PSBT {}",
+                    forfeit_psbt.unsigned_tx.compute_txid()
+                )
+            })?;
 
-        let sig = taproot::Signature {
-            signature: sig,
-            sighash_type: TapSighashType::AllPlusAnyoneCanPay,
-        };
+        for (sig, pk) in sigs {
+            let sig = taproot::Signature {
+                signature: sig,
+                sighash_type: TapSighashType::AllPlusAnyoneCanPay,
+            };
 
-        forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX]
-            .tap_script_sigs
-            .insert((pk, leaf_hash), sig);
+            forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX]
+                .tap_script_sigs
+                .insert((pk, leaf_hash), sig);
+        }
     }
 
     Ok(())

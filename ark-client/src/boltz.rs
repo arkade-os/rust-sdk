@@ -65,11 +65,12 @@ pub struct ClaimVhtlcResult {
     pub preimage: [u8; 32],
 }
 
-impl<B, W, S> Client<B, W, S>
+impl<B, W, S, K> Client<B, W, S, K>
 where
     B: Blockchain,
     W: BoardingWallet + OnchainWallet,
     S: SwapStorage + 'static,
+    K: crate::KeyProvider,
 {
     // Submarine swap.
 
@@ -92,7 +93,9 @@ where
         &self,
         invoice: Bolt11Invoice,
     ) -> Result<SubmarineSwapData, Error> {
-        let refund_public_key = self.inner.kp.public_key();
+        let refund_public_key = self
+            .next_keypair(crate::key_provider::KeypairIndex::New)?
+            .public_key();
 
         let preimage_hash = invoice.payment_hash();
         let preimage_hash = ripemd160::Hash::hash(preimage_hash.as_byte_array());
@@ -179,7 +182,8 @@ where
         &self,
         invoice: Bolt11Invoice,
     ) -> Result<SubmarineSwapResult, Error> {
-        let refund_public_key = self.inner.kp.public_key();
+        let keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
+        let refund_public_key = keypair.public_key();
 
         let preimage_hash = invoice.payment_hash();
         let preimage_hash = ripemd160::Hash::hash(preimage_hash.as_byte_array());
@@ -383,6 +387,7 @@ where
 
         let script_pubkey = vhtlc.script_pubkey();
 
+        let refunder_pk = swap_data.refund_public_key.inner.x_only_public_key().0;
         let vhtlc_input = VtxoInput::new(
             script_ver.0,
             Some(LockTime::from_consensus(
@@ -405,14 +410,16 @@ where
             &self.server_info,
         )?;
 
-        let sign_fn = |_: &mut psbt::Input,
-                       msg: secp256k1::Message|
-         -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
-            let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, self.kp());
-            let pk = self.kp().x_only_public_key().0;
+        let kp = self.keypair_by_pk(&refunder_pk)?;
+        let sign_fn =
+            |_: &mut psbt::Input,
+             msg: secp256k1::Message|
+             -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
+                let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &kp);
+                let pk = kp.x_only_public_key().0;
 
-            Ok((sig, pk))
-        };
+                Ok(vec![(sig, pk)])
+            };
 
         sign_ark_transaction(sign_fn, &mut ark_tx, 0)?;
 
@@ -428,6 +435,17 @@ where
             .first()
             .ok_or_else(|| Error::ad_hoc("no checkpoint PSBTs found"))?
             .clone();
+
+        let kp = self.keypair_by_pk(&refunder_pk)?;
+        let sign_fn =
+            |_: &mut psbt::Input,
+             msg: secp256k1::Message|
+             -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
+                let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &kp);
+                let pk = kp.x_only_public_key().0;
+
+                Ok(vec![(sig, pk)])
+            };
 
         sign_checkpoint_transaction(sign_fn, &mut checkpoint_psbt)?;
 
@@ -524,6 +542,7 @@ where
 
         let script_pubkey = vhtlc.script_pubkey();
 
+        let refunder_pk = swap_data.refund_public_key.inner.x_only_public_key().0;
         let vhtlc_input = VtxoInput::new(
             script_ver.0,
             Some(LockTime::from_consensus(
@@ -546,16 +565,18 @@ where
             &self.server_info,
         )?;
 
-        let sign_fn = |_: &mut psbt::Input,
-                       msg: secp256k1::Message|
-         -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
-            // TODO: Implement this once Boltz supports this path and we can test it.
+        let kp = self.keypair_by_pk(&refunder_pk)?;
+        let sign_fn =
+            |_: &mut psbt::Input,
+             msg: secp256k1::Message|
+             -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
+                // TODO: Implement this once Boltz supports this path and we can test it.
 
-            let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, self.kp());
-            let pk = self.kp().x_only_public_key().0;
+                let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &kp);
+                let pk = kp.x_only_public_key().0;
 
-            Ok((sig, pk))
-        };
+                Ok(vec![(sig, pk)])
+            };
 
         sign_ark_transaction(sign_fn, &mut ark_tx, 0)?;
 
@@ -595,6 +616,17 @@ where
             .ok_or_else(|| Error::ad_hoc("no checkpoint PSBTs found"))?
             .clone();
 
+        let kp = self.keypair_by_pk(&refunder_pk)?;
+        let sign_fn =
+            |_: &mut psbt::Input,
+             msg: secp256k1::Message|
+             -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
+                let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &kp);
+                let pk = kp.x_only_public_key().0;
+
+                Ok(vec![(sig, pk)])
+            };
+
         sign_checkpoint_transaction(sign_fn, &mut checkpoint_psbt)?;
 
         timeout_op(
@@ -633,7 +665,9 @@ where
         let preimage_hash_sha256 = sha256::Hash::hash(&preimage);
         let preimage_hash = ripemd160::Hash::hash(preimage_hash_sha256.as_byte_array());
 
-        let claim_public_key = self.inner.kp.public_key();
+        let claim_public_key = self
+            .next_keypair(crate::key_provider::KeypairIndex::New)?
+            .public_key();
 
         let (invoice_amount, onchain_amount) = match amount {
             SwapAmount::Invoice(amount) => (Some(amount), None),
@@ -740,7 +774,8 @@ where
     ) -> Result<ReverseSwapResult, Error> {
         let preimage_hash = ripemd160::Hash::hash(preimage_hash_sha256.as_byte_array());
 
-        let claim_public_key = self.inner.kp.public_key();
+        let keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
+        let claim_public_key = keypair.public_key();
 
         let (invoice_amount, onchain_amount) = match amount {
             SwapAmount::Invoice(amount) => (Some(amount), None),
@@ -989,6 +1024,7 @@ where
 
         let script_pubkey = vhtlc.script_pubkey();
 
+        let claimer_pk = swap.claim_public_key.inner.x_only_public_key().0;
         let vhtlc_input = VtxoInput::new(
             script_ver.0,
             None,
@@ -1011,36 +1047,38 @@ where
         .map_err(Error::from)
         .context("failed to build offchain TXs")?;
 
-        let sign_fn = |input: &mut psbt::Input,
-                       msg: secp256k1::Message|
-         -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
-            // Add preimage to PSBT input.
-            {
-                // Initialized with a 1, because we only have one witness element: the preimage.
-                let mut bytes = vec![1];
+        let kp = self.keypair_by_pk(&claimer_pk)?;
+        let sign_fn =
+            |input: &mut psbt::Input,
+             msg: secp256k1::Message|
+             -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
+                // Add preimage to PSBT input.
+                {
+                    // Initialized with a 1, because we only have one witness element: the preimage.
+                    let mut bytes = vec![1];
 
-                let length = VarInt::from(preimage.len() as u64);
+                    let length = VarInt::from(preimage.len() as u64);
 
-                length
-                    .consensus_encode(&mut bytes)
-                    .expect("valid length encoding");
+                    length
+                        .consensus_encode(&mut bytes)
+                        .expect("valid length encoding");
 
-                bytes.write_all(&preimage).expect("valid preimage encoding");
+                    bytes.write_all(&preimage).expect("valid preimage encoding");
 
-                input.unknown.insert(
-                    psbt::raw::Key {
-                        type_value: 222,
-                        key: VTXO_CONDITION_KEY.to_vec(),
-                    },
-                    bytes,
-                );
-            }
+                    input.unknown.insert(
+                        psbt::raw::Key {
+                            type_value: 222,
+                            key: VTXO_CONDITION_KEY.to_vec(),
+                        },
+                        bytes,
+                    );
+                }
 
-            let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, self.kp());
-            let pk = self.kp().x_only_public_key().0;
+                let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &kp);
+                let pk = kp.x_only_public_key().0;
 
-            Ok((sig, pk))
-        };
+                Ok(vec![(sig, pk)])
+            };
 
         sign_ark_transaction(sign_fn, &mut ark_tx, 0)
             .map_err(Error::from)
@@ -1231,6 +1269,7 @@ where
 
         let script_pubkey = vhtlc.script_pubkey();
 
+        let claimer_pk = swap.claim_public_key.inner.x_only_public_key().0;
         let vhtlc_input = VtxoInput::new(
             script_ver.0,
             None,
@@ -1253,36 +1292,38 @@ where
         .map_err(Error::from)
         .context("failed to build offchain TXs")?;
 
-        let sign_fn = |input: &mut psbt::Input,
-                       msg: secp256k1::Message|
-         -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
-            // Add preimage to PSBT input.
-            {
-                // Initialized with a 1, because we only have one witness element: the preimage.
-                let mut bytes = vec![1];
+        let kp = self.keypair_by_pk(&claimer_pk)?;
+        let sign_fn =
+            |input: &mut psbt::Input,
+             msg: secp256k1::Message|
+             -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
+                // Add preimage to PSBT input.
+                {
+                    // Initialized with a 1, because we only have one witness element: the preimage.
+                    let mut bytes = vec![1];
 
-                let length = VarInt::from(preimage.len() as u64);
+                    let length = VarInt::from(preimage.len() as u64);
 
-                length
-                    .consensus_encode(&mut bytes)
-                    .expect("valid length encoding");
+                    length
+                        .consensus_encode(&mut bytes)
+                        .expect("valid length encoding");
 
-                bytes.write_all(&preimage).expect("valid preimage encoding");
+                    bytes.write_all(&preimage).expect("valid preimage encoding");
 
-                input.unknown.insert(
-                    psbt::raw::Key {
-                        type_value: 222,
-                        key: VTXO_CONDITION_KEY.to_vec(),
-                    },
-                    bytes,
-                );
-            }
+                    input.unknown.insert(
+                        psbt::raw::Key {
+                            type_value: 222,
+                            key: VTXO_CONDITION_KEY.to_vec(),
+                        },
+                        bytes,
+                    );
+                }
 
-            let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, self.kp());
-            let pk = self.kp().x_only_public_key().0;
+                let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &kp);
+                let pk = kp.x_only_public_key().0;
 
-            Ok((sig, pk))
-        };
+                Ok(vec![(sig, pk)])
+            };
 
         sign_ark_transaction(sign_fn, &mut ark_tx, 0)
             .map_err(Error::from)
