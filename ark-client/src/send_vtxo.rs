@@ -40,20 +40,17 @@ where
     ///
     /// The [`Txid`] of the generated Ark transaction.
     pub async fn send_vtxo(&self, address: ArkAddress, amount: Amount) -> Result<Txid, Error> {
-        // Recoverable VTXOs cannot be sent.
-        let select_recoverable_vtxos = false;
-
-        let spendable_vtxos = self
-            .spendable_vtxos(select_recoverable_vtxos)
+        let (vtxo_list, script_pubkey_to_vtxo_map) = self
+            .list_vtxos()
             .await
             .context("failed to get spendable VTXOs")?;
 
         // Run coin selection algorithm on candidate spendable VTXOs.
-        let spendable_virtual_tx_outpoints = spendable_vtxos
-            .iter()
-            .flat_map(|(vtxos, _)| vtxos.clone())
+        let spendable_virtual_tx_outpoints = vtxo_list
+            .spendable_offchain()
             .map(|vtxo| ark_core::coin_select::VirtualTxOutPoint {
                 outpoint: vtxo.outpoint,
+                script_pubkey: vtxo.script.clone(),
                 expire_at: vtxo.expires_at,
                 amount: vtxo.amount,
             })
@@ -71,16 +68,14 @@ where
         let vtxo_inputs = selected_coins
             .into_iter()
             .map(|virtual_tx_outpoint| {
-                let vtxo = spendable_vtxos
-                    .clone()
-                    .into_iter()
-                    .find_map(|(virtual_tx_outpoints, vtxo)| {
-                        virtual_tx_outpoints
-                            .iter()
-                            .any(|v| v.outpoint == virtual_tx_outpoint.outpoint)
-                            .then_some(vtxo)
-                    })
-                    .expect("to find matching default VTXO");
+                let vtxo = script_pubkey_to_vtxo_map
+                    .get(&virtual_tx_outpoint.script_pubkey)
+                    .ok_or_else(|| {
+                        ark_core::Error::ad_hoc(format!(
+                            "missing VTXO for script pubkey: {}",
+                            virtual_tx_outpoint.script_pubkey
+                        ))
+                    })?;
 
                 let (forfeit_script, control_block) = vtxo
                     .forfeit_spend_info()

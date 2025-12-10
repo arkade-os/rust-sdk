@@ -13,7 +13,6 @@ use ark_core::send::VtxoInput;
 use ark_core::send::build_offchain_transactions;
 use ark_core::send::sign_ark_transaction;
 use ark_core::send::sign_checkpoint_transaction;
-use ark_core::server::GetVtxosRequest;
 use ark_core::server::parse_sequence_number;
 use ark_core::vhtlc::VhtlcOptions;
 use ark_core::vhtlc::VhtlcScript;
@@ -354,18 +353,11 @@ where
         }
 
         let vhtlc_outpoint = {
-            let request = GetVtxosRequest::new_for_addresses(&[vhtlc_address]);
-
-            let list = timeout_op(
-                self.inner.timeout,
-                self.network_client().list_vtxos(request),
-            )
-            .await
-            .context("Failed to fetch VHTLC")??;
+            let (vtxo_list, _) = self.list_vtxos().await?;
 
             // We expect a single outpoint.
-            let all = list.all();
-            let vhtlc_outpoint = all.first().ok_or_else(|| {
+            let mut unspent = vtxo_list.all_unspent();
+            let vhtlc_outpoint = unspent.next().ok_or_else(|| {
                 Error::ad_hoc(format!("no outpoint found for address {vhtlc_address}"))
             })?;
 
@@ -509,18 +501,11 @@ where
         }
 
         let vhtlc_outpoint = {
-            let request = GetVtxosRequest::new_for_addresses(&[vhtlc_address]);
-
-            let list = timeout_op(
-                self.inner.timeout,
-                self.network_client().list_vtxos(request),
-            )
-            .await
-            .context("Failed to fetch VHTLC")??;
+            let (vtxo_list, _) = self.list_vtxos().await?;
 
             // We expect a single outpoint.
-            let all = list.all();
-            let vhtlc_outpoint = all.first().ok_or_else(|| {
+            let mut unspent = vtxo_list.all_unspent();
+            let vhtlc_outpoint = unspent.next().ok_or_else(|| {
                 Error::ad_hoc(format!("no outpoint found for address {vhtlc_address}"))
             })?;
 
@@ -989,20 +974,11 @@ where
 
         // TODO: Ideally we can skip this if the vout is always the same (probably 0).
         let vhtlc_outpoint = {
-            let request = GetVtxosRequest::new_for_addresses(&[vhtlc_address]);
-
-            let list = timeout_op(
-                self.inner.timeout,
-                self.network_client().list_vtxos(request),
-            )
-            .await
-            .context("failed to fetch VHTLC")?
-            .map_err(Error::ark_server)
-            .context("failed to fetch VHTLC")?;
+            let (vtxo_list, _) = self.list_vtxos().await?;
 
             // We expect a single outpoint.
-            let all = list.all();
-            let vhtlc_outpoint = all.first().ok_or_else(|| {
+            let mut unspent = vtxo_list.all_unspent();
+            let vhtlc_outpoint = unspent.next().ok_or_else(|| {
                 Error::ad_hoc(format!("no outpoint found for address {vhtlc_address}"))
             })?;
 
@@ -1234,20 +1210,11 @@ where
 
         // TODO: Ideally we can skip this if the vout is always the same (probably 0).
         let vhtlc_outpoint = {
-            let request = GetVtxosRequest::new_for_addresses(&[vhtlc_address]);
-
-            let list = timeout_op(
-                self.inner.timeout,
-                self.network_client().list_vtxos(request),
-            )
-            .await
-            .context("failed to fetch VHTLC")?
-            .map_err(Error::ark_server)
-            .context("failed to fetch VHTLC")?;
+            let (vtxo_list, _) = self.list_vtxos().await?;
 
             // We expect a single outpoint.
-            let all = list.all();
-            let vhtlc_outpoint = all.first().ok_or_else(|| {
+            let mut unspent = vtxo_list.all_unspent();
+            let vhtlc_outpoint = unspent.next().ok_or_else(|| {
                 Error::ad_hoc(format!("no outpoint found for address {vhtlc_address}"))
             })?;
 

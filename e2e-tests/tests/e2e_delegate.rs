@@ -37,11 +37,11 @@ pub async fn e2e_delegate() {
 
     tracing::debug!(?alice_boarding_outpoint, "Funded Alice's boarding output");
 
-    alice.settle(&mut rng, false).await.unwrap();
+    alice.settle(&mut rng).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     let alice_offchain_balance = alice.offchain_balance().await.unwrap();
-    let vtxos_before = alice.list_vtxos(false).await.unwrap();
+    let (vtxos_before, _) = alice.list_vtxos().await.unwrap();
 
     tracing::info!(
         ?alice_offchain_balance,
@@ -50,13 +50,13 @@ pub async fn e2e_delegate() {
     );
 
     assert_eq!(alice_offchain_balance.confirmed(), alice_fund_amount);
-    assert_eq!(alice_offchain_balance.pending(), Amount::ZERO);
+    assert_eq!(alice_offchain_balance.pre_confirmed(), Amount::ZERO);
 
     // TODO: Not sure why we have to wait longer here.
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
     let mut delegate = alice
-        .generate_delegate(bob_delegate_cosigner_pk, false)
+        .generate_delegate(bob_delegate_cosigner_pk)
         .await
         .unwrap();
 
@@ -78,7 +78,7 @@ pub async fn e2e_delegate() {
 
     let alice_offchain_balance_after = alice.offchain_balance().await.unwrap();
 
-    let vtxos_after = alice.list_vtxos(false).await.unwrap();
+    let (vtxos_after, _) = alice.list_vtxos().await.unwrap();
 
     tracing::info!(
         %commitment_txid,
@@ -89,16 +89,16 @@ pub async fn e2e_delegate() {
 
     assert_eq!(alice_offchain_balance_after.confirmed(), alice_fund_amount);
 
-    let pre_settlement_outpoint = vtxos_before.spendable[0].0[0].outpoint;
-    let settled_outpoint = vtxos_after.spent[0].0[0].outpoint;
+    let pre_settlement_outpoint = vtxos_before.all_unspent().next().unwrap().outpoint;
+    let settled_outpoint = vtxos_after.spent().next().unwrap();
 
     assert_eq!(
-        pre_settlement_outpoint, settled_outpoint,
+        pre_settlement_outpoint, settled_outpoint.outpoint,
         "original VTXO should be spent"
     );
 
-    let old_vtxo_settlement_txid = vtxos_after.spent[0].0[0].settled_by.unwrap();
-    let new_vtxo_commitment_txid = vtxos_after.spendable[0].0[0].commitment_txids[0];
+    let old_vtxo_settlement_txid = settled_outpoint.settled_by.unwrap();
+    let new_vtxo_commitment_txid = vtxos_after.all_unspent().next().unwrap().commitment_txids[0];
 
     assert_eq!(
         old_vtxo_settlement_txid, new_vtxo_commitment_txid,

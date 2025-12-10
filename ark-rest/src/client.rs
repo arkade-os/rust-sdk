@@ -27,7 +27,6 @@ use ark_core::server::GetVtxosRequest;
 use ark_core::server::GetVtxosRequestFilter;
 use ark_core::server::GetVtxosRequestReference;
 use ark_core::server::IndexerPage;
-use ark_core::server::ListVtxo;
 use ark_core::server::NoncePks;
 use ark_core::server::PartialSigTree;
 use ark_core::server::StreamEvent;
@@ -147,8 +146,16 @@ impl Client {
         Ok(FinalizeOffchainTxResponse {})
     }
 
-    pub async fn list_vtxos(&self, request: GetVtxosRequest) -> Result<ListVtxo, Error> {
+    pub async fn list_vtxos(
+        &self,
+        request: GetVtxosRequest,
+    ) -> Result<Vec<VirtualTxOutPoint>, Error> {
         let reference = request.reference();
+
+        if reference.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let filter = request.filter();
 
         let (scripts, outpoints) = match reference {
@@ -186,50 +193,12 @@ impl Client {
         .map_err(Error::request)?;
 
         let vtxos = response.vtxos.ok_or(Error::request("VTXOs not received"))?;
-
-        let mut spent = vtxos
-            .iter()
-            .filter_map(
-                |vtxo| match (vtxo.is_spent, vtxo.is_unrolled, vtxo.is_swept) {
-                    (Some(true), _, _) | (_, Some(true), _) | (_, _, Some(true)) => {
-                        Some(VirtualTxOutPoint::try_from(vtxo.clone()))
-                    }
-                    _ => None,
-                },
-            )
+        let vtxos = vtxos
+            .into_iter()
+            .map(VirtualTxOutPoint::try_from)
             .collect::<Result<Vec<_>, crate::conversions::ConversionError>>()?;
 
-        let mut spendable = vtxos
-            .iter()
-            .filter_map(
-                |vtxo| match (vtxo.is_unrolled, vtxo.is_spent, vtxo.is_swept) {
-                    (Some(false) | None, Some(false) | None, Some(false) | None) => {
-                        Some(VirtualTxOutPoint::try_from(vtxo.clone()))
-                    }
-                    _ => None,
-                },
-            )
-            .collect::<Result<Vec<_>, crate::conversions::ConversionError>>()?;
-
-        let mut spent_by_redeem = Vec::new();
-        for spendable_vtxo in spendable.clone() {
-            let was_spent_by_redeem = spendable.iter().any(|v| v.is_unrolled);
-
-            if was_spent_by_redeem {
-                spent_by_redeem.push(spendable_vtxo);
-            }
-        }
-
-        // FIXME: Maybe this is no longer necessary (copied from ark-grpc)
-
-        // Remove "spendable" VTXOs that were actually already spent by an Ark transaction from the
-        // list of spendable VTXOs.
-        spendable.retain(|i| !spent_by_redeem.contains(i));
-
-        // Add them to the list of spent VTXOs.
-        spent.append(&mut spent_by_redeem);
-
-        Ok(ListVtxo::new(spent, spendable))
+        Ok(vtxos)
     }
 
     pub async fn register_intent(

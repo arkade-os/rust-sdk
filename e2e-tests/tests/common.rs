@@ -4,13 +4,13 @@ use ark_bdk_wallet::Wallet;
 use ark_client::Bip32KeyProvider;
 use ark_client::Blockchain;
 use ark_client::Client;
-use ark_client::ExplorerUtxo;
 use ark_client::InMemorySwapStorage;
 use ark_client::OfflineClient;
 use ark_client::SpendStatus;
 use ark_client::error::Error;
 use ark_client::wallet::Persistence;
 use ark_core::BoardingOutput;
+use ark_core::ExplorerUtxo;
 use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::Network;
@@ -395,37 +395,66 @@ pub async fn set_up_client(
     (client, wallet)
 }
 
+/// Wait until the client's offchain balance matches the specified targets.
+///
+/// Usage:
+/// ```ignore
+/// // Wait for confirmed balance only
+/// wait_until_balance!(&client, confirmed: Amount::from_sat(1000));
+///
+/// // Wait for confirmed and pre_confirmed
+/// wait_until_balance!(&client, confirmed: Amount::from_sat(1000), pre_confirmed: Amount::ZERO);
+///
+/// // Wait for all three
+/// wait_until_balance!(&client, confirmed: Amount::from_sat(1000), pre_confirmed: Amount::ZERO, recoverable: Amount::ZERO);
+///
+/// // Any combination works
+/// wait_until_balance!(&client, recoverable: Amount::from_sat(500));
+/// ```
 #[allow(unused)]
-pub async fn wait_until_balance(
-    client: &Client<Nigiri, Wallet<InMemoryDb>, InMemorySwapStorage, Bip32KeyProvider>,
-    confirmed_target: Amount,
-    pending_target: Amount,
-) -> Result<(), String> {
-    tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            let offchain_balance = client.offchain_balance().await.map_err(|e| e.to_string())?;
+macro_rules! wait_until_balance {
+    ($client:expr, $($field:ident : $target:expr),+ $(,)?) => {{
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                let offchain_balance = $client.offchain_balance().await.expect("failed to get offchain balance");
 
-            tracing::debug!(
-                ?offchain_balance,
-                %confirmed_target,
-                %pending_target,
-                "Waiting for balance to match targets"
-            );
+                tracing::debug!(
+                    ?offchain_balance,
+                    $(
+                        $field = %$target,
+                    )+
+                    "Waiting for balance to match targets"
+                );
 
-            if offchain_balance.confirmed() == confirmed_target
-                && offchain_balance.pending() == pending_target
-            {
-                return Ok::<(), String>(());
+                let matches = true
+                    $(
+                        && wait_until_balance!(@check offchain_balance, $field, $target)
+                    )+;
+
+                if matches {
+                    return;
+                }
+
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
+        })
+        .await
+        .expect("timed out waiting for balance");
+    }};
 
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    })
-    .await
-    .map_err(|e| e.to_string())?;
-
-    Ok(())
+    (@check $balance:ident, confirmed, $target:expr) => {
+        $balance.confirmed() == $target
+    };
+    (@check $balance:ident, pre_confirmed, $target:expr) => {
+        $balance.pre_confirmed() == $target
+    };
+    (@check $balance:ident, recoverable, $target:expr) => {
+        $balance.recoverable() == $target
+    };
 }
+
+#[allow(unused)]
+pub(crate) use wait_until_balance;
 
 /// Set up a client with a specific seed for reproducible key derivation.
 ///

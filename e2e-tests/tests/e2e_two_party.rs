@@ -57,7 +57,7 @@ pub async fn e2e() {
     assert_eq!(alice_offchain_balance.total(), Amount::ZERO);
     assert_eq!(bob_offchain_balance.total(), Amount::ZERO);
 
-    alice.settle(&mut rng, false).await.unwrap();
+    alice.settle(&mut rng).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     let alice_offchain_balance = alice.offchain_balance().await.unwrap();
@@ -70,7 +70,7 @@ pub async fn e2e() {
     );
 
     assert_eq!(alice_offchain_balance.confirmed(), alice_fund_amount);
-    assert_eq!(alice_offchain_balance.pending(), Amount::ZERO);
+    assert_eq!(alice_offchain_balance.pre_confirmed(), Amount::ZERO);
     assert_eq!(bob_offchain_balance.total(), Amount::ZERO);
 
     let send_to_bob_vtxo_amount = Amount::from_sat(100_000);
@@ -99,18 +99,14 @@ pub async fn e2e() {
         "Sent VTXO from Alice to Bob"
     );
 
-    wait_until_balance(
+    wait_until_balance!(
         &alice,
-        Amount::ZERO,
-        alice_fund_amount - send_to_bob_vtxo_amount,
-    )
-    .await
-    .unwrap();
-    wait_until_balance(&bob, Amount::ZERO, send_to_bob_vtxo_amount)
-        .await
-        .unwrap();
+        confirmed: Amount::ZERO,
+        pre_confirmed: alice_fund_amount - send_to_bob_vtxo_amount,
+    );
+    wait_until_balance!(&bob, confirmed: Amount::ZERO, pre_confirmed: send_to_bob_vtxo_amount);
 
-    bob.settle(&mut rng, false).await.unwrap();
+    bob.settle(&mut rng).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     let alice_offchain_balance = alice.offchain_balance().await.unwrap();
@@ -124,13 +120,13 @@ pub async fn e2e() {
 
     assert_eq!(alice_offchain_balance.confirmed(), Amount::ZERO);
     assert_eq!(
-        alice_offchain_balance.pending(),
+        alice_offchain_balance.pre_confirmed(),
         alice_fund_amount - send_to_bob_vtxo_amount
     );
     assert_eq!(bob_offchain_balance.confirmed(), send_to_bob_vtxo_amount);
-    assert_eq!(bob_offchain_balance.pending(), Amount::ZERO);
+    assert_eq!(bob_offchain_balance.pre_confirmed(), Amount::ZERO);
 
-    alice.settle(&mut rng, false).await.unwrap();
+    alice.settle(&mut rng).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     let alice_offchain_balance = alice.offchain_balance().await.unwrap();
@@ -146,9 +142,9 @@ pub async fn e2e() {
         alice_offchain_balance.confirmed(),
         alice_fund_amount - send_to_bob_vtxo_amount
     );
-    assert_eq!(alice_offchain_balance.pending(), Amount::ZERO);
+    assert_eq!(alice_offchain_balance.pre_confirmed(), Amount::ZERO);
     assert_eq!(bob_offchain_balance.confirmed(), send_to_bob_vtxo_amount);
-    assert_eq!(bob_offchain_balance.pending(), Amount::ZERO);
+    assert_eq!(bob_offchain_balance.pre_confirmed(), Amount::ZERO);
 
     let address = bitcoin::Address::from_str(
         "bcrt1puq2gdfn97qd0ep0m335gc7r7uh0hpyhjhnmy90tklyywkdpcdd9sfag5y0",
@@ -160,7 +156,6 @@ pub async fn e2e() {
             &mut rng,
             address.assume_checked(),
             send_to_bob_vtxo_amount / 2,
-            false,
         )
         .await
         .unwrap();
