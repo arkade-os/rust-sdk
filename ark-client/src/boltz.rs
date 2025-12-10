@@ -1,6 +1,7 @@
 use crate::Blockchain;
 use crate::Client;
 use crate::Error;
+use crate::batch::BatchOutputType;
 use crate::error::ErrorContext as _;
 use crate::swap_storage::SwapStorage;
 use crate::timeout_op;
@@ -8,6 +9,8 @@ use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use ark_core::ArkAddress;
 use ark_core::VTXO_CONDITION_KEY;
+use ark_core::VtxoList;
+use ark_core::intent;
 use ark_core::send::OffchainTransactions;
 use ark_core::send::VtxoInput;
 use ark_core::send::build_offchain_transactions;
@@ -19,6 +22,7 @@ use ark_core::vhtlc::VhtlcScript;
 use bitcoin::Amount;
 use bitcoin::Psbt;
 use bitcoin::PublicKey;
+use bitcoin::TxOut;
 use bitcoin::Txid;
 use bitcoin::VarInt;
 use bitcoin::XOnlyPublicKey;
@@ -34,6 +38,8 @@ use bitcoin::secp256k1;
 use bitcoin::secp256k1::schnorr;
 use bitcoin::taproot::LeafVersion;
 use lightning_invoice::Bolt11Invoice;
+use rand::CryptoRng;
+use rand::Rng;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_with::DisplayFromStr;
@@ -453,6 +459,122 @@ where
         tracing::info!(txid = %ark_txid, "Refunded VHTLC");
 
         Ok(ark_txid)
+    }
+
+    /// Refund a VHTLC after the timelock has expired via settlement.
+    ///
+    /// This path does not require a signature from Boltz.
+    pub async fn refund_expired_vhtlc_via_settlement<R>(
+        &self,
+        rng: &mut R,
+        swap_id: &str,
+    ) -> Result<Txid, Error>
+    where
+        R: Rng + CryptoRng,
+    {
+        let swap_data = self
+            .swap_storage()
+            .get_submarine(swap_id)
+            .await?
+            .ok_or(Error::ad_hoc("Submarine swap not found"))?;
+
+        let timeout_block_heights = swap_data.timeout_block_heights;
+
+        let vhtlc = VhtlcScript::new(
+            VhtlcOptions {
+                sender: swap_data.refund_public_key.into(),
+                receiver: swap_data.claim_public_key.into(),
+                server: self.server_info.signer_pk.into(),
+                preimage_hash: swap_data.preimage_hash,
+                refund_locktime: timeout_block_heights.refund,
+                unilateral_claim_delay: parse_sequence_number(
+                    timeout_block_heights.unilateral_claim as i64,
+                )
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
+                unilateral_refund_delay: parse_sequence_number(
+                    timeout_block_heights.unilateral_refund as i64,
+                )
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral refund timeout: {e}")))?,
+                unilateral_refund_without_receiver_delay: parse_sequence_number(
+                    timeout_block_heights.unilateral_refund_without_receiver as i64,
+                )
+                .map_err(|e| {
+                    Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
+                })?,
+            },
+            self.server_info.network,
+        )
+        .map_err(Error::ad_hoc)?;
+
+        let vhtlc_address = vhtlc.address();
+        if vhtlc_address != swap_data.vhtlc_address {
+            return Err(Error::ad_hoc(format!(
+                "VHTLC address ({vhtlc_address}) does not match swap address ({})",
+                swap_data.vhtlc_address
+            )));
+        }
+
+        let vhtlc_outpoint = {
+            let virtual_tx_outpoints = self
+                .get_virtual_tx_outpoints(std::iter::once(vhtlc_address))
+                .await?;
+
+            let vtxo_list = VtxoList::new(self.server_info.dust, virtual_tx_outpoints);
+
+            // We expect a single outpoint.
+            let mut recoverable = vtxo_list.recoverable();
+
+            recoverable
+                .next()
+                .ok_or_else(|| {
+                    Error::ad_hoc(format!("no outpoint found for address {vhtlc_address}"))
+                })?
+                .clone()
+        };
+
+        let refund_script = vhtlc.refund_without_receiver_script();
+
+        let spend_info = vhtlc.taproot_spend_info();
+        let script_ver = (refund_script, LeafVersion::TapScript);
+        let control_block = spend_info
+            .control_block(&script_ver)
+            .ok_or(Error::ad_hoc("control block not found for refund script"))?;
+
+        let script_pubkey = vhtlc.script_pubkey();
+
+        let (refund_address, _) = self.get_offchain_address()?;
+        let refund_amount = swap_data.amount;
+
+        let vhtlc_input = intent::Input::new(
+            vhtlc_outpoint.outpoint,
+            parse_sequence_number(timeout_block_heights.unilateral_refund as i64)
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral refund timeout: {e}")))?,
+            TxOut {
+                value: refund_amount,
+                script_pubkey,
+            },
+            vhtlc.tapscripts(),
+            (script_ver.0, control_block),
+            false,
+            true,
+        );
+
+        let commitment_txid = self
+            .join_next_batch(
+                rng,
+                Vec::new(),
+                vec![vhtlc_input],
+                BatchOutputType::Board {
+                    to_address: refund_address,
+                    to_amount: refund_amount,
+                },
+            )
+            .await
+            .context("failed to join batch")?;
+
+        tracing::info!(txid = %commitment_txid, "Refunded VHTLC via settlement");
+
+        Ok(commitment_txid)
     }
 
     /// Refund a VHTLC with collaboration from Boltz.

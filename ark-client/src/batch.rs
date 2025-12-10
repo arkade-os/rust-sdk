@@ -813,7 +813,7 @@ where
         Ok((boarding_inputs, vtxo_inputs, total_amount))
     }
 
-    async fn join_next_batch<R>(
+    pub(crate) async fn join_next_batch<R>(
         &self,
         rng: &mut R,
         onchain_inputs: Vec<batch::OnChainInput>,
@@ -1459,7 +1459,7 @@ where
 }
 
 #[derive(Debug)]
-enum BatchOutputType {
+pub(crate) enum BatchOutputType {
     Board {
         to_address: ArkAddress,
         to_amount: Amount,
