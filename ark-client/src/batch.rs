@@ -798,6 +798,7 @@ where
                 Ok(intent::Input::new(
                     virtual_tx_outpoint.outpoint,
                     vtxo.exit_delay(),
+                    None,
                     TxOut {
                         value: virtual_tx_outpoint.amount,
                         script_pubkey: vtxo.script_pubkey(),
@@ -843,6 +844,7 @@ where
                 intent::Input::new(
                     o.outpoint(),
                     o.boarding_output().exit_delay(),
+                    None,
                     TxOut {
                         value: o.amount(),
                         script_pubkey: o.boarding_output().script_pubkey(),

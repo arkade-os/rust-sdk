@@ -26,7 +26,7 @@ use bitcoin::TxOut;
 use bitcoin::Txid;
 use bitcoin::VarInt;
 use bitcoin::XOnlyPublicKey;
-use bitcoin::absolute::LockTime;
+use bitcoin::absolute;
 use bitcoin::consensus::Encodable;
 use bitcoin::hashes::Hash;
 use bitcoin::hashes::ripemd160;
@@ -388,7 +388,7 @@ where
         let refunder_pk = swap_data.refund_public_key.inner.x_only_public_key().0;
         let vhtlc_input = VtxoInput::new(
             script_ver.0,
-            Some(LockTime::from_consensus(
+            Some(absolute::LockTime::from_consensus(
                 swap_data.timeout_block_heights.refund,
             )),
             control_block,
@@ -549,6 +549,9 @@ where
             vhtlc_outpoint.outpoint,
             parse_sequence_number(timeout_block_heights.unilateral_refund as i64)
                 .map_err(|e| Error::ad_hoc(format!("invalid unilateral refund timeout: {e}")))?,
+            Some(absolute::LockTime::from_consensus(
+                timeout_block_heights.refund,
+            )),
             TxOut {
                 value: refund_amount,
                 script_pubkey,
@@ -652,7 +655,7 @@ where
         let refunder_pk = swap_data.refund_public_key.inner.x_only_public_key().0;
         let vhtlc_input = VtxoInput::new(
             script_ver.0,
-            Some(LockTime::from_consensus(
+            Some(absolute::LockTime::from_consensus(
                 swap_data.timeout_block_heights.refund,
             )),
             control_block,

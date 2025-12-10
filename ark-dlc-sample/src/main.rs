@@ -1192,6 +1192,7 @@ async fn settle(
                 intent::Input::new(
                     outpoint,
                     boarding_output.exit_delay(),
+                    None,
                     TxOut {
                         value: amount,
                         script_pubkey: boarding_output.script_pubkey(),
@@ -1212,6 +1213,7 @@ async fn settle(
                 anyhow::Ok(intent::Input::new(
                     virtual_tx_outpoint.outpoint,
                     vtxo.exit_delay(),
+                    None,
                     TxOut {
                         value: virtual_tx_outpoint.amount,
                         script_pubkey: vtxo.script_pubkey(),
@@ -1441,6 +1443,7 @@ async fn settle(
             anyhow::Ok(intent::Input::new(
                 virtual_tx_outpoint.outpoint,
                 vtxo.exit_delay(),
+                None,
                 TxOut {
                     value: virtual_tx_outpoint.amount,
                     script_pubkey: vtxo.script_pubkey(),

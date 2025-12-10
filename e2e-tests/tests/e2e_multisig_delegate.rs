@@ -114,6 +114,7 @@ pub async fn e2e_multisig_delegate() {
         // TODO: This should be modelled in the output type. I think it's supposed to be the
         // highest sequence number of all leaves, but I'm not sure.
         alice.server_info.unilateral_exit_delay,
+        None,
         TxOut {
             value: msig_output_amount,
             script_pubkey: msig_output.script_pubkey(),

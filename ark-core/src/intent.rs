@@ -14,7 +14,7 @@ use bitcoin::TxOut;
 use bitcoin::Txid;
 use bitcoin::Witness;
 use bitcoin::XOnlyPublicKey;
-use bitcoin::absolute::LockTime;
+use bitcoin::absolute;
 use bitcoin::base64;
 use bitcoin::base64::Engine;
 use bitcoin::hashes::Hash;
@@ -37,7 +37,10 @@ use std::time::UNIX_EPOCH;
 pub struct Input {
     // The TXID of this outpoint is a hash of the TXID of the actual outpoint.
     outpoint: OutPoint,
+    // Related to OP_CSV (such as unilateral exit for all VTXOs).
     sequence: Sequence,
+    // Related to OP_CLTV (such as the timelock in a HTLC).
+    locktime: absolute::LockTime,
     witness_utxo: TxOut,
     // We do not serialize this.
     tapscripts: Vec<ScriptBuf>,
@@ -50,6 +53,7 @@ impl Input {
     pub fn new(
         outpoint: OutPoint,
         sequence: Sequence,
+        locktime: Option<absolute::LockTime>,
         witness_utxo: TxOut,
         tapscripts: Vec<ScriptBuf>,
         spend_info: (ScriptBuf, taproot::ControlBlock),
@@ -59,6 +63,7 @@ impl Input {
         Self {
             outpoint,
             sequence,
+            locktime: locktime.unwrap_or(absolute::LockTime::ZERO),
             witness_utxo,
             tapscripts,
             spend_info,
@@ -278,7 +283,7 @@ pub(crate) fn build_proof_psbt(
 
         Transaction {
             version: Version::non_standard(0),
-            lock_time: LockTime::ZERO,
+            lock_time: absolute::LockTime::ZERO,
             input: vec![TxIn {
                 previous_output: OutPoint {
                     txid: Txid::all_zeros(),
@@ -331,7 +336,11 @@ pub(crate) fn build_proof_psbt(
 
         let tx = Transaction {
             version: Version::TWO,
-            lock_time: LockTime::ZERO,
+            lock_time: inputs
+                .iter()
+                .map(|i| i.locktime)
+                .max_by(|a, b| a.to_consensus_u32().cmp(&b.to_consensus_u32()))
+                .unwrap_or(absolute::LockTime::ZERO),
             input: to_sign_inputs,
             output: outputs,
         };
