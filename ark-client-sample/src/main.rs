@@ -199,34 +199,30 @@ async fn main() -> Result<()> {
     .await
     .map_err(|e| anyhow!(e))?;
 
-    let info = &client.server_info;
-
-    tracing::info!(?info, "Connected to ark server");
-
     match &cli.command {
         Commands::Balance => {
-            let off_chain_balance = client.offchain_balance().await.map_err(|e| anyhow!(e))?;
-            let boarding_output = client.get_boarding_address().map_err(|e| anyhow!(e))?;
-            let outpoints = esplora_client
-                .find_outpoints(&boarding_output)
-                .await
-                .map_err(|e| anyhow!(e))?;
+            let offchain_balance = client.offchain_balance().await.map_err(|e| anyhow!(e))?;
 
-            tracing::info!(
-                "Offchain balance: pre-confirmed = {}, pending = {}",
-                off_chain_balance.confirmed(),
-                off_chain_balance.pre_confirmed()
-            );
-            let (spent, unspent): (Vec<_>, Vec<_>) =
-                outpoints.into_iter().partition(|u| u.is_spent);
+            let boarding = {
+                let boarding_output = client.get_boarding_address().map_err(|e| anyhow!(e))?;
+                let outpoints = esplora_client
+                    .find_outpoints(&boarding_output)
+                    .await
+                    .map_err(|e| anyhow!(e))?;
 
-            let spent_sum = spent.iter().map(|u| u.amount).sum::<Amount>();
-            let unspent_sum = unspent.iter().map(|u| u.amount).sum::<Amount>();
+                let (_, unspent): (Vec<_>, Vec<_>) =
+                    outpoints.into_iter().partition(|u| u.is_spent);
 
-            tracing::info!(
-                "Onchain balance: confirmed = {}, spent = {}",
-                unspent_sum,
-                spent_sum
+                unspent.iter().map(|u| u.amount).sum::<Amount>()
+            };
+
+            println!(
+                "{}",
+                serde_json::json!({
+                    "offchain_confirmed": offchain_balance.confirmed(),
+                    "offchain_pre_confirmed": offchain_balance.pre_confirmed(),
+                    "boarding": boarding,
+                })
             );
         }
         Commands::TransactionHistory => {
@@ -240,12 +236,15 @@ async fn main() -> Result<()> {
         }
         Commands::BoardingAddress => {
             let boarding_address = client.get_boarding_address().map_err(|e| anyhow!(e))?;
-            tracing::info!("Send coins to this on-chain address: {boarding_address}");
+            println!(
+                "{}",
+                serde_json::json!({"address": boarding_address.to_string()})
+            );
         }
         Commands::OffchainAddress => {
             let (address, _) = client.get_offchain_address().map_err(|e| anyhow!(e))?;
             let address = address.encode();
-            tracing::info!("Send VTXOs to this offchain address: {address}");
+            println!("{}", serde_json::json!({"address": address}));
         }
         Commands::Settle => {
             let mut rng = thread_rng();
@@ -602,10 +601,11 @@ pub fn init_tracing() {
                  h2=warn,\
                  reqwest=info,\
                  ark_core=info,\
-                 rustls=info"
+                 rustls=info,\
+                 sqlx::query=info"
                     .into()
             }),
         )
-        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init()
 }
