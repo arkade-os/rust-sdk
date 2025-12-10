@@ -1397,9 +1397,11 @@ where
                             Some(commitment_psbt)
                         };
 
-                        network_client
-                            .submit_signed_forfeit_txs(signed_forfeit_psbts, commitment_psbt)
-                            .await?;
+                        if !signed_forfeit_psbts.is_empty() || commitment_psbt.is_some() {
+                            network_client
+                                .submit_signed_forfeit_txs(signed_forfeit_psbts, commitment_psbt)
+                                .await?;
+                        }
 
                         step = step.next();
                     }
