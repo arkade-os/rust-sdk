@@ -361,11 +361,14 @@ async fn main() -> Result<()> {
 
     // Submit DLC funding transaction.
     let res = grpc_client
-        .submit_offchain_transaction_request(dlc_virtual_tx, dlc_checkpoint_txs)
+        .submit_offchain_transaction_request(dlc_virtual_tx, dlc_checkpoint_txs.clone())
         .await
         .context("failed to submit offchain TX request to fund DLC")?;
 
     let mut alice_signed_checkpoint_psbt = res.signed_checkpoint_txs[0].clone();
+    alice_signed_checkpoint_psbt.inputs[0].witness_script =
+        dlc_checkpoint_txs[0].inputs[0].witness_script.clone();
+
     sign_checkpoint_transaction(
         |_,
          msg: secp256k1::Message|
@@ -379,6 +382,9 @@ async fn main() -> Result<()> {
     .context("failed to sign Alice's DLC-funding checkpoint TX")?;
 
     let mut bob_signed_checkpoint_psbt = res.signed_checkpoint_txs[1].clone();
+    bob_signed_checkpoint_psbt.inputs[0].witness_script =
+        dlc_checkpoint_txs[1].inputs[0].witness_script.clone();
+
     sign_checkpoint_transaction(
         |_,
          msg: secp256k1::Message|
