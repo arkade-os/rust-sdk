@@ -12,11 +12,13 @@ use ark_bdk_wallet::Wallet;
 use ark_client::Blockchain;
 use ark_client::Error;
 use ark_client::OfflineClient;
+use ark_client::SpendStatus;
 use ark_client::SqliteSwapStorage;
 use ark_client::StaticKeyProvider;
 use ark_client::SwapAmount;
 use ark_client::lightning_invoice::Bolt11Invoice;
 use ark_core::ArkAddress;
+use ark_core::ExplorerUtxo;
 use ark_core::history;
 use ark_core::server::SubscriptionResponse;
 use bitcoin::Address;
@@ -197,34 +199,30 @@ async fn main() -> Result<()> {
     .await
     .map_err(|e| anyhow!(e))?;
 
-    let info = &client.server_info;
-
-    tracing::info!(?info, "Connected to ark server");
-
     match &cli.command {
         Commands::Balance => {
-            let off_chain_balance = client.offchain_balance().await.map_err(|e| anyhow!(e))?;
-            let boarding_output = client.get_boarding_address().map_err(|e| anyhow!(e))?;
-            let outpoints = esplora_client
-                .find_outpoints(&boarding_output)
-                .await
-                .map_err(|e| anyhow!(e))?;
+            let offchain_balance = client.offchain_balance().await.map_err(|e| anyhow!(e))?;
 
-            tracing::info!(
-                "Offchain balance: confirmed = {}, pending = {}",
-                off_chain_balance.confirmed(),
-                off_chain_balance.pending()
-            );
-            let (spent, unspent): (Vec<_>, Vec<_>) =
-                outpoints.into_iter().partition(|u| u.is_spent);
+            let boarding = {
+                let boarding_output = client.get_boarding_address().map_err(|e| anyhow!(e))?;
+                let outpoints = esplora_client
+                    .find_outpoints(&boarding_output)
+                    .await
+                    .map_err(|e| anyhow!(e))?;
 
-            let spent_sum = spent.iter().map(|u| u.amount).sum::<Amount>();
-            let unspent_sum = unspent.iter().map(|u| u.amount).sum::<Amount>();
+                let (_, unspent): (Vec<_>, Vec<_>) =
+                    outpoints.into_iter().partition(|u| u.is_spent);
 
-            tracing::info!(
-                "Onchain balance: confirmed = {}, spent = {}",
-                unspent_sum,
-                spent_sum
+                unspent.iter().map(|u| u.amount).sum::<Amount>()
+            };
+
+            println!(
+                "{}",
+                serde_json::json!({
+                    "offchain_confirmed": offchain_balance.confirmed(),
+                    "offchain_pre_confirmed": offchain_balance.pre_confirmed(),
+                    "boarding": boarding,
+                })
             );
         }
         Commands::TransactionHistory => {
@@ -238,22 +236,22 @@ async fn main() -> Result<()> {
         }
         Commands::BoardingAddress => {
             let boarding_address = client.get_boarding_address().map_err(|e| anyhow!(e))?;
-            tracing::info!("Send coins to this on-chain address: {boarding_address}");
+            println!(
+                "{}",
+                serde_json::json!({"address": boarding_address.to_string()})
+            );
         }
         Commands::OffchainAddress => {
             let (address, _) = client.get_offchain_address().map_err(|e| anyhow!(e))?;
             let address = address.encode();
-            tracing::info!("Send VTXOs to this offchain address: {address}");
+            println!("{}", serde_json::json!({"address": address}));
         }
         Commands::Settle => {
             let mut rng = thread_rng();
             // we need to call this because how our wallet works
             let _ = client.get_boarding_address();
 
-            let maybe_batch_tx = client
-                .settle(&mut rng, true)
-                .await
-                .map_err(|e| anyhow!(e))?;
+            let maybe_batch_tx = client.settle(&mut rng).await.map_err(|e| anyhow!(e))?;
             match maybe_batch_tx {
                 None => {
                     tracing::info!("No batch transaction - maybe nothing to settle");
@@ -338,12 +336,7 @@ async fn main() -> Result<()> {
             let checked_address = address.clone().assume_checked();
             let mut rng = thread_rng();
             let txid = client
-                .collaborative_redeem(
-                    &mut rng,
-                    checked_address.clone(),
-                    Amount::from_sat(*amount),
-                    false,
-                )
+                .collaborative_redeem(&mut rng, checked_address.clone(), Amount::from_sat(*amount))
                 .await
                 .map_err(|e| anyhow!(e))?;
 
@@ -419,10 +412,7 @@ pub struct EsploraClient {
 }
 
 impl Blockchain for EsploraClient {
-    async fn find_outpoints(
-        &self,
-        address: &Address,
-    ) -> Result<Vec<ark_client::ExplorerUtxo>, Error> {
+    async fn find_outpoints(&self, address: &Address) -> Result<Vec<ExplorerUtxo>, Error> {
         let script_pubkey = address.script_pubkey();
         let txs = self
             .esplora_client
@@ -438,7 +428,7 @@ impl Blockchain for EsploraClient {
                     .iter()
                     .enumerate()
                     .filter(|(_, v)| v.scriptpubkey == script_pubkey)
-                    .map(|(i, v)| ark_client::ExplorerUtxo {
+                    .map(|(i, v)| ExplorerUtxo {
                         outpoint: OutPoint {
                             txid,
                             vout: i as u32,
@@ -466,7 +456,7 @@ impl Blockchain for EsploraClient {
                     utxos.push(*output);
                 }
                 Some(OutputStatus { spent: true, .. }) => {
-                    utxos.push(ark_client::ExplorerUtxo {
+                    utxos.push(ExplorerUtxo {
                         is_spent: true,
                         ..*output
                     });
@@ -486,18 +476,14 @@ impl Blockchain for EsploraClient {
         Ok(option)
     }
 
-    async fn get_output_status(
-        &self,
-        txid: &Txid,
-        vout: u32,
-    ) -> Result<ark_client::SpendStatus, Error> {
+    async fn get_output_status(&self, txid: &Txid, vout: u32) -> Result<SpendStatus, Error> {
         let status = self
             .esplora_client
             .get_output_status(txid, vout as u64)
             .await
             .map_err(Error::consumer)?;
 
-        Ok(ark_client::SpendStatus {
+        Ok(SpendStatus {
             spend_txid: status.and_then(|s| s.txid),
         })
     }
@@ -615,10 +601,11 @@ pub fn init_tracing() {
                  h2=warn,\
                  reqwest=info,\
                  ark_core=info,\
-                 rustls=info"
+                 rustls=info,\
+                 sqlx::query=info"
                     .into()
             }),
         )
-        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init()
 }

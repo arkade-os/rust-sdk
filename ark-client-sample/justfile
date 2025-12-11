@@ -3,6 +3,15 @@
 default:
     @just --list
 
+# Fund a boarding address for a given actor
+faucet actor:
+    #!/usr/bin/env bash
+
+    set -euxo pipefail
+
+    address=$(just boarding-address {{ actor }} 2>/dev/null | jq .address -r)
+    nigiri faucet $address 1
+
 # Show the balance for a given actor (e.g., alice, bob)
 balance actor:
     cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed balance

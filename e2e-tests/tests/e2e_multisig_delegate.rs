@@ -2,9 +2,9 @@
 
 use crate::msig_output::MsigOutputScript;
 use crate::msig_output::MsigOutputTaprootOptions;
+use ark_core::VtxoList;
 use ark_core::batch;
 use ark_core::intent;
-use ark_core::server::GetVtxosRequest;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
 use bitcoin::TxOut;
@@ -48,11 +48,11 @@ pub async fn e2e_multisig_delegate() {
 
     tracing::debug!(?alice_boarding_outpoint, "Funded Alice's boarding output");
 
-    alice.settle(&mut rng, false).await.unwrap();
+    alice.settle(&mut rng).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     let alice_starting_offchain_balance = alice.offchain_balance().await.unwrap();
-    let alice_starting_vtxos = alice.list_vtxos(false).await.unwrap();
+    let alice_starting_vtxos = alice.list_vtxos().await.unwrap();
 
     tracing::info!(
         ?alice_starting_offchain_balance,
@@ -64,7 +64,10 @@ pub async fn e2e_multisig_delegate() {
         alice_starting_offchain_balance.confirmed(),
         alice_fund_amount
     );
-    assert_eq!(alice_starting_offchain_balance.pending(), Amount::ZERO);
+    assert_eq!(
+        alice_starting_offchain_balance.pre_confirmed(),
+        Amount::ZERO
+    );
 
     let alice_msig_output_kp = Keypair::new(&secp, &mut rng);
     let alice_msig_output_pk = alice_msig_output_kp.public_key();
@@ -92,7 +95,7 @@ pub async fn e2e_multisig_delegate() {
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     let alice_offchain_balance_after_msig_fund = alice.offchain_balance().await.unwrap();
-    let alice_vtxos_after_msig_fund = alice.list_vtxos(false).await.unwrap();
+    let alice_vtxos_after_msig_fund = alice.list_vtxos().await.unwrap();
 
     tracing::info!(
         ?alice_offchain_balance_after_msig_fund,
@@ -111,6 +114,7 @@ pub async fn e2e_multisig_delegate() {
         // TODO: This should be modelled in the output type. I think it's supposed to be the
         // highest sequence number of all leaves, but I'm not sure.
         alice.server_info.unilateral_exit_delay,
+        None,
         TxOut {
             value: msig_output_amount,
             script_pubkey: msig_output.script_pubkey(),
@@ -183,31 +187,32 @@ pub async fn e2e_multisig_delegate() {
         "Bob settled msig VTXO using delegate system"
     );
 
-    let vtxo_list = alice
-        .network_client()
-        .list_vtxos(GetVtxosRequest::new_for_addresses(&[msig_output.address()]))
+    let virtual_tx_outpoints = alice
+        .get_virtual_tx_outpoints(std::iter::once(msig_output.address()))
         .await
         .unwrap();
 
-    assert_eq!(vtxo_list.spendable().len(), 1);
-    assert_eq!(vtxo_list.spent().len(), 1);
+    let vtxo_list = VtxoList::new(alice.server_info.dust, virtual_tx_outpoints);
 
-    let settled_msig_outpoint = &vtxo_list.spent()[0];
+    assert_eq!(vtxo_list.all_unspent().count(), 1);
+    assert_eq!(vtxo_list.spent().count(), 1);
+
+    let settled_msig_outpoint = &vtxo_list.spent().next().unwrap();
 
     assert!(settled_msig_outpoint.is_spent);
     assert!(settled_msig_outpoint.is_preconfirmed);
     assert!(!settled_msig_outpoint.is_swept);
     assert!(!settled_msig_outpoint.is_unrolled);
-    assert!(!settled_msig_outpoint.is_recoverable());
+    assert!(!settled_msig_outpoint.is_recoverable(alice.server_info.dust));
     assert_eq!(settled_msig_outpoint.settled_by, Some(commitment_txid));
 
-    let new_msig_outpoint = &vtxo_list.spendable()[0];
+    let new_msig_outpoint = &vtxo_list.all_unspent().next().unwrap();
 
     assert!(!new_msig_outpoint.is_spent);
     assert!(!new_msig_outpoint.is_preconfirmed);
     assert!(!new_msig_outpoint.is_swept);
     assert!(!new_msig_outpoint.is_unrolled);
-    assert!(!new_msig_outpoint.is_recoverable());
+    assert!(!new_msig_outpoint.is_recoverable(alice.server_info.dust));
     assert!(
         new_msig_outpoint
             .commitment_txids

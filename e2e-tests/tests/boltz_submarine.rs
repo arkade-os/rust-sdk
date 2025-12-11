@@ -43,16 +43,12 @@ pub async fn submarine_swap() {
         .faucet_fund(&alice.get_boarding_address().unwrap(), alice_fund_amount)
         .await;
 
-    alice.settle(&mut rng, false).await.unwrap();
+    alice.settle(&mut rng).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-    wait_until_balance(&alice, alice_fund_amount, Amount::ZERO)
-        .await
-        .unwrap();
+    wait_until_balance!(&alice, confirmed: alice_fund_amount, pre_confirmed: Amount::ZERO);
 
     let res = alice.pay_ln_invoice(invoice).await.unwrap();
 
-    wait_until_balance(&alice, Amount::ZERO, alice_fund_amount - res.amount)
-        .await
-        .unwrap();
+    wait_until_balance!(&alice, confirmed: Amount::ZERO, pre_confirmed: alice_fund_amount - res.amount);
 }

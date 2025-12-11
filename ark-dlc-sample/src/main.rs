@@ -7,6 +7,7 @@ use ark_core::BoardingOutput;
 use ark_core::ExplorerUtxo;
 use ark_core::TxGraph;
 use ark_core::Vtxo;
+use ark_core::VtxoList;
 use ark_core::batch;
 use ark_core::batch::aggregate_nonces;
 use ark_core::batch::create_and_sign_forfeit_txs;
@@ -360,11 +361,14 @@ async fn main() -> Result<()> {
 
     // Submit DLC funding transaction.
     let res = grpc_client
-        .submit_offchain_transaction_request(dlc_virtual_tx, dlc_checkpoint_txs)
+        .submit_offchain_transaction_request(dlc_virtual_tx, dlc_checkpoint_txs.clone())
         .await
         .context("failed to submit offchain TX request to fund DLC")?;
 
     let mut alice_signed_checkpoint_psbt = res.signed_checkpoint_txs[0].clone();
+    alice_signed_checkpoint_psbt.inputs[0].witness_script =
+        dlc_checkpoint_txs[0].inputs[0].witness_script.clone();
+
     sign_checkpoint_transaction(
         |_,
          msg: secp256k1::Message|
@@ -378,6 +382,9 @@ async fn main() -> Result<()> {
     .context("failed to sign Alice's DLC-funding checkpoint TX")?;
 
     let mut bob_signed_checkpoint_psbt = res.signed_checkpoint_txs[1].clone();
+    bob_signed_checkpoint_psbt.inputs[0].witness_script =
+        dlc_checkpoint_txs[1].inputs[0].witness_script.clone();
+
     sign_checkpoint_transaction(
         |_,
          msg: secp256k1::Message|
@@ -423,7 +430,8 @@ async fn main() -> Result<()> {
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         {
-            let spendable_vtxos = spendable_vtxos(&grpc_client, &[alice_payout_vtxo]).await?;
+            let spendable_vtxos =
+                spendable_vtxos(&grpc_client, server_info.dust, &[alice_payout_vtxo]).await?;
             let virtual_tx_outpoints = list_virtual_tx_outpoints(
                 |address: &bitcoin::Address| -> Result<Vec<ExplorerUtxo>, ark_core::Error> {
                     find_outpoints(tokio::runtime::Handle::current(), &esplora_client, address)
@@ -434,7 +442,8 @@ async fn main() -> Result<()> {
             assert_eq!(virtual_tx_outpoints.spendable_balance(), alice_fund_amount);
         }
         {
-            let spendable_vtxos = spendable_vtxos(&grpc_client, &[bob_payout_vtxo]).await?;
+            let spendable_vtxos =
+                spendable_vtxos(&grpc_client, server_info.dust, &[bob_payout_vtxo]).await?;
             let virtual_tx_outpoints = list_virtual_tx_outpoints(
                 |address: &bitcoin::Address| -> Result<Vec<ExplorerUtxo>, ark_core::Error> {
                     find_outpoints(tokio::runtime::Handle::current(), &esplora_client, address)
@@ -543,7 +552,8 @@ async fn main() -> Result<()> {
     // Verify that Alice and Bob receive the expected payouts.
 
     {
-        let spendable_vtxos = spendable_vtxos(&grpc_client, &[alice_payout_vtxo]).await?;
+        let spendable_vtxos =
+            spendable_vtxos(&grpc_client, server_info.dust, &[alice_payout_vtxo]).await?;
         let virtual_tx_outpoints = list_virtual_tx_outpoints(
             |address: &bitcoin::Address| -> Result<Vec<ExplorerUtxo>, ark_core::Error> {
                 find_outpoints(tokio::runtime::Handle::current(), &esplora_client, address)
@@ -565,7 +575,8 @@ async fn main() -> Result<()> {
     };
 
     {
-        let spendable_vtxos = spendable_vtxos(&grpc_client, &[bob_payout_vtxo]).await?;
+        let spendable_vtxos =
+            spendable_vtxos(&grpc_client, server_info.dust, &[bob_payout_vtxo]).await?;
         let virtual_tx_outpoints = list_virtual_tx_outpoints(
             |address: &bitcoin::Address| -> Result<Vec<ExplorerUtxo>, ark_core::Error> {
                 find_outpoints(tokio::runtime::Handle::current(), &esplora_client, address)
@@ -656,11 +667,12 @@ async fn fund_vtxo(
 
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    let request = GetVtxosRequest::new_for_addresses(&[vtxo.to_ark_address()]);
-    let vtxo_list = grpc_client.list_vtxos(request).await?;
+    let request = GetVtxosRequest::new_for_addresses(std::iter::once(vtxo.to_ark_address()));
+    let virtual_tx_outpoints = grpc_client.list_vtxos(request).await?;
+
+    let vtxo_list = VtxoList::new(server_info.dust, virtual_tx_outpoints);
     let virtual_tx_outpoint = vtxo_list
-        .spendable()
-        .iter()
+        .spendable_offchain()
         .find(|v| v.commitment_txids[0] == commitment_txid)
         .ok_or(anyhow!("could not find input in batch"))?;
 
@@ -1180,6 +1192,7 @@ async fn settle(
                 intent::Input::new(
                     outpoint,
                     boarding_output.exit_delay(),
+                    None,
                     TxOut {
                         value: amount,
                         script_pubkey: boarding_output.script_pubkey(),
@@ -1200,6 +1213,7 @@ async fn settle(
                 anyhow::Ok(intent::Input::new(
                     virtual_tx_outpoint.outpoint,
                     vtxo.exit_delay(),
+                    None,
                     TxOut {
                         value: virtual_tx_outpoint.amount,
                         script_pubkey: vtxo.script_pubkey(),
@@ -1429,6 +1443,7 @@ async fn settle(
             anyhow::Ok(intent::Input::new(
                 virtual_tx_outpoint.outpoint,
                 vtxo.exit_delay(),
+                None,
                 TxOut {
                     value: virtual_tx_outpoint.amount,
                     script_pubkey: vtxo.script_pubkey(),
@@ -1502,15 +1517,20 @@ async fn settle(
 
 async fn spendable_vtxos(
     grpc_client: &ark_grpc::Client,
+    dust: Amount,
     vtxos: &[Vtxo],
 ) -> Result<HashMap<Vtxo, Vec<VirtualTxOutPoint>>> {
     let mut spendable_vtxos = HashMap::new();
     for vtxo in vtxos.iter() {
         // The VTXOs for the given Ark address that the Ark server tells us about.
-        let request = GetVtxosRequest::new_for_addresses(&[vtxo.to_ark_address()]);
-        let vtxo_list = grpc_client.list_vtxos(request).await?;
+        let request = GetVtxosRequest::new_for_addresses(std::iter::once(vtxo.to_ark_address()));
+        let virtual_tx_outpoints = grpc_client.list_vtxos(request).await?;
+        let vtxo_list = VtxoList::new(dust, virtual_tx_outpoints);
 
-        spendable_vtxos.insert(vtxo.clone(), vtxo_list.spendable().to_vec());
+        spendable_vtxos.insert(
+            vtxo.clone(),
+            vtxo_list.spendable_offchain().cloned().collect(),
+        );
     }
 
     Ok(spendable_vtxos)

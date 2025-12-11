@@ -54,10 +54,8 @@ pub async fn send_onchain_vtxo_and_boarding_output() {
 
     assert_eq!(offchain_balance.total(), Amount::ZERO);
 
-    alice.settle(&mut rng, false).await.unwrap();
-    wait_until_balance(&alice, fund_amount, Amount::ZERO)
-        .await
-        .unwrap();
+    alice.settle(&mut rng).await.unwrap();
+    wait_until_balance!(&alice, confirmed: fund_amount, pre_confirmed: Amount::ZERO);
 
     // Ensure that the commitment TX is mined.
     nigiri.mine(1).await;
@@ -70,9 +68,7 @@ pub async fn send_onchain_vtxo_and_boarding_output() {
         .await
         .unwrap();
 
-    wait_until_balance(&alice, Amount::ZERO, fund_amount)
-        .await
-        .unwrap();
+    wait_until_balance!(&alice, confirmed: Amount::ZERO, pre_confirmed: fund_amount);
 
     let unilateral_exit_trees = alice.build_unilateral_exit_trees().await.unwrap();
 
@@ -111,9 +107,7 @@ pub async fn send_onchain_vtxo_and_boarding_output() {
     // Get one confirmation on the VTXO.
     nigiri.mine(1).await;
 
-    wait_until_balance(&alice, Amount::ZERO, Amount::ZERO)
-        .await
-        .unwrap();
+    wait_until_balance!(&alice, confirmed: Amount::ZERO, pre_confirmed: Amount::ZERO);
 
     let alice_boarding_address = alice.get_boarding_address().unwrap();
     nigiri
@@ -123,7 +117,7 @@ pub async fn send_onchain_vtxo_and_boarding_output() {
     let offchain_balance = alice.offchain_balance().await.unwrap();
 
     assert_eq!(offchain_balance.confirmed(), Amount::ZERO);
-    assert_eq!(offchain_balance.pending(), Amount::ZERO);
+    assert_eq!(offchain_balance.pre_confirmed(), Amount::ZERO);
 
     // To be able to spend a VTXO it needs to have been confirmed for at least
     // `unilateral_exit_delay` seconds.

@@ -108,6 +108,13 @@ pub fn build_offchain_transactions(
         ));
     }
 
+    let vtxo_min_amount = server_info.vtxo_min_amount.unwrap_or(Amount::ONE_SAT);
+    if outputs.iter().any(|(_, amount)| *amount < vtxo_min_amount) {
+        return Err(Error::transaction(format!(
+            "output amount smaller than minimum of {vtxo_min_amount}"
+        )));
+    }
+
     let checkpoint_script = &server_info.checkpoint_tapscript;
 
     let mut checkpoint_data = Vec::new();

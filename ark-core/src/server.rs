@@ -218,10 +218,9 @@ pub struct GetVtxosRequest {
 }
 
 impl GetVtxosRequest {
-    pub fn new_for_addresses(addresses: &[ArkAddress]) -> Self {
+    pub fn new_for_addresses(addresses: impl Iterator<Item = ArkAddress>) -> Self {
         let scripts = addresses
-            .iter()
-            .map(|a| a.to_p2tr_script_pubkey())
+            .flat_map(|a| [a.to_p2tr_script_pubkey()])
             .collect();
 
         Self {
@@ -284,6 +283,15 @@ pub enum GetVtxosRequestReference {
     OutPoints(Vec<OutPoint>),
 }
 
+impl GetVtxosRequestReference {
+    pub fn is_empty(&self) -> bool {
+        match self {
+            GetVtxosRequestReference::Scripts(script_bufs) => script_bufs.is_empty(),
+            GetVtxosRequestReference::OutPoints(outpoints) => outpoints.is_empty(),
+        }
+    }
+}
+
 pub enum GetVtxosRequestFilter {
     Spendable,
     Spent,
@@ -317,11 +325,14 @@ pub struct VirtualTxOutPoint {
 }
 
 impl VirtualTxOutPoint {
-    // TODO: Our definition of recoverable is not quite correct.
-    //
-    // Outputs that are expired but not yet swept, are not "recoverable" and can still be forfeited.
-    // The rule is that recoverable VTXOs (including sub-dust) cannot be forfeited.
-    pub fn is_recoverable(&self) -> bool {
+    /// Check if a VTXO has expired.
+    ///
+    /// Expired VTXOs can be settled, but they cannot be sent in an offchain transaction. To settle
+    /// them, the original VTXO must be forfeited.
+    ///
+    /// NOTE: The server's concept of now may differ from the client's, so client and server may
+    /// sometimes disagree on whether a VTXO has expired or not.
+    pub fn is_expired(&self) -> bool {
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         let current_timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -337,7 +348,16 @@ impl VirtualTxOutPoint {
             performance.now() as i64
         };
 
-        (self.is_swept || current_timestamp > self.expires_at) && !self.is_spent
+        current_timestamp > self.expires_at && !self.is_swept && !self.is_spent
+    }
+
+    /// Check if a VTXO is recoverable.
+    ///
+    /// Recoverable VTXOs can be settled, but they cannot be sent in an offchain transaction. To
+    /// settle them, the original VTXO does not need to be forfeited, as the Arkade server already
+    /// controls it.
+    pub fn is_recoverable(&self, dust: Amount) -> bool {
+        (self.amount < dust || self.is_swept) && !self.is_spent
     }
 }
 
@@ -393,68 +413,6 @@ pub struct ScheduledSession {
 pub struct DeprecatedSigner {
     pub pk: PublicKey,
     pub cutoff_date: i64,
-}
-
-#[derive(Clone, Debug)]
-pub struct ListVtxo {
-    spent: Vec<VirtualTxOutPoint>,
-    spendable: Vec<VirtualTxOutPoint>,
-}
-
-impl ListVtxo {
-    pub fn new(spent: Vec<VirtualTxOutPoint>, spendable: Vec<VirtualTxOutPoint>) -> Self {
-        Self { spent, spendable }
-    }
-
-    pub fn all(&self) -> Vec<VirtualTxOutPoint> {
-        [self.spent(), self.spendable()].concat()
-    }
-
-    pub fn spent(&self) -> &[VirtualTxOutPoint] {
-        &self.spent
-    }
-
-    pub fn spent_without_recoverable(&self) -> Vec<VirtualTxOutPoint> {
-        self.spent
-            .iter()
-            .filter(|v| !v.is_recoverable())
-            .cloned()
-            .collect()
-    }
-
-    pub fn spendable(&self) -> &[VirtualTxOutPoint] {
-        &self.spendable
-    }
-
-    /// Collect all unspent VTXOs, including recoverable ones.
-    ///
-    /// Useful when building a VTXO set that can be settled.
-    pub fn spendable_with_recoverable(&self) -> Vec<VirtualTxOutPoint> {
-        let mut spendable = self.spendable.clone();
-
-        let mut recoverable_vtxos = Vec::new();
-        for spent_vtxo in self.spent.iter() {
-            if spent_vtxo.is_recoverable() {
-                recoverable_vtxos.push(spent_vtxo.clone());
-            }
-        }
-
-        spendable.append(&mut recoverable_vtxos);
-
-        spendable
-    }
-
-    /// Collect all unspent VTXOs, excluding recoverable ones.
-    ///
-    /// Useful when building a VTXO set that can be sent offchain, since recoverable VTXOs can only
-    /// be settled.
-    pub fn spendable_without_recoverable(&self) -> Vec<VirtualTxOutPoint> {
-        self.spendable
-            .clone()
-            .into_iter()
-            .filter(|v| !v.is_recoverable())
-            .collect::<Vec<_>>()
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -568,13 +526,13 @@ pub enum StreamTransactionData {
 pub struct ArkTransaction {
     pub txid: Txid,
     pub spent_vtxos: Vec<VirtualTxOutPoint>,
-    pub spendable_vtxos: Vec<VirtualTxOutPoint>,
+    pub unspent_vtxos: Vec<VirtualTxOutPoint>,
 }
 
 pub struct CommitmentTransaction {
     pub txid: Txid,
     pub spent_vtxos: Vec<VirtualTxOutPoint>,
-    pub spendable_vtxos: Vec<VirtualTxOutPoint>,
+    pub unspent_vtxos: Vec<VirtualTxOutPoint>,
 }
 
 #[derive(Clone, Debug)]

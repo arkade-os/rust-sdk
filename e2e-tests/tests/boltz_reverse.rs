@@ -42,7 +42,5 @@ pub async fn reverse_swap() {
 
     tracing::info!(swap_id = res.swap_id, "Lightning invoice paid");
 
-    wait_until_balance(&alice, Amount::ZERO, res.amount)
-        .await
-        .unwrap();
+    wait_until_balance!(&alice, confirmed: Amount::ZERO, pre_confirmed: res.amount);
 }

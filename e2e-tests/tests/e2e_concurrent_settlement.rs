@@ -63,35 +63,29 @@ pub async fn concurrent_boarding() {
     let alice_task = tokio::spawn({
         async move {
             let mut rng = StdRng::from_entropy();
-            alice.settle(&mut rng, false).await.unwrap();
+            alice.settle(&mut rng).await.unwrap();
             alice
         }
     });
 
     let bob_task = tokio::spawn(async move {
         let mut rng = StdRng::from_entropy();
-        bob.settle(&mut rng, false).await.unwrap();
+        bob.settle(&mut rng).await.unwrap();
         bob
     });
 
     let claire_task = tokio::spawn(async move {
         let mut rng = StdRng::from_entropy();
-        claire.settle(&mut rng, false).await.unwrap();
+        claire.settle(&mut rng).await.unwrap();
         claire
     });
 
     // Three parties joining a batch concurrently.
     let (alice, bob, claire) = try_join!(alice_task, bob_task, claire_task).unwrap();
 
-    wait_until_balance(&alice, alice_fund_amount, Amount::ZERO)
-        .await
-        .unwrap();
-    wait_until_balance(&bob, bob_fund_amount, Amount::ZERO)
-        .await
-        .unwrap();
-    wait_until_balance(&claire, claire_fund_amount, Amount::ZERO)
-        .await
-        .unwrap();
+    wait_until_balance!(&alice, confirmed: alice_fund_amount, pre_confirmed: Amount::ZERO);
+    wait_until_balance!(&bob, confirmed: bob_fund_amount, pre_confirmed: Amount::ZERO);
+    wait_until_balance!(&claire, confirmed: claire_fund_amount, pre_confirmed: Amount::ZERO);
 
     let (alice_offchain_address, _) = alice.get_offchain_address().unwrap();
     let (bob_offchain_address, _) = bob.get_offchain_address().unwrap();
@@ -123,33 +117,31 @@ pub async fn concurrent_boarding() {
         .await
         .unwrap();
 
-    wait_until_balance(
+    wait_until_balance!(
         &alice,
-        Amount::ZERO,
-        alice_fund_amount - alice_to_bob_send_amount + claire_to_alice_send_amount,
-    )
-    .await
-    .unwrap();
+        confirmed: Amount::ZERO,
+        pre_confirmed: alice_fund_amount - alice_to_bob_send_amount + claire_to_alice_send_amount,
+    );
 
     // Checking Bob and Claire's balance is inconsistent because of coin selection.
 
     let alice_task = tokio::spawn({
         async move {
             let mut rng = StdRng::from_entropy();
-            alice.settle(&mut rng, false).await.unwrap();
+            alice.settle(&mut rng).await.unwrap();
             alice
         }
     });
 
     let bob_task = tokio::spawn(async move {
         let mut rng = StdRng::from_entropy();
-        bob.settle(&mut rng, false).await.unwrap();
+        bob.settle(&mut rng).await.unwrap();
         bob
     });
 
     let claire_task = tokio::spawn(async move {
         let mut rng = StdRng::from_entropy();
-        claire.settle(&mut rng, false).await.unwrap();
+        claire.settle(&mut rng).await.unwrap();
         claire
     });
 
@@ -157,25 +149,19 @@ pub async fn concurrent_boarding() {
     let (alice, bob, claire) = try_join!(alice_task, bob_task, claire_task).unwrap();
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    wait_until_balance(
+    wait_until_balance!(
         &alice,
-        alice_fund_amount - alice_to_bob_send_amount + claire_to_alice_send_amount,
-        Amount::ZERO,
-    )
-    .await
-    .unwrap();
-    wait_until_balance(
+        confirmed: alice_fund_amount - alice_to_bob_send_amount + claire_to_alice_send_amount,
+        pre_confirmed: Amount::ZERO,
+    );
+    wait_until_balance!(
         &bob,
-        bob_fund_amount - bob_to_claire_send_amount + alice_to_bob_send_amount,
-        Amount::ZERO,
-    )
-    .await
-    .unwrap();
-    wait_until_balance(
+        confirmed: bob_fund_amount - bob_to_claire_send_amount + alice_to_bob_send_amount,
+        pre_confirmed: Amount::ZERO,
+    );
+    wait_until_balance!(
         &claire,
-        claire_fund_amount - claire_to_alice_send_amount + bob_to_claire_send_amount,
-        Amount::ZERO,
-    )
-    .await
-    .unwrap();
+        confirmed: claire_fund_amount - claire_to_alice_send_amount + bob_to_claire_send_amount,
+        pre_confirmed: Amount::ZERO,
+    );
 }

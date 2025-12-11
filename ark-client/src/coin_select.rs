@@ -1,10 +1,10 @@
 use crate::Blockchain;
 use crate::Client;
 use crate::Error;
-use crate::ExplorerUtxo;
 use crate::swap_storage::SwapStorage;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
+use ark_core::ExplorerUtxo;
 use ark_core::unilateral_exit;
 use bitcoin::Amount;
 use bitcoin::TxOut;

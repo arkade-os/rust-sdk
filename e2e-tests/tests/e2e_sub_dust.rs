@@ -30,7 +30,7 @@ pub async fn send_subdust_amount() {
         .faucet_fund(&alice.get_boarding_address().unwrap(), alice_fund_amount)
         .await;
 
-    alice.settle(&mut rng, false).await.unwrap();
+    alice.settle(&mut rng).await.unwrap();
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     let alice_offchain_balance = alice.offchain_balance().await.unwrap();
@@ -45,10 +45,8 @@ pub async fn send_subdust_amount() {
         .await
         .unwrap();
 
-    // Available balance does not include sub-dust amounts, so we cannot wait on Bob's balance.
-    wait_until_balance(&alice, Amount::ZERO, alice_fund_amount - sub_dust_amount)
-        .await
-        .unwrap();
+    wait_until_balance!(&alice, confirmed: Amount::ZERO, pre_confirmed: alice_fund_amount - sub_dust_amount);
+    wait_until_balance!(&bob, confirmed: Amount::ZERO, pre_confirmed: Amount::ZERO, recoverable: sub_dust_amount);
 
     let (alice_offchain_address, _) = alice.get_offchain_address().unwrap();
 
@@ -56,7 +54,7 @@ pub async fn send_subdust_amount() {
         .await
         .expect_err("should not be able to send sub-dust amount");
 
-    bob.settle(&mut rng, true)
+    bob.settle(&mut rng)
         .await
         .expect_err("should not be able to board sub-dust amount");
 
@@ -68,20 +66,14 @@ pub async fn send_subdust_amount() {
         .await
         .unwrap();
 
-    wait_until_balance(
+    wait_until_balance!(
         &alice,
-        Amount::ZERO,
-        alice_fund_amount - regular_amount - sub_dust_amount,
-    )
-    .await
-    .unwrap();
-    wait_until_balance(&bob, Amount::ZERO, regular_amount)
-        .await
-        .unwrap();
+        confirmed: Amount::ZERO,
+        pre_confirmed: alice_fund_amount - regular_amount - sub_dust_amount,
+    );
+    wait_until_balance!(&bob, confirmed: Amount::ZERO, pre_confirmed: regular_amount, recoverable: sub_dust_amount);
 
-    bob.settle(&mut rng, true).await.unwrap();
+    bob.settle(&mut rng).await.unwrap();
 
-    wait_until_balance(&bob, regular_amount + sub_dust_amount, Amount::ZERO)
-        .await
-        .unwrap();
+    wait_until_balance!(&bob, confirmed: regular_amount + sub_dust_amount, pre_confirmed: Amount::ZERO, recoverable: Amount::ZERO);
 }

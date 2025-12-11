@@ -12,7 +12,7 @@ jobs:
       matrix:
         arkd-version: [
           'master',
-          'v0.8.0-rc.1'
+          'v0.8.10'
           # Add more versions as needed
         ]
 

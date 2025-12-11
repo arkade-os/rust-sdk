@@ -42,71 +42,64 @@ where
     /// commitment transaction output to a spendable VTXO. Every transaction is fully signed,
     /// but requires fee bumping through a P2A output.
     pub async fn build_unilateral_exit_trees(&self) -> Result<Vec<Vec<Transaction>>, Error> {
-        // Recoverable VTXOs cannot be unilaterally claimed.
-        let select_recoverable_vtxos = false;
-
-        let spendable_vtxos = self
-            .spendable_vtxos(select_recoverable_vtxos)
+        let (vtxo_list, _) = self
+            .list_vtxos()
             .await
             .context("failed to get spendable VTXOs")?;
 
         let mut unilateral_exit_trees = Vec::new();
 
         // For each spendable VTXO, generate its unilateral exit tree.
-        for (virtual_tx_outpoints, _) in spendable_vtxos {
-            for virtual_tx_outpoint in virtual_tx_outpoints {
-                let vtxo_chain_response = timeout_op(
-                    self.inner.timeout,
-                    self.network_client()
-                        .get_vtxo_chain(Some(virtual_tx_outpoint.outpoint), None),
-                )
-                .await
-                .context(format!(
-                    "failed to get VTXO chain for outpoint {}",
-                    virtual_tx_outpoint.outpoint
-                ))??;
+        for virtual_tx_outpoint in vtxo_list.could_exit_unilaterally() {
+            let vtxo_chain_response = timeout_op(
+                self.inner.timeout,
+                self.network_client()
+                    .get_vtxo_chain(Some(virtual_tx_outpoint.outpoint), None),
+            )
+            .await
+            .context(format!(
+                "failed to get VTXO chain for outpoint {}",
+                virtual_tx_outpoint.outpoint
+            ))??;
 
-                let paths = build_unilateral_exit_tree_txids(
-                    &vtxo_chain_response.chains,
-                    virtual_tx_outpoint.outpoint.txid,
-                )?;
+            let paths = build_unilateral_exit_tree_txids(
+                &vtxo_chain_response.chains,
+                virtual_tx_outpoint.outpoint.txid,
+            )?;
 
-                // We don't want to fetch transactions more than once.
-                let txs = HashSet::<Txid>::from_iter(paths.concat().into_iter());
+            // We don't want to fetch transactions more than once.
+            let txs = HashSet::<Txid>::from_iter(paths.concat().into_iter());
 
-                let virtual_txs_response = timeout_op(
-                    self.inner.timeout,
-                    self.network_client()
-                        .get_virtual_txs(txs.iter().map(|tx| tx.to_string()).collect(), None),
-                )
-                .await
-                .context("failed to get virtual TXs")??;
+            let virtual_txs_response = timeout_op(
+                self.inner.timeout,
+                self.network_client()
+                    .get_virtual_txs(txs.iter().map(|tx| tx.to_string()).collect(), None),
+            )
+            .await
+            .context("failed to get virtual TXs")??;
 
-                let paths = paths
-                    .into_iter()
-                    .map(|path| {
-                        path.into_iter()
-                            .map(|txid| {
-                                virtual_txs_response
-                                    .txs
-                                    .iter()
-                                    .find(|t| t.unsigned_tx.compute_txid() == txid)
-                                    .cloned()
-                                    .ok_or_else(|| {
-                                        Error::ad_hoc(format!(
-                                            "no PSBT found for virtual TX {txid}"
-                                        ))
-                                    })
-                            })
-                            .collect::<Result<Vec<_>, _>>()
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
+            let paths = paths
+                .into_iter()
+                .map(|path| {
+                    path.into_iter()
+                        .map(|txid| {
+                            virtual_txs_response
+                                .txs
+                                .iter()
+                                .find(|t| t.unsigned_tx.compute_txid() == txid)
+                                .cloned()
+                                .ok_or_else(|| {
+                                    Error::ad_hoc(format!("no PSBT found for virtual TX {txid}"))
+                                })
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .collect::<Result<Vec<_>, _>>()?;
 
-                let unilateral_exit_tree =
-                    UnilateralExitTree::new(virtual_tx_outpoint.commitment_txids, paths);
+            let unilateral_exit_tree =
+                UnilateralExitTree::new(virtual_tx_outpoint.commitment_txids.clone(), paths);
 
-                unilateral_exit_trees.push(unilateral_exit_tree);
-            }
+            unilateral_exit_trees.push(unilateral_exit_tree);
         }
 
         let mut branches: Vec<Vec<Transaction>> = Vec::new();

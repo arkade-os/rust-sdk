@@ -1,10 +1,12 @@
 use crate::Error;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
+use bitcoin::ScriptBuf;
 
 #[derive(Clone, Debug)]
 pub struct VirtualTxOutPoint {
     pub outpoint: OutPoint,
+    pub script_pubkey: ScriptBuf,
     pub expire_at: i64,
     pub amount: Amount,
 }
@@ -59,9 +61,10 @@ mod tests {
 
     fn vtxo(expire_at: i64, amount: Amount) -> VirtualTxOutPoint {
         VirtualTxOutPoint {
+            outpoint: OutPoint::default(),
+            script_pubkey: ScriptBuf::new(),
             expire_at,
             amount,
-            outpoint: OutPoint::default(),
         }
     }
 

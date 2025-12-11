@@ -20,6 +20,7 @@ mod ark_address;
 mod error;
 mod tree_tx_output_script;
 mod tx_graph;
+mod vtxo_list;
 
 pub use ark_address::ArkAddress;
 pub use boarding_output::BoardingOutput;
@@ -33,6 +34,7 @@ pub use unilateral_exit::UtxoCoinSelection;
 pub use unilateral_exit::build_anchor_tx;
 pub use unilateral_exit::build_unilateral_exit_tree_txids;
 pub use vtxo::Vtxo;
+pub use vtxo_list::VtxoList;
 
 pub const UNSPENDABLE_KEY: &str =
     "0250929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0";

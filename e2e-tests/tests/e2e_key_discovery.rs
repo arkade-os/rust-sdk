@@ -53,7 +53,7 @@ pub async fn e2e_key_discovery() {
 
     // Settle the boarding output to create a VTXO
     tracing::info!("Settling boarding output");
-    client.settle(&mut rng, false).await.unwrap();
+    client.settle(&mut rng).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     // Check the balance after settling
@@ -61,7 +61,7 @@ pub async fn e2e_key_discovery() {
     tracing::info!(?balance_after_settle, "Balance after settle");
 
     assert_eq!(balance_after_settle.confirmed(), fund_amount);
-    assert_eq!(balance_after_settle.pending(), Amount::ZERO);
+    assert_eq!(balance_after_settle.pre_confirmed(), Amount::ZERO);
 
     // Drop the first client to simulate a restart
     drop(client);
@@ -83,9 +83,9 @@ pub async fn e2e_key_discovery() {
         "Confirmed balance should be the same after key discovery"
     );
     assert_eq!(
-        balance_after_restore.pending(),
-        balance_after_settle.pending(),
-        "Pending balance should be the same after key discovery"
+        balance_after_restore.pre_confirmed(),
+        balance_after_settle.pre_confirmed(),
+        "Pre-confirmed balance should be the same after key discovery"
     );
     assert_eq!(
         balance_after_restore.total(),

@@ -1,7 +1,6 @@
 use crate::Blockchain;
 use crate::Client;
 use crate::Error;
-use crate::ExplorerUtxo;
 use crate::error::ErrorContext as _;
 use crate::swap_storage::SwapStorage;
 use crate::utils::sleep;
@@ -9,6 +8,7 @@ use crate::utils::timeout_op;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use ark_core::ArkAddress;
+use ark_core::ExplorerUtxo;
 use ark_core::TxGraph;
 use ark_core::batch;
 use ark_core::batch::Delegate;
@@ -56,20 +56,15 @@ where
 {
     /// Settle _all_ prior VTXOs and boarding outputs into the next batch, generating new confirmed
     /// VTXOs.
-    pub async fn settle<R>(
-        &self,
-        rng: &mut R,
-        select_recoverable_vtxos: bool,
-    ) -> Result<Option<Txid>, Error>
+    pub async fn settle<R>(&self, rng: &mut R) -> Result<Option<Txid>, Error>
     where
         R: Rng + CryptoRng + Clone,
     {
         // Get off-chain address and send all funds to this address, no change output 🦄
         let (to_address, _) = self.get_offchain_address()?;
 
-        let (boarding_inputs, vtxo_inputs, total_amount) = self
-            .fetch_commitment_transaction_inputs(select_recoverable_vtxos)
-            .await?;
+        let (boarding_inputs, vtxo_inputs, total_amount) =
+            self.fetch_commitment_transaction_inputs().await?;
 
         tracing::debug!(
             offchain_adress = %to_address.encode(),
@@ -119,16 +114,14 @@ where
         rng: &mut R,
         to_address: Address,
         to_amount: Amount,
-        select_recoverable_vtxos: bool,
     ) -> Result<Txid, Error>
     where
         R: Rng + CryptoRng + Clone,
     {
         let (change_address, _) = self.get_offchain_address()?;
 
-        let (boarding_inputs, vtxo_inputs, total_amount) = self
-            .fetch_commitment_transaction_inputs(select_recoverable_vtxos)
-            .await?;
+        let (boarding_inputs, vtxo_inputs, total_amount) =
+            self.fetch_commitment_transaction_inputs().await?;
 
         let onchain_fee = self
             .server_info
@@ -206,15 +199,12 @@ where
     pub async fn generate_delegate(
         &self,
         delegate_cosigner_pk: PublicKey,
-        select_recoverable_vtxos: bool,
     ) -> Result<Delegate, Error> {
         // Get off-chain address and send all funds to this address.
         let (to_address, _) = self.get_offchain_address()?;
 
         // Simply collect all VTXOs that can be settled.
-        let (_, vtxo_inputs, _) = self
-            .fetch_commitment_transaction_inputs(select_recoverable_vtxos)
-            .await?;
+        let (_, vtxo_inputs, _) = self.fetch_commitment_transaction_inputs().await?;
 
         let total_amount = vtxo_inputs
             .iter()
@@ -733,7 +723,6 @@ where
     /// upcoming batch.
     async fn fetch_commitment_transaction_inputs(
         &self,
-        select_recoverable_vtxos: bool,
     ) -> Result<(Vec<batch::OnChainInput>, Vec<intent::Input>, Amount), Error> {
         // Get all known boarding outputs.
         let boarding_outputs = self.inner.wallet.get_boarding_outputs()?;
@@ -787,43 +776,45 @@ where
             }
         }
 
-        let spendable_vtxos = self.spendable_vtxos(select_recoverable_vtxos).await?;
+        let (vtxo_list, script_pubkey_to_vtxo_map) = self.list_vtxos().await?;
 
-        for (virtual_tx_outpoints, _) in spendable_vtxos.iter() {
-            total_amount += virtual_tx_outpoints
-                .iter()
-                .fold(Amount::ZERO, |acc, vtxo| acc + vtxo.amount)
-        }
+        total_amount += vtxo_list
+            .all_unspent()
+            .fold(Amount::ZERO, |acc, vtxo| acc + vtxo.amount);
 
-        let vtxo_inputs = spendable_vtxos
-            .into_iter()
-            .flat_map(|(virtual_tx_outpoints, vtxo)| {
-                virtual_tx_outpoints
-                    .into_iter()
-                    .map(|virtual_tx_outpoint| {
-                        let spend_info = vtxo.forfeit_spend_info()?;
-
-                        Ok(intent::Input::new(
-                            virtual_tx_outpoint.outpoint,
-                            vtxo.exit_delay(),
-                            TxOut {
-                                value: virtual_tx_outpoint.amount,
-                                script_pubkey: vtxo.script_pubkey(),
-                            },
-                            vtxo.tapscripts(),
-                            spend_info,
-                            false,
-                            virtual_tx_outpoint.is_swept,
+        let vtxo_inputs = vtxo_list
+            .all_unspent()
+            .map(|virtual_tx_outpoint| {
+                let vtxo = script_pubkey_to_vtxo_map
+                    .get(&virtual_tx_outpoint.script)
+                    .ok_or_else(|| {
+                        ark_core::Error::ad_hoc(format!(
+                            "missing VTXO for script pubkey: {}",
+                            virtual_tx_outpoint.script
                         ))
-                    })
-                    .collect::<Vec<_>>()
+                    })?;
+                let spend_info = vtxo.forfeit_spend_info()?;
+
+                Ok(intent::Input::new(
+                    virtual_tx_outpoint.outpoint,
+                    vtxo.exit_delay(),
+                    None,
+                    TxOut {
+                        value: virtual_tx_outpoint.amount,
+                        script_pubkey: vtxo.script_pubkey(),
+                    },
+                    vtxo.tapscripts(),
+                    spend_info,
+                    false,
+                    virtual_tx_outpoint.is_swept,
+                ))
             })
             .collect::<Result<Vec<_>, ark_core::Error>>()?;
 
         Ok((boarding_inputs, vtxo_inputs, total_amount))
     }
 
-    async fn join_next_batch<R>(
+    pub(crate) async fn join_next_batch<R>(
         &self,
         rng: &mut R,
         onchain_inputs: Vec<batch::OnChainInput>,
@@ -853,6 +844,7 @@ where
                 intent::Input::new(
                     o.outpoint(),
                     o.boarding_output().exit_delay(),
+                    None,
                     TxOut {
                         value: o.amount(),
                         script_pubkey: o.boarding_output().script_pubkey(),
@@ -869,32 +861,58 @@ where
                 .collect::<Vec<_>>()
         };
 
+        let dust = self.server_info.dust;
+
         let mut outputs = vec![];
 
         match output_type {
             BatchOutputType::Board {
                 to_address,
                 to_amount,
-            } => outputs.push(intent::Output::Offchain(TxOut {
-                value: to_amount,
-                script_pubkey: to_address.to_p2tr_script_pubkey(),
-            })),
+            } => {
+                if to_amount < self.server_info.dust {
+                    return Err(Error::ad_hoc(format!(
+                        "cannot settle into sub-dust VTXO: {to_amount} < {dust}"
+                    )));
+                }
+
+                outputs.push(intent::Output::Offchain(TxOut {
+                    value: to_amount,
+                    script_pubkey: to_address.to_p2tr_script_pubkey(),
+                }));
+            }
+            BatchOutputType::OffBoard {
+                to_address,
+                to_amount,
+                change_amount,
+                ..
+            } if change_amount == Amount::ZERO => {
+                outputs.push(intent::Output::Onchain(TxOut {
+                    value: to_amount,
+                    script_pubkey: to_address.script_pubkey(),
+                }));
+            }
             BatchOutputType::OffBoard {
                 to_address,
                 to_amount,
                 change_address,
                 change_amount,
             } => {
+                if change_amount < dust {
+                    return Err(Error::ad_hoc(format!(
+                        "cannot settle with sub-dust change VTXO: {change_amount} < {dust}"
+                    )));
+                }
+
                 outputs.push(intent::Output::Onchain(TxOut {
                     value: to_amount,
                     script_pubkey: to_address.script_pubkey(),
                 }));
-                if change_amount > self.server_info.dust {
-                    outputs.push(intent::Output::Offchain(TxOut {
-                        value: change_amount,
-                        script_pubkey: change_address.to_p2tr_script_pubkey(),
-                    }));
-                }
+
+                outputs.push(intent::Output::Offchain(TxOut {
+                    value: change_amount,
+                    script_pubkey: change_address.to_p2tr_script_pubkey(),
+                }));
             }
         }
 
@@ -1381,9 +1399,11 @@ where
                             Some(commitment_psbt)
                         };
 
-                        network_client
-                            .submit_signed_forfeit_txs(signed_forfeit_psbts, commitment_psbt)
-                            .await?;
+                        if !signed_forfeit_psbts.is_empty() || commitment_psbt.is_some() {
+                            network_client
+                                .submit_signed_forfeit_txs(signed_forfeit_psbts, commitment_psbt)
+                                .await?;
+                        }
 
                         step = step.next();
                     }
@@ -1442,7 +1462,8 @@ where
     }
 }
 
-enum BatchOutputType {
+#[derive(Debug)]
+pub(crate) enum BatchOutputType {
     Board {
         to_address: ArkAddress,
         to_amount: Amount,

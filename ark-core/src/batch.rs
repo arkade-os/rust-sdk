@@ -333,7 +333,7 @@ where
 
     let mut signed_forfeit_psbts = Vec::new();
     for vtxo_input in vtxo_inputs.iter() {
-        if vtxo_input.amount() <= dust || vtxo_input.is_swept() {
+        if vtxo_input.amount() < dust || vtxo_input.is_swept() {
             // Sub-dust VTXOs don't need to be forfeited.
             continue;
         }
