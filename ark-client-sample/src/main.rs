@@ -38,6 +38,7 @@ use futures::StreamExt;
 use jiff::Timestamp;
 use rand::thread_rng;
 use serde::Deserialize;
+use serde::Serialize;
 use std::fs;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -104,6 +105,17 @@ enum Commands {
     RefundSwap { swap_id: String },
     /// Attempt to refund a past swap without the receiver's signature.
     RefundSwapWithoutReceiver { swap_id: String },
+    /// List all VTXOs and boarding outputs sorted by expiry, then amount.
+    ListVtxos,
+    /// Settle specific VTXOs and/or boarding outputs by outpoint.
+    SettleVtxos {
+        /// VTXO outpoints to settle (format: txid:vout, comma-separated).
+        #[arg(long)]
+        vtxos: Option<String>,
+        /// Boarding output outpoints to settle (format: txid:vout, comma-separated).
+        #[arg(long)]
+        boarding: Option<String>,
+    },
 }
 
 #[derive(Clone)]
@@ -152,6 +164,34 @@ struct Config {
     esplora_url: String,
     swap_storage_path: String,
     boltz_url: String,
+}
+
+#[derive(Serialize)]
+struct VtxoEntry {
+    outpoint: String,
+    amount_sats: u64,
+    created_at: String,
+    expires_at: String,
+    status: String,
+}
+
+#[derive(Serialize)]
+struct BoardingEntry {
+    outpoint: String,
+    amount_sats: u64,
+    confirmation_time: Option<String>,
+    status: String,
+}
+
+#[derive(Serialize)]
+struct ListVtxosOutput {
+    vtxos: Vec<VtxoEntry>,
+    boarding_outputs: Vec<BoardingEntry>,
+}
+
+fn format_timestamp(unix_secs: i64) -> Result<String> {
+    let ts = Timestamp::from_second(unix_secs)?;
+    Ok(ts.to_string())
 }
 
 #[tokio::main]
@@ -401,6 +441,158 @@ async fn main() -> Result<()> {
                 .map_err(|e| anyhow!(e))?;
 
             tracing::info!(?txid, swap_id, "Swap refunded");
+        }
+        Commands::ListVtxos => {
+            // Get VTXOs
+            let (vtxo_list, _) = client.list_vtxos().await.map_err(|e| anyhow!(e))?;
+
+            let mut vtxo_entries: Vec<VtxoEntry> = Vec::new();
+
+            // Collect pre-confirmed VTXOs
+            for v in vtxo_list.pre_confirmed() {
+                vtxo_entries.push(VtxoEntry {
+                    outpoint: v.outpoint.to_string(),
+                    amount_sats: v.amount.to_sat(),
+                    created_at: format_timestamp(v.created_at)?,
+                    expires_at: format_timestamp(v.expires_at)?,
+                    status: "pre_confirmed".to_string(),
+                });
+            }
+
+            // Collect confirmed VTXOs
+            for v in vtxo_list.confirmed() {
+                vtxo_entries.push(VtxoEntry {
+                    outpoint: v.outpoint.to_string(),
+                    amount_sats: v.amount.to_sat(),
+                    created_at: format_timestamp(v.created_at)?,
+                    expires_at: format_timestamp(v.expires_at)?,
+                    status: "confirmed".to_string(),
+                });
+            }
+
+            // Collect expired VTXOs
+            for v in vtxo_list.expired() {
+                vtxo_entries.push(VtxoEntry {
+                    outpoint: v.outpoint.to_string(),
+                    amount_sats: v.amount.to_sat(),
+                    created_at: format_timestamp(v.created_at)?,
+                    expires_at: format_timestamp(v.expires_at)?,
+                    status: "expired".to_string(),
+                });
+            }
+
+            // Collect recoverable VTXOs
+            for v in vtxo_list.recoverable() {
+                vtxo_entries.push(VtxoEntry {
+                    outpoint: v.outpoint.to_string(),
+                    amount_sats: v.amount.to_sat(),
+                    created_at: format_timestamp(v.created_at)?,
+                    expires_at: format_timestamp(v.expires_at)?,
+                    status: "recoverable".to_string(),
+                });
+            }
+
+            // Sort by expiry (soonest first), then by amount (largest first)
+            vtxo_entries.sort_by(|a, b| {
+                a.expires_at
+                    .cmp(&b.expires_at)
+                    .then_with(|| b.amount_sats.cmp(&a.amount_sats))
+            });
+
+            // Get boarding outputs
+            let boarding_output = client.get_boarding_address().map_err(|e| anyhow!(e))?;
+            let outpoints = esplora_client
+                .find_outpoints(&boarding_output)
+                .await
+                .map_err(|e| anyhow!(e))?;
+
+            let mut boarding_entries: Vec<BoardingEntry> = Vec::new();
+            for o in outpoints {
+                if !o.is_spent {
+                    boarding_entries.push(BoardingEntry {
+                        outpoint: o.outpoint.to_string(),
+                        amount_sats: o.amount.to_sat(),
+                        confirmation_time: o
+                            .confirmation_blocktime
+                            .map(|t| format_timestamp(t as i64))
+                            .transpose()?,
+                        status: if o.confirmation_blocktime.is_some() {
+                            "confirmed".to_string()
+                        } else {
+                            "pending".to_string()
+                        },
+                    });
+                }
+            }
+
+            // Sort boarding by confirmation time (earliest first), then amount (largest first)
+            boarding_entries.sort_by(|a, b| {
+                a.confirmation_time
+                    .cmp(&b.confirmation_time)
+                    .then_with(|| b.amount_sats.cmp(&a.amount_sats))
+            });
+
+            let output = ListVtxosOutput {
+                vtxos: vtxo_entries,
+                boarding_outputs: boarding_entries,
+            };
+
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        Commands::SettleVtxos { vtxos, boarding } => {
+            let mut rng = thread_rng();
+
+            // Parse VTXO outpoints
+            let vtxo_outpoints: Vec<OutPoint> = match vtxos {
+                Some(s) if !s.is_empty() => s
+                    .split(',')
+                    .map(|op| {
+                        OutPoint::from_str(op.trim())
+                            .with_context(|| format!("invalid outpoint: {op}"))
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+                _ => Vec::new(),
+            };
+
+            // Parse boarding outpoints
+            let boarding_outpoints: Vec<OutPoint> = match boarding {
+                Some(s) if !s.is_empty() => s
+                    .split(',')
+                    .map(|op| {
+                        OutPoint::from_str(op.trim())
+                            .with_context(|| format!("invalid outpoint: {op}"))
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+                _ => Vec::new(),
+            };
+
+            if vtxo_outpoints.is_empty() && boarding_outpoints.is_empty() {
+                let output = serde_json::json!({
+                    "commitment_txid": null,
+                    "message": "No outpoints specified"
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+                return Ok(());
+            }
+
+            // We need to call this because of how our wallet works
+            let _ = client.get_boarding_address();
+
+            let maybe_batch_tx = client
+                .settle_vtxos(&mut rng, &vtxo_outpoints, &boarding_outpoints)
+                .await
+                .map_err(|e| anyhow!(e))?;
+
+            let output = match maybe_batch_tx {
+                None => serde_json::json!({
+                    "commitment_txid": null,
+                    "message": "No matching inputs to settle"
+                }),
+                Some(txid) => serde_json::json!({
+                    "commitment_txid": txid.to_string()
+                }),
+            };
+            println!("{}", serde_json::to_string_pretty(&output)?);
         }
     }
 
