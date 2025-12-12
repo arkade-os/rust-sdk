@@ -28,6 +28,7 @@ use backon::ExponentialBuilder;
 use backon::Retryable;
 use bitcoin::Address;
 use bitcoin::Amount;
+use bitcoin::OutPoint;
 use bitcoin::Psbt;
 use bitcoin::TxOut;
 use bitcoin::Txid;
@@ -103,6 +104,86 @@ where
             .context("Failed to join batch")?;
 
         tracing::info!(%commitment_txid, "Settlement success");
+
+        Ok(Some(commitment_txid))
+    }
+
+    /// Settle specific VTXOs and boarding outputs by outpoint into the next batch, generating new
+    /// confirmed VTXOs.
+    ///
+    /// Unlike [`Self::settle`], this method allows the caller to specify exactly which VTXOs and
+    /// boarding outputs to settle by providing their outpoints.
+    pub async fn settle_vtxos<R>(
+        &self,
+        rng: &mut R,
+        vtxo_outpoints: &[OutPoint],
+        boarding_outpoints: &[OutPoint],
+    ) -> Result<Option<Txid>, Error>
+    where
+        R: Rng + CryptoRng + Clone,
+    {
+        // Get off-chain address and send all funds to this address, no change output.
+        let (to_address, _) = self.get_offchain_address()?;
+
+        let (all_boarding_inputs, all_vtxo_inputs, _) =
+            self.fetch_commitment_transaction_inputs().await?;
+
+        // Filter boarding inputs to only those specified.
+        let boarding_inputs: Vec<_> = all_boarding_inputs
+            .into_iter()
+            .filter(|input| boarding_outpoints.contains(&input.outpoint()))
+            .collect();
+
+        // Filter VTXO inputs to only those specified.
+        let vtxo_inputs: Vec<_> = all_vtxo_inputs
+            .into_iter()
+            .filter(|input| vtxo_outpoints.contains(&input.outpoint()))
+            .collect();
+
+        // Recalculate total amount from filtered inputs.
+        let total_amount = boarding_inputs
+            .iter()
+            .map(|i| i.amount())
+            .chain(vtxo_inputs.iter().map(|i| i.amount()))
+            .fold(Amount::ZERO, |acc, a| acc + a);
+
+        tracing::debug!(
+            offchain_address = %to_address.encode(),
+            ?boarding_inputs,
+            ?vtxo_inputs,
+            %total_amount,
+            "Attempting to settle specific outputs"
+        );
+
+        if boarding_inputs.is_empty() && vtxo_inputs.is_empty() {
+            tracing::debug!("No matching inputs to settle");
+            return Ok(None);
+        }
+
+        let join_next_batch = || async {
+            self.join_next_batch(
+                &mut rng.clone(),
+                boarding_inputs.clone(),
+                vtxo_inputs.clone(),
+                BatchOutputType::Board {
+                    to_address,
+                    to_amount: total_amount,
+                },
+            )
+            .await
+        };
+
+        // Joining a batch can fail depending on the timing, so we try a few times.
+        let commitment_txid = join_next_batch
+            .retry(ExponentialBuilder::default().with_max_times(0))
+            .sleep(sleep)
+            .notify(|err: &Error, dur: std::time::Duration| {
+                tracing::warn!("Retrying joining next batch after {dur:?}. Error: {err}",);
+            })
+            .await
+            .context("Failed to join batch")?;
+
+        tracing::info!(%commitment_txid, "Settlement of specific VTXOs success");
 
         Ok(Some(commitment_txid))
     }
