@@ -359,7 +359,11 @@ where
         }
 
         let vhtlc_outpoint = {
-            let (vtxo_list, _) = self.list_vtxos().await?;
+            let virtual_tx_outpoints = self
+                .get_virtual_tx_outpoints(std::iter::once(vhtlc_address))
+                .await?;
+
+            let vtxo_list = VtxoList::new(self.server_info.dust, virtual_tx_outpoints);
 
             // We expect a single outpoint.
             let mut unspent = vtxo_list.all_unspent();
@@ -626,7 +630,11 @@ where
         }
 
         let vhtlc_outpoint = {
-            let (vtxo_list, _) = self.list_vtxos().await?;
+            let virtual_tx_outpoints = self
+                .get_virtual_tx_outpoints(std::iter::once(vhtlc_address))
+                .await?;
+
+            let vtxo_list = VtxoList::new(self.server_info.dust, virtual_tx_outpoints);
 
             // We expect a single outpoint.
             let mut unspent = vtxo_list.all_unspent();
@@ -1099,7 +1107,11 @@ where
 
         // TODO: Ideally we can skip this if the vout is always the same (probably 0).
         let vhtlc_outpoint = {
-            let (vtxo_list, _) = self.list_vtxos().await?;
+            let virtual_tx_outpoints = self
+                .get_virtual_tx_outpoints(std::iter::once(vhtlc_address))
+                .await?;
+
+            let vtxo_list = VtxoList::new(self.server_info.dust, virtual_tx_outpoints);
 
             // We expect a single outpoint.
             let mut unspent = vtxo_list.all_unspent();
@@ -1335,7 +1347,11 @@ where
 
         // TODO: Ideally we can skip this if the vout is always the same (probably 0).
         let vhtlc_outpoint = {
-            let (vtxo_list, _) = self.list_vtxos().await?;
+            let virtual_tx_outpoints = self
+                .get_virtual_tx_outpoints(std::iter::once(vhtlc_address))
+                .await?;
+
+            let vtxo_list = VtxoList::new(self.server_info.dust, virtual_tx_outpoints);
 
             // We expect a single outpoint.
             let mut unspent = vtxo_list.all_unspent();
