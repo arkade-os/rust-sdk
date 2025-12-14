@@ -500,8 +500,18 @@ impl Blockchain for EsploraClient {
         Ok(1.0)
     }
 
-    async fn broadcast_package(&self, _txs: &[&Transaction]) -> Result<(), Error> {
-        unimplemented!("Not implemented yet");
+    async fn broadcast_package(&self, txs: &[&Transaction]) -> Result<(), Error> {
+        // Broadcast transactions sequentially in order.
+        // This ensures parent transactions are broadcast before child transactions,
+        // which is important for package relay scenarios (e.g., unilateral exits).
+        // Note: esplora doesn't support native package relay, so we broadcast sequentially.
+        for tx in txs {
+            self.esplora_client
+                .broadcast(tx)
+                .await
+                .map_err(Error::consumer)?;
+        }
+        Ok(())
     }
 }
 
