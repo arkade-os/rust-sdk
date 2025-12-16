@@ -59,3 +59,31 @@ refund-swap-collab actor swap_id:
 # Refund a submarine swap without the receiver
 refund-swap actor swap_id:
     cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed refund-swap-without-receiver {{ swap_id }}
+
+# List all VTXOs and boarding outputs for a given actor
+list-vtxos actor:
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed list-vtxos
+
+# Settle specific VTXOs by outpoint for a given actor, e.g. just settle-vtxos alice "abc123:0,def456:1"
+settle-vtxos actor vtxos:
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed settle-vtxos --vtxos {{ vtxos }}
+
+# Settle specific boarding outputs by outpoint for a given actor
+settle-boarding actor boarding:
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed settle-vtxos --boarding {{ boarding }}
+
+# Settle specific VTXOs and boarding outputs by outpoint for a given actor
+settle-selected actor vtxos boarding:
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed settle-vtxos --vtxos {{ vtxos }} --boarding {{ boarding }}
+
+# Settle all recoverable VTXOs for a given actor
+settle-recoverable actor:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    outpoints=$(just list-vtxos {{ actor }} 2>/dev/null | jq -r '[.vtxos[] | select(.status == "recoverable") | .outpoint] | join(",")')
+    if [ -z "$outpoints" ]; then
+        echo '{"commitment_txid": null, "message": "No recoverable VTXOs found"}'
+    else
+        cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed settle-vtxos --vtxos "$outpoints"
+    fi
+
