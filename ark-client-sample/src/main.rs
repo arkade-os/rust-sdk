@@ -152,6 +152,12 @@ struct Config {
     esplora_url: String,
     swap_storage_path: String,
     boltz_url: String,
+    #[serde(default)]
+    bitcoin_rpc_url: Option<String>,
+    #[serde(default)]
+    bitcoin_rpc_username: Option<String>,
+    #[serde(default)]
+    bitcoin_rpc_password: Option<String>,
 }
 
 #[tokio::main]
@@ -177,7 +183,17 @@ async fn main() -> Result<()> {
     let wallet = Wallet::new(kp, secp, Network::Regtest, config.esplora_url.as_str(), db)?;
     let wallet = Arc::new(wallet);
 
-    let esplora_client = EsploraClient::new(&config.esplora_url)?;
+    let bitcoin_rpc = if let (Some(url), Some(username), Some(password)) = (
+        config.bitcoin_rpc_url.as_ref(),
+        config.bitcoin_rpc_username.as_ref(),
+        config.bitcoin_rpc_password.as_ref(),
+    ) {
+        Some(BitcoinRpc::new(url.clone(), username.clone(), password.clone()))
+    } else {
+        None
+    };
+
+    let esplora_client = EsploraClient::new(&config.esplora_url, bitcoin_rpc)?;
     let esplora_client = Arc::new(esplora_client);
 
     let storage = Arc::new(
@@ -407,8 +423,78 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+struct BitcoinRpc {
+    url: String,
+    username: String,
+    password: String,
+    reqwest_client: reqwest::Client,
+}
+
+impl BitcoinRpc {
+    fn new(url: String, username: String, password: String) -> Self {
+        Self {
+            url,
+            username,
+            password,
+            reqwest_client: reqwest::Client::new(),
+        }
+    }
+
+    async fn submit_package(&self, txs: Vec<String>) -> Result<(), Error> {
+        let rpc_request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "submitpackage",
+            "params": [txs]
+        });
+
+        let response = self
+            .reqwest_client
+            .post(&self.url)
+            .header("Content-Type", "application/json")
+            .basic_auth(&self.username, Some(&self.password))
+            .json(&rpc_request)
+            .send()
+            .await
+            .map_err(|e| Error::consumer(format!("Bitcoin RPC request failed: {e}")))?;
+
+        let status = response.status();
+        let response_text = response.text().await
+            .map_err(|e| Error::consumer(format!("Failed to read RPC response: {e}")))?;
+
+        if !status.is_success() {
+            return Err(Error::consumer(format!(
+                "Bitcoin RPC request failed with status {status}: {response_text}",
+            )));
+        }
+
+        if response_text.contains("failed") {
+            return Err(Error::consumer(format!(
+                "Bitcoin RPC submitpackage failed: {response_text}",
+            )));
+        }
+
+        // Parse JSON-RPC response to check for RPC-level errors
+        let rpc_response: serde_json::Value = serde_json::from_str(&response_text)
+            .map_err(|e| Error::consumer(format!("Failed to parse RPC response: {e}")))?;
+
+        if let Some(error) = rpc_response.get("error") {
+            return Err(Error::consumer(format!(
+                "Bitcoin RPC submitpackage error: {error}",
+            )));
+        }
+
+        tracing::debug!(
+            "Successfully submitted package of {} transactions",
+            txs.len()
+        );
+        Ok(())
+    }
+}
+
 pub struct EsploraClient {
     esplora_client: esplora_client::AsyncClient,
+    bitcoin_rpc: Option<BitcoinRpc>,
 }
 
 impl Blockchain for EsploraClient {
@@ -501,26 +587,33 @@ impl Blockchain for EsploraClient {
     }
 
     async fn broadcast_package(&self, txs: &[&Transaction]) -> Result<(), Error> {
-        // Broadcast transactions sequentially in order.
-        // This ensures parent transactions are broadcast before child transactions,
-        // which is important for package relay scenarios (e.g., unilateral exits).
-        // Note: esplora doesn't support native package relay, so we broadcast sequentially.
-        for tx in txs {
-            self.esplora_client
-                .broadcast(tx)
-                .await
-                .map_err(Error::consumer)?;
-        }
+        // Ark transactions are 0-fee v3 transactions with 0-amount p2a outputs.
+        // These require Bitcoin Core's submitpackage RPC, not regular broadcast.
+        // See: https://bitcoincore.org/en/doc/26.0.0/rpc/rawtransactions/submitpackage/
+        let Some(ref bitcoin_rpc) = self.bitcoin_rpc else {
+            return Err(Error::consumer(
+                "broadcast_package requires Bitcoin Core RPC (bitcoin_rpc_url must be configured)"
+            ));
+        };
+
+        let txs_hex: Vec<String> = txs
+            .iter()
+            .map(|tx| bitcoin::consensus::encode::serialize_hex(tx))
+            .collect();
+
+        bitcoin_rpc.submit_package(txs_hex).await
+            .map_err(Error::consumer)?;
+
         Ok(())
     }
 }
 
 impl EsploraClient {
-    pub fn new(url: &str) -> Result<Self> {
+    pub fn new(url: &str, bitcoin_rpc: Option<BitcoinRpc>) -> Result<Self> {
         let builder = esplora_client::Builder::new(url);
         let esplora_client = builder.build_async()?;
 
-        Ok(Self { esplora_client })
+        Ok(Self { esplora_client, bitcoin_rpc })
     }
 }
 
