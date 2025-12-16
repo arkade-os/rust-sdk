@@ -468,12 +468,6 @@ impl BitcoinRpc {
             )));
         }
 
-        if response_text.contains("failed") {
-            return Err(Error::consumer(format!(
-                "Bitcoin RPC submitpackage failed: {response_text}",
-            )));
-        }
-
         // Parse JSON-RPC response to check for RPC-level errors
         let rpc_response: serde_json::Value = serde_json::from_str(&response_text)
             .map_err(|e| Error::consumer(format!("Failed to parse RPC response: {e}")))?;
