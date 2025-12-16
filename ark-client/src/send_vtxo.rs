@@ -16,6 +16,7 @@ use ark_core::send::build_offchain_transactions;
 use ark_core::send::sign_ark_transaction;
 use ark_core::send::sign_checkpoint_transaction;
 use bitcoin::Amount;
+use bitcoin::OutPoint;
 use bitcoin::Txid;
 use bitcoin::XOnlyPublicKey;
 use bitcoin::key::Secp256k1;
@@ -30,11 +31,13 @@ where
     S: SwapStorage + 'static,
     K: crate::KeyProvider,
 {
-    /// Spend confirmed and pre-confimed VTXOs in an Ark transaction sending the given `amount` to
+    /// Spend confirmed and pre-confirmed VTXOs in an Ark transaction sending the given `amount` to
     /// the given `address`.
     ///
     /// The Ark transaction is built in collaboration with the Ark server. The outputs of said
     /// transaction will be pre-confirmed VTXOs.
+    ///
+    /// Coin selection is performed automatically to choose which VTXOs to spend.
     ///
     /// # Returns
     ///
@@ -93,6 +96,120 @@ where
             })
             .collect::<Result<Vec<_>, Error>>()?;
 
+        self.build_and_sign_offchain_tx(vtxo_inputs, address, amount)
+            .await
+    }
+
+    /// Spend specific VTXOs in an Ark transaction sending the given `amount` to the given
+    /// `address`.
+    ///
+    /// The Ark transaction is built in collaboration with the Ark server. The outputs of said
+    /// transaction will be pre-confirmed VTXOs.
+    ///
+    /// Unlike [`Self::send_vtxo`], this method allows the caller to specify exactly which VTXOs
+    /// to spend by providing their outpoints. This is useful for applications that want to have
+    /// full control over VTXO selection.
+    ///
+    /// # Arguments
+    ///
+    /// * `vtxo_outpoints` - The specific VTXO outpoints to spend
+    /// * `address` - The destination Ark address
+    /// * `amount` - The amount to send
+    ///
+    /// # Returns
+    ///
+    /// The [`Txid`] of the generated Ark transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the selected VTXOs don't have enough value to cover the requested
+    /// amount.
+    pub async fn send_vtxo_selection(
+        &self,
+        vtxo_outpoints: &[OutPoint],
+        address: ArkAddress,
+        amount: Amount,
+    ) -> Result<Txid, Error> {
+        let (vtxo_list, script_pubkey_to_vtxo_map) = self
+            .list_vtxos()
+            .await
+            .context("failed to get spendable VTXOs")?;
+
+        // Get all spendable VTXOs for reference
+        let all_spendable = vtxo_list
+            .spendable_offchain()
+            .map(|vtxo| ark_core::coin_select::VirtualTxOutPoint {
+                outpoint: vtxo.outpoint,
+                script_pubkey: vtxo.script.clone(),
+                expire_at: vtxo.expires_at,
+                amount: vtxo.amount,
+            })
+            .collect::<Vec<_>>();
+
+        // Filter to only the specified outpoints
+        let selected_coins: Vec<_> = all_spendable
+            .into_iter()
+            .filter(|vtxo| vtxo_outpoints.contains(&vtxo.outpoint))
+            .collect();
+
+        if selected_coins.is_empty() {
+            return Err(Error::ad_hoc("no matching VTXO outpoints found"));
+        }
+
+        // Check that total amount is sufficient
+        let total_amount = selected_coins
+            .iter()
+            .fold(Amount::ZERO, |acc, vtxo| acc + vtxo.amount);
+
+        if total_amount < amount {
+            return Err(Error::coin_select(format!(
+                "insufficient VTXO amount: {} < {}",
+                total_amount, amount
+            )));
+        }
+
+        // Build VTXO inputs from selected coins
+        let vtxo_inputs = selected_coins
+            .into_iter()
+            .map(|virtual_tx_outpoint| {
+                let vtxo = script_pubkey_to_vtxo_map
+                    .get(&virtual_tx_outpoint.script_pubkey)
+                    .ok_or_else(|| {
+                        ark_core::Error::ad_hoc(format!(
+                            "missing VTXO for script pubkey: {}",
+                            virtual_tx_outpoint.script_pubkey
+                        ))
+                    })?;
+
+                let (forfeit_script, control_block) = vtxo
+                    .forfeit_spend_info()
+                    .context("failed to get forfeit spend info")?;
+
+                Ok(send::VtxoInput::new(
+                    forfeit_script,
+                    None,
+                    control_block,
+                    vtxo.tapscripts(),
+                    vtxo.script_pubkey(),
+                    virtual_tx_outpoint.amount,
+                    virtual_tx_outpoint.outpoint,
+                ))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+
+        self.build_and_sign_offchain_tx(vtxo_inputs, address, amount)
+            .await
+    }
+
+    /// Build and sign an Ark transaction with the given VTXO inputs.
+    ///
+    /// This is a shared helper used by both [`Self::send_vtxo`] and [`Self::send_vtxo_selection`].
+    async fn build_and_sign_offchain_tx(
+        &self,
+        vtxo_inputs: Vec<send::VtxoInput>,
+        address: ArkAddress,
+        amount: Amount,
+    ) -> Result<Txid, Error> {
         let (change_address, change_address_vtxo) = self.get_offchain_address()?;
 
         let OffchainTransactions {

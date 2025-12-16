@@ -77,6 +77,16 @@ enum Commands {
         /// Where to send the coins to.
         addresses_and_amounts: AddressesAndAmounts,
     },
+    /// Send coins to an Ark address using specific VTXOs.
+    SendToArkAddressWithVtxos {
+        /// Comma-separated VTXO outpoints to use (format: txid:vout).
+        #[arg(long)]
+        vtxos: String,
+        /// Where to send the coins to.
+        address: ArkAddressCli,
+        /// How many sats to send.
+        amount: u64,
+    },
     /// Transform boarding outputs and VTXOs into fresh, confirmed VTXOs.
     Settle,
     /// Subscribe to notifications for an Ark address.
@@ -311,6 +321,30 @@ async fn main() -> Result<()> {
                     .map_err(|e| anyhow!(e))?;
                 tracing::info!("Sent to address {address} amount {amount} in txid {txid}")
             }
+        }
+        Commands::SendToArkAddressWithVtxos {
+            vtxos,
+            address,
+            amount,
+        } => {
+            // Parse comma-separated VTXO outpoints
+            let vtxo_outpoints: Vec<OutPoint> = vtxos
+                .split(',')
+                .map(|op| {
+                    OutPoint::from_str(op.trim()).with_context(|| format!("invalid outpoint: {op}"))
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            let txid = client
+                .send_vtxo_selection(&vtxo_outpoints, address.0, Amount::from_sat(*amount))
+                .await
+                .map_err(|e| anyhow!(e))?;
+            tracing::info!(
+                "Sent to address {} amount {} in txid {}",
+                address.0,
+                amount,
+                txid
+            );
         }
         Commands::Subscribe { address } => {
             tracing::info!("Subscribing to address: {}", address.0);
