@@ -32,6 +32,10 @@ offchain-address actor:
 send actor addresses_and_amounts:
     cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed send-to-ark-addresses {{ addresses_and_amounts }}
 
+# Send coins to an Ark address using specific VTXOs, e.g. just send-vtxo-selection alice "abc123:0,def456:1" tark... 50000
+send-vtxo-selection actor vtxos address amount:
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed send-to-ark-address-with-vtxos --vtxos {{ vtxos }} {{ address }} {{ amount }}
+
 # Transform boarding outputs and VTXOs into fresh, confirmed VTXOs for a given actor
 settle actor:
     cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed settle
