@@ -7,6 +7,7 @@ use ark_client::Client;
 use ark_client::InMemorySwapStorage;
 use ark_client::OfflineClient;
 use ark_client::SpendStatus;
+use ark_client::TxStatus;
 use ark_client::error::Error;
 use ark_client::wallet::Persistence;
 use ark_core::BoardingOutput;
@@ -277,6 +278,14 @@ impl Blockchain for Nigiri {
         Ok(tx)
     }
 
+    async fn get_tx_status(&self, txid: &Txid) -> Result<TxStatus, Error> {
+        let info = self.esplora_client.get_tx_info(txid).unwrap();
+
+        Ok(TxStatus {
+            confirmed_at: info.and_then(|s| s.status.block_time.map(|t| t as i64)),
+        })
+    }
+
     async fn get_output_status(&self, txid: &Txid, vout: u32) -> Result<SpendStatus, Error> {
         let status = self
             .esplora_client
@@ -284,7 +293,7 @@ impl Blockchain for Nigiri {
             .unwrap();
 
         Ok(SpendStatus {
-            spend_txid: status.and_then(|s| s.txid),
+            spend_txid: status.as_ref().and_then(|s| s.txid),
         })
     }
 
