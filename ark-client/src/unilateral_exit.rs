@@ -1,5 +1,3 @@
-use crate::Blockchain;
-use crate::Client;
 use crate::coin_select::coin_select_for_onchain;
 use crate::error::Error;
 use crate::error::ErrorContext;
@@ -8,21 +6,23 @@ use crate::utils::sleep;
 use crate::utils::timeout_op;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
+use crate::Blockchain;
+use crate::Client;
 use ark_core::build_unilateral_exit_tree_txids;
 use ark_core::script::extract_checksig_pubkeys;
 use ark_core::unilateral_exit;
-use ark_core::unilateral_exit::UnilateralExitTree;
 use ark_core::unilateral_exit::create_unilateral_exit_transaction;
 use ark_core::unilateral_exit::sign_unilateral_exit_tree;
+use ark_core::unilateral_exit::UnilateralExitTree;
 use backon::ExponentialBuilder;
 use backon::Retryable;
+use bitcoin::key::Secp256k1;
+use bitcoin::psbt;
 use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::Transaction;
 use bitcoin::TxOut;
 use bitcoin::Txid;
-use bitcoin::key::Secp256k1;
-use bitcoin::psbt;
 use std::collections::HashSet;
 
 // TODO: We should not _need_ to connect to the Ark server to perform unilateral exit. Currently we

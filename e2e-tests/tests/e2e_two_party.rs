@@ -1,11 +1,11 @@
 #![allow(clippy::unwrap_used)]
 
 use crate::common::wait_until_balance;
-use bitcoin::Amount;
 use bitcoin::key::Secp256k1;
-use common::Nigiri;
+use bitcoin::Amount;
 use common::init_tracing;
 use common::set_up_client;
+use common::Nigiri;
 use rand::thread_rng;
 use std::str::FromStr;
 use std::sync::Arc;

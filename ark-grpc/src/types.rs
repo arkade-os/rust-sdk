@@ -1,17 +1,17 @@
-use crate::Error;
 use crate::generated;
+use crate::Error;
 use ark_core::server;
+use ark_core::server::parse_sequence_number;
 use ark_core::server::DeprecatedSigner;
 use ark_core::server::FeeInfo;
 use ark_core::server::IntentFeeInfo;
 use ark_core::server::ScheduledSession;
-use ark_core::server::parse_sequence_number;
+use bitcoin::address::NetworkUnchecked;
+use bitcoin::hex::FromHex;
 use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
 use bitcoin::ScriptBuf;
-use bitcoin::address::NetworkUnchecked;
-use bitcoin::hex::FromHex;
 use std::str::FromStr;
 
 impl TryFrom<generated::ark::v1::GetInfoResponse> for server::Info {

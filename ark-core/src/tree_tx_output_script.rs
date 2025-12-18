@@ -1,11 +1,11 @@
 use crate::script::csv_sig_script;
-use bitcoin::ScriptBuf;
-use bitcoin::XOnlyPublicKey;
 use bitcoin::key::Secp256k1;
 use bitcoin::secp256k1::All;
 use bitcoin::taproot::LeafVersion;
 use bitcoin::taproot::TaprootBuilder;
 use bitcoin::taproot::TaprootSpendInfo;
+use bitcoin::ScriptBuf;
+use bitcoin::XOnlyPublicKey;
 
 /// The script of an _internal_ node of the batch tree. By internal node we mean a non-leaf node.
 ///

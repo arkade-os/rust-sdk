@@ -3,8 +3,8 @@
 use ark_client::error::Error;
 use ark_client::wallet::Persistence;
 use ark_core::BoardingOutput;
-use bitcoin::XOnlyPublicKey;
 use bitcoin::secp256k1::SecretKey;
+use bitcoin::XOnlyPublicKey;
 use std::collections::HashMap;
 use std::sync::RwLock;
 

@@ -1,7 +1,7 @@
 //! Stream event type conversions
 
-use crate::conversions::ConversionError;
 use crate::conversions::parse_sequence_number;
+use crate::conversions::ConversionError;
 use crate::models;
 use ark_core::server::BatchFailed;
 use ark_core::server::BatchFinalizationEvent;
@@ -13,13 +13,13 @@ use ark_core::server::TreeNoncesAggregatedEvent;
 use ark_core::server::TreeSignatureEvent;
 use ark_core::server::TreeSigningStartedEvent;
 use ark_core::server::TreeTxEvent;
-use bitcoin::Psbt;
-use bitcoin::Txid;
 use bitcoin::base64;
 use bitcoin::base64::Engine;
 use bitcoin::hex::FromHex;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::taproot::Signature;
+use bitcoin::Psbt;
+use bitcoin::Txid;
 use std::str::FromStr;
 
 impl TryFrom<models::GetEventStreamResponse> for StreamEvent {

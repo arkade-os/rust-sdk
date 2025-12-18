@@ -3,14 +3,14 @@
 use crate::models::GetInfoResponse;
 use crate::models::GetSubscriptionResponse;
 use crate::models::IndexerVtxo;
+use bitcoin::base64;
+use bitcoin::base64::Engine;
+use bitcoin::secp256k1::PublicKey;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
 use bitcoin::Psbt;
 use bitcoin::ScriptBuf;
 use bitcoin::Txid;
-use bitcoin::base64;
-use bitcoin::base64::Engine;
-use bitcoin::secp256k1::PublicKey;
 use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::str::FromStr;

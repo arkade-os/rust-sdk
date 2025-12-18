@@ -1,10 +1,10 @@
 use crate::Error;
 use bech32::Bech32m;
 use bech32::Hrp;
+use bitcoin::key::TweakedPublicKey;
 use bitcoin::Network;
 use bitcoin::ScriptBuf;
 use bitcoin::XOnlyPublicKey;
-use bitcoin::key::TweakedPublicKey;
 use std::str::FromStr;
 
 #[derive(Debug, Clone, Copy, PartialEq)]

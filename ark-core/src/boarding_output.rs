@@ -1,15 +1,9 @@
-use crate::Error;
-use crate::ExplorerUtxo;
-use crate::UNSPENDABLE_KEY;
 use crate::script::csv_sig_script;
 use crate::script::multisig_script;
 use crate::script::tr_script_pubkey;
-use bitcoin::Address;
-use bitcoin::Amount;
-use bitcoin::Network;
-use bitcoin::OutPoint;
-use bitcoin::ScriptBuf;
-use bitcoin::XOnlyPublicKey;
+use crate::Error;
+use crate::ExplorerUtxo;
+use crate::UNSPENDABLE_KEY;
 use bitcoin::key::PublicKey;
 use bitcoin::key::Secp256k1;
 use bitcoin::key::Verification;
@@ -18,6 +12,12 @@ use bitcoin::taproot;
 use bitcoin::taproot::LeafVersion;
 use bitcoin::taproot::TaprootBuilder;
 use bitcoin::taproot::TaprootSpendInfo;
+use bitcoin::Address;
+use bitcoin::Amount;
+use bitcoin::Network;
+use bitcoin::OutPoint;
+use bitcoin::ScriptBuf;
+use bitcoin::XOnlyPublicKey;
 use std::time::Duration;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
