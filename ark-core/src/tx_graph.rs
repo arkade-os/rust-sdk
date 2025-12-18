@@ -1,8 +1,8 @@
 use crate::Error;
 use crate::VTXO_INPUT_INDEX;
+use bitcoin::taproot::Signature;
 use bitcoin::Psbt;
 use bitcoin::Txid;
-use bitcoin::taproot::Signature;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]

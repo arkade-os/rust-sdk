@@ -395,3 +395,27 @@ wasm-test:
 
     # Run WASM tests with Firefox (headless)
     wasm-pack test --headless --firefox -- --test wasm
+
+# Check MSRV for all published crates.
+msrv-check:
+    #!/usr/bin/env bash
+
+    packages=(
+        "ark-core"
+        "ark-grpc"
+        "ark-rest"
+        "ark-client"
+        "ark-bdk-wallet"
+        "ark-rs"
+    )
+
+    root_dir="$PWD"
+
+    for pkg in "${packages[@]}"; do
+        echo "=== Checking MSRV for $pkg ==="
+        cd "$root_dir/$pkg"
+        cargo msrv verify 2>&1 || true
+        echo ""
+    done
+
+    echo "=== MSRV check complete ==="

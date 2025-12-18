@@ -1,15 +1,16 @@
 use crate::error::Error;
 use ark_core::BoardingOutput;
 use ark_core::UtxoCoinSelection;
+use bitcoin::secp256k1::schnorr::Signature;
+use bitcoin::secp256k1::Message;
+use bitcoin::secp256k1::SecretKey;
 use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::FeeRate;
 use bitcoin::Network;
 use bitcoin::Psbt;
 use bitcoin::XOnlyPublicKey;
-use bitcoin::secp256k1::Message;
-use bitcoin::secp256k1::SecretKey;
-use bitcoin::secp256k1::schnorr::Signature;
+use std::future::Future;
 
 // TODO: I think we should get rid of `BoardingWallet` and `OnchainWallet` and just use
 // `KeyProvider` for everything! Also, IMO this client doesn't benefit from having an "on-chain

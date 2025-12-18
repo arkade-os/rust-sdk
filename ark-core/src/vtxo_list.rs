@@ -1,6 +1,6 @@
+use crate::server::VirtualTxOutPoint;
 use crate::ExplorerUtxo;
 use crate::Vtxo;
-use crate::server::VirtualTxOutPoint;
 use bitcoin::Amount;
 use bitcoin::ScriptBuf;
 use std::collections::HashMap;
@@ -119,13 +119,11 @@ impl VtxoList {
                     ..
                 }) => {
                     // VTXOs with an _active_ exit path. These should be claimed unilaterally.
-                    if let Some(vtxo) = vtxos.get(&v.script)
-                        && vtxo.can_be_claimed_unilaterally_by_owner(
+                    if let Some(vtxo) = vtxos.get(&v.script) {
+                        vtxo.can_be_claimed_unilaterally_by_owner(
                             now,
                             Duration::from_secs(*confirmation_blocktime),
                         )
-                    {
-                        true
                     } else {
                         false
                     }

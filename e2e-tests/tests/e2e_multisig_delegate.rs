@@ -2,21 +2,21 @@
 
 use crate::msig_output::MsigOutputScript;
 use crate::msig_output::MsigOutputTaprootOptions;
-use ark_core::VtxoList;
 use ark_core::batch;
 use ark_core::intent;
-use bitcoin::Amount;
-use bitcoin::OutPoint;
-use bitcoin::TxOut;
-use bitcoin::XOnlyPublicKey;
+use ark_core::VtxoList;
 use bitcoin::key::Keypair;
 use bitcoin::key::Secp256k1;
 use bitcoin::psbt;
 use bitcoin::secp256k1;
 use bitcoin::secp256k1::schnorr;
-use common::Nigiri;
+use bitcoin::Amount;
+use bitcoin::OutPoint;
+use bitcoin::TxOut;
+use bitcoin::XOnlyPublicKey;
 use common::init_tracing;
 use common::set_up_client;
+use common::Nigiri;
 use rand::thread_rng;
 use std::sync::Arc;
 
@@ -213,29 +213,27 @@ pub async fn e2e_multisig_delegate() {
     assert!(!new_msig_outpoint.is_swept);
     assert!(!new_msig_outpoint.is_unrolled);
     assert!(!new_msig_outpoint.is_recoverable(alice.server_info.dust));
-    assert!(
-        new_msig_outpoint
-            .commitment_txids
-            .contains(&commitment_txid)
-    );
+    assert!(new_msig_outpoint
+        .commitment_txids
+        .contains(&commitment_txid));
 }
 
 mod msig_output {
-    use anyhow::Context;
-    use anyhow::Result;
     use anyhow::anyhow;
     use anyhow::bail;
+    use anyhow::Context;
+    use anyhow::Result;
     use ark_core::ArkAddress;
     use ark_core::UNSPENDABLE_KEY;
-    use bitcoin::Network;
-    use bitcoin::PublicKey;
-    use bitcoin::ScriptBuf;
-    use bitcoin::XOnlyPublicKey;
     use bitcoin::opcodes::all::*;
     use bitcoin::taproot;
     use bitcoin::taproot::LeafVersion;
     use bitcoin::taproot::TaprootBuilder;
     use bitcoin::taproot::TaprootSpendInfo;
+    use bitcoin::Network;
+    use bitcoin::PublicKey;
+    use bitcoin::ScriptBuf;
+    use bitcoin::XOnlyPublicKey;
     use serde::Deserialize;
     use serde::Serialize;
     use std::str::FromStr;

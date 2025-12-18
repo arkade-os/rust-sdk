@@ -6,16 +6,16 @@
 
 use crate::ArkAddress;
 use crate::UNSPENDABLE_KEY;
+use bitcoin::hashes::ripemd160;
+use bitcoin::hashes::Hash;
+use bitcoin::opcodes::all::*;
+use bitcoin::taproot::TaprootBuilder;
+use bitcoin::taproot::TaprootSpendInfo;
 use bitcoin::Network;
 use bitcoin::PublicKey;
 use bitcoin::ScriptBuf;
 use bitcoin::Sequence;
 use bitcoin::XOnlyPublicKey;
-use bitcoin::hashes::Hash;
-use bitcoin::hashes::ripemd160;
-use bitcoin::opcodes::all::*;
-use bitcoin::taproot::TaprootBuilder;
-use bitcoin::taproot::TaprootSpendInfo;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -471,12 +471,12 @@ impl VhtlcScript {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bitcoin::hex::DisplayHex;
+    use bitcoin::hex::FromHex;
     use bitcoin::Network;
     use bitcoin::PublicKey;
     use bitcoin::Sequence;
     use bitcoin::XOnlyPublicKey;
-    use bitcoin::hex::DisplayHex;
-    use bitcoin::hex::FromHex;
     use serde::Deserialize;
     use serde::Serialize;
     use std::collections::HashMap;
@@ -577,7 +577,7 @@ mod tests {
                     if self.value < 512 {
                         return Err("seconds timelock must be greater or equal to 512".to_string());
                     }
-                    if !self.value.is_multiple_of(512) {
+                    if self.value % 512 != 0 {
                         return Err("seconds timelock must be multiple of 512".to_string());
                     }
                     Sequence::from_seconds_ceil(self.value)

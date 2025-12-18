@@ -1,21 +1,11 @@
+use crate::anchor_output;
+use crate::script::tr_script_pubkey;
+use crate::server;
 use crate::ArkAddress;
 use crate::Error;
 use crate::ErrorContext;
 use crate::UNSPENDABLE_KEY;
 use crate::VTXO_TAPROOT_KEY;
-use crate::anchor_output;
-use crate::script::tr_script_pubkey;
-use crate::server;
-use bitcoin::Amount;
-use bitcoin::OutPoint;
-use bitcoin::Psbt;
-use bitcoin::ScriptBuf;
-use bitcoin::TapLeafHash;
-use bitcoin::TapSighashType;
-use bitcoin::Transaction;
-use bitcoin::TxIn;
-use bitcoin::TxOut;
-use bitcoin::XOnlyPublicKey;
 use bitcoin::absolute::LockTime;
 use bitcoin::hashes::Hash;
 use bitcoin::key::PublicKey;
@@ -31,6 +21,16 @@ use bitcoin::taproot::LeafVersion;
 use bitcoin::taproot::TaprootBuilder;
 use bitcoin::taproot::TaprootSpendInfo;
 use bitcoin::transaction;
+use bitcoin::Amount;
+use bitcoin::OutPoint;
+use bitcoin::Psbt;
+use bitcoin::ScriptBuf;
+use bitcoin::TapLeafHash;
+use bitcoin::TapSighashType;
+use bitcoin::Transaction;
+use bitcoin::TxIn;
+use bitcoin::TxOut;
+use bitcoin::XOnlyPublicKey;
 use std::collections::BTreeMap;
 use std::io;
 use std::io::Write;
@@ -156,19 +156,19 @@ pub fn build_offchain_transactions(
         ))
     })?;
 
-    if change_amount > Amount::ZERO
-        && let Some(change_address) = change_address
-    {
-        if change_amount > server_info.dust {
-            outputs.push(TxOut {
-                value: change_amount,
-                script_pubkey: change_address.to_p2tr_script_pubkey(),
-            })
-        } else {
-            outputs.push(TxOut {
-                value: change_amount,
-                script_pubkey: change_address.to_sub_dust_script_pubkey(),
-            })
+    if let Some(change_address) = change_address {
+        if change_amount > Amount::ZERO {
+            if change_amount > server_info.dust {
+                outputs.push(TxOut {
+                    value: change_amount,
+                    script_pubkey: change_address.to_p2tr_script_pubkey(),
+                })
+            } else {
+                outputs.push(TxOut {
+                    value: change_amount,
+                    script_pubkey: change_address.to_sub_dust_script_pubkey(),
+                })
+            }
         }
     }
 

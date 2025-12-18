@@ -1,31 +1,40 @@
-use crate::Blockchain;
-use crate::Client;
-use crate::Error;
 use crate::error::ErrorContext as _;
 use crate::swap_storage::SwapStorage;
 use crate::utils::sleep;
 use crate::utils::timeout_op;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
-use ark_core::ArkAddress;
-use ark_core::ExplorerUtxo;
-use ark_core::TxGraph;
+use crate::Blockchain;
+use crate::Client;
+use crate::Error;
 use ark_core::batch;
-use ark_core::batch::Delegate;
-use ark_core::batch::NonceKps;
 use ark_core::batch::aggregate_nonces;
 use ark_core::batch::complete_delegate_forfeit_txs;
 use ark_core::batch::create_and_sign_forfeit_txs;
 use ark_core::batch::generate_nonce_tree;
 use ark_core::batch::sign_batch_tree_tx;
 use ark_core::batch::sign_commitment_psbt;
+use ark_core::batch::Delegate;
+use ark_core::batch::NonceKps;
 use ark_core::intent;
 use ark_core::script::extract_checksig_pubkeys;
 use ark_core::server::BatchTreeEventType;
 use ark_core::server::PartialSigTree;
 use ark_core::server::StreamEvent;
+use ark_core::ArkAddress;
+use ark_core::ExplorerUtxo;
+use ark_core::TxGraph;
 use backon::ExponentialBuilder;
 use backon::Retryable;
+use bitcoin::hashes::sha256;
+use bitcoin::hashes::Hash;
+use bitcoin::hex::DisplayHex;
+use bitcoin::key::Keypair;
+use bitcoin::key::Secp256k1;
+use bitcoin::psbt;
+use bitcoin::secp256k1;
+use bitcoin::secp256k1::schnorr;
+use bitcoin::secp256k1::PublicKey;
 use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
@@ -33,15 +42,6 @@ use bitcoin::Psbt;
 use bitcoin::TxOut;
 use bitcoin::Txid;
 use bitcoin::XOnlyPublicKey;
-use bitcoin::hashes::Hash;
-use bitcoin::hashes::sha256;
-use bitcoin::hex::DisplayHex;
-use bitcoin::key::Keypair;
-use bitcoin::key::Secp256k1;
-use bitcoin::psbt;
-use bitcoin::secp256k1;
-use bitcoin::secp256k1::PublicKey;
-use bitcoin::secp256k1::schnorr;
 use futures::StreamExt;
 use jiff::Timestamp;
 use rand::CryptoRng;
@@ -650,20 +650,19 @@ where
 
                         agg_nonce_pks.insert(e.txid, agg_nonce_pk);
 
-                        let vtxo_graph = match vtxo_graph {
-                            Some(ref vtxo_graph) => vtxo_graph,
-                            None => {
-                                let chunks = vtxo_graph_chunks.take().ok_or(Error::ark_server(
-                                    "received tree nonces event without VTXO graph chunks",
-                                ))?;
-
-                                &TxGraph::new(chunks)
+                        if vtxo_graph.is_none() {
+                            let chunks = vtxo_graph_chunks.take().ok_or(Error::ark_server(
+                                "received tree nonces event without VTXO graph chunks",
+                            ))?;
+                            vtxo_graph = Some(
+                                TxGraph::new(chunks)
                                     .map_err(Error::from)
-                                    .context("failed to build VTXO graph before tree signing")?
-                            }
-                        };
+                                    .context("failed to build VTXO graph before tree signing")?,
+                            );
+                        }
+                        let vtxo_graph_ref = vtxo_graph.as_ref().expect("just populated");
 
-                        if agg_nonce_pks.len() == vtxo_graph.nb_of_nodes() {
+                        if agg_nonce_pks.len() == vtxo_graph_ref.nb_of_nodes() {
                             let cosigner_kp = own_cosigner_kps
                                 .iter()
                                 .find(|kp| kp.public_key().x_only_public_key().0 == cosigner_pk)
@@ -690,7 +689,7 @@ where
                                 .ok_or_else(|| Error::ad_hoc("missing batch expiry"))?;
 
                             let mut partial_sig_tree = PartialSigTree::default();
-                            for (txid, _) in vtxo_graph.as_map() {
+                            for (txid, _) in vtxo_graph_ref.as_map() {
                                 let agg_nonce_pk = agg_nonce_pks.get(&txid).ok_or_else(|| {
                                     Error::ad_hoc(format!(
                                         "missing aggregated nonce PK for TX {txid}"
@@ -703,7 +702,7 @@ where
                                     ark_forfeit_pk,
                                     cosigner_kp,
                                     *agg_nonce_pk,
-                                    vtxo_graph,
+                                    vtxo_graph_ref,
                                     unsigned_commitment_tx,
                                     our_nonce_tree,
                                 )
@@ -744,7 +743,9 @@ where
                         if chunks.is_empty() {
                             tracing::debug!(batch_id = e.id, "No delegated forfeit transactions");
                         } else {
-                            let connectors_graph = TxGraph::new(chunks).map_err(Error::from).context(
+                            let connectors_graph = TxGraph::new(chunks)
+                                .map_err(Error::from)
+                                .context(
                                 "failed to build connectors graph before completing forfeit TXs",
                             )?;
 
@@ -1314,22 +1315,21 @@ where
 
                         agg_nonce_pks.insert(e.txid, agg_nonce_pk);
 
-                        let vtxo_graph = match vtxo_graph {
-                            Some(ref vtxo_graph) => vtxo_graph,
-                            None => {
-                                let chunks = vtxo_graph_chunks.take().ok_or(Error::ark_server(
-                                    "received tree nonces event without VTXO graph chunks",
-                                ))?;
-
-                                &TxGraph::new(chunks)
+                        if vtxo_graph.is_none() {
+                            let chunks = vtxo_graph_chunks.take().ok_or(Error::ark_server(
+                                "received tree nonces event without VTXO graph chunks",
+                            ))?;
+                            vtxo_graph = Some(
+                                TxGraph::new(chunks)
                                     .map_err(Error::from)
-                                    .context("failed to build VTXO graph before tree signing")?
-                            }
-                        };
+                                    .context("failed to build VTXO graph before tree signing")?,
+                            );
+                        }
+                        let vtxo_graph_ref = vtxo_graph.as_ref().expect("just populated");
 
                         // Once we collect an aggregated nonce per transaction in our VTXO graph, we
                         // can go ahead with signing and submitting.
-                        if agg_nonce_pks.len() == vtxo_graph.nb_of_nodes() {
+                        if agg_nonce_pks.len() == vtxo_graph_ref.nb_of_nodes() {
                             let cosigner_kp = own_cosigner_kps
                                 .iter()
                                 .find(|kp| kp.public_key().x_only_public_key().0 == cosigner_pk)
@@ -1356,7 +1356,7 @@ where
                                 .ok_or_else(|| Error::ad_hoc("missing batch expiry"))?;
 
                             let mut partial_sig_tree = PartialSigTree::default();
-                            for (txid, _) in vtxo_graph.as_map() {
+                            for (txid, _) in vtxo_graph_ref.as_map() {
                                 let agg_nonce_pk = agg_nonce_pks.get(&txid).ok_or_else(|| {
                                     Error::ad_hoc(format!(
                                         "missing aggregated nonce PK for TX {txid}"
@@ -1369,7 +1369,7 @@ where
                                     ark_forfeit_pk,
                                     cosigner_kp,
                                     *agg_nonce_pk,
-                                    vtxo_graph,
+                                    vtxo_graph_ref,
                                     unsigned_commitment_tx,
                                     our_nonce_tree,
                                 )
@@ -1414,8 +1414,9 @@ where
 
                                 Vec::new()
                             } else {
-                                let connectors_graph =
-                                TxGraph::new(chunks).map_err(Error::from).context(
+                                let connectors_graph = TxGraph::new(chunks)
+                                    .map_err(Error::from)
+                                    .context(
                                     "failed to build connectors graph before signing forfeit TXs",
                                 )?;
 

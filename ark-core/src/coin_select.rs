@@ -45,10 +45,10 @@ pub fn select_vtxos(
 
     // Try to avoid generating dust.
     let change_amount = selected_amount - amount;
-    if change_amount < dust
-        && let Some(vtxo) = not_selected.first()
-    {
-        selected.push(vtxo.clone());
+    if let Some(vtxo) = not_selected.first() {
+        if change_amount < dust {
+            selected.push(vtxo.clone());
+        }
     }
 
     Ok(selected)

@@ -1,8 +1,8 @@
-use bitcoin::ScriptBuf;
-use bitcoin::XOnlyPublicKey;
 use bitcoin::opcodes::all::*;
 use bitcoin::script::Instruction;
 use bitcoin::taproot::TaprootSpendInfo;
+use bitcoin::ScriptBuf;
+use bitcoin::XOnlyPublicKey;
 use std::fmt;
 
 /// A conventional 2-of-2 multisignature [`ScriptBuf`].
@@ -63,8 +63,10 @@ pub fn extract_checksig_pubkeys(script: &ScriptBuf) -> Vec<XOnlyPublicKey> {
                 Instruction::Op(op) if *op == OP_CHECKSIG || *op == OP_CHECKSIGVERIFY
             );
 
-            if is_checksig && let Ok(pk) = XOnlyPublicKey::from_slice(bytes.as_bytes()) {
-                pubkeys.push(pk);
+            if let Ok(pk) = XOnlyPublicKey::from_slice(bytes.as_bytes()) {
+                if is_checksig {
+                    pubkeys.push(pk);
+                }
             }
         }
     }
@@ -121,8 +123,8 @@ impl std::error::Error for InvalidCsvSigScriptError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin::XOnlyPublicKey;
     use bitcoin::locktime;
+    use bitcoin::XOnlyPublicKey;
     use std::str::FromStr;
 
     #[test]

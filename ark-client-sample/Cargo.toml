@@ -9,7 +9,7 @@ workspace = true
 [dependencies]
 anyhow = "1"
 ark-bdk-wallet = { path = "../ark-bdk-wallet" }
-ark-client = { path = "../ark-client", features = ["default"] }
+ark-client = { path = "../ark-client", features = ["default", "sqlite"] }
 ark-core = { path = "../ark-core" }
 async-trait = "0.1"
 bitcoin = { version = "0.32.7" }
