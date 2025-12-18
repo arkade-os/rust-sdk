@@ -16,6 +16,7 @@ use ark_client::SpendStatus;
 use ark_client::SqliteSwapStorage;
 use ark_client::StaticKeyProvider;
 use ark_client::SwapAmount;
+use ark_client::TxStatus;
 use ark_client::lightning_invoice::Bolt11Invoice;
 use ark_core::ArkAddress;
 use ark_core::ExplorerUtxo;
@@ -280,7 +281,7 @@ async fn main() -> Result<()> {
             if tx_history.is_empty() {
                 tracing::info!("No transactions found");
             }
-            for tx in tx_history.iter() {
+            for tx in tx_history.iter().rev() {
                 tracing::info!("{}\n", pretty_print_transaction(tx)?);
             }
         }
@@ -702,6 +703,18 @@ impl Blockchain for EsploraClient {
         Ok(option)
     }
 
+    async fn get_tx_status(&self, txid: &Txid) -> Result<TxStatus, Error> {
+        let info = self
+            .esplora_client
+            .get_tx_info(txid)
+            .await
+            .map_err(Error::consumer)?;
+
+        Ok(TxStatus {
+            confirmed_at: info.and_then(|s| s.status.block_time.map(|t| t as i64)),
+        })
+    }
+
     async fn get_output_status(&self, txid: &Txid, vout: u32) -> Result<SpendStatus, Error> {
         let status = self
             .esplora_client
@@ -710,7 +723,7 @@ impl Blockchain for EsploraClient {
             .map_err(Error::consumer)?;
 
         Ok(SpendStatus {
-            spend_txid: status.and_then(|s| s.txid),
+            spend_txid: status.as_ref().and_then(|s| s.txid),
         })
     }
 
@@ -807,6 +820,24 @@ fn pretty_print_transaction(tx: &history::Transaction) -> Result<String> {
                  TXID: {txid}\n\
                  Status: {status}\n\
                  Settlement: {settlement}\n\
+                 Amount: {amount}\n\
+                 Time: {time}"
+            )
+        }
+        history::Transaction::Offboard {
+            commitment_txid,
+            amount,
+            confirmed_at,
+        } => {
+            let time = match confirmed_at {
+                Some(t) => format!("{}", Timestamp::from_second(*t)?),
+                None => "Pending confirmation".to_string(),
+            };
+
+            format!(
+                "Type: Offboard\n\
+                 Commitment TXID: {commitment_txid}\n\
+                 Status: Sent (onchain)\n\
                  Amount: {amount}\n\
                  Time: {time}"
             )

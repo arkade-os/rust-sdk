@@ -35,6 +35,16 @@ pub enum Transaction {
         is_settled: bool,
         created_at: i64,
     },
+    /// A transaction that offboards VTXOs to an onchain output.
+    Offboard {
+        /// The commitment TXID that settles the VTXOs.
+        commitment_txid: Txid,
+        /// We use [`Amount`] because offboarding transactions are always outgoing.
+        amount: Amount,
+        /// Confirmation time of the commitment transaction. This information must be provided by
+        /// an external source (e.g., esplora).
+        confirmed_at: Option<i64>,
+    },
 }
 
 impl Transaction {
@@ -48,9 +58,13 @@ impl Transaction {
     ///
     /// - The creation time of an Ark transaction is based on the `created_at` of our VTXO produced
     ///   by it.
+    ///
+    /// - The creation time of an offboard transaction is based on its confirmation time. If it is
+    ///   pending, we return [`None`].
     pub fn created_at(&self) -> Option<i64> {
         match self {
-            Transaction::Boarding { confirmed_at, .. } => *confirmed_at,
+            Transaction::Boarding { confirmed_at, .. }
+            | Transaction::Offboard { confirmed_at, .. } => *confirmed_at,
             Transaction::Commitment { created_at, .. } | Transaction::Ark { created_at, .. } => {
                 Some(*created_at)
             }
@@ -62,6 +76,9 @@ impl Transaction {
             Transaction::Boarding { txid, .. }
             | Transaction::Commitment { txid, .. }
             | Transaction::Ark { txid, .. } => *txid,
+            Transaction::Offboard {
+                commitment_txid, ..
+            } => *commitment_txid,
         }
     }
 }
@@ -190,15 +207,20 @@ pub fn generate_incoming_vtxo_transaction_history(
 
 /// Generate a list of outgoing transactions.
 ///
-/// This list excludes settlements.
+/// This includes:
+/// - Outgoing Ark transactions (offchain payments)
+/// - Offboarding transactions (collaborative redeem to onchain)
+///
+/// Pure settlements (VTXO refreshes with no net outflow) are excluded.
 ///
 /// # Returns
 ///
 /// An iterator of [`OutgoingTransaction`]s.
 ///
 /// We do not return a list of [`Transaction`]s directly because some outgoing transactions may need
-/// additional data to be constructed. In particular, outgoing transactions that do not generate a
-/// change VTXO
+/// additional data to be constructed:
+/// - [`OutgoingTransaction::Incomplete`]: needs a [`VirtualTxOutPoint`] to complete.
+/// - [`OutgoingTransaction::IncompleteOffboard`]: needs confirmation data from an external source.
 ///
 /// # Example
 ///
@@ -208,7 +230,11 @@ pub fn generate_incoming_vtxo_transaction_history(
 /// # use ark_core::server::VirtualTxOutPoint;
 /// # use ark_core::Error;
 /// # use bitcoin::OutPoint;
+/// # use bitcoin::Txid;
 /// # fn fetch_virtual_tx_outpoint(_outpoint: OutPoint) -> Result<Option<VirtualTxOutPoint>, Error> {
+/// #     Ok(None)
+/// # }
+/// # fn fetch_tx_confirmation_time(_txid: Txid) -> Result<Option<i64>, Error> {
 /// #     Ok(None)
 /// # }
 /// #
@@ -230,6 +256,12 @@ pub fn generate_incoming_vtxo_transaction_history(
 ///                 complete_outgoing_txs.push(complete_tx);
 ///             }
 ///         }
+///         OutgoingTransaction::IncompleteOffboard(incomplete_offboard) => {
+///             // Need to fetch confirmation time from an external source (e.g., esplora).
+///             let confirmed_at = fetch_tx_confirmation_time(incomplete_offboard.commitment_txid()).unwrap();
+///             let complete_tx = incomplete_offboard.finish(confirmed_at);
+///             complete_outgoing_txs.push(complete_tx);
+///         }
 ///     }
 /// }
 /// ```
@@ -241,13 +273,21 @@ pub fn generate_outgoing_vtxo_transaction_history(
 
     // We collect all the transactions where one or more VTXOs of ours are spent.
     let mut vtxos_by_spent_by = HashMap::<Txid, Vec<VirtualTxOutPoint>>::new();
-    for spent_vtxo in spent_vtxos.iter() {
-        if spent_vtxo.settled_by.is_some() {
-            // Ignore settlements.
-            continue;
-        }
+    // We collect all the VTXOs that are settled (forfeited) by a commitment transaction.
+    let mut vtxos_by_settled_by = HashMap::<Txid, Vec<VirtualTxOutPoint>>::new();
 
-        if spent_vtxo.spent_by.is_some()
+    for spent_vtxo in spent_vtxos.iter() {
+        if let Some(settled_by) = spent_vtxo.settled_by {
+            // Track settlements to detect offboarding.
+            match vtxos_by_settled_by.entry(settled_by) {
+                Entry::Occupied(mut occupied_entry) => {
+                    occupied_entry.get_mut().push(spent_vtxo.clone());
+                }
+                Entry::Vacant(e) => {
+                    e.insert(vec![spent_vtxo.clone()]);
+                }
+            }
+        } else if spent_vtxo.spent_by.is_some()
             && let Some(ark_txid) = spent_vtxo.ark_txid
         {
             match vtxos_by_spent_by.entry(ark_txid) {
@@ -266,6 +306,7 @@ pub fn generate_outgoing_vtxo_transaction_history(
     // transaction.
     let mut outgoing_txs = Vec::new();
 
+    // Process regular outgoing transactions (Ark transactions).
     for (spend_txid, spent_vtxos) in vtxos_by_spent_by.iter() {
         let spent_amount = spent_vtxos
             .iter()
@@ -301,6 +342,48 @@ pub fn generate_outgoing_vtxo_transaction_history(
         outgoing_txs.push(tx);
     }
 
+    // Process settlements to detect offboarding transactions.
+    //
+    // When VTXOs are settled by a commitment transaction, the inputs may be:
+    // 1. Refreshed into new VTXOs of equal value (pure settlement) - ignore.
+    // 2. Partially offboarded with some change VTXO remaining - track the offboarded amount.
+    // 3. Fully offboarded with no change VTXO - track the entire amount.
+    //
+    // NOTE: I believe this may not tell the whole story, but it's good enough for now.
+    for (commitment_txid, settled_vtxos) in vtxos_by_settled_by.iter() {
+        let input_amount = settled_vtxos
+            .iter()
+            .fold(Amount::ZERO, |acc, x| acc + x.amount)
+            .to_signed()
+            .map_err(Error::ad_hoc)?;
+
+        // Find VTXOs that were produced by this settlement (have commitment_txid in their
+        // commitment_txids).
+        let produced_vtxos = all_vtxos
+            .iter()
+            .filter(|v| v.commitment_txids.contains(commitment_txid))
+            .collect::<Vec<_>>();
+
+        let output_amount = produced_vtxos
+            .iter()
+            .fold(Amount::ZERO, |acc, x| acc + x.amount)
+            .to_signed()
+            .map_err(Error::ad_hoc)?;
+
+        let offboarded_amount = input_amount - output_amount;
+
+        if offboarded_amount.is_positive() {
+            // Some or all of the input was offboarded onchain.
+            outgoing_txs.push(OutgoingTransaction::IncompleteOffboard(
+                IncompleteOffboardTransaction {
+                    commitment_txid: *commitment_txid,
+                    amount: offboarded_amount.to_unsigned().map_err(Error::ad_hoc)?,
+                },
+            ));
+        }
+        // If offboarded_amount <= 0, it's a pure settlement (refresh) - ignore.
+    }
+
     Ok(OutgoingTransactionIter::new(outgoing_txs))
 }
 
@@ -308,13 +391,15 @@ pub fn generate_outgoing_vtxo_transaction_history(
 ///
 /// If the transaction is [`OutgoingTransaction::Complete`], it can be used as is. If the
 /// transaction is [`OutgoingTransaction::Incomplete`], you will need to complete it with a
-/// [`VirtualTxOutPoint`].
+/// [`VirtualTxOutPoint`]. If the transaction is [`OutgoingTransaction::IncompleteOffboard`], you
+/// will need to complete it with confirmation data.
 ///
 /// Refer to [`generate_outgoing_vtxo_transaction_history`] for more info on how to use this type.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum OutgoingTransaction {
     Complete(Transaction),
     Incomplete(IncompleteOutgoingTransaction),
+    IncompleteOffboard(IncompleteOffboardTransaction),
 }
 
 impl OutgoingTransaction {
@@ -354,6 +439,39 @@ pub struct IncompleteOutgoingTransaction {
     // - Every transaction has at least one outpoint.
     first_outpoint: bitcoin::OutPoint,
     net_amount: SignedAmount,
+}
+
+/// An offboard transaction that is missing confirmation data so that it can be completed.
+///
+/// Use [`IncompleteOffboardTransaction::finish`] to complete the transaction with confirmation
+/// data from an external source (e.g., esplora).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct IncompleteOffboardTransaction {
+    commitment_txid: Txid,
+    amount: Amount,
+}
+
+impl IncompleteOffboardTransaction {
+    /// The commitment TXID of this offboard transaction.
+    ///
+    /// Use this value to query an external source (e.g., esplora) for confirmation data.
+    pub fn commitment_txid(&self) -> Txid {
+        self.commitment_txid
+    }
+
+    /// Transform this incomplete offboard transaction into a [`Transaction`].
+    ///
+    /// # Arguments
+    ///
+    /// * `confirmed_at`: The confirmation time of the commitment transaction, or [`None`] if
+    ///   unconfirmed.
+    pub fn finish(self, confirmed_at: Option<i64>) -> Transaction {
+        Transaction::Offboard {
+            commitment_txid: self.commitment_txid,
+            amount: self.amount,
+            confirmed_at,
+        }
+    }
 }
 
 impl IncompleteOutgoingTransaction {
@@ -426,16 +544,14 @@ fn build_outgoing_transaction(
 ) -> Transaction {
     let created_at = vtxo_outpoint.created_at;
     match vtxo_outpoint.is_preconfirmed {
-        true => {
-            Transaction::Ark {
-                txid: vtxo_outpoint.outpoint.txid,
-                amount: net_amount,
-                // For a pre-confirmed outgoing Ark transaction, the sender always considers the
-                // transaction settled.
-                is_settled: true,
-                created_at,
-            }
-        }
+        true => Transaction::Ark {
+            txid: vtxo_outpoint.outpoint.txid,
+            amount: net_amount,
+            // For a pre-confirmed outgoing Ark transaction, the sender always considers the
+            // transaction settled.
+            is_settled: true,
+            created_at,
+        },
         false => Transaction::Commitment {
             txid: vtxo_outpoint.commitment_txids[0],
             amount: net_amount,

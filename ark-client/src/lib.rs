@@ -80,7 +80,7 @@ pub const DEFAULT_GAP_LIMIT: u32 = 20;
 /// # use std::future::Future;
 /// # use std::str::FromStr;
 /// # use std::time::Duration;
-/// # use ark_client::{Blockchain, Client, Error, SpendStatus};
+/// # use ark_client::{Blockchain, Client, Error, SpendStatus, TxStatus};
 /// # use ark_client::OfflineClient;
 /// # use bitcoin::key::Keypair;
 /// # use bitcoin::secp256k1::{Message, SecretKey};
@@ -105,6 +105,10 @@ pub const DEFAULT_GAP_LIMIT: u32 = 20;
 /// #     }
 /// #
 /// #     async fn find_tx(&self, txid: &Txid) -> Result<Option<Transaction>, Error> {
+/// #         unimplemented!()
+/// #     }
+/// #
+/// #     async fn get_tx_status(&self, txid: &Txid) -> Result<TxStatus, Error> {
 /// #         unimplemented!()
 /// #     }
 /// #
@@ -284,6 +288,11 @@ pub struct Client<B, W, S, K> {
 }
 
 #[derive(Clone, Copy, Debug)]
+pub struct TxStatus {
+    pub confirmed_at: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug)]
 pub struct SpendStatus {
     pub spend_txid: Option<Txid>,
 }
@@ -338,6 +347,8 @@ pub trait Blockchain {
         &self,
         txid: &Txid,
     ) -> impl Future<Output = Result<Option<Transaction>, Error>> + Send;
+
+    fn get_tx_status(&self, txid: &Txid) -> impl Future<Output = Result<TxStatus, Error>> + Send;
 
     fn get_output_status(
         &self,
@@ -911,6 +922,17 @@ where
                             continue;
                         }
                     }
+                }
+                OutgoingTransaction::IncompleteOffboard(incomplete_offboard) => {
+                    let status = timeout_op(
+                        self.inner.timeout,
+                        self.blockchain()
+                            .get_tx_status(&incomplete_offboard.commitment_txid()),
+                    )
+                    .await
+                    .context("failed to get commitment TX status")??;
+
+                    incomplete_offboard.finish(status.confirmed_at)
                 }
             };
 
