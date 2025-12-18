@@ -1,31 +1,40 @@
-use crate::Blockchain;
-use crate::Client;
-use crate::Error;
 use crate::error::ErrorContext as _;
 use crate::swap_storage::SwapStorage;
 use crate::utils::sleep;
 use crate::utils::timeout_op;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
-use ark_core::ArkAddress;
-use ark_core::ExplorerUtxo;
-use ark_core::TxGraph;
+use crate::Blockchain;
+use crate::Client;
+use crate::Error;
 use ark_core::batch;
-use ark_core::batch::Delegate;
-use ark_core::batch::NonceKps;
 use ark_core::batch::aggregate_nonces;
 use ark_core::batch::complete_delegate_forfeit_txs;
 use ark_core::batch::create_and_sign_forfeit_txs;
 use ark_core::batch::generate_nonce_tree;
 use ark_core::batch::sign_batch_tree_tx;
 use ark_core::batch::sign_commitment_psbt;
+use ark_core::batch::Delegate;
+use ark_core::batch::NonceKps;
 use ark_core::intent;
 use ark_core::script::extract_checksig_pubkeys;
 use ark_core::server::BatchTreeEventType;
 use ark_core::server::PartialSigTree;
 use ark_core::server::StreamEvent;
+use ark_core::ArkAddress;
+use ark_core::ExplorerUtxo;
+use ark_core::TxGraph;
 use backon::ExponentialBuilder;
 use backon::Retryable;
+use bitcoin::hashes::sha256;
+use bitcoin::hashes::Hash;
+use bitcoin::hex::DisplayHex;
+use bitcoin::key::Keypair;
+use bitcoin::key::Secp256k1;
+use bitcoin::psbt;
+use bitcoin::secp256k1;
+use bitcoin::secp256k1::schnorr;
+use bitcoin::secp256k1::PublicKey;
 use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
@@ -33,15 +42,6 @@ use bitcoin::Psbt;
 use bitcoin::TxOut;
 use bitcoin::Txid;
 use bitcoin::XOnlyPublicKey;
-use bitcoin::hashes::Hash;
-use bitcoin::hashes::sha256;
-use bitcoin::hex::DisplayHex;
-use bitcoin::key::Keypair;
-use bitcoin::key::Secp256k1;
-use bitcoin::psbt;
-use bitcoin::secp256k1;
-use bitcoin::secp256k1::PublicKey;
-use bitcoin::secp256k1::schnorr;
 use futures::StreamExt;
 use jiff::Timestamp;
 use rand::CryptoRng;
@@ -744,7 +744,9 @@ where
                         if chunks.is_empty() {
                             tracing::debug!(batch_id = e.id, "No delegated forfeit transactions");
                         } else {
-                            let connectors_graph = TxGraph::new(chunks).map_err(Error::from).context(
+                            let connectors_graph = TxGraph::new(chunks)
+                                .map_err(Error::from)
+                                .context(
                                 "failed to build connectors graph before completing forfeit TXs",
                             )?;
 
@@ -1414,8 +1416,9 @@ where
 
                                 Vec::new()
                             } else {
-                                let connectors_graph =
-                                TxGraph::new(chunks).map_err(Error::from).context(
+                                let connectors_graph = TxGraph::new(chunks)
+                                    .map_err(Error::from)
+                                    .context(
                                     "failed to build connectors graph before signing forfeit TXs",
                                 )?;
 

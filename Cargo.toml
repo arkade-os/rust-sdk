@@ -16,7 +16,7 @@ resolver = "2"
 
 [workspace.package]
 license = "MIT"
-edition = "2024"
+edition = "2021"
 
 [workspace.lints.rust]
 unused-import-braces = "warn"
