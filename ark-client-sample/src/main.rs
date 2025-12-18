@@ -150,7 +150,7 @@ impl FromStr for AddressesAndAmounts {
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         let parts: Vec<&str> = input.split(',').collect();
 
-        if !parts.len().is_multiple_of(2) {
+        if parts.len() % 2 != 0 {
             bail!("invalid input: expected comma-separated pairs of <address,amount in sats>");
         }
 

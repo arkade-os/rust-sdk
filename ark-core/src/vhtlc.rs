@@ -577,7 +577,7 @@ mod tests {
                     if self.value < 512 {
                         return Err("seconds timelock must be greater or equal to 512".to_string());
                     }
-                    if !self.value.is_multiple_of(512) {
+                    if self.value % 512 != 0 {
                         return Err("seconds timelock must be multiple of 512".to_string());
                     }
                     Sequence::from_seconds_ceil(self.value)

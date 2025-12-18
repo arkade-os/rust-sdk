@@ -487,8 +487,7 @@ impl Client {
     pub async fn get_subscription(
         &self,
         subscription_id: String,
-    ) -> Result<impl Stream<Item = Result<SubscriptionResponse, Error>> + Unpin + use<>, Error>
-    {
+    ) -> Result<impl Stream<Item = Result<SubscriptionResponse, Error>> + Unpin, Error> {
         let mut client = self.indexer_client()?;
 
         let response = client

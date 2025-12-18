@@ -650,20 +650,19 @@ where
 
                         agg_nonce_pks.insert(e.txid, agg_nonce_pk);
 
-                        let vtxo_graph = match vtxo_graph {
-                            Some(ref vtxo_graph) => vtxo_graph,
-                            None => {
-                                let chunks = vtxo_graph_chunks.take().ok_or(Error::ark_server(
-                                    "received tree nonces event without VTXO graph chunks",
-                                ))?;
-
-                                &TxGraph::new(chunks)
+                        if vtxo_graph.is_none() {
+                            let chunks = vtxo_graph_chunks.take().ok_or(Error::ark_server(
+                                "received tree nonces event without VTXO graph chunks",
+                            ))?;
+                            vtxo_graph = Some(
+                                TxGraph::new(chunks)
                                     .map_err(Error::from)
-                                    .context("failed to build VTXO graph before tree signing")?
-                            }
-                        };
+                                    .context("failed to build VTXO graph before tree signing")?,
+                            );
+                        }
+                        let vtxo_graph_ref = vtxo_graph.as_ref().expect("just populated");
 
-                        if agg_nonce_pks.len() == vtxo_graph.nb_of_nodes() {
+                        if agg_nonce_pks.len() == vtxo_graph_ref.nb_of_nodes() {
                             let cosigner_kp = own_cosigner_kps
                                 .iter()
                                 .find(|kp| kp.public_key().x_only_public_key().0 == cosigner_pk)
@@ -690,7 +689,7 @@ where
                                 .ok_or_else(|| Error::ad_hoc("missing batch expiry"))?;
 
                             let mut partial_sig_tree = PartialSigTree::default();
-                            for (txid, _) in vtxo_graph.as_map() {
+                            for (txid, _) in vtxo_graph_ref.as_map() {
                                 let agg_nonce_pk = agg_nonce_pks.get(&txid).ok_or_else(|| {
                                     Error::ad_hoc(format!(
                                         "missing aggregated nonce PK for TX {txid}"
@@ -703,7 +702,7 @@ where
                                     ark_forfeit_pk,
                                     cosigner_kp,
                                     *agg_nonce_pk,
-                                    vtxo_graph,
+                                    vtxo_graph_ref,
                                     unsigned_commitment_tx,
                                     our_nonce_tree,
                                 )
@@ -1316,22 +1315,21 @@ where
 
                         agg_nonce_pks.insert(e.txid, agg_nonce_pk);
 
-                        let vtxo_graph = match vtxo_graph {
-                            Some(ref vtxo_graph) => vtxo_graph,
-                            None => {
-                                let chunks = vtxo_graph_chunks.take().ok_or(Error::ark_server(
-                                    "received tree nonces event without VTXO graph chunks",
-                                ))?;
-
-                                &TxGraph::new(chunks)
+                        if vtxo_graph.is_none() {
+                            let chunks = vtxo_graph_chunks.take().ok_or(Error::ark_server(
+                                "received tree nonces event without VTXO graph chunks",
+                            ))?;
+                            vtxo_graph = Some(
+                                TxGraph::new(chunks)
                                     .map_err(Error::from)
-                                    .context("failed to build VTXO graph before tree signing")?
-                            }
-                        };
+                                    .context("failed to build VTXO graph before tree signing")?,
+                            );
+                        }
+                        let vtxo_graph_ref = vtxo_graph.as_ref().expect("just populated");
 
                         // Once we collect an aggregated nonce per transaction in our VTXO graph, we
                         // can go ahead with signing and submitting.
-                        if agg_nonce_pks.len() == vtxo_graph.nb_of_nodes() {
+                        if agg_nonce_pks.len() == vtxo_graph_ref.nb_of_nodes() {
                             let cosigner_kp = own_cosigner_kps
                                 .iter()
                                 .find(|kp| kp.public_key().x_only_public_key().0 == cosigner_pk)
@@ -1358,7 +1356,7 @@ where
                                 .ok_or_else(|| Error::ad_hoc("missing batch expiry"))?;
 
                             let mut partial_sig_tree = PartialSigTree::default();
-                            for (txid, _) in vtxo_graph.as_map() {
+                            for (txid, _) in vtxo_graph_ref.as_map() {
                                 let agg_nonce_pk = agg_nonce_pks.get(&txid).ok_or_else(|| {
                                     Error::ad_hoc(format!(
                                         "missing aggregated nonce PK for TX {txid}"
@@ -1371,7 +1369,7 @@ where
                                     ark_forfeit_pk,
                                     cosigner_kp,
                                     *agg_nonce_pk,
-                                    vtxo_graph,
+                                    vtxo_graph_ref,
                                     unsigned_commitment_tx,
                                     our_nonce_tree,
                                 )

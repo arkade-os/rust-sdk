@@ -97,6 +97,19 @@ jobs:
       - name: Build crates for WASM
         run: just build-wasm
 
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.75"
+      - uses: Swatinem/rust-cache@v2
+      - name: Use minimal lockfile
+        run: cp Cargo-minimal.lock Cargo.lock
+      - name: Check MSRV
+        run: cargo check --workspace --exclude ark-secp256k1 --exclude e2e-tests --exclude ark-client-sample --exclude ark-dlc-sample
+
   wasm_macos:
     strategy:
       fail-fast: false

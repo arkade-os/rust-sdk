@@ -1,4 +1,5 @@
 use crate::error::ErrorContext;
+use crate::key_provider::KeypairIndex;
 use crate::utils::sleep;
 use crate::utils::timeout_op;
 use crate::wallet::BoardingWallet;
@@ -52,7 +53,6 @@ mod send_vtxo;
 mod unilateral_exit;
 mod utils;
 
-use crate::key_provider::KeypairIndex;
 pub use boltz::ReverseSwapData;
 pub use boltz::SubmarineSwapData;
 pub use boltz::SwapAmount;
@@ -63,6 +63,7 @@ pub use key_provider::KeyProvider;
 pub use key_provider::StaticKeyProvider;
 pub use lightning_invoice;
 pub use swap_storage::InMemorySwapStorage;
+#[cfg(feature = "sqlite")]
 pub use swap_storage::SqliteSwapStorage;
 pub use swap_storage::SwapStorage;
 
