@@ -48,6 +48,10 @@ subscribe actor address:
 send-onchain actor address amount:
     cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed send-onchain {{ address }} {{ amount }}
 
+# Send coins to an Onchain address using specific VTXOs, e.g. just send-onchain-vtxo-selection alice "abc123:0,def456:1" bc1... 50000
+send-onchain-vtxo-selection actor vtxos address amount:
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed send-onchain-with-vtxos --vtxos {{ vtxos }} {{ address }} {{ amount }}
+
 # Receive via lightning
 lightning-invoice actor amount:
     cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed lightning-invoice {{ amount }}

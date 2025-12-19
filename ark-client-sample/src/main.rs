@@ -102,6 +102,16 @@ enum Commands {
         /// How many sats to send.
         amount: u64,
     },
+    /// Send on-chain to address using specific VTXOs.
+    SendOnchainWithVtxos {
+        /// Comma-separated VTXO outpoints to use (format: txid:vout).
+        #[arg(long)]
+        vtxos: String,
+        /// Where to send the funds to.
+        address: Address<NetworkUnchecked>,
+        /// How many sats to send.
+        amount: u64,
+    },
     /// Generate a BOLT11 invoice to receive payment via a Boltz reverse submarine swap.
     LightningInvoice {
         /// How many sats to receive.
@@ -408,7 +418,9 @@ async fn main() -> Result<()> {
             println!("Subscription stream ended");
         }
         Commands::SendOnchain { address, amount } => {
-            let checked_address = address.clone().assume_checked();
+            let network = client.server_info.network;
+            let checked_address = address.clone().require_network(network)?;
+
             let mut rng = thread_rng();
             let txid = client
                 .collaborative_redeem(&mut rng, checked_address.clone(), Amount::from_sat(*amount))
@@ -420,6 +432,40 @@ async fn main() -> Result<()> {
                 amount = amount.to_string(),
                 txid = txid.to_string(),
                 "Sent funds on-chain"
+            );
+        }
+        Commands::SendOnchainWithVtxos {
+            vtxos,
+            address,
+            amount,
+        } => {
+            // Parse comma-separated VTXO outpoints
+            let vtxo_outpoints: Vec<OutPoint> = vtxos
+                .split(',')
+                .map(|op| {
+                    OutPoint::from_str(op.trim()).with_context(|| format!("invalid outpoint: {op}"))
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            let network = client.server_info.network;
+            let checked_address = address.clone().require_network(network)?;
+
+            let mut rng = thread_rng();
+            let txid = client
+                .collaborative_redeem_vtxo_selection(
+                    &mut rng,
+                    vtxo_outpoints.into_iter(),
+                    checked_address.clone(),
+                    Amount::from_sat(*amount),
+                )
+                .await
+                .map_err(|e| anyhow!(e))?;
+
+            tracing::info!(
+                address = checked_address.to_string(),
+                amount = amount.to_string(),
+                txid = txid.to_string(),
+                "Sent funds on-chain using selected VTXOs"
             );
         }
         Commands::LightningInvoice { amount } => {
