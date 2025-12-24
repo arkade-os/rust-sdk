@@ -264,6 +264,136 @@ where
         Ok(commitment_txid)
     }
 
+    /// Send to an onchain Bitcoin address using specific VTXOs.
+    ///
+    /// This is similar to [`collaborative_redeem`] but allows specifying exactly which VTXOs
+    /// to use as inputs. This is useful when VTXOs close to expiry need to be excluded
+    /// (e.g., to satisfy ASP's minExpiryGap requirement).
+    ///
+    /// # Arguments
+    ///
+    /// * `rng` - Random number generator
+    /// * `vtxo_outpoints` - Specific VTXO outpoints to use as inputs
+    /// * `to_address` - The onchain Bitcoin address to send to
+    /// * `to_amount` - The amount to send (fees will be deducted from this)
+    ///
+    /// # Returns
+    ///
+    /// The transaction ID of the commitment transaction.
+    pub async fn collaborative_redeem_with_vtxos<R>(
+        &self,
+        rng: &mut R,
+        vtxo_outpoints: &[OutPoint],
+        to_address: Address,
+        to_amount: Amount,
+    ) -> Result<Txid, Error>
+    where
+        R: Rng + CryptoRng + Clone,
+    {
+        let (change_address, _) = self.get_offchain_address()?;
+
+        // Get all VTXOs and their mapping
+        let (vtxo_list, script_pubkey_to_vtxo_map) = self.list_vtxos().await?;
+
+        // Filter to only the specified VTXOs and convert to intent::Input
+        let mut vtxo_inputs: Vec<intent::Input> = Vec::new();
+        let mut total_vtxo_amount = Amount::ZERO;
+
+        for vtxo in vtxo_list.all_unspent() {
+            if vtxo_outpoints.contains(&vtxo.outpoint) {
+                let vtxo_data = script_pubkey_to_vtxo_map
+                    .get(&vtxo.script)
+                    .ok_or_else(|| {
+                        Error::ad_hoc(format!(
+                            "missing VTXO for script pubkey: {}",
+                            vtxo.script
+                        ))
+                    })?;
+                let spend_info = vtxo_data.forfeit_spend_info()?;
+
+                vtxo_inputs.push(intent::Input::new(
+                    vtxo.outpoint,
+                    vtxo_data.exit_delay(),
+                    None,
+                    TxOut {
+                        value: vtxo.amount,
+                        script_pubkey: vtxo_data.script_pubkey(),
+                    },
+                    vtxo_data.tapscripts(),
+                    spend_info,
+                    false,
+                    vtxo.is_swept,
+                ));
+                total_vtxo_amount += vtxo.amount;
+            }
+        }
+
+        if vtxo_inputs.is_empty() {
+            return Err(Error::ad_hoc("no matching VTXOs found for the specified outpoints"));
+        }
+
+        let onchain_fee = self
+            .server_info
+            .fees
+            .as_ref()
+            .map(|f| f.intent_fee.onchain_output)
+            .unwrap_or(Amount::ZERO);
+
+        // Deduct fee from the requested amount.
+        let net_to_amount = to_amount.checked_sub(onchain_fee).ok_or_else(|| {
+            Error::coin_select(
+                "cannot deduct fees from offboard amount ({onchain_fee} > {to_amount})",
+            )
+        })?;
+
+        let change_amount = total_vtxo_amount.checked_sub(to_amount).ok_or_else(|| {
+            Error::coin_select(
+                "cannot afford to send requested amount, insufficient selected VTXOs",
+            )
+        })?;
+
+        tracing::info!(
+            %to_address,
+            gross_amount = %to_amount,
+            net_amount = %net_to_amount,
+            fee = %onchain_fee,
+            change_address = %change_address.encode(),
+            %change_amount,
+            selected_vtxos = vtxo_inputs.len(),
+            total_vtxo_amount = %total_vtxo_amount,
+            "Attempting collaborative redeem with specific VTXOs"
+        );
+
+        let join_next_batch = || async {
+            self.join_next_batch(
+                &mut rng.clone(),
+                Vec::new(), // No boarding inputs - only use VTXOs
+                vtxo_inputs.clone(),
+                BatchOutputType::OffBoard {
+                    to_address: to_address.clone(),
+                    to_amount: net_to_amount,
+                    change_address,
+                    change_amount,
+                },
+            )
+            .await
+        };
+
+        // Joining a batch can fail depending on the timing, so we try a few times.
+        let commitment_txid = join_next_batch
+            .retry(ExponentialBuilder::default().with_max_times(3))
+            .sleep(sleep)
+            .notify(|err: &Error, dur: std::time::Duration| {
+                tracing::warn!("Retrying joining next batch after {dur:?}. Error: {err}");
+            })
+            .await
+            .context("Failed to join batch with specific VTXOs")?;
+
+        tracing::info!(%commitment_txid, "Collaborative redeem with specific VTXOs success");
+
+        Ok(commitment_txid)
+    }
+
     /// Generate a delegate for settling VTXOs on behalf of the owner.
     ///
     /// The owner pre-signs the intent and forfeit transactions, allowing another party to complete
