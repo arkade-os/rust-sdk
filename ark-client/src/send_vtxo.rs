@@ -130,10 +130,8 @@ where
         address: ArkAddress,
         amount: Amount,
     ) -> Result<Txid, Error> {
-        let (vtxo_list, script_pubkey_to_vtxo_map) = self
-            .list_vtxos()
-            .await
-            .context("failed to get spendable VTXOs")?;
+        let (vtxo_list, script_pubkey_to_vtxo_map) =
+            self.list_vtxos().await.context("failed to get VTXO list")?;
 
         // Get all spendable VTXOs for reference
         let all_spendable = vtxo_list
