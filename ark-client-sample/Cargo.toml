@@ -18,6 +18,7 @@ esplora-client = { version = "0.10", features = ["async-https"] }
 futures = "0.3"
 jiff = "0.2.1"
 rand = "0.8"
+reqwest = { version = "0.12", features = ["json", "basic-auth"] }
 rustls = { version = "0.23", features = ["ring"] }
 serde = { version = "1", features = ["derive"] }
 serde_derive = "1"
