@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 ark-core = { path = "../ark-core", version = "0.7.0" }
+ark-fees = { path = "../ark-fees" }
 async-stream = "0.3"
 async-trait = "0.1"
 base64 = "0.22.1"
