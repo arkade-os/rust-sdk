@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "ark-fees",
   "ark-client",
   "ark-core",
   "ark-grpc",
