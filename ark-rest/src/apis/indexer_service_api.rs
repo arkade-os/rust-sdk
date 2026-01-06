@@ -160,16 +160,8 @@ pub async fn indexer_service_get_batch_sweep_transactions(
         let content = resp.text().await?;
         match content_type {
             ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
-            ContentType::Text => {
-                return Err(Error::from(serde_json::Error::custom(
-                    "Received `text/plain` content type response that cannot be converted to `models::GetBatchSweepTransactionsResponse`",
-                )));
-            }
-            ContentType::Unsupported(unknown_type) => {
-                return Err(Error::from(serde_json::Error::custom(format!(
-                    "Received `{unknown_type}` content type response that cannot be converted to `models::GetBatchSweepTransactionsResponse`"
-                ))));
-            }
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::GetBatchSweepTransactionsResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::GetBatchSweepTransactionsResponse`")))),
         }
     } else {
         let content = resp.text().await?;
@@ -218,16 +210,8 @@ pub async fn indexer_service_get_commitment_tx(
         let content = resp.text().await?;
         match content_type {
             ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
-            ContentType::Text => {
-                return Err(Error::from(serde_json::Error::custom(
-                    "Received `text/plain` content type response that cannot be converted to `models::GetCommitmentTxResponse`",
-                )));
-            }
-            ContentType::Unsupported(unknown_type) => {
-                return Err(Error::from(serde_json::Error::custom(format!(
-                    "Received `{unknown_type}` content type response that cannot be converted to `models::GetCommitmentTxResponse`"
-                ))));
-            }
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::GetCommitmentTxResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::GetCommitmentTxResponse`")))),
         }
     } else {
         let content = resp.text().await?;
@@ -287,16 +271,8 @@ pub async fn indexer_service_get_connectors(
         let content = resp.text().await?;
         match content_type {
             ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
-            ContentType::Text => {
-                return Err(Error::from(serde_json::Error::custom(
-                    "Received `text/plain` content type response that cannot be converted to `models::GetConnectorsResponse`",
-                )));
-            }
-            ContentType::Unsupported(unknown_type) => {
-                return Err(Error::from(serde_json::Error::custom(format!(
-                    "Received `{unknown_type}` content type response that cannot be converted to `models::GetConnectorsResponse`"
-                ))));
-            }
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::GetConnectorsResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::GetConnectorsResponse`")))),
         }
     } else {
         let content = resp.text().await?;
@@ -355,16 +331,8 @@ pub async fn indexer_service_get_forfeit_txs(
         let content = resp.text().await?;
         match content_type {
             ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
-            ContentType::Text => {
-                return Err(Error::from(serde_json::Error::custom(
-                    "Received `text/plain` content type response that cannot be converted to `models::GetForfeitTxsResponse`",
-                )));
-            }
-            ContentType::Unsupported(unknown_type) => {
-                return Err(Error::from(serde_json::Error::custom(format!(
-                    "Received `{unknown_type}` content type response that cannot be converted to `models::GetForfeitTxsResponse`"
-                ))));
-            }
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::GetForfeitTxsResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::GetForfeitTxsResponse`")))),
         }
     } else {
         let content = resp.text().await?;
@@ -413,16 +381,8 @@ pub async fn indexer_service_get_subscription(
         let content = resp.text().await?;
         match content_type {
             ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
-            ContentType::Text => {
-                return Err(Error::from(serde_json::Error::custom(
-                    "Received `text/plain` content type response that cannot be converted to `models::GetSubscriptionResponse`",
-                )));
-            }
-            ContentType::Unsupported(unknown_type) => {
-                return Err(Error::from(serde_json::Error::custom(format!(
-                    "Received `{unknown_type}` content type response that cannot be converted to `models::GetSubscriptionResponse`"
-                ))));
-            }
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::GetSubscriptionResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::GetSubscriptionResponse`")))),
         }
     } else {
         let content = resp.text().await?;
@@ -481,16 +441,8 @@ pub async fn indexer_service_get_virtual_txs(
         let content = resp.text().await?;
         match content_type {
             ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
-            ContentType::Text => {
-                return Err(Error::from(serde_json::Error::custom(
-                    "Received `text/plain` content type response that cannot be converted to `models::GetVirtualTxsResponse`",
-                )));
-            }
-            ContentType::Unsupported(unknown_type) => {
-                return Err(Error::from(serde_json::Error::custom(format!(
-                    "Received `{unknown_type}` content type response that cannot be converted to `models::GetVirtualTxsResponse`"
-                ))));
-            }
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::GetVirtualTxsResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::GetVirtualTxsResponse`")))),
         }
     } else {
         let content = resp.text().await?;
@@ -552,16 +504,8 @@ pub async fn indexer_service_get_vtxo_chain(
         let content = resp.text().await?;
         match content_type {
             ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
-            ContentType::Text => {
-                return Err(Error::from(serde_json::Error::custom(
-                    "Received `text/plain` content type response that cannot be converted to `models::GetVtxoChainResponse`",
-                )));
-            }
-            ContentType::Unsupported(unknown_type) => {
-                return Err(Error::from(serde_json::Error::custom(format!(
-                    "Received `{unknown_type}` content type response that cannot be converted to `models::GetVtxoChainResponse`"
-                ))));
-            }
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::GetVtxoChainResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::GetVtxoChainResponse`")))),
         }
     } else {
         let content = resp.text().await?;
@@ -623,16 +567,8 @@ pub async fn indexer_service_get_vtxo_tree(
         let content = resp.text().await?;
         match content_type {
             ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
-            ContentType::Text => {
-                return Err(Error::from(serde_json::Error::custom(
-                    "Received `text/plain` content type response that cannot be converted to `models::GetVtxoTreeResponse`",
-                )));
-            }
-            ContentType::Unsupported(unknown_type) => {
-                return Err(Error::from(serde_json::Error::custom(format!(
-                    "Received `{unknown_type}` content type response that cannot be converted to `models::GetVtxoTreeResponse`"
-                ))));
-            }
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::GetVtxoTreeResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::GetVtxoTreeResponse`")))),
         }
     } else {
         let content = resp.text().await?;
@@ -693,16 +629,8 @@ pub async fn indexer_service_get_vtxo_tree_leaves(
         let content = resp.text().await?;
         match content_type {
             ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
-            ContentType::Text => {
-                return Err(Error::from(serde_json::Error::custom(
-                    "Received `text/plain` content type response that cannot be converted to `models::GetVtxoTreeLeavesResponse`",
-                )));
-            }
-            ContentType::Unsupported(unknown_type) => {
-                return Err(Error::from(serde_json::Error::custom(format!(
-                    "Received `{unknown_type}` content type response that cannot be converted to `models::GetVtxoTreeLeavesResponse`"
-                ))));
-            }
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::GetVtxoTreeLeavesResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::GetVtxoTreeLeavesResponse`")))),
         }
     } else {
         let content = resp.text().await?;
@@ -726,6 +654,7 @@ pub async fn indexer_service_get_vtxos(
     spendable_only: Option<bool>,
     spent_only: Option<bool>,
     recoverable_only: Option<bool>,
+    pending_only: Option<bool>,
     page_period_size: Option<i32>,
     page_period_index: Option<i32>,
 ) -> Result<models::GetVtxosResponse, Error<IndexerServiceGetVtxosError>> {
@@ -735,6 +664,7 @@ pub async fn indexer_service_get_vtxos(
     let p_spendable_only = spendable_only;
     let p_spent_only = spent_only;
     let p_recoverable_only = recoverable_only;
+    let p_pending_only = pending_only;
     let p_page_period_size = page_period_size;
     let p_page_period_index = page_period_index;
 
@@ -788,6 +718,9 @@ pub async fn indexer_service_get_vtxos(
     if let Some(ref param_value) = p_recoverable_only {
         req_builder = req_builder.query(&[("recoverableOnly", &param_value.to_string())]);
     }
+    if let Some(ref param_value) = p_pending_only {
+        req_builder = req_builder.query(&[("pendingOnly", &param_value.to_string())]);
+    }
     if let Some(ref param_value) = p_page_period_size {
         req_builder = req_builder.query(&[("page.size", &param_value.to_string())]);
     }
@@ -813,16 +746,8 @@ pub async fn indexer_service_get_vtxos(
         let content = resp.text().await?;
         match content_type {
             ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
-            ContentType::Text => {
-                return Err(Error::from(serde_json::Error::custom(
-                    "Received `text/plain` content type response that cannot be converted to `models::GetVtxosResponse`",
-                )));
-            }
-            ContentType::Unsupported(unknown_type) => {
-                return Err(Error::from(serde_json::Error::custom(format!(
-                    "Received `{unknown_type}` content type response that cannot be converted to `models::GetVtxosResponse`"
-                ))));
-            }
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::GetVtxosResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::GetVtxosResponse`")))),
         }
     } else {
         let content = resp.text().await?;
@@ -869,16 +794,8 @@ pub async fn indexer_service_subscribe_for_scripts(
         let content = resp.text().await?;
         match content_type {
             ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
-            ContentType::Text => {
-                return Err(Error::from(serde_json::Error::custom(
-                    "Received `text/plain` content type response that cannot be converted to `models::SubscribeForScriptsResponse`",
-                )));
-            }
-            ContentType::Unsupported(unknown_type) => {
-                return Err(Error::from(serde_json::Error::custom(format!(
-                    "Received `{unknown_type}` content type response that cannot be converted to `models::SubscribeForScriptsResponse`"
-                ))));
-            }
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::SubscribeForScriptsResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::SubscribeForScriptsResponse`")))),
         }
     } else {
         let content = resp.text().await?;
@@ -925,16 +842,8 @@ pub async fn indexer_service_unsubscribe_for_scripts(
         let content = resp.text().await?;
         match content_type {
             ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
-            ContentType::Text => {
-                return Err(Error::from(serde_json::Error::custom(
-                    "Received `text/plain` content type response that cannot be converted to `serde_json::Value`",
-                )));
-            }
-            ContentType::Unsupported(unknown_type) => {
-                return Err(Error::from(serde_json::Error::custom(format!(
-                    "Received `{unknown_type}` content type response that cannot be converted to `serde_json::Value`"
-                ))));
-            }
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `serde_json::Value`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `serde_json::Value`")))),
         }
     } else {
         let content = resp.text().await?;

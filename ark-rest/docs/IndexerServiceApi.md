@@ -278,7 +278,7 @@ No authorization required
 
 ## indexer_service_get_vtxos
 
-> models::GetVtxosResponse indexer_service_get_vtxos(scripts, outpoints, spendable_only, spent_only, recoverable_only, page_period_size, page_period_index)
+> models::GetVtxosResponse indexer_service_get_vtxos(scripts, outpoints, spendable_only, spent_only, recoverable_only, pending_only, page_period_size, page_period_index)
 
 GetVtxos returns the list of vtxos based on the provided filter. Vtxos can be retrieved either by addresses or by outpoints, and optionally filtered by spendable or spent only. The response may be paginated if the results span multiple pages.
 
@@ -291,6 +291,7 @@ GetVtxos returns the list of vtxos based on the provided filter. Vtxos can be re
 | **spendable_only**    | Option<**bool**>                     | Retrieve only spendable vtxos                                                                          |          |       |
 | **spent_only**        | Option<**bool**>                     | Retrieve only spent vtxos.                                                                             |          |       |
 | **recoverable_only**  | Option<**bool**>                     | Retrieve only recoverable vtxos (notes, subdust or swept vtxos). The 3 filters are mutually exclusive, |          |       |
+| **pending_only**      | Option<**bool**>                     | Include only spent vtxos that are not finalized.                                                       |          |       |
 | **page_period_size**  | Option<**i32**>                      |                                                                                                        |          |       |
 | **page_period_index** | Option<**i32**>                      |                                                                                                        |          |       |
 

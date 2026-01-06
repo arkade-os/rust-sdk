@@ -19,6 +19,9 @@ pub struct GetVtxosRequest {
     pub outpoints: Option<Vec<String>>,
     #[serde(rename = "page", skip_serializing_if = "Option::is_none")]
     pub page: Option<models::IndexerPageRequest>,
+    /// Include only spent vtxos that are not finalized.
+    #[serde(rename = "pendingOnly", skip_serializing_if = "Option::is_none")]
+    pub pending_only: Option<bool>,
     /// Retrieve only recoverable vtxos (notes, subdust or swept vtxos). The 3 filters are mutually
     /// exclusive,
     #[serde(rename = "recoverableOnly", skip_serializing_if = "Option::is_none")]
@@ -39,6 +42,7 @@ impl GetVtxosRequest {
         GetVtxosRequest {
             outpoints: None,
             page: None,
+            pending_only: None,
             recoverable_only: None,
             scripts: None,
             spendable_only: None,

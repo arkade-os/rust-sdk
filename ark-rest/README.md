@@ -27,6 +27,7 @@ All URIs are relative to _http://localhost_
 | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- | ----------- |
 | _ArkServiceApi_               | [**ark_service_confirm_registration**](docs/ArkServiceApi.md#ark_service_confirm_registration)                             | **POST** /v1/batch/ack                                                            |             |
 | _ArkServiceApi_               | [**ark_service_delete_intent**](docs/ArkServiceApi.md#ark_service_delete_intent)                                           | **POST** /v1/batch/deleteIntent                                                   |             |
+| _ArkServiceApi_               | [**ark_service_estimate_intent_fee**](docs/ArkServiceApi.md#ark_service_estimate_intent_fee)                               | **POST** /v1/batch/estimateFee                                                    |             |
 | _ArkServiceApi_               | [**ark_service_finalize_tx**](docs/ArkServiceApi.md#ark_service_finalize_tx)                                               | **POST** /v1/tx/finalize                                                          |             |
 | _ArkServiceApi_               | [**ark_service_get_event_stream**](docs/ArkServiceApi.md#ark_service_get_event_stream)                                     | **GET** /v1/batch/events                                                          |             |
 | _ArkServiceApi_               | [**ark_service_get_info**](docs/ArkServiceApi.md#ark_service_get_info)                                                     | **GET** /v1/info                                                                  |             |
@@ -74,6 +75,8 @@ All URIs are relative to _http://localhost_
 - [DeprecatedSigner](docs/DeprecatedSigner.md)
 - [DeriveAddressResponse](docs/DeriveAddressResponse.md)
 - [ErrorDetails](docs/ErrorDetails.md)
+- [EstimateIntentFeeRequest](docs/EstimateIntentFeeRequest.md)
+- [EstimateIntentFeeResponse](docs/EstimateIntentFeeResponse.md)
 - [FeeInfo](docs/FeeInfo.md)
 - [FinalizeTxRequest](docs/FinalizeTxRequest.md)
 - [GenSeedResponse](docs/GenSeedResponse.md)
