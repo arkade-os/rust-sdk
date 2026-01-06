@@ -287,6 +287,7 @@ pub struct OfflineClient<B, W, S, K> {
 pub struct Client<B, W, S, K> {
     inner: OfflineClient<B, W, S, K>,
     pub server_info: server::Info,
+    fee_estimator: ark_fees::Estimator,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -545,9 +546,24 @@ where
             "Connected to Ark server"
         );
 
+        let fee_estimator_config = server_info
+            .fees
+            .clone()
+            .map(|fees| ark_fees::Config {
+                intent_offchain_input_program: fees.intent_fee.offchain_input.unwrap_or_default(),
+                intent_onchain_input_program: fees.intent_fee.onchain_input.unwrap_or_default(),
+                intent_offchain_output_program: fees.intent_fee.offchain_output.unwrap_or_default(),
+                intent_onchain_output_program: fees.intent_fee.onchain_output.unwrap_or_default(),
+            })
+            .unwrap_or_default();
+
+        let fee_estimator =
+            ark_fees::Estimator::new(fee_estimator_config).map_err(Error::ark_server)?;
+
         let client = Client {
             inner: self,
             server_info,
+            fee_estimator,
         };
 
         if let Err(error) = client.discover_keys(DEFAULT_GAP_LIMIT).await {

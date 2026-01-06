@@ -101,10 +101,10 @@ impl From<generated::ark::v1::FeeInfo> for FeeInfo {
         let intent_fee = value
             .intent_fee
             .map(|i| IntentFeeInfo {
-                offchain_input: server::parse_fee_amount(Some(i.offchain_input)),
-                offchain_output: server::parse_fee_amount(Some(i.offchain_output)),
-                onchain_input: server::parse_fee_amount(Some(i.onchain_input)),
-                onchain_output: server::parse_fee_amount(Some(i.onchain_output)),
+                offchain_input: Some(i.offchain_input),
+                offchain_output: Some(i.offchain_output),
+                onchain_input: Some(i.onchain_input),
+                onchain_output: Some(i.onchain_output),
             })
             .unwrap_or_default();
 

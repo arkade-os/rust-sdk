@@ -205,11 +205,13 @@ where
             self.fetch_commitment_transaction_inputs().await?;
 
         let onchain_fee = self
-            .server_info
-            .fees
-            .as_ref()
-            .map(|f| f.intent_fee.onchain_output)
-            .unwrap_or(Amount::ZERO);
+            .fee_estimator
+            .eval_onchain_output(ark_fees::Output {
+                amount: to_amount.to_sat(),
+                script: to_address.script_pubkey().to_string(),
+            })
+            .map_err(Error::ad_hoc)?;
+        let onchain_fee = Amount::from_sat(onchain_fee.to_satoshis());
 
         // Deduct fee from the requested amount.
         let net_to_amount = to_amount.checked_sub(onchain_fee).ok_or_else(|| {
@@ -319,11 +321,13 @@ where
             .fold(Amount::ZERO, |acc, vtxo| acc + vtxo.amount());
 
         let onchain_fee = self
-            .server_info
-            .fees
-            .as_ref()
-            .map(|f| f.intent_fee.onchain_output)
-            .unwrap_or(Amount::ZERO);
+            .fee_estimator
+            .eval_onchain_output(ark_fees::Output {
+                amount: to_amount.to_sat(),
+                script: to_address.script_pubkey().to_string(),
+            })
+            .map_err(Error::ad_hoc)?;
+        let onchain_fee = Amount::from_sat(onchain_fee.to_satoshis());
 
         // Deduct fee from the requested amount.
         let net_to_amount = to_amount.checked_sub(onchain_fee).ok_or_else(|| {
