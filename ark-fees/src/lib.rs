@@ -16,7 +16,7 @@ pub struct FeeAmount(pub f64);
 impl FeeAmount {
     /// Converts the fee amount to satoshis, rounding up.
     pub fn to_satoshis(&self) -> u64 {
-        self.0.ceil() as u64
+        self.0.max(0.0).ceil() as u64
     }
 }
 
