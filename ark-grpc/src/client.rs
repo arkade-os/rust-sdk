@@ -1074,7 +1074,7 @@ impl From<GetVtxosRequest> for generated::ark::v1::GetVtxosRequest {
                 spent_only,
                 recoverable_only,
                 page,
-                pending_only
+                pending_only,
             },
             GetVtxosRequestReference::OutPoints(outpoints) => Self {
                 scripts: Vec::new(),
@@ -1083,7 +1083,7 @@ impl From<GetVtxosRequest> for generated::ark::v1::GetVtxosRequest {
                 spent_only,
                 recoverable_only,
                 page,
-                pending_only
+                pending_only,
             },
         }
     }
