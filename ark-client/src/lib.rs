@@ -748,14 +748,7 @@ where
         addresses: impl Iterator<Item = ArkAddress>,
     ) -> Result<Vec<VirtualTxOutPoint>, Error> {
         let request = GetVtxosRequest::new_for_addresses(addresses);
-        let vtxos = timeout_op(
-            self.inner.timeout,
-            self.network_client().list_vtxos(request),
-        )
-        .await
-        .context("failed to fetch list of VTXOs")??;
-
-        Ok(vtxos)
+        self.fetch_all_vtxos(request).await
     }
 
     pub async fn list_vtxos(&self) -> Result<(VtxoList, HashMap<ScriptBuf, Vtxo>), Error> {
@@ -895,14 +888,9 @@ where
                     let first_outpoint = incomplete_tx.first_outpoint();
 
                     let request = GetVtxosRequest::new_for_outpoints(&[first_outpoint]);
-                    let list = timeout_op(
-                        self.inner.timeout,
-                        self.network_client().list_vtxos(request),
-                    )
-                    .await
-                    .context("Failed to fetch list of VTXOs")??;
+                    let vtxos = self.fetch_all_vtxos(request).await?;
 
-                    match list.first() {
+                    match vtxos.first() {
                         Some(virtual_tx_outpoint) => {
                             match incomplete_tx.finish(virtual_tx_outpoint) {
                                 Ok(tx) => tx,
@@ -996,6 +984,42 @@ where
 
     pub fn network_client(&self) -> ark_grpc::Client {
         self.inner.network_client.clone()
+    }
+
+    /// Fetch all VTXOs for a request, handling pagination internally.
+    async fn fetch_all_vtxos(
+        &self,
+        request: GetVtxosRequest,
+    ) -> Result<Vec<VirtualTxOutPoint>, Error> {
+        if request.reference().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut all_vtxos = Vec::new();
+        let mut cursor = 0;
+        const PAGE_SIZE: i32 = 100;
+
+        loop {
+            let paged_request = request.clone().with_page(PAGE_SIZE, cursor);
+            let response = timeout_op(
+                self.inner.timeout,
+                self.network_client().list_vtxos(paged_request),
+            )
+            .await
+            .context("failed to fetch list of VTXOs")??;
+
+            all_vtxos.extend(response.vtxos);
+
+            // Use server-provided cursor for next page; next == total means end
+            match response.page {
+                Some(page) if page.next < page.total => {
+                    cursor = page.next;
+                }
+                _ => break,
+            }
+        }
+
+        Ok(all_vtxos)
     }
 
     fn next_keypair(&self, keypair_index: KeypairIndex) -> Result<Keypair, Error> {
