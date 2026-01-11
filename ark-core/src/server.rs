@@ -362,6 +362,19 @@ pub struct VirtualTxOutPoint {
 }
 
 impl VirtualTxOutPoint {
+    /// Check if a VTXO is recoverable.
+    ///
+    /// Recoverable VTXOs can be settled, but they cannot be sent in an offchain transaction. To
+    /// settle them, the original VTXO does not need to be forfeited, as the Arkade server already
+    /// controls it.
+    pub fn is_recoverable(&self, dust: Amount) -> bool {
+        if self.is_spent {
+            return false;
+        }
+
+        self.amount < dust || self.is_swept || self.is_expired()
+    }
+
     /// Check if a VTXO has expired.
     ///
     /// Expired VTXOs can be settled, but they cannot be sent in an offchain transaction. To settle
@@ -386,15 +399,6 @@ impl VirtualTxOutPoint {
         };
 
         current_timestamp > self.expires_at && !self.is_swept && !self.is_spent
-    }
-
-    /// Check if a VTXO is recoverable.
-    ///
-    /// Recoverable VTXOs can be settled, but they cannot be sent in an offchain transaction. To
-    /// settle them, the original VTXO does not need to be forfeited, as the Arkade server already
-    /// controls it.
-    pub fn is_recoverable(&self, dust: Amount) -> bool {
-        (self.amount < dust || self.is_swept) && !self.is_spent
     }
 }
 

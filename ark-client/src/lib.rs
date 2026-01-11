@@ -308,7 +308,6 @@ pub struct AddressVtxos {
 pub struct OffChainBalance {
     pre_confirmed: Amount,
     confirmed: Amount,
-    expired: Amount,
     recoverable: Amount,
 }
 
@@ -321,21 +320,13 @@ impl OffChainBalance {
         self.confirmed
     }
 
-    /// Balance which can only be settled, but requires a forfeit transaction per VTXO.
-    ///
-    /// Since the server's concept of now may differ slightly from the client's, this balance may
-    /// sometimes be incorrect.
-    pub fn expired(&self) -> Amount {
-        self.expired
-    }
-
     /// Balance which can only be settled, and does not require a forfeit transaction per VTXO.
     pub fn recoverable(&self) -> Amount {
         self.recoverable
     }
 
     pub fn total(&self) -> Amount {
-        self.pre_confirmed + self.confirmed + self.expired + self.recoverable
+        self.pre_confirmed + self.confirmed + self.recoverable
     }
 }
 
@@ -809,10 +800,6 @@ where
             .confirmed()
             .fold(Amount::ZERO, |acc, x| acc + x.amount);
 
-        let expired = vtxo_list
-            .expired()
-            .fold(Amount::ZERO, |acc, x| acc + x.amount);
-
         let recoverable = vtxo_list
             .recoverable()
             .fold(Amount::ZERO, |acc, x| acc + x.amount);
@@ -820,7 +807,6 @@ where
         Ok(OffChainBalance {
             pre_confirmed,
             confirmed,
-            expired,
             recoverable,
         })
     }

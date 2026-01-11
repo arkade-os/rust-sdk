@@ -11,7 +11,6 @@ pub struct VtxoList {
     // Unspent
     pre_confirmed: Vec<VirtualTxOutPoint>,
     confirmed: Vec<VirtualTxOutPoint>,
-    expired: Vec<VirtualTxOutPoint>,
     recoverable: Vec<VirtualTxOutPoint>,
 
     // Spent
@@ -28,7 +27,6 @@ impl VtxoList {
         let mut spent = Vec::new();
         let mut pre_confirmed = Vec::new();
         let mut confirmed = Vec::new();
-        let mut expired = Vec::new();
         for virtual_tx_outpoint in virtual_tx_outpoints {
             if virtual_tx_outpoint.is_recoverable(dust) {
                 recoverable.push(virtual_tx_outpoint);
@@ -37,8 +35,6 @@ impl VtxoList {
                 || virtual_tx_outpoint.is_swept
             {
                 spent.push(virtual_tx_outpoint);
-            } else if virtual_tx_outpoint.is_expired() {
-                expired.push(virtual_tx_outpoint);
             } else if virtual_tx_outpoint.is_preconfirmed {
                 pre_confirmed.push(virtual_tx_outpoint);
             } else {
@@ -49,7 +45,6 @@ impl VtxoList {
         VtxoList {
             pre_confirmed,
             confirmed,
-            expired,
             recoverable,
             spent,
         }
@@ -63,7 +58,6 @@ impl VtxoList {
         self.pre_confirmed
             .iter()
             .chain(self.confirmed.iter())
-            .chain(self.expired.iter())
             .chain(self.recoverable.iter())
     }
 
@@ -72,10 +66,7 @@ impl VtxoList {
     /// This does _not_ mean that the VTXOs are readily spendable on-chain, just that their ancestor
     /// chain can still be published.
     pub fn could_exit_unilaterally(&self) -> impl Iterator<Item = &VirtualTxOutPoint> {
-        self.pre_confirmed
-            .iter()
-            .chain(self.confirmed.iter())
-            .chain(self.expired.iter())
+        self.pre_confirmed.iter().chain(self.confirmed.iter())
     }
 
     /// VTXOs that can be spent in an offchain transaction.
@@ -91,10 +82,13 @@ impl VtxoList {
         self.confirmed.iter()
     }
 
-    pub fn expired(&self) -> impl Iterator<Item = &VirtualTxOutPoint> {
-        self.expired.iter()
-    }
-
+    /// Returns the list of recoverable VTXOs
+    ///
+    /// A VTXO is recoverable if it:
+    ///
+    /// - has expired;
+    /// - was swept already; or
+    /// - is sub-dust.
     pub fn recoverable(&self) -> impl Iterator<Item = &VirtualTxOutPoint> {
         self.recoverable.iter()
     }

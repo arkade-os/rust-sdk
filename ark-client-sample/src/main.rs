@@ -558,17 +558,6 @@ async fn main() -> Result<()> {
                 });
             }
 
-            // Collect expired VTXOs
-            for v in vtxo_list.expired() {
-                vtxo_entries.push(VtxoEntry {
-                    outpoint: v.outpoint.to_string(),
-                    amount_sats: v.amount.to_sat(),
-                    created_at: format_timestamp(v.created_at)?,
-                    expires_at: format_timestamp(v.expires_at)?,
-                    status: "expired".to_string(),
-                });
-            }
-
             // Collect recoverable VTXOs
             for v in vtxo_list.recoverable() {
                 vtxo_entries.push(VtxoEntry {
