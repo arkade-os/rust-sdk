@@ -368,8 +368,16 @@ impl VirtualTxOutPoint {
     /// Recoverable VTXOs can be settled, but they cannot be sent in an offchain transaction. To
     /// settle them, the original VTXO does not need to be forfeited, as the Arkade server already
     /// controls it.
+    ///
+    /// A VTXO is recoverable if it is unspent and
+    /// - amount is smaller than dust, or
+    /// - it was swept already, or
+    /// - it is expired (either swept or not swept)
     pub fn is_recoverable(&self, dust: Amount) -> bool {
-        (self.amount < dust || self.is_swept) && !self.is_spent
+        if self.is_spent {
+            return false;
+        }
+        self.amount < dust || self.is_swept || self.is_expired()
     }
 }
 
