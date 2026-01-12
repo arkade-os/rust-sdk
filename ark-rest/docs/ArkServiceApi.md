@@ -6,6 +6,7 @@ All URIs are relative to _http://localhost_
 | --------------------------------------------------------------------------------------------------- | ---------------------------------------- | ----------- |
 | [**ark_service_confirm_registration**](ArkServiceApi.md#ark_service_confirm_registration)           | **POST** /v1/batch/ack                   |             |
 | [**ark_service_delete_intent**](ArkServiceApi.md#ark_service_delete_intent)                         | **POST** /v1/batch/deleteIntent          |             |
+| [**ark_service_estimate_intent_fee**](ArkServiceApi.md#ark_service_estimate_intent_fee)             | **POST** /v1/batch/estimateFee           |             |
 | [**ark_service_finalize_tx**](ArkServiceApi.md#ark_service_finalize_tx)                             | **POST** /v1/tx/finalize                 |             |
 | [**ark_service_get_event_stream**](ArkServiceApi.md#ark_service_get_event_stream)                   | **GET** /v1/batch/events                 |             |
 | [**ark_service_get_info**](ArkServiceApi.md#ark_service_get_info)                                   | **GET** /v1/info                         |             |
@@ -59,6 +60,33 @@ DeleteIntent removes a previously registered intent from the server. The client 
 ### Return type
 
 [**serde_json::Value**](serde_json::Value.md)
+
+### Authorization
+
+No authorization required
+
+### HTTP request headers
+
+- **Content-Type**: application/json
+- **Accept**: application/json
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+## ark_service_estimate_intent_fee
+
+> models::EstimateIntentFeeResponse ark_service_estimate_intent_fee(estimate_intent_fee_request)
+
+EstimateIntentFee allows to estimate the fees for a given intent. The client should provide a BIP-322 message with the same data as the register intent message, and the server should respond with the estimated fees in satoshis.
+
+### Parameters
+
+| Name                            | Type                                                        | Description | Required   | Notes |
+| ------------------------------- | ----------------------------------------------------------- | ----------- | ---------- | ----- |
+| **estimate_intent_fee_request** | [**EstimateIntentFeeRequest**](EstimateIntentFeeRequest.md) |             | [required] |       |
+
+### Return type
+
+[**models::EstimateIntentFeeResponse**](EstimateIntentFeeResponse.md)
 
 ### Authorization
 

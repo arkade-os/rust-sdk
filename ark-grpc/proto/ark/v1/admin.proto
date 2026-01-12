@@ -38,6 +38,12 @@ service AdminService {
       body: "*"
     };
   }
+  rpc ClearScheduledSessionConfig(ClearScheduledSessionConfigRequest) returns (ClearScheduledSessionConfigResponse) {
+    option (meshapi.gateway.http) = {
+      post: "/v1/admin/scheduledSession/clear"
+      body: "*"
+    };
+  }
   rpc ListIntents(ListIntentsRequest) returns (ListIntentsResponse) {
     option (meshapi.gateway.http) = {
       get: "/v1/admin/intents"
@@ -46,6 +52,23 @@ service AdminService {
   rpc DeleteIntents(DeleteIntentsRequest) returns (DeleteIntentsResponse) {
     option (meshapi.gateway.http) = {
       post: "/v1/admin/intents/delete"
+      body: "*"
+    };
+  }
+  rpc GetIntentFees(GetIntentFeesRequest) returns (GetIntentFeesResponse){
+    option (meshapi.gateway.http) = {
+      get: "/v1/admin/intentFees"
+    };
+  }
+  rpc UpdateIntentFees(UpdateIntentFeesRequest) returns (UpdateIntentFeesResponse){
+    option (meshapi.gateway.http) = {
+      post: "/v1/admin/intentFees"
+      body: "*"
+    };
+  }
+  rpc ClearIntentFees(ClearIntentFeesRequest) returns (ClearIntentFeesResponse){
+    option (meshapi.gateway.http) = {
+      post: "/v1/admin/intentFees/clear"
       body: "*"
     };
   }
@@ -87,6 +110,22 @@ service AdminService {
       body: "*"
     };
   }
+  rpc GetExpiringLiquidity(GetExpiringLiquidityRequest) returns (GetExpiringLiquidityResponse) {
+    option (meshapi.gateway.http) = {
+      get: "/v1/admin/liquidity/expiring"
+    };
+  }
+  rpc GetRecoverableLiquidity(GetRecoverableLiquidityRequest) returns (GetRecoverableLiquidityResponse) {
+    option (meshapi.gateway.http) = {
+      get: "/v1/admin/liquidity/recoverable"
+    };
+  }
+  rpc Sweep(SweepRequest) returns (SweepResponse) {
+    option (meshapi.gateway.http) = {
+      post: "/v1/admin/sweep"
+      body: "*"
+    };
+  }
 }
 
 message GetScheduledSweepRequest {}
@@ -114,6 +153,8 @@ message GetRoundDetailsResponse {
 message GetRoundsRequest {
   int64 after = 1;
   int64 before = 2;
+  bool with_failed = 3;
+  bool with_completed = 4;
 }
 message GetRoundsResponse {
   repeated string rounds = 1;
@@ -137,6 +178,9 @@ message UpdateScheduledSessionConfigRequest {
 }
 message UpdateScheduledSessionConfigResponse {}
 
+message ClearScheduledSessionConfigRequest {}
+message ClearScheduledSessionConfigResponse {}
+
 message ListIntentsRequest {
   repeated string intent_ids = 1;
 }
@@ -149,6 +193,22 @@ message DeleteIntentsRequest {
 }
 message DeleteIntentsResponse {}
 
+message GetIntentFeesRequest {}
+
+message GetIntentFeesResponse {
+  IntentFees fees = 1;
+}
+
+message UpdateIntentFeesRequest {
+  IntentFees fees = 1;
+}
+
+message UpdateIntentFeesResponse {}
+
+message ClearIntentFeesRequest {}
+
+message ClearIntentFeesResponse {}
+
 message GetConvictionsRequest {
   repeated string ids = 1;
 }
@@ -158,7 +218,7 @@ message GetConvictionsResponse {
 
 message GetConvictionsInRangeRequest {
   int64 from = 1; // Unix timestamp
-  int64 to = 2;   // Unix timestamp
+  int64 to = 2; // Unix timestamp
 }
 message GetConvictionsInRangeResponse {
   repeated Conviction convictions = 1;
@@ -207,6 +267,7 @@ message SweepableOutput {
 message ScheduledSweep {
   string round_id = 1;
   repeated SweepableOutput outputs = 2;
+  bool confirmed = 3;
 }
 
 message ScheduledSessionConfig {
@@ -233,6 +294,13 @@ message IntentInfo {
   repeated IntentInput boarding_inputs = 5;
   repeated string cosigners_public_keys = 6;
   Intent intent = 7;
+}
+
+message IntentFees {
+  string offchain_input_fee = 1;
+  string onchain_input_fee = 2;
+  string offchain_output_fee = 3;
+  string onchain_output_fee = 4;
 }
 
 message Output {
@@ -269,4 +337,26 @@ message Conviction {
   CrimeType crime_type = 7;
   string round_id = 8;
   string reason = 9;
+}
+
+message GetExpiringLiquidityRequest {
+  int64 after = 1; // expires after this timestamp
+  int64 before = 2; // expires before this timestamp
+}
+message GetExpiringLiquidityResponse {
+  uint64 amount = 1;
+}
+
+message GetRecoverableLiquidityRequest {}
+message GetRecoverableLiquidityResponse {
+  uint64 amount = 1;
+}
+
+message SweepRequest {
+  bool connectors = 1;
+  repeated string commitment_txids = 2;
+}
+message SweepResponse {
+  string txid = 1;
+  string hex = 2;
 }

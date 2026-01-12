@@ -15,6 +15,8 @@ docs/DeleteIntentRequest.md
 docs/DeprecatedSigner.md
 docs/DeriveAddressResponse.md
 docs/ErrorDetails.md
+docs/EstimateIntentFeeRequest.md
+docs/EstimateIntentFeeResponse.md
 docs/FeeInfo.md
 docs/FinalizeTxRequest.md
 docs/GenSeedResponse.md
@@ -114,6 +116,8 @@ src/models/delete_intent_request.rs
 src/models/deprecated_signer.rs
 src/models/derive_address_response.rs
 src/models/error_details.rs
+src/models/estimate_intent_fee_request.rs
+src/models/estimate_intent_fee_response.rs
 src/models/fee_info.rs
 src/models/finalize_tx_request.rs
 src/models/gen_seed_response.rs

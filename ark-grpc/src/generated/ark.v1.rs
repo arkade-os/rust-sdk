@@ -411,6 +411,16 @@ pub struct RegisterIntentResponse {
     pub intent_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EstimateIntentFeeRequest {
+    #[prost(message, optional, tag = "1")]
+    pub intent: ::core::option::Option<Intent>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EstimateIntentFeeResponse {
+    #[prost(int64, tag = "1")]
+    pub fee: i64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeleteIntentRequest {
     /// an intent proof that includes any of the inputs of the intent to be deleted to prove the
     /// ownership of that intent.
@@ -527,8 +537,16 @@ pub struct FinalizeTxRequest {
 pub struct FinalizeTxResponse {}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetPendingTxRequest {
-    #[prost(message, optional, tag = "1")]
-    pub intent: ::core::option::Option<Intent>,
+    #[prost(oneof = "get_pending_tx_request::Identifier", tags = "1")]
+    pub identifier: ::core::option::Option<get_pending_tx_request::Identifier>,
+}
+/// Nested message and enum types in `GetPendingTxRequest`.
+pub mod get_pending_tx_request {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Identifier {
+        #[prost(message, tag = "1")]
+        Intent(super::Intent),
+    }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetPendingTxResponse {
@@ -676,6 +694,24 @@ pub mod ark_service_client {
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("ark.v1.ArkService", "RegisterIntent"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// EstimateIntentFee allows to estimate the fees for a given intent.
+        /// The client should provide a BIP-322 message with the same data as the register intent
+        /// message, and the server should respond with the estimated fees in satoshis.
+        pub async fn estimate_intent_fee(
+            &mut self,
+            request: impl tonic::IntoRequest<super::EstimateIntentFeeRequest>,
+        ) -> std::result::Result<tonic::Response<super::EstimateIntentFeeResponse>, tonic::Status>
+        {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/ark.v1.ArkService/EstimateIntentFee");
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ark.v1.ArkService", "EstimateIntentFee"));
             self.inner.unary(req, path, codec).await
         }
         /// DeleteIntent removes a previously registered intent from the server.
@@ -1394,6 +1430,9 @@ pub struct GetVtxosRequest {
     pub recoverable_only: bool,
     #[prost(message, optional, tag = "6")]
     pub page: ::core::option::Option<IndexerPageRequest>,
+    /// Include only spent vtxos that are not finalized.
+    #[prost(bool, tag = "7")]
+    pub pending_only: bool,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetVtxosResponse {
@@ -2055,6 +2094,10 @@ pub struct GetRoundsRequest {
     pub after: i64,
     #[prost(int64, tag = "2")]
     pub before: i64,
+    #[prost(bool, tag = "3")]
+    pub with_failed: bool,
+    #[prost(bool, tag = "4")]
+    pub with_completed: bool,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetRoundsResponse {
@@ -2087,6 +2130,10 @@ pub struct UpdateScheduledSessionConfigRequest {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct UpdateScheduledSessionConfigResponse {}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ClearScheduledSessionConfigRequest {}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ClearScheduledSessionConfigResponse {}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ListIntentsRequest {
     #[prost(string, repeated, tag = "1")]
@@ -2104,6 +2151,24 @@ pub struct DeleteIntentsRequest {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeleteIntentsResponse {}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetIntentFeesRequest {}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetIntentFeesResponse {
+    #[prost(message, optional, tag = "1")]
+    pub fees: ::core::option::Option<IntentFees>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UpdateIntentFeesRequest {
+    #[prost(message, optional, tag = "1")]
+    pub fees: ::core::option::Option<IntentFees>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UpdateIntentFeesResponse {}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ClearIntentFeesRequest {}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ClearIntentFeesResponse {}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetConvictionsRequest {
     #[prost(string, repeated, tag = "1")]
@@ -2194,6 +2259,8 @@ pub struct ScheduledSweep {
     pub round_id: ::prost::alloc::string::String,
     #[prost(message, repeated, tag = "2")]
     pub outputs: ::prost::alloc::vec::Vec<SweepableOutput>,
+    #[prost(bool, tag = "3")]
+    pub confirmed: bool,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ScheduledSessionConfig {
@@ -2239,6 +2306,17 @@ pub struct IntentInfo {
     pub intent: ::core::option::Option<Intent>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct IntentFees {
+    #[prost(string, tag = "1")]
+    pub offchain_input_fee: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub onchain_input_fee: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub offchain_output_fee: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub onchain_output_fee: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Output {
     /// Amount to send in satoshis.
     #[prost(uint64, tag = "3")]
@@ -2278,6 +2356,41 @@ pub struct Conviction {
     pub round_id: ::prost::alloc::string::String,
     #[prost(string, tag = "9")]
     pub reason: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetExpiringLiquidityRequest {
+    /// expires after this timestamp
+    #[prost(int64, tag = "1")]
+    pub after: i64,
+    /// expires before this timestamp
+    #[prost(int64, tag = "2")]
+    pub before: i64,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetExpiringLiquidityResponse {
+    #[prost(uint64, tag = "1")]
+    pub amount: u64,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetRecoverableLiquidityRequest {}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetRecoverableLiquidityResponse {
+    #[prost(uint64, tag = "1")]
+    pub amount: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SweepRequest {
+    #[prost(bool, tag = "1")]
+    pub connectors: bool,
+    #[prost(string, repeated, tag = "2")]
+    pub commitment_txids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SweepResponse {
+    #[prost(string, tag = "1")]
+    pub txid: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub hex: ::prost::alloc::string::String,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
@@ -2541,6 +2654,27 @@ pub mod admin_service_client {
             ));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn clear_scheduled_session_config(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ClearScheduledSessionConfigRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ClearScheduledSessionConfigResponse>,
+            tonic::Status,
+        > {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ark.v1.AdminService/ClearScheduledSessionConfig",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new(
+                "ark.v1.AdminService",
+                "ClearScheduledSessionConfig",
+            ));
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn list_intents(
             &mut self,
             request: impl tonic::IntoRequest<super::ListIntentsRequest>,
@@ -2569,6 +2703,52 @@ pub mod admin_service_client {
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("ark.v1.AdminService", "DeleteIntents"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn get_intent_fees(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetIntentFeesRequest>,
+        ) -> std::result::Result<tonic::Response<super::GetIntentFeesResponse>, tonic::Status>
+        {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/ark.v1.AdminService/GetIntentFees");
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ark.v1.AdminService", "GetIntentFees"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn update_intent_fees(
+            &mut self,
+            request: impl tonic::IntoRequest<super::UpdateIntentFeesRequest>,
+        ) -> std::result::Result<tonic::Response<super::UpdateIntentFeesResponse>, tonic::Status>
+        {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path =
+                http::uri::PathAndQuery::from_static("/ark.v1.AdminService/UpdateIntentFees");
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ark.v1.AdminService", "UpdateIntentFees"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn clear_intent_fees(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ClearIntentFeesRequest>,
+        ) -> std::result::Result<tonic::Response<super::ClearIntentFeesResponse>, tonic::Status>
+        {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/ark.v1.AdminService/ClearIntentFees");
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ark.v1.AdminService", "ClearIntentFees"));
             self.inner.unary(req, path, codec).await
         }
         pub async fn get_convictions(
@@ -2686,6 +2866,59 @@ pub mod admin_service_client {
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("ark.v1.AdminService", "RevokeAuth"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn get_expiring_liquidity(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetExpiringLiquidityRequest>,
+        ) -> std::result::Result<tonic::Response<super::GetExpiringLiquidityResponse>, tonic::Status>
+        {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path =
+                http::uri::PathAndQuery::from_static("/ark.v1.AdminService/GetExpiringLiquidity");
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new(
+                "ark.v1.AdminService",
+                "GetExpiringLiquidity",
+            ));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn get_recoverable_liquidity(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetRecoverableLiquidityRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetRecoverableLiquidityResponse>,
+            tonic::Status,
+        > {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/ark.v1.AdminService/GetRecoverableLiquidity",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new(
+                "ark.v1.AdminService",
+                "GetRecoverableLiquidity",
+            ));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn sweep(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SweepRequest>,
+        ) -> std::result::Result<tonic::Response<super::SweepResponse>, tonic::Status> {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/ark.v1.AdminService/Sweep");
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ark.v1.AdminService", "Sweep"));
             self.inner.unary(req, path, codec).await
         }
     }

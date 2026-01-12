@@ -1037,11 +1037,12 @@ impl TryFrom<generated::ark::v1::GetSubscriptionResponse> for SubscriptionRespon
 
 impl From<GetVtxosRequest> for generated::ark::v1::GetVtxosRequest {
     fn from(value: GetVtxosRequest) -> Self {
-        let (spendable_only, spent_only, recoverable_only) = match value.filter() {
-            Some(GetVtxosRequestFilter::Spendable) => (true, false, false),
-            Some(GetVtxosRequestFilter::Spent) => (false, true, false),
-            Some(GetVtxosRequestFilter::Recoverable) => (false, false, true),
-            None => (false, false, false),
+        let (spendable_only, spent_only, recoverable_only, pending_only) = match value.filter() {
+            Some(GetVtxosRequestFilter::Spendable) => (true, false, false, false),
+            Some(GetVtxosRequestFilter::Spent) => (false, true, false, false),
+            Some(GetVtxosRequestFilter::Recoverable) => (false, false, true, false),
+            Some(GetVtxosRequestFilter::PendingOnly) => (false, false, false, true),
+            None => (false, false, false, false),
         };
 
         match value.reference() {
@@ -1052,6 +1053,7 @@ impl From<GetVtxosRequest> for generated::ark::v1::GetVtxosRequest {
                 spent_only,
                 recoverable_only,
                 page: None,
+                pending_only,
             },
             GetVtxosRequestReference::OutPoints(outpoints) => Self {
                 scripts: Vec::new(),
@@ -1060,6 +1062,7 @@ impl From<GetVtxosRequest> for generated::ark::v1::GetVtxosRequest {
                 spent_only,
                 recoverable_only,
                 page: None,
+                pending_only,
             },
         }
     }

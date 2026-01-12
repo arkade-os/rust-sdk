@@ -269,6 +269,17 @@ impl GetVtxosRequest {
         })
     }
 
+    pub fn pending_only(self) -> Result<Self, Error> {
+        if self.filter.is_some() {
+            return Err(Error::ad_hoc("GetVtxosRequest filter already set"));
+        }
+
+        Ok(Self {
+            filter: Some(GetVtxosRequestFilter::PendingOnly),
+            ..self
+        })
+    }
+
     pub fn reference(&self) -> &GetVtxosRequestReference {
         &self.reference
     }
@@ -296,6 +307,7 @@ pub enum GetVtxosRequestFilter {
     Spendable,
     Spent,
     Recoverable,
+    PendingOnly,
 }
 
 #[derive(Clone, Debug, PartialEq)]

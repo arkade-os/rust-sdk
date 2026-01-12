@@ -167,12 +167,19 @@ impl Client {
                 (None, Some(o.iter().map(|o| o.to_string()).collect()))
             }
         };
-        let (spendable_only, spent_only, recoverable_only) = match filter {
-            None => (Some(false), Some(false), Some(false)),
+        let (spendable_only, spent_only, recoverable_only, pending_only) = match filter {
+            None => (Some(false), Some(false), Some(false), Some(false)),
             Some(filter) => match filter {
-                GetVtxosRequestFilter::Spendable => (Some(true), Some(false), Some(false)),
-                GetVtxosRequestFilter::Spent => (Some(false), Some(true), Some(false)),
-                GetVtxosRequestFilter::Recoverable => (Some(false), Some(false), Some(true)),
+                GetVtxosRequestFilter::Spendable => {
+                    (Some(true), Some(false), Some(false), Some(false))
+                }
+                GetVtxosRequestFilter::Spent => (Some(false), Some(true), Some(false), Some(false)),
+                GetVtxosRequestFilter::Recoverable => {
+                    (Some(false), Some(false), Some(true), Some(false))
+                }
+                GetVtxosRequestFilter::PendingOnly => {
+                    (Some(false), Some(false), Some(false), Some(true))
+                }
             },
         };
 
@@ -186,6 +193,7 @@ impl Client {
             spendable_only,
             spent_only,
             recoverable_only,
+            pending_only,
             page_period_size,
             page_period_index,
         )
