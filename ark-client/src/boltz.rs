@@ -1476,6 +1476,129 @@ where
         })
     }
 
+    /// Fetch fee information from Boltz for both submarine and reverse swaps.
+    ///
+    /// # Returns
+    ///
+    /// - A [`BoltzFees`] struct containing fee information for both swap types.
+    pub async fn get_fees(&self) -> Result<BoltzFees, Error> {
+        let client = reqwest::Client::builder()
+            .timeout(self.inner.timeout)
+            .build()
+            .map_err(|e| Error::ad_hoc(e.to_string()))?;
+
+        // Fetch submarine swap fees (ARK -> BTC)
+        let submarine_url = format!("{}/v2/swap/submarine", &self.inner.boltz_url);
+        let submarine_response = client
+            .get(&submarine_url)
+            .send()
+            .await
+            .map_err(|e| Error::ad_hoc(e.to_string()))
+            .context("failed to fetch submarine swap fees")?;
+
+        if !submarine_response.status().is_success() {
+            let error_text = submarine_response
+                .text()
+                .await
+                .map_err(|e| Error::ad_hoc(e.to_string()))?;
+            return Err(Error::ad_hoc(format!(
+                "failed to fetch submarine swap fees: {error_text}"
+            )));
+        }
+
+        let submarine_pairs: SubmarinePairsResponse = submarine_response
+            .json()
+            .await
+            .map_err(|e| Error::ad_hoc(e.to_string()))
+            .context("failed to deserialize submarine swap fees response")?;
+
+        let submarine_pair_fees = &submarine_pairs.ark.btc.fees;
+        let submarine_fees = SubmarineSwapFees {
+            percentage: submarine_pair_fees.percentage,
+            miner_fees: submarine_pair_fees.miner_fees,
+        };
+
+        // Fetch reverse swap fees (BTC -> ARK)
+        let reverse_url = format!("{}/v2/swap/reverse", self.inner.boltz_url);
+        let reverse_response = client
+            .get(&reverse_url)
+            .send()
+            .await
+            .map_err(|e| Error::ad_hoc(e.to_string()))
+            .context("failed to fetch reverse swap fees")?;
+
+        if !reverse_response.status().is_success() {
+            let error_text = reverse_response
+                .text()
+                .await
+                .map_err(|e| Error::ad_hoc(e.to_string()))?;
+            return Err(Error::ad_hoc(format!(
+                "failed to fetch reverse swap fees: {error_text}"
+            )));
+        }
+
+        let reverse_pairs: ReversePairsResponse = reverse_response
+            .json()
+            .await
+            .map_err(|e| Error::ad_hoc(e.to_string()))
+            .context("failed to deserialize reverse swap fees response")?;
+
+        let reverse_pair_fees = &reverse_pairs.btc.ark.fees;
+        let reverse_fees = ReverseSwapFees {
+            percentage: reverse_pair_fees.percentage,
+            miner_fees: ReverseMinerFees {
+                lockup: reverse_pair_fees.miner_fees.lockup,
+                claim: reverse_pair_fees.miner_fees.claim,
+            },
+        };
+
+        Ok(BoltzFees {
+            submarine: submarine_fees,
+            reverse: reverse_fees,
+        })
+    }
+
+    /// Fetch swap amount limits from Boltz for submarine swaps.
+    ///
+    /// # Returns
+    ///
+    /// - A [`SwapLimits`] struct containing minimum and maximum swap amounts in satoshis.
+    pub async fn get_limits(&self) -> Result<SwapLimits, Error> {
+        let client = reqwest::Client::builder()
+            .timeout(self.inner.timeout)
+            .build()
+            .map_err(|e| Error::ad_hoc(e.to_string()))?;
+
+        let url = format!("{}/v2/swap/submarine", self.inner.boltz_url);
+        let response = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| Error::ad_hoc(e.to_string()))
+            .context("failed to fetch swap limits")?;
+
+        if !response.status().is_success() {
+            let error_text = response
+                .text()
+                .await
+                .map_err(|e| Error::ad_hoc(e.to_string()))?;
+            return Err(Error::ad_hoc(format!(
+                "failed to fetch swap limits: {error_text}"
+            )));
+        }
+
+        let pairs: SubmarinePairsResponse = response
+            .json()
+            .await
+            .map_err(|e| Error::ad_hoc(e.to_string()))
+            .context("failed to deserialize swap limits response")?;
+
+        Ok(SwapLimits {
+            min: pairs.ark.btc.limits.minimal,
+            max: pairs.ark.btc.limits.maximal,
+        })
+    }
+
     /// Use Boltz's API to learn about updates for a particular swap.
     // TODO: Make sure this is WASM-compatible.
     pub fn subscribe_to_swap_updates(
@@ -1744,6 +1867,119 @@ struct RefundSwapResponse {
     transaction: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+}
+
+/// Fee information for submarine swaps (Ark -> Lightning).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmarineSwapFees {
+    /// Percentage fee charged by Boltz (e.g., 0.25 = 0.25%).
+    pub percentage: f64,
+    /// Fixed miner fee in satoshis.
+    pub miner_fees: u64,
+}
+
+/// Miner fees for reverse swaps, broken down by operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReverseMinerFees {
+    /// Miner fee for lockup transaction in satoshis.
+    pub lockup: u64,
+    /// Miner fee for claim transaction in satoshis.
+    pub claim: u64,
+}
+
+/// Fee information for reverse swaps (Lightning -> Ark).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReverseSwapFees {
+    /// Percentage fee charged by Boltz (e.g., 0.25 = 0.25%).
+    pub percentage: f64,
+    /// Miner fees broken down by operation.
+    pub miner_fees: ReverseMinerFees,
+}
+
+/// Combined fee information for both swap types.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoltzFees {
+    /// Fees for submarine swaps (Ark -> Lightning).
+    pub submarine: SubmarineSwapFees,
+    /// Fees for reverse swaps (Lightning -> Ark).
+    pub reverse: ReverseSwapFees,
+}
+
+/// Limits for swap amounts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwapLimits {
+    /// Minimum amount in satoshis.
+    pub min: u64,
+    /// Maximum amount in satoshis.
+    pub max: u64,
+}
+
+// Internal structs for deserializing the Boltz API response.
+
+#[derive(Debug, Clone, Deserialize)]
+struct PairLimits {
+    minimal: u64,
+    maximal: u64,
+}
+
+// Submarine swap: { "ARK": { "BTC": { ... } } }
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SubmarinePairFees {
+    percentage: f64,
+    miner_fees: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SubmarinePairInfo {
+    fees: SubmarinePairFees,
+    limits: PairLimits,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+struct SubmarineArkPairs {
+    btc: SubmarinePairInfo,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+struct SubmarinePairsResponse {
+    ark: SubmarineArkPairs,
+}
+
+// Reverse swap: { "BTC": { "ARK": { ... } } }
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReverseMinerFeesResponse {
+    claim: u64,
+    lockup: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReversePairFees {
+    percentage: f64,
+    miner_fees: ReverseMinerFeesResponse,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ReversePairInfo {
+    fees: ReversePairFees,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+struct ReverseBtcPairs {
+    ark: ReversePairInfo,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+struct ReversePairsResponse {
+    btc: ReverseBtcPairs,
 }
 
 #[cfg(test)]
