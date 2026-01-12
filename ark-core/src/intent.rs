@@ -138,6 +138,7 @@ pub fn make_intent<SV, SO>(
     inputs: Vec<Input>,
     outputs: Vec<Output>,
     own_cosigner_pks: Vec<PublicKey>,
+    intent_message_type: IntentMessageType,
 ) -> Result<Intent, Error>
 where
     SV: Fn(
@@ -165,7 +166,7 @@ where
     let expire_at = now + (2 * 60);
 
     let intent_message = IntentMessage {
-        intent_message_type: IntentMessageType::Register,
+        intent_message_type,
         onchain_output_indexes,
         valid_at: now,
         expire_at,
@@ -421,10 +422,13 @@ impl IntentMessage {
 }
 
 #[derive(Serialize, Debug, Clone)]
-#[serde(rename_all = "lowercase")]
 pub enum IntentMessageType {
+    #[serde(rename = "register")]
     Register,
+    #[serde(rename = "delete")]
     Delete,
+    #[serde(rename = "estimate-intent-fee")]
+    EstimateIntentFee,
 }
 
 pub(crate) mod taptree {

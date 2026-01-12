@@ -17,6 +17,7 @@ use ark_core::batch::sign_commitment_psbt;
 use ark_core::batch::Delegate;
 use ark_core::batch::NonceKps;
 use ark_core::intent;
+pub use ark_core::intent::IntentMessageType;
 use ark_core::script::extract_checksig_pubkeys;
 use ark_core::server::BatchTreeEventType;
 use ark_core::server::PartialSigTree;
@@ -920,7 +921,7 @@ where
 
     /// Get all the [`batch::OnChainInput`]s and [`batch::VtxoInput`]s that can be used to join an
     /// upcoming batch.
-    async fn fetch_commitment_transaction_inputs(
+    pub(crate) async fn fetch_commitment_transaction_inputs(
         &self,
     ) -> Result<(Vec<batch::OnChainInput>, Vec<intent::Input>, Amount), Error> {
         // Get all known boarding outputs.
@@ -1013,29 +1014,30 @@ where
         Ok((boarding_inputs, vtxo_inputs, total_amount))
     }
 
-    pub(crate) async fn join_next_batch<R>(
+    /// Prepare an intent for batch registration or fee estimation.
+    ///
+    /// This creates a signed intent PSBT along with all the data needed to participate
+    /// in the batch protocol.
+    ///
+    /// The `intent_message_type` parameter determines the intent message type sent to the server.
+    pub(crate) fn prepare_intent<R>(
         &self,
         rng: &mut R,
         onchain_inputs: Vec<batch::OnChainInput>,
         vtxo_inputs: Vec<intent::Input>,
         output_type: BatchOutputType,
-    ) -> Result<Txid, Error>
+        intent_message_type: IntentMessageType,
+    ) -> Result<PreparedIntent, Error>
     where
         R: Rng + CryptoRng,
     {
         if onchain_inputs.is_empty() && vtxo_inputs.is_empty() {
-            return Err(Error::ad_hoc("cannot join batch without inputs"));
+            return Err(Error::ad_hoc("cannot prepare intent without inputs"));
         }
 
-        let server_info = &self.server_info;
-
         // Generate an (ephemeral) cosigner keypair.
-        let own_cosigner_kp = Keypair::new(self.secp(), rng);
+        let cosigner_keypair = Keypair::new(self.secp(), rng);
 
-        let onchain_input_outpoints = onchain_inputs
-            .iter()
-            .map(|i| i.outpoint())
-            .collect::<Vec<_>>();
         let vtxo_input_outpoints = vtxo_inputs.iter().map(|i| i.outpoint()).collect::<Vec<_>>();
 
         let inputs = {
@@ -1115,13 +1117,7 @@ where
             }
         }
 
-        let mut step = Step::Start;
-
-        let own_cosigner_kps = [own_cosigner_kp];
-        let own_cosigner_pks = own_cosigner_kps
-            .iter()
-            .map(|k| k.public_key())
-            .collect::<Vec<_>>();
+        let cosigner_pk = cosigner_keypair.public_key();
 
         let secp = Secp256k1::new();
 
@@ -1178,8 +1174,63 @@ where
             sign_for_onchain_fn,
             inputs,
             outputs.clone(),
-            own_cosigner_pks.clone(),
+            vec![cosigner_pk],
+            intent_message_type,
         )?;
+
+        Ok(PreparedIntent {
+            intent,
+            cosigner_keypair,
+            vtxo_input_outpoints,
+            outputs,
+            onchain_inputs,
+            vtxo_inputs,
+        })
+    }
+
+    pub(crate) async fn join_next_batch<R>(
+        &self,
+        rng: &mut R,
+        onchain_inputs: Vec<batch::OnChainInput>,
+        vtxo_inputs: Vec<intent::Input>,
+        output_type: BatchOutputType,
+    ) -> Result<Txid, Error>
+    where
+        R: Rng + CryptoRng,
+    {
+        let prepared = self.prepare_intent(
+            rng,
+            onchain_inputs,
+            vtxo_inputs,
+            output_type,
+            IntentMessageType::Register,
+        )?;
+
+        let PreparedIntent {
+            intent,
+            cosigner_keypair,
+            vtxo_input_outpoints,
+            outputs,
+            onchain_inputs,
+            vtxo_inputs,
+        } = prepared;
+
+        let onchain_input_outpoints = onchain_inputs
+            .iter()
+            .map(|i| i.outpoint())
+            .collect::<Vec<_>>();
+
+        let server_info = &self.server_info;
+
+        let own_cosigner_kps = [cosigner_keypair];
+        let own_cosigner_pks = own_cosigner_kps
+            .iter()
+            .map(|k| k.public_key())
+            .collect::<Vec<_>>();
+
+        let secp = Secp256k1::new();
+
+        let mut step = Step::Start;
 
         let intent_id = timeout_op(
             self.inner.timeout,
@@ -1661,7 +1712,7 @@ where
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum BatchOutputType {
     Board {
         to_address: ArkAddress,
@@ -1673,4 +1724,20 @@ pub(crate) enum BatchOutputType {
         change_address: ArkAddress,
         change_amount: Amount,
     },
+}
+
+/// Prepared intent data ready for batch registration.
+pub(crate) struct PreparedIntent {
+    /// The signed intent.
+    pub intent: intent::Intent,
+    /// The ephemeral cosigner keypair.
+    pub cosigner_keypair: Keypair,
+    /// VTXO input outpoints (used for event stream topics).
+    pub vtxo_input_outpoints: Vec<OutPoint>,
+    /// Intent outputs (used to determine batch protocol steps).
+    pub outputs: Vec<intent::Output>,
+    /// The original onchain inputs (needed for commitment signing).
+    pub onchain_inputs: Vec<batch::OnChainInput>,
+    /// The original VTXO inputs (needed for forfeit signing).
+    pub vtxo_inputs: Vec<intent::Input>,
 }

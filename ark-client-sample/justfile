@@ -95,3 +95,6 @@ settle-recoverable actor:
         cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed settle-vtxos --vtxos "$outpoints"
     fi
 
+# Estimate fees for sending on-chain (collaborative redeem), e.g. just estimate-fees alice bc1... 50000
+estimate-fees actor address amount:
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed estimate-fees {{ address }} {{ amount }}

@@ -49,6 +49,7 @@ pub mod wallet;
 mod batch;
 mod boltz;
 mod coin_select;
+mod fee_estimation;
 mod send_vtxo;
 mod unilateral_exit;
 mod utils;

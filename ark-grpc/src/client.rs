@@ -4,6 +4,7 @@ use crate::generated::ark::v1::get_subscription_response;
 use crate::generated::ark::v1::indexer_service_client::IndexerServiceClient;
 use crate::generated::ark::v1::indexer_tx_history_record::Key;
 use crate::generated::ark::v1::ConfirmRegistrationRequest;
+use crate::generated::ark::v1::EstimateIntentFeeRequest;
 use crate::generated::ark::v1::GetEventStreamRequest;
 use crate::generated::ark::v1::GetInfoRequest;
 use crate::generated::ark::v1::GetSubscriptionRequest;
@@ -521,6 +522,24 @@ impl Client {
         };
 
         Ok(stream.boxed())
+    }
+
+    pub async fn estimate_fees(
+        &self,
+        intent: ark_core::intent::Intent,
+    ) -> Result<SignedAmount, Error> {
+        let mut client = self.ark_client()?;
+
+        let intent = intent.try_into()?;
+        let response = client
+            .estimate_intent_fee(EstimateIntentFeeRequest {
+                intent: Some(intent),
+            })
+            .await
+            .map_err(Error::request)?;
+        let response = response.into_inner();
+
+        Ok(SignedAmount::from_sat(response.fee))
     }
 
     fn ark_client(&self) -> Result<ArkServiceClient<tonic::transport::Channel>, Error> {
