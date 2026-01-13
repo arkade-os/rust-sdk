@@ -702,7 +702,7 @@ async fn main() -> Result<()> {
             } else {
                 let amount = match amount {
                     None => {
-                        bail!("No amount specified")
+                        bail!("Amount is required for Bitcoin address fee estimation")
                     }
                     Some(sats) => Amount::from_sat(*sats),
                 };

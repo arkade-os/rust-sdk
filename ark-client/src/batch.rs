@@ -220,7 +220,9 @@ where
         })?;
 
         let change_amount = total_amount.checked_sub(to_amount).ok_or_else(|| {
-            Error::coin_select("cannot afford to send {to_amount}, only have {total_amount}")
+            Error::coin_select(format!(
+                "cannot afford to send {to_amount}, only have {total_amount}"
+            ))
         })?;
 
         tracing::info!(
