@@ -1006,6 +1006,17 @@ where
         self.inner.key_provider.get_keypair_for_pk(pk)
     }
 
+    /// Get the keypair for a given x-only public key.
+    ///
+    /// This is a public wrapper around the internal `keypair_by_pk` method,
+    /// useful for external signing operations like Lendasat collateral claims
+    /// where the VTXO is locked to an Ark identity.
+    ///
+    /// Equivalent to TypeScript SDK's `identity.sign()` capability.
+    pub fn get_keypair_for_pk(&self, pk: &XOnlyPublicKey) -> Result<Keypair, Error> {
+        self.keypair_by_pk(pk)
+    }
+
     fn secp(&self) -> &Secp256k1<All> {
         &self.inner.secp
     }
