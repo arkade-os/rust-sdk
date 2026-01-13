@@ -11,11 +11,13 @@ pub struct VtxoList {
     // Unspent
     pre_confirmed: Vec<VirtualTxOutPoint>,
     confirmed: Vec<VirtualTxOutPoint>,
-    expired: Vec<VirtualTxOutPoint>,
     recoverable: Vec<VirtualTxOutPoint>,
 
     // Spent
     spent: Vec<VirtualTxOutPoint>,
+
+    // Expired VTXOs are also included in [`recoverable`].
+    expired: Vec<VirtualTxOutPoint>,
 }
 
 impl VtxoList {
@@ -63,7 +65,6 @@ impl VtxoList {
         self.pre_confirmed
             .iter()
             .chain(self.confirmed.iter())
-            .chain(self.expired.iter())
             .chain(self.recoverable.iter())
     }
 
@@ -75,6 +76,7 @@ impl VtxoList {
         self.pre_confirmed
             .iter()
             .chain(self.confirmed.iter())
+            // we can only unilaterally exit expired VTXOs but not sub-dust
             .chain(self.expired.iter())
     }
 
@@ -91,10 +93,20 @@ impl VtxoList {
         self.confirmed.iter()
     }
 
+    /// Returns the list of expired VTXOs
+    ///
+    /// A VTXO is recoverable if
+    /// - it is expired but not spent
     pub fn expired(&self) -> impl Iterator<Item = &VirtualTxOutPoint> {
         self.expired.iter()
     }
 
+    /// Returns the list of recoverable VTXOs
+    ///
+    /// A VTXO is recoverable if
+    /// - it is expired
+    /// - if it was swept already
+    /// - if it is sub-dust
     pub fn recoverable(&self) -> impl Iterator<Item = &VirtualTxOutPoint> {
         self.recoverable.iter()
     }
