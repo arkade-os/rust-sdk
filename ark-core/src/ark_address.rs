@@ -56,6 +56,14 @@ impl ArkAddress {
     pub fn decode(value: &str) -> Result<Self, Error> {
         let (hrp, bytes) = bech32::decode(value).map_err(Error::address_format)?;
 
+        // ArkAddress requires exactly 65 bytes: 1 version + 32 server pubkey + 32 vtxo pubkey
+        if bytes.len() != 65 {
+            return Err(Error::address_format(format!(
+                "invalid ark address length: expected 65 bytes, got {}",
+                bytes.len()
+            )));
+        }
+
         let version = bytes[0];
 
         let server = XOnlyPublicKey::from_slice(&bytes[1..33]).map_err(Error::address_format)?;

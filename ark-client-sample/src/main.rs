@@ -137,6 +137,13 @@ enum Commands {
         #[arg(long)]
         boarding: Option<String>,
     },
+    /// Estimate fees for sending (onchain for Bitcoin address, offchain for Ark address).
+    EstimateFees {
+        /// Where to send the funds to (Bitcoin address or Ark address).
+        address: String,
+        /// How many sats to send.
+        amount: Option<u64>,
+    },
 }
 
 #[derive(Clone)]
@@ -674,6 +681,48 @@ async fn main() -> Result<()> {
                 }),
             };
             println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        Commands::EstimateFees { address, amount } => {
+            let network = client.server_info.network;
+            let mut rng = thread_rng();
+
+            // Try parsing as ArkAddress first, then as Bitcoin address
+            if let Ok(ark_address) = ArkAddress::decode(address) {
+                let fees = client
+                    .estimate_batch_fees(&mut rng, ark_address)
+                    .await
+                    .map_err(|e| anyhow!(e))?;
+
+                let output = serde_json::json!({
+                    "address": ark_address.encode(),
+                    "address_type": "ark",
+                    "estimated_fee_sats": fees.to_sat()
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                let amount = match amount {
+                    None => {
+                        bail!("Amount is required for Bitcoin address fee estimation")
+                    }
+                    Some(sats) => Amount::from_sat(*sats),
+                };
+
+                let bitcoin_address: Address<NetworkUnchecked> = address.parse()?;
+                let checked_address = bitcoin_address.require_network(network)?;
+
+                let fees = client
+                    .estimate_onchain_fees(&mut rng, checked_address.clone(), amount)
+                    .await
+                    .map_err(|e| anyhow!(e))?;
+
+                let output = serde_json::json!({
+                    "address": checked_address.to_string(),
+                    "address_type": "bitcoin",
+                    "amount_sats": amount,
+                    "estimated_fee_sats": fees.to_sat()
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            }
         }
     }
 

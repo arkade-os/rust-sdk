@@ -1268,6 +1268,7 @@ async fn settle(
         batch_inputs,
         batch_outputs,
         own_cosigner_pks.clone(),
+        intent::IntentMessageType::Register,
     )?;
 
     let intent_id = grpc_client.register_intent(intent).await?;
