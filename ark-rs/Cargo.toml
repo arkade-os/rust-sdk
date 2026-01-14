@@ -10,11 +10,18 @@ description = "Collection of Rust crates designed to simplify building Bitcoin w
 workspace = true
 
 [dependencies]
-ark-client = { path = "../ark-client", version = "0.7.0", optional = true }
+ark-client = { path = "../ark-client", version = "0.7.0", optional = true, default-features = false }
 ark-core = { path = "../ark-core", version = "0.7.0" }
-ark-grpc = { path = "../ark-grpc", version = "0.7.0", optional = true }
+ark-grpc = { path = "../ark-grpc", version = "0.7.0", optional = true, default-features = false }
 
 [features]
-default = []
+default = ["tls-native-roots"]
 client = ["ark-client"]
 grpc = ["ark-grpc"]
+
+# Forward ark-client features
+sqlite = ["ark-client/sqlite"]
+
+# Forward TLS features to both ark-client and ark-grpc
+tls-native-roots = ["ark-client?/tls-native-roots", "ark-grpc?/tls-native-roots"]
+tls-webpki-roots = ["ark-client?/tls-webpki-roots", "ark-grpc?/tls-webpki-roots"]
