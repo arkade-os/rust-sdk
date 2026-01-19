@@ -18,11 +18,9 @@ use ark_client::SqliteSwapStorage;
 use ark_client::StaticKeyProvider;
 use ark_client::SwapAmount;
 use ark_client::TxStatus;
-use ark_core::boarding_output::list_boarding_outpoints;
 use ark_core::history;
 use ark_core::server::SubscriptionResponse;
 use ark_core::ArkAddress;
-use ark_core::BoardingOutput;
 use ark_core::ExplorerUtxo;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::key::Secp256k1;
@@ -579,58 +577,59 @@ async fn main() -> Result<()> {
                     .then_with(|| b.amount_sats.cmp(&a.amount_sats))
             });
 
-            // Get boarding outputs with proper status categorization (expired vs spendable)
-            let boarding_outputs = vec![BoardingOutput::new(
-                &Secp256k1::new(),
-                client.server_info.signer_pk.into(),
-                kp.x_only_public_key().0,
-                client.server_info.boarding_exit_delay,
-                client.server_info.network,
-            )
-            .map_err(|e| anyhow!(e))?];
+            // Get boarding outputs using wallet's stored outputs for consistency
+            let boarding_output = client.get_boarding_address().map_err(|e| anyhow!(e))?;
+            let outpoints: Vec<ExplorerUtxo> = esplora_client
+                .find_outpoints(&boarding_output)
+                .await
+                .map_err(|e| anyhow!(e))?;
 
-            let esplora = esplora_client.clone();
-            let find_outpoints = |address: &Address| -> Result<Vec<ExplorerUtxo>, ark_core::Error> {
-                futures::executor::block_on(async {
-                    esplora
-                        .find_outpoints(address)
-                        .await
-                        .map_err(|e| ark_core::Error::ad_hoc(format!("{e}")))
-                })
+            let now = std::time::UNIX_EPOCH
+                .elapsed()
+                .map_err(|e| anyhow!("failed to get current time: {e}"))?;
+
+            let exit_delay_duration = {
+                let exit_delay = client
+                    .server_info
+                    .boarding_exit_delay
+                    .to_relative_lock_time()
+                    .expect("relative lock time");
+                match exit_delay {
+                    bitcoin::relative::LockTime::Time(time) => {
+                        Duration::from_secs(time.value() as u64 * 512)
+                    }
+                    bitcoin::relative::LockTime::Blocks(_) => {
+                        unreachable!("Only seconds timelock is supported");
+                    }
+                }
             };
-
-            let outpoints = list_boarding_outpoints(find_outpoints, &boarding_outputs)
-                .map_err(|e| anyhow!("failed to list boarding outpoints: {e}"))?;
 
             let mut boarding_entries: Vec<BoardingEntry> = Vec::new();
 
-            // Add spendable (confirmed, not expired) boarding outputs
-            for (outpoint, amount, _) in &outpoints.spendable {
-                boarding_entries.push(BoardingEntry {
-                    outpoint: outpoint.to_string(),
-                    amount_sats: amount.to_sat(),
-                    confirmation_time: None,
-                    status: "spendable".to_string(),
-                });
-            }
+            for o in outpoints {
+                if o.is_spent {
+                    continue;
+                }
 
-            // Add expired boarding outputs (CSV timeout passed, refundable)
-            for (outpoint, amount, _) in &outpoints.expired {
-                boarding_entries.push(BoardingEntry {
-                    outpoint: outpoint.to_string(),
-                    amount_sats: amount.to_sat(),
-                    confirmation_time: None,
-                    status: "expired".to_string(),
-                });
-            }
+                let (status, confirmation_time) = match o.confirmation_blocktime {
+                    Some(blocktime) => {
+                        let confirmation_time = Duration::from_secs(blocktime);
+                        let exit_path_time = confirmation_time + exit_delay_duration;
+                        let status = if now > exit_path_time {
+                            "expired"
+                        } else {
+                            "spendable"
+                        };
+                        (status, Some(format_timestamp(blocktime as i64)?))
+                    }
+                    None => ("pending", None),
+                };
 
-            // Add pending (unconfirmed) boarding outputs
-            for (outpoint, amount, _) in &outpoints.pending {
                 boarding_entries.push(BoardingEntry {
-                    outpoint: outpoint.to_string(),
-                    amount_sats: amount.to_sat(),
-                    confirmation_time: None,
-                    status: "pending".to_string(),
+                    outpoint: o.outpoint.to_string(),
+                    amount_sats: o.amount.to_sat(),
+                    confirmation_time,
+                    status: status.to_string(),
                 });
             }
 

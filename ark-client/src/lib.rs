@@ -879,6 +879,14 @@ where
         let mut expired = Amount::ZERO;
         let mut pending = Amount::ZERO;
 
+        // Track seen outpoints to avoid double-counting when multiple BoardingOutput
+        // instances share the same address
+        let mut seen_outpoints = HashSet::new();
+
+        let now = std::time::UNIX_EPOCH
+            .elapsed()
+            .map_err(|e| Error::ad_hoc(format!("failed to get current time: {e}")))?;
+
         for boarding_output in boarding_outputs.iter() {
             let boarding_address = boarding_output.address();
 
@@ -889,12 +897,12 @@ where
             .await
             .context("failed to find boarding outpoints")??;
 
-            let now = std::time::UNIX_EPOCH
-                .elapsed()
-                .map_err(|e| Error::ad_hoc(format!("failed to get current time: {e}")))?;
-
             for utxo in utxos {
                 if utxo.is_spent {
+                    continue;
+                }
+
+                if !seen_outpoints.insert(utxo.outpoint) {
                     continue;
                 }
 
