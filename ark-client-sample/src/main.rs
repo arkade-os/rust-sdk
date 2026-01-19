@@ -18,9 +18,11 @@ use ark_client::SqliteSwapStorage;
 use ark_client::StaticKeyProvider;
 use ark_client::SwapAmount;
 use ark_client::TxStatus;
+use ark_core::boarding_output::list_boarding_outpoints;
 use ark_core::history;
 use ark_core::server::SubscriptionResponse;
 use ark_core::ArkAddress;
+use ark_core::BoardingOutput;
 use ark_core::ExplorerUtxo;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::key::Secp256k1;
@@ -270,26 +272,16 @@ async fn main() -> Result<()> {
     match &cli.command {
         Commands::Balance => {
             let offchain_balance = client.offchain_balance().await.map_err(|e| anyhow!(e))?;
-
-            let boarding = {
-                let boarding_output = client.get_boarding_address().map_err(|e| anyhow!(e))?;
-                let outpoints = esplora_client
-                    .find_outpoints(&boarding_output)
-                    .await
-                    .map_err(|e| anyhow!(e))?;
-
-                let (_, unspent): (Vec<_>, Vec<_>) =
-                    outpoints.into_iter().partition(|u| u.is_spent);
-
-                unspent.iter().map(|u| u.amount).sum::<Amount>()
-            };
+            let boarding_balance = client.boarding_balance().await.map_err(|e| anyhow!(e))?;
 
             println!(
                 "{}",
                 serde_json::json!({
                     "offchain_confirmed": offchain_balance.confirmed(),
                     "offchain_pre_confirmed": offchain_balance.pre_confirmed(),
-                    "boarding": boarding,
+                    "boarding_spendable": boarding_balance.spendable(),
+                    "boarding_expired": boarding_balance.expired(),
+                    "boarding_pending": boarding_balance.pending(),
                 })
             );
         }
@@ -587,36 +579,71 @@ async fn main() -> Result<()> {
                     .then_with(|| b.amount_sats.cmp(&a.amount_sats))
             });
 
-            // Get boarding outputs
-            let boarding_output = client.get_boarding_address().map_err(|e| anyhow!(e))?;
-            let outpoints = esplora_client
-                .find_outpoints(&boarding_output)
-                .await
-                .map_err(|e| anyhow!(e))?;
+            // Get boarding outputs with proper status categorization (expired vs spendable)
+            let boarding_outputs = vec![BoardingOutput::new(
+                &Secp256k1::new(),
+                client.server_info.signer_pk.into(),
+                kp.x_only_public_key().0,
+                client.server_info.boarding_exit_delay,
+                client.server_info.network,
+            )
+            .map_err(|e| anyhow!(e))?];
+
+            let esplora = esplora_client.clone();
+            let find_outpoints = |address: &Address| -> Result<Vec<ExplorerUtxo>, ark_core::Error> {
+                futures::executor::block_on(async {
+                    esplora
+                        .find_outpoints(address)
+                        .await
+                        .map_err(|e| ark_core::Error::ad_hoc(format!("{e}")))
+                })
+            };
+
+            let outpoints = list_boarding_outpoints(find_outpoints, &boarding_outputs)
+                .map_err(|e| anyhow!("failed to list boarding outpoints: {e}"))?;
 
             let mut boarding_entries: Vec<BoardingEntry> = Vec::new();
-            for o in outpoints {
-                if !o.is_spent {
-                    boarding_entries.push(BoardingEntry {
-                        outpoint: o.outpoint.to_string(),
-                        amount_sats: o.amount.to_sat(),
-                        confirmation_time: o
-                            .confirmation_blocktime
-                            .map(|t| format_timestamp(t as i64))
-                            .transpose()?,
-                        status: if o.confirmation_blocktime.is_some() {
-                            "confirmed".to_string()
-                        } else {
-                            "pending".to_string()
-                        },
-                    });
-                }
+
+            // Add spendable (confirmed, not expired) boarding outputs
+            for (outpoint, amount, _) in &outpoints.spendable {
+                boarding_entries.push(BoardingEntry {
+                    outpoint: outpoint.to_string(),
+                    amount_sats: amount.to_sat(),
+                    confirmation_time: None,
+                    status: "spendable".to_string(),
+                });
             }
 
-            // Sort boarding by confirmation time (earliest first), then amount (largest first)
+            // Add expired boarding outputs (CSV timeout passed, refundable)
+            for (outpoint, amount, _) in &outpoints.expired {
+                boarding_entries.push(BoardingEntry {
+                    outpoint: outpoint.to_string(),
+                    amount_sats: amount.to_sat(),
+                    confirmation_time: None,
+                    status: "expired".to_string(),
+                });
+            }
+
+            // Add pending (unconfirmed) boarding outputs
+            for (outpoint, amount, _) in &outpoints.pending {
+                boarding_entries.push(BoardingEntry {
+                    outpoint: outpoint.to_string(),
+                    amount_sats: amount.to_sat(),
+                    confirmation_time: None,
+                    status: "pending".to_string(),
+                });
+            }
+
+            // Sort boarding by status (expired first so user knows to refund), then amount
             boarding_entries.sort_by(|a, b| {
-                a.confirmation_time
-                    .cmp(&b.confirmation_time)
+                let status_order = |s: &str| match s {
+                    "expired" => 0,
+                    "spendable" => 1,
+                    "pending" => 2,
+                    _ => 3,
+                };
+                status_order(&a.status)
+                    .cmp(&status_order(&b.status))
                     .then_with(|| b.amount_sats.cmp(&a.amount_sats))
             });
 
