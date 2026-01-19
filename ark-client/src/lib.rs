@@ -931,6 +931,63 @@ where
         })
     }
 
+    /// Get detailed boarding outpoints with their on-chain status.
+    ///
+    /// This method returns outpoints categorized as spendable, expired, or pending,
+    /// using each BoardingOutput's own exit_delay for accurate status determination.
+    pub async fn list_boarding_outpoints(
+        &self,
+    ) -> Result<Vec<(OutPoint, Amount, Option<u64>, &'static str)>, Error> {
+        let boarding_outputs = self.inner.wallet.get_boarding_outputs()?;
+
+        let mut result = Vec::new();
+        let mut seen_outpoints = HashSet::new();
+
+        let now = std::time::UNIX_EPOCH
+            .elapsed()
+            .map_err(|e| Error::ad_hoc(format!("failed to get current time: {e}")))?;
+
+        for boarding_output in boarding_outputs.iter() {
+            let boarding_address = boarding_output.address();
+
+            let utxos = timeout_op(
+                self.inner.timeout,
+                self.inner.blockchain.find_outpoints(boarding_address),
+            )
+            .await
+            .context("failed to find boarding outpoints")??;
+
+            for utxo in utxos {
+                if utxo.is_spent {
+                    continue;
+                }
+
+                if !seen_outpoints.insert(utxo.outpoint) {
+                    continue;
+                }
+
+                let (status, confirmation_time) = match utxo.confirmation_blocktime {
+                    Some(blocktime) => {
+                        let confirmation_time = Duration::from_secs(blocktime);
+                        let status = if boarding_output
+                            .can_be_claimed_unilaterally_by_owner(now, confirmation_time)
+                        {
+                            "expired"
+                        } else {
+                            "spendable"
+                        };
+                        (status, Some(blocktime))
+                    }
+                    None => ("pending", None),
+                };
+
+                result.push((utxo.outpoint, utxo.amount, confirmation_time, status));
+            }
+        }
+
+        Ok(result)
+    }
+
     pub async fn transaction_history(&self) -> Result<Vec<history::Transaction>, Error> {
         let mut boarding_transactions = Vec::new();
         let mut boarding_commitment_transactions = Vec::new();
