@@ -15,5 +15,6 @@ mod conversions;
 mod error;
 
 pub use client::Client;
+pub use client::ListVtxosResponse;
 pub use conversions::ConversionError;
 pub use error::Error;

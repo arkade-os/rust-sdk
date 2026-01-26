@@ -211,10 +211,20 @@ pub struct TxTreeNode {
     pub leaf: bool,
 }
 
-// TODO: Implement pagination.
+#[derive(Clone)]
 pub struct GetVtxosRequest {
     reference: GetVtxosRequestReference,
     filter: Option<GetVtxosRequestFilter>,
+    page: Option<PageRequest>,
+}
+
+/// Page request for paginated queries.
+#[derive(Debug, Clone, Copy)]
+pub struct PageRequest {
+    /// Number of items per page.
+    pub size: i32,
+    /// Page index (0-based).
+    pub index: i32,
 }
 
 impl GetVtxosRequest {
@@ -226,6 +236,7 @@ impl GetVtxosRequest {
         Self {
             reference: GetVtxosRequestReference::Scripts(scripts),
             filter: None,
+            page: None,
         }
     }
 
@@ -233,6 +244,7 @@ impl GetVtxosRequest {
         Self {
             reference: GetVtxosRequestReference::OutPoints(outpoints.to_vec()),
             filter: None,
+            page: None,
         }
     }
 
@@ -287,8 +299,20 @@ impl GetVtxosRequest {
     pub fn filter(&self) -> Option<&GetVtxosRequestFilter> {
         self.filter.as_ref()
     }
+
+    pub fn with_page(self, size: i32, index: i32) -> Self {
+        Self {
+            page: Some(PageRequest { size, index }),
+            ..self
+        }
+    }
+
+    pub fn page(&self) -> Option<PageRequest> {
+        self.page
+    }
 }
 
+#[derive(Clone)]
 pub enum GetVtxosRequestReference {
     Scripts(Vec<ScriptBuf>),
     OutPoints(Vec<OutPoint>),
@@ -303,6 +327,7 @@ impl GetVtxosRequestReference {
     }
 }
 
+#[derive(Clone, Copy)]
 pub enum GetVtxosRequestFilter {
     Spendable,
     Spent,
