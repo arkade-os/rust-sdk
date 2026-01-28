@@ -7,6 +7,7 @@ arkd_logs := "$PWD/arkd.log"
 arkd_wallet_logs := "$PWD/arkd-wallet.log"
 
 mod ark-rest
+mod nix
 
 ## ------------------------
 ## Code quality functions
