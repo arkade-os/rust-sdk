@@ -636,7 +636,6 @@ pub fn prepare_delegate_psbts(
     outputs: Vec<intent::Output>,
     delegate_cosigner_pk: PublicKey,
     server_forfeit_address: &Address,
-    // TODO: Handle sub-dust amounts (they can be settled!).
     dust: Amount,
 ) -> Result<Delegate, Error> {
     // Create intent message
@@ -693,6 +692,11 @@ pub fn prepare_delegate_psbts(
     const FORFEIT_TX_VTXO_INDEX: usize = 0;
 
     for intent_input in intent_inputs.iter() {
+        // Skip swept or sub-dust VTXOs - they cannot be forfeited.
+        if intent_input.is_swept() || intent_input.amount() <= dust {
+            continue;
+        }
+
         let vtxo_amount = intent_input.amount();
         let virtual_tx_outpoint = intent_input.outpoint();
         let connector_amount = dust;
