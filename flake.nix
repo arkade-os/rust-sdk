@@ -3,7 +3,7 @@
 
   inputs = {
     nixpkgs.url      = "github:NixOS/nixpkgs/nixos-unstable";
-    nixpkgs-stable.url = "github:NixOS/nixpkgs/nixos-24.05";
+    nixpkgs-stable.url = "github:NixOS/nixpkgs/nixos-25.11";
     rust-overlay.url = "github:oxalica/rust-overlay";
     flake-utils.url  = "github:numtide/flake-utils";
   };
@@ -20,7 +20,7 @@
         };
         pkgs-stable = import nixpkgs-stable { inherit system; };
 
-        rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+        rustToolchain = pkgs.rust-bin.stable.latest.default;
         rustToolchainWithWasm = rustToolchain.override {
           targets = [ "wasm32-unknown-unknown" ];
           extensions = [ "rust-src" ];
