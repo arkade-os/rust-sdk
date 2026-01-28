@@ -693,7 +693,7 @@ pub fn prepare_delegate_psbts(
 
     for intent_input in intent_inputs.iter() {
         // Skip swept or sub-dust VTXOs - they cannot be forfeited.
-        if intent_input.is_swept() || intent_input.amount() <= dust {
+        if intent_input.is_swept() || intent_input.amount() < dust {
             continue;
         }
 
