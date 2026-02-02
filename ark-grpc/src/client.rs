@@ -110,12 +110,14 @@ impl Client {
         response.into_inner().try_into()
     }
 
-    pub async fn list_vtxos(
-        &self,
-        request: GetVtxosRequest,
-    ) -> Result<Vec<VirtualTxOutPoint>, Error> {
+    /// List VTXOs with pagination support.
+    /// Returns a single page of results along with pagination info.
+    pub async fn list_vtxos(&self, request: GetVtxosRequest) -> Result<ListVtxosResponse, Error> {
         if request.reference().is_empty() {
-            return Ok(Vec::new());
+            return Ok(ListVtxosResponse {
+                vtxos: Vec::new(),
+                page: None,
+            });
         }
 
         let mut client = self.indexer_client()?;
@@ -125,14 +127,21 @@ impl Client {
             .await
             .map_err(Error::request)?;
 
-        let vtxos = response
-            .get_ref()
+        let inner = response.into_inner();
+
+        let vtxos = inner
             .vtxos
             .iter()
             .map(VirtualTxOutPoint::try_from)
             .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(vtxos)
+        let page = inner
+            .page
+            .map(IndexerPage::try_from)
+            .transpose()
+            .map_err(Error::conversion)?;
+
+        Ok(ListVtxosResponse { vtxos, page })
     }
 
     pub async fn register_intent(&self, intent: ark_core::intent::Intent) -> Result<String, Error> {
@@ -867,6 +876,11 @@ pub struct VtxoChainResponse {
     pub page: Option<IndexerPage>,
 }
 
+pub struct ListVtxosResponse {
+    pub vtxos: Vec<VirtualTxOutPoint>,
+    pub page: Option<IndexerPage>,
+}
+
 impl TryFrom<generated::ark::v1::GetVtxoChainResponse> for VtxoChainResponse {
     type Error = Error;
 
@@ -1064,6 +1078,13 @@ impl From<GetVtxosRequest> for generated::ark::v1::GetVtxosRequest {
             None => (false, false, false, false),
         };
 
+        let page = value
+            .page()
+            .map(|p| generated::ark::v1::IndexerPageRequest {
+                size: p.size,
+                index: p.index,
+            });
+
         match value.reference() {
             GetVtxosRequestReference::Scripts(script_bufs) => Self {
                 scripts: script_bufs.iter().map(|s| s.to_hex_string()).collect(),
@@ -1071,7 +1092,7 @@ impl From<GetVtxosRequest> for generated::ark::v1::GetVtxosRequest {
                 spendable_only,
                 spent_only,
                 recoverable_only,
-                page: None,
+                page,
                 pending_only,
             },
             GetVtxosRequestReference::OutPoints(outpoints) => Self {
@@ -1080,7 +1101,7 @@ impl From<GetVtxosRequest> for generated::ark::v1::GetVtxosRequest {
                 spendable_only,
                 spent_only,
                 recoverable_only,
-                page: None,
+                page,
                 pending_only,
             },
         }

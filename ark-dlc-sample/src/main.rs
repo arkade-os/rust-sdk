@@ -668,9 +668,9 @@ async fn fund_vtxo(
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     let request = GetVtxosRequest::new_for_addresses(std::iter::once(vtxo.to_ark_address()));
-    let virtual_tx_outpoints = grpc_client.list_vtxos(request).await?;
+    let response = grpc_client.list_vtxos(request).await?;
 
-    let vtxo_list = VtxoList::new(server_info.dust, virtual_tx_outpoints);
+    let vtxo_list = VtxoList::new(server_info.dust, response.vtxos);
     let virtual_tx_outpoint = vtxo_list
         .spendable_offchain()
         .find(|v| v.commitment_txids[0] == commitment_txid)
@@ -1525,8 +1525,8 @@ async fn spendable_vtxos(
     for vtxo in vtxos.iter() {
         // The VTXOs for the given Ark address that the Ark server tells us about.
         let request = GetVtxosRequest::new_for_addresses(std::iter::once(vtxo.to_ark_address()));
-        let virtual_tx_outpoints = grpc_client.list_vtxos(request).await?;
-        let vtxo_list = VtxoList::new(dust, virtual_tx_outpoints);
+        let response = grpc_client.list_vtxos(request).await?;
+        let vtxo_list = VtxoList::new(dust, response.vtxos);
 
         spendable_vtxos.insert(
             vtxo.clone(),
