@@ -2,10 +2,8 @@ use crate::ark_address::ArkAddress;
 use crate::script::csv_sig_script;
 use crate::script::multisig_script;
 use crate::script::tr_script_pubkey;
-use crate::server::VirtualTxOutPoint;
 use crate::Error;
 use crate::ErrorContext;
-use crate::ExplorerUtxo;
 use crate::UNSPENDABLE_KEY;
 use bitcoin::key::PublicKey;
 use bitcoin::key::Secp256k1;
@@ -16,11 +14,9 @@ use bitcoin::taproot::LeafVersion;
 use bitcoin::taproot::TaprootBuilder;
 use bitcoin::taproot::TaprootSpendInfo;
 use bitcoin::Address;
-use bitcoin::Amount;
 use bitcoin::Network;
 use bitcoin::ScriptBuf;
 use bitcoin::XOnlyPublicKey;
-use std::collections::HashMap;
 use std::time::Duration;
 
 /// All the information needed to _spend_ a VTXO.
@@ -239,71 +235,4 @@ fn calculate_leaf_depths(n: usize) -> Vec<usize> {
     }
 
     result
-}
-
-/// The status of a collection of VTXOs.
-#[derive(Debug, Clone, Default)]
-pub struct VirtualTxOutPoints {
-    /// VTXOs that can be spent in collaboration with the Ark server.
-    pub spendable: Vec<(VirtualTxOutPoint, Vtxo)>,
-    /// VTXOs that should only be spent unilaterally.
-    pub expired: Vec<(VirtualTxOutPoint, Vtxo)>,
-}
-
-impl VirtualTxOutPoints {
-    pub fn spendable_balance(&self) -> Amount {
-        self.spendable
-            .iter()
-            .fold(Amount::ZERO, |acc, x| acc + x.0.amount)
-    }
-
-    pub fn expired_balance(&self) -> Amount {
-        self.expired
-            .iter()
-            .fold(Amount::ZERO, |acc, x| acc + x.0.amount)
-    }
-}
-
-pub fn list_virtual_tx_outpoints<F>(
-    find_outpoints_fn: F,
-    spendable_vtxos: HashMap<Vtxo, Vec<VirtualTxOutPoint>>,
-) -> Result<VirtualTxOutPoints, Error>
-where
-    F: Fn(&Address) -> Result<Vec<ExplorerUtxo>, Error>,
-{
-    let mut spendable = Vec::new();
-    let mut expired = Vec::new();
-    for (vtxo, virtual_tx_outpoints) in spendable_vtxos {
-        // We look to see if we can find any on-chain VTXOs for this address.
-        let onchain_vtxos = find_outpoints_fn(vtxo.address())?;
-
-        for virtual_tx_outpoint in virtual_tx_outpoints {
-            let now = std::time::UNIX_EPOCH.elapsed().map_err(Error::ad_hoc)?;
-
-            match onchain_vtxos
-                .iter()
-                .find(|onchain_utxo| onchain_utxo.outpoint == virtual_tx_outpoint.outpoint)
-            {
-                // VTXOs that have been confirmed on the blockchain, but whose
-                // exit path is now _active_, have expired.
-                Some(ExplorerUtxo {
-                    confirmation_blocktime: Some(confirmation_blocktime),
-                    ..
-                }) if vtxo.can_be_claimed_unilaterally_by_owner(
-                    now,
-                    Duration::from_secs(*confirmation_blocktime),
-                ) =>
-                {
-                    expired.push((virtual_tx_outpoint, vtxo.clone()));
-                }
-                // All other VTXOs (either still offchain or on-chain but with an inactive exit
-                // path) are spendable.
-                _ => {
-                    spendable.push((virtual_tx_outpoint, vtxo.clone()));
-                }
-            }
-        }
-    }
-
-    Ok(VirtualTxOutPoints { spendable, expired })
 }
