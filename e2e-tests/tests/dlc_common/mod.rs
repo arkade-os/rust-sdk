@@ -1,4 +1,6 @@
-use anyhow::anyhow;
+#![allow(clippy::unwrap_used)]
+
+use crate::common::Nigiri;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
@@ -46,31 +48,20 @@ use bitcoin::Amount;
 use bitcoin::OutPoint;
 use bitcoin::Psbt;
 use bitcoin::ScriptBuf;
-use bitcoin::Transaction;
 use bitcoin::TxOut;
 use bitcoin::Txid;
 use bitcoin::XOnlyPublicKey;
-use esplora_client::FromHex;
 use futures::StreamExt;
 use rand::thread_rng;
 use rand::Rng;
-use regex::Regex;
-use std::process::Command;
 use std::time::Duration;
-use tokio::task::block_in_place;
 use zkp::musig::new_musig_nonce_pair;
 use zkp::musig::MusigAggNonce;
 use zkp::musig::MusigKeyAggCache;
 use zkp::musig::MusigSession;
 use zkp::musig::MusigSessionId;
 
-const RUN_REFUND_SCENARIO: bool = false;
-
-#[tokio::main]
-#[allow(clippy::unwrap_in_result)]
-async fn main() -> Result<()> {
-    init_tracing();
-
+pub async fn run_dlc_scenario(nigiri: &Nigiri, run_refund_scenario: bool) -> Result<()> {
     // We instantiate an oracle that attests to coin flips.
     let mut oracle = Oracle::new();
 
@@ -83,8 +74,6 @@ async fn main() -> Result<()> {
     grpc_client.connect().await?;
     let server_info = grpc_client.get_info().await?;
     let server_pk = server_info.signer_pk.x_only_public_key().0;
-
-    let esplora_client = EsploraClient::new("http://localhost:30000")?;
 
     let alice_kp = Keypair::new(&secp, &mut rng);
     let alice_pk = alice_kp.public_key();
@@ -101,7 +90,7 @@ async fn main() -> Result<()> {
 
     let alice_fund_amount = Amount::from_sat(100_000_000);
     let alice_dlc_input = fund_vtxo(
-        &esplora_client,
+        nigiri,
         &grpc_client,
         &server_info,
         &alice_kp,
@@ -110,14 +99,8 @@ async fn main() -> Result<()> {
     .await?;
 
     let bob_fund_amount = Amount::from_sat(100_000_000);
-    let bob_dlc_input = fund_vtxo(
-        &esplora_client,
-        &grpc_client,
-        &server_info,
-        &bob_kp,
-        bob_fund_amount,
-    )
-    .await?;
+    let bob_dlc_input =
+        fund_vtxo(nigiri, &grpc_client, &server_info, &bob_kp, bob_fund_amount).await?;
 
     // Using Musig2, the server is not even aware that this is a shared VTXO.
     let musig_key_agg_cache =
@@ -129,9 +112,11 @@ async fn main() -> Result<()> {
     // the oracle attests to the outcome of a relevant event, but _before_ the batch ends. Thus,
     // choosing the timelock correctly is very important.
     //
-    // We don't use this path in this example, but including it in the Tapscript demonstrates that
-    // the server accepts it.
-    let refund_locktime = bitcoin::absolute::LockTime::from_height(1_000)?;
+    // Use a locktime a couple of blocks behind the current tip so the refund path is already
+    // spendable on-chain. Not realistic for production, but proves the contract's refund path
+    // works end-to-end.
+    let current_height = nigiri.get_height();
+    let refund_locktime = bitcoin::absolute::LockTime::from_height(current_height - 2)?;
     let dlc_refund_script = ScriptBuf::builder()
         .push_int(refund_locktime.to_consensus_u32() as i64)
         .push_opcode(OP_CLTV)
@@ -404,7 +389,7 @@ async fn main() -> Result<()> {
 
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    if RUN_REFUND_SCENARIO {
+    if run_refund_scenario {
         let refund_virtual_txid = refund_virtual_tx.unsigned_tx.compute_txid();
 
         let res = grpc_client
@@ -557,25 +542,8 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn find_outpoints(
-    runtime: tokio::runtime::Handle,
-    esplora_client: &EsploraClient,
-    address: &bitcoin::Address,
-) -> Result<Vec<ExplorerUtxo>, ark_core::Error> {
-    block_in_place(|| {
-        runtime.block_on(async {
-            let outpoints = esplora_client
-                .find_outpoints(address)
-                .await
-                .map_err(ark_core::Error::ad_hoc)?;
-
-            Ok(outpoints)
-        })
-    })
-}
-
 async fn fund_vtxo(
-    esplora_client: &EsploraClient,
+    nigiri: &Nigiri,
     grpc_client: &ark_grpc::Client,
     server_info: &server::Info,
     kp: &Keypair,
@@ -593,11 +561,11 @@ async fn fund_vtxo(
         server_info.network,
     )?;
 
-    faucet_fund(boarding_output.address(), amount).await?;
+    nigiri.faucet_fund(boarding_output.address(), amount).await;
 
     let boarding_outpoints = list_boarding_outpoints(
         |address: &bitcoin::Address| -> Result<Vec<ExplorerUtxo>, ark_core::Error> {
-            find_outpoints(tokio::runtime::Handle::current(), esplora_client, address)
+            Ok(nigiri.find_outpoints_blocking(address))
         },
         &[boarding_output],
     )?;
@@ -620,7 +588,7 @@ async fn fund_vtxo(
         vtxo.to_ark_address(),
     )
     .await?
-    .ok_or(anyhow!("did not join batch"))?;
+    .context("did not join batch")?;
 
     tokio::time::sleep(Duration::from_secs(2)).await;
 
@@ -631,7 +599,7 @@ async fn fund_vtxo(
     let virtual_tx_outpoint = vtxo_list
         .spendable_offchain()
         .find(|v| v.commitment_txids[0] == commitment_txid)
-        .ok_or(anyhow!("could not find input in batch"))?;
+        .context("could not find input in batch")?;
 
     let (forfeit_script, control_block) = vtxo.forfeit_spend_info()?;
 
@@ -1485,153 +1453,10 @@ async fn spendable_balance(
         .fold(Amount::ZERO, |acc, v| acc + v.amount))
 }
 
-pub struct EsploraClient {
-    esplora_client: esplora_client::AsyncClient,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct SpendStatus {
-    pub spend_txid: Option<Txid>,
-}
-
-impl EsploraClient {
-    fn new(url: &str) -> Result<Self> {
-        let builder = esplora_client::Builder::new(url);
-        let esplora_client = builder.build_async()?;
-
-        Ok(Self { esplora_client })
-    }
-
-    async fn find_outpoints(&self, address: &bitcoin::Address) -> Result<Vec<ExplorerUtxo>> {
-        let script_pubkey = address.script_pubkey();
-        let txs = self
-            .esplora_client
-            .scripthash_txs(&script_pubkey, None)
-            .await?;
-
-        let outputs = txs
-            .into_iter()
-            .flat_map(|tx| {
-                let txid = tx.txid;
-                tx.vout
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, v)| v.scriptpubkey == script_pubkey)
-                    .map(|(i, v)| ExplorerUtxo {
-                        outpoint: OutPoint {
-                            txid,
-                            vout: i as u32,
-                        },
-                        amount: Amount::from_sat(v.value),
-                        confirmation_blocktime: tx.status.block_time,
-                        // Assume the output is unspent until we dig deeper, further down.
-                        is_spent: false,
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-
-        let mut utxos = Vec::new();
-        for output in outputs.iter() {
-            let outpoint = output.outpoint;
-            let status = self
-                .esplora_client
-                .get_output_status(&outpoint.txid, outpoint.vout as u64)
-                .await?;
-
-            match status {
-                Some(esplora_client::OutputStatus { spent: false, .. }) | None => {
-                    utxos.push(*output);
-                }
-                Some(esplora_client::OutputStatus { spent: true, .. }) => {
-                    utxos.push(ExplorerUtxo {
-                        is_spent: true,
-                        ..*output
-                    });
-                }
-            }
-        }
-
-        Ok(utxos)
-    }
-
-    async fn _get_output_status(&self, txid: &Txid, vout: u32) -> Result<SpendStatus> {
-        let status = self
-            .esplora_client
-            .get_output_status(txid, vout as u64)
-            .await?;
-
-        Ok(SpendStatus {
-            spend_txid: status.and_then(|s| s.txid),
-        })
-    }
-}
-
-async fn faucet_fund(address: &bitcoin::Address, amount: Amount) -> Result<OutPoint> {
-    let res = Command::new("nigiri")
-        .args(["faucet", &address.to_string(), &amount.to_btc().to_string()])
-        .output()?;
-
-    assert!(res.status.success());
-
-    let text = String::from_utf8(res.stdout)?;
-    let re = Regex::new(r"txId: ([0-9a-fA-F]{64})")?;
-
-    let txid = match re.captures(&text) {
-        Some(captures) => match captures.get(1) {
-            Some(txid) => txid.as_str(),
-            _ => panic!("Could not parse TXID"),
-        },
-        None => {
-            panic!("Could not parse TXID");
-        }
-    };
-
-    let txid: Txid = txid.parse()?;
-
-    let res = Command::new("nigiri")
-        .args(["rpc", "getrawtransaction", &txid.to_string()])
-        .output()?;
-
-    let tx = String::from_utf8(res.stdout)?;
-
-    let tx = Vec::from_hex(tx.trim())?;
-    let tx: Transaction = bitcoin::consensus::deserialize(&tx)?;
-
-    let (vout, _) = tx
-        .output
-        .iter()
-        .enumerate()
-        .find(|(_, o)| o.script_pubkey == address.script_pubkey())
-        .context("could not find vout")?;
-
-    // Wait for output to be confirmed.
-    tokio::time::sleep(Duration::from_secs(5)).await;
-
-    Ok(OutPoint {
-        txid,
-        vout: vout as u32,
-    })
-}
-
 fn to_zkp_pk(pk: secp256k1::PublicKey) -> zkp::PublicKey {
     zkp::PublicKey::from_slice(&pk.serialize()).expect("valid conversion")
 }
 
-pub fn from_zkp_xonly(pk: zkp::XOnlyPublicKey) -> XOnlyPublicKey {
+fn from_zkp_xonly(pk: zkp::XOnlyPublicKey) -> XOnlyPublicKey {
     XOnlyPublicKey::from_slice(&pk.serialize()).expect("valid conversion")
-}
-
-fn init_tracing() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            "debug,\
-             bdk=info,\
-             tower=info,\
-             hyper_util=info,\
-             hyper=info,\
-             reqwest=info,\
-             h2=warn",
-        )
-        .init()
 }
