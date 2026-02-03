@@ -293,6 +293,7 @@ where
         input_vtxos: impl Iterator<Item = OutPoint> + Clone,
         to_address: Address,
         to_amount: Amount,
+        onchain_fee_override: Option<Amount>,
     ) -> Result<Txid, Error>
     where
         R: Rng + CryptoRng + Clone,
@@ -337,35 +338,41 @@ where
             .iter()
             .fold(Amount::ZERO, |acc, vtxo| acc + vtxo.amount());
 
-        // Estimate the fee dynamically from the server.
-        let pre_fee_change = total_input_amount.checked_sub(to_amount).ok_or_else(|| {
-            Error::coin_select(format!(
-                "insufficient VTXO amount: {total_input_amount} (input) < {to_amount} (to_amount)"
-            ))
-        })?;
-        let estimation_intent = self.prepare_intent(
-            &mut rng.clone(),
-            Vec::new(),
-            vtxo_inputs.clone(),
-            BatchOutputType::OffBoard {
-                to_address: to_address.clone(),
-                to_amount,
-                change_address,
-                change_amount: pre_fee_change,
-            },
-            IntentMessageType::EstimateIntentFee,
-        )?;
-        let estimated_fee = self
-            .network_client()
-            .estimate_fees(estimation_intent.intent)
-            .await?;
-        let fee_sat = estimated_fee.to_sat();
-        if fee_sat < 0 {
-            return Err(Error::ad_hoc(format!(
-                "server returned negative fee estimate: {estimated_fee}"
-            )));
-        }
-        let onchain_fee = Amount::from_sat(fee_sat as u64);
+        // Use the caller-provided fee if available, otherwise estimate dynamically.
+        let onchain_fee = match onchain_fee_override {
+            Some(fee) => fee,
+            None => {
+                let pre_fee_change =
+                    total_input_amount.checked_sub(to_amount).ok_or_else(|| {
+                        Error::coin_select(format!(
+                            "insufficient VTXO amount: {total_input_amount} (input) < {to_amount} (to_amount)"
+                        ))
+                    })?;
+                let estimation_intent = self.prepare_intent(
+                    &mut rng.clone(),
+                    Vec::new(),
+                    vtxo_inputs.clone(),
+                    BatchOutputType::OffBoard {
+                        to_address: to_address.clone(),
+                        to_amount,
+                        change_address,
+                        change_amount: pre_fee_change,
+                    },
+                    IntentMessageType::EstimateIntentFee,
+                )?;
+                let estimated_fee = self
+                    .network_client()
+                    .estimate_fees(estimation_intent.intent)
+                    .await?;
+                let fee_sat = estimated_fee.to_sat();
+                if fee_sat < 0 {
+                    return Err(Error::ad_hoc(format!(
+                        "server returned negative fee estimate: {estimated_fee}"
+                    )));
+                }
+                Amount::from_sat(fee_sat as u64)
+            }
+        };
 
         // Deduct fee from the requested amount.
         let net_to_amount = to_amount.checked_sub(onchain_fee).ok_or_else(|| {

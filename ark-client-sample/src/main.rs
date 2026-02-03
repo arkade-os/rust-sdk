@@ -464,6 +464,7 @@ async fn main() -> Result<()> {
                     vtxo_outpoints.into_iter(),
                     checked_address.clone(),
                     Amount::from_sat(*amount),
+                    None,
                 )
                 .await
                 .map_err(|e| anyhow!(e))?;
