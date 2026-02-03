@@ -1,8 +1,8 @@
 use crate::batch;
 use crate::batch::BatchOutputType;
 use crate::error::ErrorContext;
-use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
+use crate::wallet::Persistence;
 use crate::Client;
 use crate::Error;
 use crate::KeyProvider;
@@ -20,7 +20,7 @@ use rand::Rng;
 impl<B, W, S, K> Client<B, W, S, K>
 where
     B: crate::Blockchain,
-    W: BoardingWallet + OnchainWallet,
+    W: OnchainWallet + Persistence,
     S: SwapStorage + 'static,
     K: KeyProvider,
 {

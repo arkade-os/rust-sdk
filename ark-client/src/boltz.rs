@@ -2,8 +2,8 @@ use crate::batch::BatchOutputType;
 use crate::error::ErrorContext as _;
 use crate::swap_storage::SwapStorage;
 use crate::timeout_op;
-use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
+use crate::wallet::Persistence;
 use crate::Blockchain;
 use crate::Client;
 use crate::Error;
@@ -73,7 +73,7 @@ pub struct ClaimVhtlcResult {
 impl<B, W, S, K> Client<B, W, S, K>
 where
     B: Blockchain,
-    W: BoardingWallet + OnchainWallet,
+    W: OnchainWallet + Persistence,
     S: SwapStorage + 'static,
     K: crate::KeyProvider,
 {

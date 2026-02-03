@@ -2,7 +2,6 @@ use anyhow::Result;
 use ark_client::error::Error;
 use ark_client::error::ErrorContext;
 use ark_client::wallet::Balance;
-use ark_client::wallet::BoardingWallet;
 use ark_client::wallet::OnchainWallet;
 use ark_client::wallet::Persistence;
 use ark_core::BoardingOutput;
@@ -16,9 +15,7 @@ use bdk_wallet::Wallet as BdkWallet;
 use bitcoin::bip32::Xpriv;
 use bitcoin::key::Keypair;
 use bitcoin::key::Secp256k1;
-use bitcoin::secp256k1::schnorr::Signature;
 use bitcoin::secp256k1::All;
-use bitcoin::secp256k1::Message;
 use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::FeeRate;
@@ -38,8 +35,6 @@ pub struct Wallet<DB>
 where
     DB: Persistence,
 {
-    kp: Keypair,
-    secp: Secp256k1<All>,
     inner: Arc<RwLock<BdkWallet>>,
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     client: esplora_client::AsyncClient,
@@ -54,7 +49,7 @@ where
 {
     pub fn new(
         kp: Keypair,
-        secp: Secp256k1<All>,
+        _secp: Secp256k1<All>,
         network: Network,
         esplora_url: &str,
         db: DB,
@@ -75,8 +70,6 @@ where
             esplora_client::Builder::new(esplora_url).build_async_with_sleeper::<WebSleeper>()?;
 
         Ok(Self {
-            kp,
-            secp,
             inner: Arc::new(RwLock::new(wallet)),
             client,
             db,
@@ -237,44 +230,24 @@ where
     }
 }
 
-impl<DB> BoardingWallet for Wallet<DB>
+impl<DB> Persistence for Wallet<DB>
 where
     DB: Persistence,
 {
-    fn new_boarding_output(
+    fn save_boarding_output(
         &self,
-        server_pk: XOnlyPublicKey,
-        exit_delay: bitcoin::Sequence,
-        network: Network,
-    ) -> Result<BoardingOutput, Error> {
-        let sk = self.kp.secret_key();
-        let (owner_pk, _) = sk.public_key(&self.secp).x_only_public_key();
-
-        let boarding_output =
-            BoardingOutput::new(&self.secp, server_pk, owner_pk, exit_delay, network)?;
-
-        self.db
-            .save_boarding_output(sk, boarding_output.clone())
-            .context("Failed saving boarding output")?;
-
-        Ok(boarding_output)
+        sk: bitcoin::secp256k1::SecretKey,
+        boarding_output: BoardingOutput,
+    ) -> Result<(), Error> {
+        self.db.save_boarding_output(sk, boarding_output)
     }
 
-    fn get_boarding_outputs(&self) -> Result<Vec<BoardingOutput>, Error> {
+    fn load_boarding_outputs(&self) -> Result<Vec<BoardingOutput>, Error> {
         self.db.load_boarding_outputs()
     }
 
-    fn sign_for_pk(&self, pk: &XOnlyPublicKey, msg: &Message) -> Result<Signature, Error> {
-        let key = self
-            .db
-            .sk_for_pk(pk)
-            .with_context(|| format!("Failed retrieving SK for PK {pk}"))?;
-
-        let sig = self
-            .secp
-            .sign_schnorr_no_aux_rand(msg, &key.keypair(&self.secp));
-
-        Ok(sig)
+    fn sk_for_pk(&self, pk: &XOnlyPublicKey) -> Result<bitcoin::secp256k1::SecretKey, Error> {
+        self.db.sk_for_pk(pk)
     }
 }
 

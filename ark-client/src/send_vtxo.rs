@@ -1,8 +1,8 @@
 use crate::error::ErrorContext;
 use crate::swap_storage::SwapStorage;
 use crate::utils::timeout_op;
-use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
+use crate::wallet::Persistence;
 use crate::Blockchain;
 use crate::Client;
 use crate::Error;
@@ -27,7 +27,7 @@ use bitcoin::XOnlyPublicKey;
 impl<B, W, S, K> Client<B, W, S, K>
 where
     B: Blockchain,
-    W: BoardingWallet + OnchainWallet,
+    W: OnchainWallet + Persistence,
     S: SwapStorage + 'static,
     K: crate::KeyProvider,
 {
