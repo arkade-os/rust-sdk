@@ -1167,7 +1167,6 @@ where
                     .wallet
                     .sk_for_pk(&owner_pk)
                     .map_err(|e| ark_core::Error::ad_hoc(e.to_string()))?;
-                let secp = Secp256k1::new();
                 let sig = secp.sign_schnorr_no_aux_rand(&msg, &sk.keypair(&secp));
 
                 Ok((sig, owner_pk))
