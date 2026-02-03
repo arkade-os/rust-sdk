@@ -212,8 +212,16 @@ impl Default for Nigiri {
     }
 }
 
-impl Blockchain for Nigiri {
-    async fn find_outpoints(&self, address: &Address) -> Result<Vec<ExplorerUtxo>, Error> {
+impl Nigiri {
+    /// Get the current block height from the esplora client.
+    #[allow(unused)]
+    pub fn get_height(&self) -> u32 {
+        self.esplora_client.get_height().unwrap()
+    }
+
+    /// Synchronous version of outpoint lookup. The underlying esplora client is blocking, so this
+    /// can be called from non-async contexts (e.g. closures passed to `list_boarding_outpoints`).
+    pub fn find_outpoints_blocking(&self, address: &Address) -> Vec<ExplorerUtxo> {
         let script_pubkey = address.script_pubkey();
         let txs = self
             .esplora_client
@@ -269,7 +277,13 @@ impl Blockchain for Nigiri {
             }
         }
 
-        Ok(utxos)
+        utxos
+    }
+}
+
+impl Blockchain for Nigiri {
+    async fn find_outpoints(&self, address: &Address) -> Result<Vec<ExplorerUtxo>, Error> {
+        Ok(self.find_outpoints_blocking(address))
     }
 
     async fn find_tx(&self, txid: &Txid) -> Result<Option<Transaction>, Error> {
