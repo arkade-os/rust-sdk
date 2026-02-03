@@ -676,9 +676,9 @@ where
             }
 
             // Query all addresses in batch at once
-            let vtxo_list = self
-                .list_vtxos_for_addresses(batch.iter().map(|(_, _, a)| a).copied())
-                .await?;
+            let addresses = batch.iter().map(|(_, _, a)| *a);
+
+            let vtxo_list = self.list_vtxos_for_addresses(addresses).await?;
 
             // Build set of used scripts from response
             let used_scripts: HashSet<&ScriptBuf> = vtxo_list.all().map(|v| &v.script).collect();

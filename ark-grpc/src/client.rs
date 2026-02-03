@@ -257,12 +257,13 @@ impl Client {
             .await
             .map_err(Error::request)?;
 
+        let inner = res.into_inner();
         let base64 = base64::engine::GeneralPurpose::new(
             &base64::alphabet::STANDARD,
             base64::engine::GeneralPurposeConfig::new(),
         );
 
-        res.into_inner()
+        inner
             .pending_txs
             .into_iter()
             .map(|tx| {

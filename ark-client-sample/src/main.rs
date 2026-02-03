@@ -144,6 +144,10 @@ enum Commands {
         /// How many sats to send.
         amount: Option<u64>,
     },
+    /// List pending (submitted but not finalized) offchain transactions.
+    ListPendingTxs,
+    /// Continue and finalize any pending offchain transactions.
+    ContinuePendingTxs,
 }
 
 #[derive(Clone)]
@@ -215,6 +219,19 @@ struct BoardingEntry {
 struct ListVtxosOutput {
     vtxos: Vec<VtxoEntry>,
     boarding_outputs: Vec<BoardingEntry>,
+}
+
+#[derive(Serialize)]
+struct PendingTxEntry {
+    ark_txid: String,
+    num_inputs: usize,
+    num_outputs: usize,
+    total_output_sats: u64,
+}
+
+#[derive(Serialize)]
+struct ListPendingTxsOutput {
+    pending_txs: Vec<PendingTxEntry>,
 }
 
 fn format_timestamp(unix_secs: i64) -> Result<String> {
@@ -709,6 +726,56 @@ async fn main() -> Result<()> {
                     "address_type": "bitcoin",
                     "amount_sats": amount,
                     "estimated_fee_sats": fees.to_sat()
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            }
+        }
+        Commands::ListPendingTxs => {
+            let pending_txs = client
+                .list_pending_offchain_txs()
+                .await
+                .map_err(|e| anyhow!(e))?;
+
+            let entries: Vec<PendingTxEntry> = pending_txs
+                .iter()
+                .map(|tx| {
+                    let total_output_sats = tx
+                        .signed_ark_tx
+                        .unsigned_tx
+                        .output
+                        .iter()
+                        .map(|o| o.value.to_sat())
+                        .sum();
+
+                    PendingTxEntry {
+                        ark_txid: tx.ark_txid.to_string(),
+                        num_inputs: tx.signed_ark_tx.unsigned_tx.input.len(),
+                        num_outputs: tx.signed_ark_tx.unsigned_tx.output.len(),
+                        total_output_sats,
+                    }
+                })
+                .collect();
+
+            let output = ListPendingTxsOutput {
+                pending_txs: entries,
+            };
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        Commands::ContinuePendingTxs => {
+            let finalized = client
+                .continue_pending_offchain_txs()
+                .await
+                .map_err(|e| anyhow!(e))?;
+
+            if finalized.is_empty() {
+                let output = serde_json::json!({
+                    "finalized_txids": [],
+                    "message": "No pending transactions to finalize"
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                let output = serde_json::json!({
+                    "finalized_txids": finalized.iter().map(|t| t.to_string()).collect::<Vec<_>>()
                 });
                 println!("{}", serde_json::to_string_pretty(&output)?);
             }

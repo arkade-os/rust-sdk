@@ -383,6 +383,20 @@ where
         Ok(ark_txid)
     }
 
+    /// List pending (submitted but not finalized) offchain transactions.
+    ///
+    /// This retrieves any transactions that were submitted to the server but not yet finalized
+    /// (e.g. due to a crash or network error between submit and finalize).
+    ///
+    /// # Returns
+    ///
+    /// The pending transactions, or an empty vec if there are none.
+    pub async fn list_pending_offchain_txs(
+        &self,
+    ) -> Result<Vec<ark_core::server::PendingTx>, Error> {
+        self.fetch_pending_offchain_txs().await
+    }
+
     /// Resume and finalize any pending (submitted but not finalized) offchain transactions.
     ///
     /// This handles the case where `send_vtxo` successfully submitted the transaction to the
@@ -395,113 +409,7 @@ where
     /// The [`Txid`]s of the finalized Ark transactions, or an empty vec if there were no
     /// pending transactions.
     pub async fn continue_pending_offchain_txs(&self) -> Result<Vec<Txid>, Error> {
-        let ark_addresses = self.get_offchain_addresses()?;
-
-        let script_pubkey_to_vtxo_map: std::collections::HashMap<_, _> = ark_addresses
-            .iter()
-            .map(|(a, v)| (a.to_p2tr_script_pubkey(), v.clone()))
-            .collect();
-
-        let addresses = ark_addresses.iter().map(|(a, _)| *a);
-        let request = ark_core::server::GetVtxosRequest::new_for_addresses(addresses)
-            .pending_only()
-            .context("failed to build pending vtxo request")?;
-
-        let pending_vtxos = self
-            .fetch_all_vtxos(request)
-            .await
-            .context("failed to fetch pending VTXOs")?;
-
-        if pending_vtxos.is_empty() {
-            return Ok(vec![]);
-        }
-
-        let vtxo_inputs: Vec<intent::Input> = pending_vtxos
-            .iter()
-            .map(|virtual_tx_outpoint| {
-                let vtxo = script_pubkey_to_vtxo_map
-                    .get(&virtual_tx_outpoint.script)
-                    .ok_or_else(|| {
-                        Error::ad_hoc(format!(
-                            "missing VTXO for script pubkey: {}",
-                            virtual_tx_outpoint.script
-                        ))
-                    })?;
-                let spend_info = vtxo
-                    .forfeit_spend_info()
-                    .context("failed to get forfeit spend info")?;
-
-                Ok(intent::Input::new(
-                    virtual_tx_outpoint.outpoint,
-                    vtxo.exit_delay(),
-                    None,
-                    TxOut {
-                        value: virtual_tx_outpoint.amount,
-                        script_pubkey: vtxo.script_pubkey(),
-                    },
-                    vtxo.tapscripts(),
-                    spend_info,
-                    false,
-                    virtual_tx_outpoint.is_swept,
-                ))
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("valid duration")
-            .as_secs();
-
-        let message = intent::IntentMessage::GetPendingTx {
-            expire_at: now + (2 * 60),
-        };
-
-        let secp = Secp256k1::new();
-        let sign_for_vtxo_fn =
-            |input: &mut psbt::Input,
-             msg: secp256k1::Message|
-             -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
-                match &input.witness_script {
-                    None => Err(ark_core::Error::ad_hoc(
-                        "Missing witness script in psbt::Input when signing get-pending-tx intent",
-                    )),
-                    Some(script) => {
-                        let pks = extract_checksig_pubkeys(script);
-                        let mut res = vec![];
-                        for pk in pks {
-                            if let Ok(keypair) = self.keypair_by_pk(&pk) {
-                                let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
-                                res.push((sig, keypair.x_only_public_key().0));
-                            }
-                        }
-                        Ok(res)
-                    }
-                }
-            };
-
-        let sign_for_onchain_fn =
-            |_: &mut psbt::Input,
-             _: secp256k1::Message|
-             -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
-                Err(ark_core::Error::ad_hoc(
-                    "unexpected onchain input in get-pending-tx intent",
-                ))
-            };
-
-        let get_pending_intent = intent::make_intent(
-            sign_for_vtxo_fn,
-            sign_for_onchain_fn,
-            vtxo_inputs,
-            vec![],
-            message,
-        )?;
-
-        let pending_txs = self
-            .network_client()
-            .get_pending_tx(get_pending_intent)
-            .await
-            .map_err(Error::ark_server)
-            .context("failed to get pending transactions")?;
+        let pending_txs = self.fetch_pending_offchain_txs().await?;
 
         if pending_txs.is_empty() {
             return Ok(vec![]);
@@ -569,5 +477,168 @@ where
         }
 
         Ok(finalized_txids)
+    }
+
+    /// Fetch pending offchain transactions from the server.
+    ///
+    /// Shared helper used by both [`Self::list_pending_offchain_txs`] and
+    /// [`Self::continue_pending_offchain_txs`].
+    async fn fetch_pending_offchain_txs(&self) -> Result<Vec<ark_core::server::PendingTx>, Error> {
+        const MAX_INPUTS_PER_INTENT: usize = 20;
+
+        let ark_addresses = self.get_offchain_addresses()?;
+
+        let script_pubkey_to_vtxo_map: std::collections::HashMap<_, _> = ark_addresses
+            .iter()
+            .map(|(a, v)| (a.to_p2tr_script_pubkey(), v.clone()))
+            .collect();
+
+        // Fetch ALL VTXOs (not just pending_only), filter out swept & settled.
+        let addresses = ark_addresses.iter().map(|(a, _)| *a);
+        let request = ark_core::server::GetVtxosRequest::new_for_addresses(addresses);
+
+        let all_vtxos = self
+            .fetch_all_vtxos(request)
+            .await
+            .context("failed to fetch VTXOs")?;
+
+        let vtxos: Vec<_> = all_vtxos
+            .iter()
+            .filter(|v| !v.is_swept && v.settled_by.is_none())
+            .collect();
+
+        tracing::debug!(
+            total_vtxos = all_vtxos.len(),
+            after_filter = vtxos.len(),
+            "Fetched non-swept, non-settled VTXOs for pending tx lookup"
+        );
+
+        if vtxos.is_empty() {
+            tracing::info!("No VTXOs found");
+            return Ok(vec![]);
+        }
+
+        let secp = Secp256k1::new();
+        let mut all_pending_txs = Vec::new();
+        let mut seen_ark_txids = std::collections::HashSet::new();
+
+        // Batch inputs to avoid oversized intents.
+        for (batch_idx, batch) in vtxos.chunks(MAX_INPUTS_PER_INTENT).enumerate() {
+            let mut vtxo_inputs = Vec::new();
+            for virtual_tx_outpoint in batch {
+                let vtxo = match script_pubkey_to_vtxo_map.get(&virtual_tx_outpoint.script) {
+                    Some(v) => v,
+                    None => {
+                        tracing::warn!(
+                            outpoint = %virtual_tx_outpoint.outpoint,
+                            script = %virtual_tx_outpoint.script,
+                            "Skipping VTXO with unknown script"
+                        );
+                        continue;
+                    }
+                };
+                let spend_info = vtxo
+                    .forfeit_spend_info()
+                    .context("failed to get forfeit spend info")?;
+
+                vtxo_inputs.push(intent::Input::new(
+                    virtual_tx_outpoint.outpoint,
+                    vtxo.exit_delay(),
+                    None,
+                    TxOut {
+                        value: virtual_tx_outpoint.amount,
+                        script_pubkey: vtxo.script_pubkey(),
+                    },
+                    vtxo.tapscripts(),
+                    spend_info,
+                    false,
+                    virtual_tx_outpoint.is_swept,
+                ));
+            }
+
+            if vtxo_inputs.is_empty() {
+                continue;
+            }
+
+            tracing::debug!(
+                batch = batch_idx,
+                num_inputs = vtxo_inputs.len(),
+                "Querying server for pending txs"
+            );
+
+            // expire_at = 0: server does not enforce expiry for get-pending-tx intents.
+            let message = intent::IntentMessage::GetPendingTx { expire_at: 0 };
+
+            let sign_for_vtxo_fn = |input: &mut psbt::Input,
+                                    msg: secp256k1::Message|
+             -> Result<
+                Vec<(schnorr::Signature, XOnlyPublicKey)>,
+                ark_core::Error,
+            > {
+                match &input.witness_script {
+                    None => Err(ark_core::Error::ad_hoc(
+                        "Missing witness script in psbt::Input when signing get-pending-tx intent",
+                    )),
+                    Some(script) => {
+                        let pks = extract_checksig_pubkeys(script);
+                        let mut res = vec![];
+                        for pk in &pks {
+                            if let Ok(keypair) = self.keypair_by_pk(pk) {
+                                let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
+                                res.push((sig, keypair.x_only_public_key().0));
+                            }
+                        }
+                        Ok(res)
+                    }
+                }
+            };
+
+            let sign_for_onchain_fn =
+                |_: &mut psbt::Input,
+                 _: secp256k1::Message|
+                 -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+                    Err(ark_core::Error::ad_hoc(
+                        "unexpected onchain input in get-pending-tx intent",
+                    ))
+                };
+
+            let get_pending_intent = intent::make_intent(
+                sign_for_vtxo_fn,
+                sign_for_onchain_fn,
+                vtxo_inputs,
+                vec![],
+                message,
+            )?;
+
+            let pending_txs = self
+                .network_client()
+                .get_pending_tx(get_pending_intent)
+                .await
+                .map_err(Error::ark_server)
+                .context("failed to get pending transactions")?;
+
+            tracing::debug!(
+                batch = batch_idx,
+                num_pending_txs = pending_txs.len(),
+                "Server response for batch"
+            );
+
+            for tx in pending_txs {
+                if seen_ark_txids.insert(tx.ark_txid) {
+                    tracing::info!(
+                        ark_txid = %tx.ark_txid,
+                        "Found pending transaction"
+                    );
+                    all_pending_txs.push(tx);
+                }
+            }
+        }
+
+        tracing::info!(
+            num_pending_txs = all_pending_txs.len(),
+            "Total pending transactions found"
+        );
+
+        Ok(all_pending_txs)
     }
 }

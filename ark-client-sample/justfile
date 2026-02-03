@@ -98,3 +98,12 @@ settle-recoverable actor:
 # Estimate fees for sending on-chain (collaborative redeem), e.g. just estimate-fees alice bc1... 50000
 estimate-fees actor address amount:
     cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed estimate-fees {{ address }} {{ amount }}
+
+
+# List pending (submitted but not finalized) offchain transactions for a given actor
+list-pending-txs actor:
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed list-pending-txs
+
+# Continue and finalize any pending offchain transactions for a given actor
+continue-pending-txs actor:
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed continue-pending-txs
