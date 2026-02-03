@@ -14,75 +14,75 @@ faucet actor:
 
 # Show the balance for a given actor (e.g., alice, bob)
 balance actor:
-    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed balance
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic balance
 
 # Show the transaction history for a given actor
 transaction-history actor:
-    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed transaction-history
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic transaction-history
 
 # Generate a boarding address for a given actor
 boarding-address actor:
-    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed boarding-address
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic boarding-address
 
 # Generate an Ark address for a given actor
 offchain-address actor:
-    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed offchain-address
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic offchain-address
 
 # Send coins to an Ark address from a given actor, e.g. just send bob tark...,1234
 send actor addresses_and_amounts:
-    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed send-to-ark-addresses {{ addresses_and_amounts }}
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic send-to-ark-addresses {{ addresses_and_amounts }}
 
 # Send coins to an Ark address using specific VTXOs, e.g. just send-vtxo-selection alice "abc123:0,def456:1" tark... 50000
 send-vtxo-selection actor vtxos address amount:
-    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed send-to-ark-address-with-vtxos --vtxos {{ vtxos }} {{ address }} {{ amount }}
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic send-to-ark-address-with-vtxos --vtxos {{ vtxos }} {{ address }} {{ amount }}
 
 # Transform boarding outputs and VTXOs into fresh, confirmed VTXOs for a given actor
 settle actor:
-    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed settle
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic settle
 
 # Subscribe to an address
 subscribe actor address:
-    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed subscribe {{ address }}
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic subscribe {{ address }}
 
 # Send coins to an Onchain address from a given actor, e.g. just send-onchain bob bc1... 1234
 send-onchain actor address amount:
-    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed send-onchain {{ address }} {{ amount }}
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic send-onchain {{ address }} {{ amount }}
 
 # Send coins to an Onchain address using specific VTXOs, e.g. just send-onchain-vtxo-selection alice "abc123:0,def456:1" bc1... 50000
 send-onchain-vtxo-selection actor vtxos address amount:
-    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed send-onchain-with-vtxos --vtxos {{ vtxos }} {{ address }} {{ amount }}
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic send-onchain-with-vtxos --vtxos {{ vtxos }} {{ address }} {{ amount }}
 
 # Receive via lightning
 lightning-invoice actor amount:
-    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed lightning-invoice {{ amount }}
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic lightning-invoice {{ amount }}
 
 # Pay lightning invoice
 pay-invoice actor invoice:
-    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed pay-invoice {{ invoice }}
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic pay-invoice {{ invoice }}
 
 # Refund a submarine swap collaboratively
 refund-swap-collab actor swap_id:
-    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed refund-swap {{ swap_id }}
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic refund-swap {{ swap_id }}
 
 # Refund a submarine swap without the receiver
 refund-swap actor swap_id:
-    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed refund-swap-without-receiver {{ swap_id }}
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic refund-swap-without-receiver {{ swap_id }}
 
 # List all VTXOs and boarding outputs for a given actor
 list-vtxos actor:
-    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed list-vtxos
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic list-vtxos
 
 # Settle specific VTXOs by outpoint for a given actor, e.g. just settle-vtxos alice "abc123:0,def456:1"
 settle-vtxos actor vtxos:
-    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed settle-vtxos --vtxos {{ vtxos }}
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic settle-vtxos --vtxos {{ vtxos }}
 
 # Settle specific boarding outputs by outpoint for a given actor
 settle-boarding actor boarding:
-    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed settle-vtxos --boarding {{ boarding }}
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic settle-vtxos --boarding {{ boarding }}
 
 # Settle specific VTXOs and boarding outputs by outpoint for a given actor
 settle-selected actor vtxos boarding:
-    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed settle-vtxos --vtxos {{ vtxos }} --boarding {{ boarding }}
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic settle-vtxos --vtxos {{ vtxos }} --boarding {{ boarding }}
 
 # Settle all recoverable VTXOs for a given actor
 settle-recoverable actor:
@@ -92,22 +92,22 @@ settle-recoverable actor:
     if [ -z "$outpoints" ]; then
         echo '{"commitment_txid": null, "message": "No recoverable VTXOs found"}'
     else
-        cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed settle-vtxos --vtxos "$outpoints"
+        cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic settle-vtxos --vtxos "$outpoints"
     fi
 
 # Estimate fees for sending on-chain (collaborative redeem), e.g. just estimate-fees alice bc1... 50000
 estimate-fees actor address amount:
-    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed estimate-fees {{ address }} {{ amount }}
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic estimate-fees {{ address }} {{ amount }}
 
 
 # List pending (submitted but not finalized) offchain transactions for a given actor
 list-pending-txs actor:
-    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed list-pending-txs
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic list-pending-txs
 
 # Continue and finalize any pending offchain transactions for a given actor
 continue-pending-txs actor:
-    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed continue-pending-txs
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic continue-pending-txs
 
 # Submit an offchain tx WITHOUT finalizing (for testing pending tx recovery)
 submit-only actor address amount:
-    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed submit-only {{ address }} {{ amount }}
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic submit-only {{ address }} {{ amount }}

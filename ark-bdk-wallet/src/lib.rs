@@ -61,6 +61,22 @@ where
     ) -> Result<Self> {
         let key = kp.secret_key();
         let xprv = Xpriv::new_master(network, key.as_ref())?;
+        Self::new_from_xpriv(xprv, secp, network, esplora_url, db)
+    }
+
+    /// Create a new wallet from a BIP32 extended private key.
+    ///
+    /// This avoids the double-derivation that occurs when using [`Self::new`] with a keypair
+    /// derived from an existing Xpriv. Use this when you already have an Xpriv (e.g. from a
+    /// BIP39 mnemonic).
+    pub fn new_from_xpriv(
+        xprv: Xpriv,
+        secp: Secp256k1<All>,
+        network: Network,
+        esplora_url: &str,
+        db: DB,
+    ) -> Result<Self> {
+        let kp = xprv.to_keypair(&secp);
         let external = bdk_wallet::template::Bip84(xprv, KeychainKind::External);
         let change = bdk_wallet::template::Bip84(xprv, KeychainKind::Internal);
         let wallet = BdkWallet::create(external, change)
