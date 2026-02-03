@@ -148,6 +148,8 @@ enum Commands {
     ListPendingTxs,
     /// Continue and finalize any pending offchain transactions.
     ContinuePendingTxs,
+    /// Submit an offchain tx WITHOUT finalizing (for testing pending tx recovery).
+    SubmitOnly { address: ArkAddressCli, amount: u64 },
 }
 
 #[derive(Clone)]
@@ -760,6 +762,67 @@ async fn main() -> Result<()> {
                 pending_txs: entries,
             };
             println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        Commands::SubmitOnly { address, amount } => {
+            let amount = Amount::from_sat(*amount);
+
+            let (vtxo_list, script_pubkey_to_vtxo_map) =
+                client.list_vtxos().await.map_err(|e| anyhow!(e))?;
+
+            let spendable = vtxo_list
+                .spendable_offchain()
+                .map(|vtxo| ark_core::coin_select::VirtualTxOutPoint {
+                    outpoint: vtxo.outpoint,
+                    script_pubkey: vtxo.script.clone(),
+                    expire_at: vtxo.expires_at,
+                    amount: vtxo.amount,
+                })
+                .collect::<Vec<_>>();
+
+            let selected = ark_core::coin_select::select_vtxos(
+                spendable,
+                amount,
+                client.server_info.dust,
+                true,
+            )
+            .map_err(|e| anyhow!(e))?;
+
+            let vtxo_inputs: Vec<ark_core::send::VtxoInput> = selected
+                .into_iter()
+                .map(|coin| {
+                    let vtxo = script_pubkey_to_vtxo_map
+                        .get(&coin.script_pubkey)
+                        .ok_or_else(|| {
+                            anyhow!("missing VTXO for script pubkey: {}", coin.script_pubkey)
+                        })?;
+                    let (forfeit_script, control_block) = vtxo
+                        .forfeit_spend_info()
+                        .context("failed to get forfeit spend info")?;
+                    Ok(ark_core::send::VtxoInput::new(
+                        forfeit_script,
+                        None,
+                        control_block,
+                        vtxo.tapscripts(),
+                        vtxo.script_pubkey(),
+                        coin.amount,
+                        coin.outpoint,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            let ark_txid = client
+                .submit_offchain_tx(vtxo_inputs, address.0, amount)
+                .await
+                .map_err(|e| anyhow!(e))?;
+
+            tracing::info!(%ark_txid, "Submitted offchain tx WITHOUT finalizing");
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "ark_txid": ark_txid.to_string(),
+                    "status": "submitted_not_finalized"
+                }))?
+            );
         }
         Commands::ContinuePendingTxs => {
             let finalized = client

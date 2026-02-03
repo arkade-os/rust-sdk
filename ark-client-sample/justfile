@@ -107,3 +107,7 @@ list-pending-txs actor:
 # Continue and finalize any pending offchain transactions for a given actor
 continue-pending-txs actor:
     cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed continue-pending-txs
+
+# Submit an offchain tx WITHOUT finalizing (for testing pending tx recovery)
+submit-only actor address amount:
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --seed ./{{ actor }}/ark.seed submit-only {{ address }} {{ amount }}
