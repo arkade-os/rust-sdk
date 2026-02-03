@@ -1641,8 +1641,8 @@ where
                                     .wallet
                                     .sk_for_pk(pk)
                                     .map_err(|e| ark_core::Error::ad_hoc(e.to_string()))?;
-                                let secp = Secp256k1::new();
-                                Ok(secp.sign_schnorr_no_aux_rand(msg, &sk.keypair(&secp)))
+                                let secp = self.secp();
+                                Ok(secp.sign_schnorr_no_aux_rand(msg, &sk.keypair(secp)))
                             };
 
                             sign_commitment_psbt(
