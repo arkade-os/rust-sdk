@@ -329,7 +329,19 @@ where
             .map_err(Error::ark_server)
             .context("failed to submit offchain transaction request")?;
 
-        for (index, checkpoint_psbt) in res.signed_checkpoint_txs.iter_mut().enumerate() {
+        // Build a map from checkpoint txid → witness_script from the client's
+        // original checkpoints. The server may return signed checkpoints in a
+        // different order, so we match by txid rather than assuming index order.
+        let client_checkpoint_ws: std::collections::HashMap<_, _> = checkpoint_txs
+            .iter()
+            .map(|cp| {
+                let txid = cp.unsigned_tx.compute_txid();
+                let ws = cp.inputs[0].witness_script.clone();
+                (txid, ws)
+            })
+            .collect();
+
+        for checkpoint_psbt in res.signed_checkpoint_txs.iter_mut() {
             let sign_fn = |input: &mut psbt::Input,
                            msg: secp256k1::Message|
              -> Result<
@@ -355,10 +367,10 @@ where
                 }
             };
 
-            // TODO: Maybe it's better to add the signature from the server-signed checkpoint PSBT
-            // instead.
-            checkpoint_psbt.inputs[0].witness_script =
-                checkpoint_txs[index].inputs[0].witness_script.clone();
+            let cp_txid = checkpoint_psbt.unsigned_tx.compute_txid();
+            if let Some(ws) = client_checkpoint_ws.get(&cp_txid).cloned().flatten() {
+                checkpoint_psbt.inputs[0].witness_script = Some(ws);
+            }
 
             sign_checkpoint_transaction(sign_fn, checkpoint_psbt)?;
         }
@@ -421,19 +433,44 @@ where
             let ark_txid = pending_tx.ark_txid;
             let mut signed_checkpoint_txs = pending_tx.signed_checkpoint_txs;
 
-            for (index, checkpoint_psbt) in signed_checkpoint_txs.iter_mut().enumerate() {
-                let witness_script = pending_tx
-                    .signed_ark_tx
-                    .inputs
-                    .get(index)
-                    .and_then(|input| input.witness_script.clone())
-                    .ok_or_else(|| {
-                        Error::ad_hoc(format!(
-                            "missing witness script on ark tx input {index} for pending tx {ark_txid}"
-                        ))
-                    })?;
+            // Build a map from checkpoint txid → ark tx input index, since the
+            // server may return checkpoint txs in a different order than the ark
+            // tx inputs reference them.
+            let ark_tx_input_index_by_checkpoint_txid: std::collections::HashMap<_, _> = pending_tx
+                .signed_ark_tx
+                .unsigned_tx
+                .input
+                .iter()
+                .enumerate()
+                .map(|(i, inp)| (inp.previous_output.txid, i))
+                .collect();
 
-                checkpoint_psbt.inputs[0].witness_script = Some(witness_script);
+            for checkpoint_psbt in signed_checkpoint_txs.iter_mut() {
+                if checkpoint_psbt.inputs[0].witness_script.is_none() {
+                    // Server stripped the witness_script — restore it from
+                    // the ark tx input that spends this checkpoint.
+                    let checkpoint_txid = checkpoint_psbt.unsigned_tx.compute_txid();
+                    let ark_input_idx = ark_tx_input_index_by_checkpoint_txid
+                        .get(&checkpoint_txid)
+                        .ok_or_else(|| {
+                            Error::ad_hoc(format!(
+                                "checkpoint txid {checkpoint_txid} not found in ark tx inputs for pending tx {ark_txid}"
+                            ))
+                        })?;
+
+                    let witness_script = pending_tx
+                        .signed_ark_tx
+                        .inputs
+                        .get(*ark_input_idx)
+                        .and_then(|input| input.witness_script.clone())
+                        .ok_or_else(|| {
+                            Error::ad_hoc(format!(
+                                "missing witness script on ark tx input {ark_input_idx} for pending tx {ark_txid}"
+                            ))
+                        })?;
+
+                    checkpoint_psbt.inputs[0].witness_script = Some(witness_script);
+                }
 
                 let sign_fn = |input: &mut psbt::Input,
                                msg: secp256k1::Message|
