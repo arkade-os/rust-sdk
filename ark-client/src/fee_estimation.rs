@@ -86,7 +86,7 @@ where
                 change_address,
                 change_amount,
             },
-            batch::IntentMessageType::EstimateIntentFee,
+            batch::PrepareIntentKind::EstimateFee,
         )?;
 
         let amount = self.network_client().estimate_fees(intent.intent).await?;
@@ -144,7 +144,7 @@ where
                 to_address,
                 to_amount: total_amount,
             },
-            batch::IntentMessageType::EstimateIntentFee,
+            batch::PrepareIntentKind::EstimateFee,
         )?;
 
         let amount = self.network_client().estimate_fees(intent.intent).await?;
@@ -253,7 +253,7 @@ where
                 change_address,
                 change_amount,
             },
-            batch::IntentMessageType::EstimateIntentFee,
+            batch::PrepareIntentKind::EstimateFee,
         )?;
 
         let amount = self.network_client().estimate_fees(intent.intent).await?;
@@ -345,7 +345,7 @@ where
                 to_address,
                 to_amount: total_input_amount,
             },
-            batch::IntentMessageType::EstimateIntentFee,
+            batch::PrepareIntentKind::EstimateFee,
         )?;
 
         let amount = self.network_client().estimate_fees(intent.intent).await?;
