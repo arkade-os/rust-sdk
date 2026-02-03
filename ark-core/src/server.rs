@@ -618,6 +618,13 @@ pub struct SubmitOffchainTxResponse {
 }
 
 #[derive(Debug, Clone)]
+pub struct PendingTx {
+    pub ark_txid: Txid,
+    pub signed_ark_tx: Psbt,
+    pub signed_checkpoint_txs: Vec<Psbt>,
+}
+
+#[derive(Debug, Clone)]
 pub struct FinalizeOffchainTxResponse {}
 
 #[derive(Debug)]

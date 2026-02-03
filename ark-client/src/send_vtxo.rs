@@ -7,6 +7,7 @@ use crate::Blockchain;
 use crate::Client;
 use crate::Error;
 use ark_core::coin_select::select_vtxos;
+use ark_core::intent;
 use ark_core::script::extract_checksig_pubkeys;
 use ark_core::send;
 use ark_core::send::build_offchain_transactions;
@@ -21,6 +22,7 @@ use bitcoin::secp256k1;
 use bitcoin::secp256k1::schnorr;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
+use bitcoin::TxOut;
 use bitcoin::Txid;
 use bitcoin::XOnlyPublicKey;
 
@@ -199,6 +201,73 @@ where
             .await
     }
 
+    /// Build, sign and submit an offchain transaction to the server without finalizing.
+    ///
+    /// This is primarily useful for testing pending transaction recovery flows.
+    ///
+    /// Returns the Ark txid. The transaction will remain in a pending state on the server
+    /// until [`Self::continue_pending_offchain_txs`] or a manual finalize call completes it.
+    #[cfg(feature = "test-utils")]
+    pub async fn submit_offchain_tx(
+        &self,
+        vtxo_inputs: Vec<send::VtxoInput>,
+        address: ArkAddress,
+        amount: Amount,
+    ) -> Result<Txid, Error> {
+        let (change_address, _) = self.get_offchain_address()?;
+
+        let OffchainTransactions {
+            mut ark_tx,
+            checkpoint_txs,
+        } = build_offchain_transactions(
+            &[(&address, amount)],
+            Some(&change_address),
+            &vtxo_inputs,
+            &self.server_info,
+        )
+        .map_err(Error::from)
+        .context("failed to build offchain transactions")?;
+
+        for i in 0..checkpoint_txs.len() {
+            let sign_fn = |input: &mut psbt::Input,
+                           msg: secp256k1::Message|
+             -> Result<
+                Vec<(schnorr::Signature, XOnlyPublicKey)>,
+                ark_core::Error,
+            > {
+                match &input.witness_script {
+                    None => Err(ark_core::Error::ad_hoc(
+                        "Missing witness script for psbt::Input when signing ark transaction",
+                    )),
+                    Some(script) => {
+                        let mut res = vec![];
+                        let pks = extract_checksig_pubkeys(script);
+                        for pk in pks {
+                            if let Ok(keypair) = self.keypair_by_pk(&pk) {
+                                let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &keypair);
+                                let pk = keypair.x_only_public_key().0;
+                                res.push((sig, pk))
+                            }
+                        }
+                        Ok(res)
+                    }
+                }
+            };
+
+            sign_ark_transaction(sign_fn, &mut ark_tx, i)?;
+        }
+
+        let ark_txid = ark_tx.unsigned_tx.compute_txid();
+
+        self.network_client()
+            .submit_offchain_transaction_request(ark_tx, checkpoint_txs)
+            .await
+            .map_err(Error::ark_server)
+            .context("failed to submit offchain transaction request")?;
+
+        Ok(ark_txid)
+    }
+
     /// Build and sign an Ark transaction with the given VTXO inputs.
     ///
     /// This is a shared helper used by both [`Self::send_vtxo`] and [`Self::send_vtxo_selection`].
@@ -312,5 +381,193 @@ where
         }
 
         Ok(ark_txid)
+    }
+
+    /// Resume and finalize any pending (submitted but not finalized) offchain transactions.
+    ///
+    /// This handles the case where `send_vtxo` successfully submitted the transaction to the
+    /// server but failed before finalizing (e.g. due to a crash or network error). The server
+    /// holds the submitted-but-not-finalized transaction in a pending state. This method
+    /// retrieves it, signs the checkpoint transactions, and finalizes.
+    ///
+    /// # Returns
+    ///
+    /// The [`Txid`]s of the finalized Ark transactions, or an empty vec if there were no
+    /// pending transactions.
+    pub async fn continue_pending_offchain_txs(&self) -> Result<Vec<Txid>, Error> {
+        let ark_addresses = self.get_offchain_addresses()?;
+
+        let script_pubkey_to_vtxo_map: std::collections::HashMap<_, _> = ark_addresses
+            .iter()
+            .map(|(a, v)| (a.to_p2tr_script_pubkey(), v.clone()))
+            .collect();
+
+        let addresses = ark_addresses.iter().map(|(a, _)| *a);
+        let request = ark_core::server::GetVtxosRequest::new_for_addresses(addresses)
+            .pending_only()
+            .context("failed to build pending vtxo request")?;
+
+        let pending_vtxos = self
+            .fetch_all_vtxos(request)
+            .await
+            .context("failed to fetch pending VTXOs")?;
+
+        if pending_vtxos.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let vtxo_inputs: Vec<intent::Input> = pending_vtxos
+            .iter()
+            .map(|virtual_tx_outpoint| {
+                let vtxo = script_pubkey_to_vtxo_map
+                    .get(&virtual_tx_outpoint.script)
+                    .ok_or_else(|| {
+                        Error::ad_hoc(format!(
+                            "missing VTXO for script pubkey: {}",
+                            virtual_tx_outpoint.script
+                        ))
+                    })?;
+                let spend_info = vtxo
+                    .forfeit_spend_info()
+                    .context("failed to get forfeit spend info")?;
+
+                Ok(intent::Input::new(
+                    virtual_tx_outpoint.outpoint,
+                    vtxo.exit_delay(),
+                    None,
+                    TxOut {
+                        value: virtual_tx_outpoint.amount,
+                        script_pubkey: vtxo.script_pubkey(),
+                    },
+                    vtxo.tapscripts(),
+                    spend_info,
+                    false,
+                    virtual_tx_outpoint.is_swept,
+                ))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("valid duration")
+            .as_secs();
+
+        let message = intent::IntentMessage::GetPendingTx {
+            expire_at: now + (2 * 60),
+        };
+
+        let secp = Secp256k1::new();
+        let sign_for_vtxo_fn =
+            |input: &mut psbt::Input,
+             msg: secp256k1::Message|
+             -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
+                match &input.witness_script {
+                    None => Err(ark_core::Error::ad_hoc(
+                        "Missing witness script in psbt::Input when signing get-pending-tx intent",
+                    )),
+                    Some(script) => {
+                        let pks = extract_checksig_pubkeys(script);
+                        let mut res = vec![];
+                        for pk in pks {
+                            if let Ok(keypair) = self.keypair_by_pk(&pk) {
+                                let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
+                                res.push((sig, keypair.x_only_public_key().0));
+                            }
+                        }
+                        Ok(res)
+                    }
+                }
+            };
+
+        let sign_for_onchain_fn =
+            |_: &mut psbt::Input,
+             _: secp256k1::Message|
+             -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+                Err(ark_core::Error::ad_hoc(
+                    "unexpected onchain input in get-pending-tx intent",
+                ))
+            };
+
+        let get_pending_intent = intent::make_intent(
+            sign_for_vtxo_fn,
+            sign_for_onchain_fn,
+            vtxo_inputs,
+            vec![],
+            message,
+        )?;
+
+        let pending_txs = self
+            .network_client()
+            .get_pending_tx(get_pending_intent)
+            .await
+            .map_err(Error::ark_server)
+            .context("failed to get pending transactions")?;
+
+        if pending_txs.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut finalized_txids = Vec::new();
+
+        for pending_tx in pending_txs {
+            let ark_txid = pending_tx.ark_txid;
+            let mut signed_checkpoint_txs = pending_tx.signed_checkpoint_txs;
+
+            for (index, checkpoint_psbt) in signed_checkpoint_txs.iter_mut().enumerate() {
+                let witness_script = pending_tx
+                    .signed_ark_tx
+                    .inputs
+                    .get(index)
+                    .and_then(|input| input.witness_script.clone())
+                    .ok_or_else(|| {
+                        Error::ad_hoc(format!(
+                            "missing witness script on ark tx input {index} for pending tx {ark_txid}"
+                        ))
+                    })?;
+
+                checkpoint_psbt.inputs[0].witness_script = Some(witness_script);
+
+                let sign_fn = |input: &mut psbt::Input,
+                               msg: secp256k1::Message|
+                 -> Result<
+                    Vec<(schnorr::Signature, XOnlyPublicKey)>,
+                    ark_core::Error,
+                > {
+                    match &input.witness_script {
+                        None => Err(ark_core::Error::ad_hoc(
+                            "Missing witness script for psbt::Input signing checkpoint tx",
+                        )),
+                        Some(script) => {
+                            let mut res = vec![];
+                            let pks = extract_checksig_pubkeys(script);
+                            for pk in pks {
+                                if let Ok(keypair) = self.keypair_by_pk(&pk) {
+                                    let sig =
+                                        Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &keypair);
+                                    let pk = keypair.x_only_public_key().0;
+                                    res.push((sig, pk));
+                                }
+                            }
+                            Ok(res)
+                        }
+                    }
+                };
+
+                sign_checkpoint_transaction(sign_fn, checkpoint_psbt)?;
+            }
+
+            timeout_op(
+                self.inner.timeout,
+                self.network_client()
+                    .finalize_offchain_transaction(ark_txid, signed_checkpoint_txs),
+            )
+            .await?
+            .map_err(Error::ark_server)
+            .context("failed to finalize pending offchain transaction")?;
+
+            finalized_txids.push(ark_txid);
+        }
+
+        Ok(finalized_txids)
     }
 }
