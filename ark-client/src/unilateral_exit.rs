@@ -211,7 +211,7 @@ where
         to_amount: Amount,
     ) -> Result<Txid, Error> {
         let (tx, _) = self
-            .create_send_on_chain_transaction(to_address, to_amount)
+            .create_send_on_chain_transaction_inner(to_address, to_amount)
             .await?;
 
         let txid = tx.compute_txid();
@@ -227,13 +227,20 @@ where
         Ok(txid)
     }
 
-    /// Helper function to `send_on_chain`.
+    /// Build the on-chain send transaction without broadcasting.
     ///
-    /// We extract this and keep it as part of the public API to be able to test the resulting
-    /// transaction in the e2e tests without needing to wait for a long time.
-    ///
-    /// TODO: Obviously, it's bad to have this as part of the public API. Do something about it!
+    /// Primarily useful for testing. Exposed publicly behind the `test-utils` feature.
+    #[cfg(feature = "test-utils")]
     pub async fn create_send_on_chain_transaction(
+        &self,
+        to_address: Address,
+        to_amount: Amount,
+    ) -> Result<(Transaction, Vec<TxOut>), Error> {
+        self.create_send_on_chain_transaction_inner(to_address, to_amount)
+            .await
+    }
+
+    pub(crate) async fn create_send_on_chain_transaction_inner(
         &self,
         to_address: Address,
         to_amount: Amount,
