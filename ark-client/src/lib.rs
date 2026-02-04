@@ -496,20 +496,8 @@ where
         timeout_op(self.timeout, self.network_client.connect())
             .await
             .context("Failed to connect to Ark server")??;
-        let server_info = timeout_op(self.timeout, self.network_client.get_info())
-            .await
-            .context("Failed to get Ark server info")??;
 
-        tracing::debug!(
-            name = self.name,
-            ark_server_url = ?self.network_client,
-            "Connected to Ark server"
-        );
-
-        Ok(Client {
-            inner: self,
-            server_info,
-        })
+        self.finish_connect().await
     }
 
     /// Connects to the Ark server and retrieves server information.
@@ -543,6 +531,10 @@ where
             };
         }
 
+        self.finish_connect().await
+    }
+
+    async fn finish_connect(mut self) -> Result<Client<B, W, S, K>, Error> {
         let server_info = timeout_op(self.timeout, self.network_client.get_info())
             .await
             .context("Failed to get Ark server info")??;
@@ -560,6 +552,10 @@ where
 
         if let Err(error) = client.discover_keys(DEFAULT_GAP_LIMIT).await {
             tracing::warn!(?error, "Failed during key discovery");
+        };
+
+        if let Err(error) = client.continue_pending_offchain_txs().await {
+            tracing::warn!(?error, "Failed to recover pending transactions");
         };
 
         Ok(client)
