@@ -117,8 +117,6 @@ pub fn generate_nonce_tree<R>(
 where
     R: Rng + CryptoRng,
 {
-    let secp_musig = ::musig::Secp256k1::new();
-
     let batch_tree_tx_map = batch_tree_tx_graph.as_map();
 
     let nonce_tree = batch_tree_tx_map
@@ -132,10 +130,7 @@ where
                 )));
             }
 
-            // TODO: We would like to use our own RNG here, but this library is using a
-            // different version of `rand`. I think it's not worth the hassle at this stage,
-            // particularly because this duplicated dependency will go away anyway.
-            let session_id = musig::SessionSecretRand::new();
+            let session_id = musig::SessionSecretRand::assume_unique_per_nonce_gen(rng.r#gen());
             let extra_rand = rng.r#gen();
 
             let msg = tree_tx_sighash(tx, &batch_tree_tx_map, commitment_tx)?;
@@ -145,16 +140,11 @@ where
                     .iter()
                     .map(|pk| to_musig_pk(*pk))
                     .collect::<Vec<_>>();
-                musig::KeyAggCache::new(&secp_musig, &cosigner_pks.iter().collect::<Vec<_>>())
+                musig::KeyAggCache::new(&cosigner_pks.iter().collect::<Vec<_>>())
             };
 
-            let (nonce, pub_nonce) = key_agg_cache.nonce_gen(
-                &secp_musig,
-                session_id,
-                to_musig_pk(own_cosigner_pk),
-                msg,
-                extra_rand,
-            );
+            let (nonce, pub_nonce) =
+                key_agg_cache.nonce_gen(session_id, to_musig_pk(own_cosigner_pk), &msg, extra_rand);
 
             Ok((*txid, (Some(nonce), pub_nonce)))
         })
@@ -170,7 +160,7 @@ fn tree_tx_sighash(
     tx_map: &HashMap<Txid, &Psbt>,
     // The commitment transaction, in case it contains the previous output.
     commitment_tx: &Psbt,
-) -> Result<::musig::Message, Error> {
+) -> Result<[u8; 32], Error> {
     let tx = &psbt.unsigned_tx;
 
     // We expect a single input to a VTXO.
@@ -210,20 +200,17 @@ fn tree_tx_sighash(
     let tap_sighash = SighashCache::new(tx)
         .taproot_key_spend_signature_hash(VTXO_INPUT_INDEX, &prevouts, TapSighashType::Default)
         .map_err(Error::crypto)?;
-    let msg = ::musig::Message::from_digest(tap_sighash.to_raw_hash().to_byte_array());
 
-    Ok(msg)
+    Ok(tap_sighash.to_raw_hash().to_byte_array())
 }
 
 /// Compute the aggregated nonce public key for a transaction in the VTXO tree.
 ///
 /// The [`TreeTxNoncePks`] holds the public nonces of all the cosigners of this transaction.
 pub fn aggregate_nonces(tree_tx_nonce_pks: TreeTxNoncePks) -> musig::AggregatedNonce {
-    let secp_musig = ::musig::Secp256k1::new();
-
     let pks = tree_tx_nonce_pks.to_pks();
     let ref_pks = pks.iter().collect::<Vec<_>>();
-    musig::AggregatedNonce::new(&secp_musig, &ref_pks)
+    musig::AggregatedNonce::new(&ref_pks)
 }
 
 /// Use `own_cosigner_kp` to sign each batch tree transaction output that we are a part, using
@@ -245,11 +232,9 @@ pub fn sign_batch_tree_tx(
     let internal_node_script = TreeTxOutputScript::new(vtxo_tree_expiry, server_pk);
 
     let secp = Secp256k1::new();
-    let secp_musig = ::musig::Secp256k1::new();
 
-    let own_cosigner_kp =
-        ::musig::Keypair::from_seckey_slice(&secp_musig, &own_cosigner_kp.secret_bytes())
-            .map_err(|e| Error::ad_hoc(format!("invalid keypair: {e}")))?;
+    let own_cosigner_kp = ::musig::Keypair::from_seckey_byte_array(own_cosigner_kp.secret_bytes())
+        .map_err(|e| Error::ad_hoc(format!("invalid keypair: {e}")))?;
 
     let batch_tree_tx_map = batch_tree_tx_graph.as_map();
 
@@ -273,19 +258,19 @@ pub fn sign_batch_tree_tx(
             .iter()
             .map(|pk| to_musig_pk(*pk))
             .collect::<Vec<_>>();
-        musig::KeyAggCache::new(&secp_musig, &cosigner_pks.iter().collect::<Vec<_>>())
+        musig::KeyAggCache::new(&cosigner_pks.iter().collect::<Vec<_>>())
     };
 
     let sweep_tap_tree =
         internal_node_script.sweep_spend_leaf(&secp, from_musig_xonly(key_agg_cache.agg_pk()));
 
     let tweak = ::musig::Scalar::from(
-        ::musig::SecretKey::from_slice(sweep_tap_tree.tap_tweak().as_byte_array())
+        ::musig::SecretKey::from_secret_bytes(*sweep_tap_tree.tap_tweak().as_byte_array())
             .map_err(|e| Error::ad_hoc(format!("invalid tweak: {e}")))?,
     );
 
     key_agg_cache
-        .pubkey_xonly_tweak_add(&secp_musig, &tweak)
+        .pubkey_xonly_tweak_add(&tweak)
         .map_err(Error::crypto)?;
 
     let msg = tree_tx_sighash(psbt, &batch_tree_tx_map, commitment_psbt)?;
@@ -294,8 +279,7 @@ pub fn sign_batch_tree_tx(
         .take_sk(&tree_txid)
         .ok_or_else(|| Error::crypto(format!("missing nonce for tree TX {tree_txid}")))?;
 
-    let sig = musig::Session::new(&secp_musig, &key_agg_cache, agg_nonce_pk, msg).partial_sign(
-        &secp_musig,
+    let sig = musig::Session::new(&key_agg_cache, agg_nonce_pk, &msg).partial_sign(
         nonce_sk,
         &own_cosigner_kp,
         &key_agg_cache,

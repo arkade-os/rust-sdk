@@ -12,7 +12,7 @@ workspace = true
 [dependencies]
 bech32 = "0.11"
 bitcoin = { version = "0.32.7", features = ["base64", "rand", "serde"] }
-musig = { package = "ark-secp256k1", path = "../ark-rust-secp256k1", features = ["serde", "rand"] }
+musig = { package = "secp256k1", version = "0.32.0-beta.2", features = ["serde"] }
 rand = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

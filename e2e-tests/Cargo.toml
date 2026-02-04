@@ -21,7 +21,6 @@ bitcoin = { version = "0.32.7", features = ["rand"] }
 bitcoinconsensus = "0.106.0"
 esplora-client = { version = "0.10.0", features = ["async-https", "blocking-https"] }
 futures = "0.3.31"
-musig = { package = "ark-secp256k1", path = "../ark-rust-secp256k1", features = ["serde"] }
 prost = "0.13.3"
 rand = "0.8.5"
 regex = "1"
