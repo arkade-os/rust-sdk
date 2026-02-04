@@ -25,6 +25,7 @@ use bitcoin::OutPoint;
 use bitcoin::TxOut;
 use bitcoin::Txid;
 use bitcoin::XOnlyPublicKey;
+use std::time::Duration;
 
 impl<B, W, S, K> Client<B, W, S, K>
 where
@@ -375,14 +376,8 @@ where
             sign_checkpoint_transaction(sign_fn, checkpoint_psbt)?;
         }
 
-        timeout_op(
-            self.inner.timeout,
-            self.network_client()
-                .finalize_offchain_transaction(ark_txid, res.signed_checkpoint_txs),
-        )
-        .await?
-        .map_err(Error::ark_server)
-        .context("failed to finalize offchain transaction")?;
+        self.finalize_with_retry(ark_txid, res.signed_checkpoint_txs)
+            .await?;
 
         let used_pk = change_address_vtxo.owner_pk();
         if let Err(err) = self.inner.key_provider.mark_as_used(&used_pk) {
@@ -393,6 +388,54 @@ where
         }
 
         Ok(ark_txid)
+    }
+
+    /// Finalize an offchain transaction, retrying on transient failures.
+    ///
+    /// After submit succeeds but before finalize completes, a network error
+    /// would leave the transaction in a pending state. Retrying here avoids
+    /// that without needing full recovery via [`Self::continue_pending_offchain_txs`].
+    async fn finalize_with_retry(
+        &self,
+        ark_txid: Txid,
+        signed_checkpoint_txs: Vec<bitcoin::Psbt>,
+    ) -> Result<(), Error> {
+        const MAX_RETRIES: usize = 3;
+
+        let mut last_err = None;
+
+        for attempt in 0..=MAX_RETRIES {
+            if attempt > 0 {
+                let delay = Duration::from_millis(500 * (1 << (attempt - 1)));
+                tracing::warn!(
+                    %ark_txid,
+                    attempt,
+                    ?delay,
+                    "Retrying finalize after transient failure"
+                );
+                crate::utils::sleep(delay).await;
+            }
+
+            match timeout_op(
+                self.inner.timeout,
+                self.network_client()
+                    .finalize_offchain_transaction(ark_txid, signed_checkpoint_txs.clone()),
+            )
+            .await
+            {
+                Ok(Ok(_)) => return Ok(()),
+                Ok(Err(e)) => {
+                    last_err = Some(Error::ark_server(e));
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                }
+            }
+        }
+
+        Err(last_err
+            .expect("at least one attempt was made")
+            .context("failed to finalize offchain transaction after retries"))
     }
 
     /// List pending (submitted but not finalized) offchain transactions.
