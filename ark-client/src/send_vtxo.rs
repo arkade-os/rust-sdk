@@ -530,28 +530,22 @@ where
             .map(|(a, v)| (a.to_p2tr_script_pubkey(), v.clone()))
             .collect();
 
-        // Fetch ALL VTXOs (not just pending_only), filter out swept & settled.
+        // Use pending_only filter to only fetch VTXOs that are spent but not
+        // finalized. This is much cheaper than fetching all VTXOs when there
+        // are no pending transactions (common case).
         let addresses = ark_addresses.iter().map(|(a, _)| *a);
-        let request = ark_core::server::GetVtxosRequest::new_for_addresses(addresses);
+        let request = ark_core::server::GetVtxosRequest::new_for_addresses(addresses)
+            .pending_only()
+            .map_err(Error::from)?;
 
-        let all_vtxos = self
+        let vtxos = self
             .fetch_all_vtxos(request)
             .await
-            .context("failed to fetch VTXOs")?;
+            .context("failed to fetch pending VTXOs")?;
 
-        let vtxos: Vec<_> = all_vtxos
-            .iter()
-            .filter(|v| !v.is_swept && v.settled_by.is_none())
-            .collect();
-
-        tracing::debug!(
-            total_vtxos = all_vtxos.len(),
-            after_filter = vtxos.len(),
-            "Fetched non-swept, non-settled VTXOs for pending tx lookup"
-        );
+        tracing::debug!(num_pending_vtxos = vtxos.len(), "Fetched pending VTXOs");
 
         if vtxos.is_empty() {
-            tracing::info!("No VTXOs found");
             return Ok(vec![]);
         }
 
