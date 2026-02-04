@@ -36,6 +36,8 @@
       in
         {
           devShells.default = with pkgs; mkShell {
+            hardeningDisable = [ "fortify" ];
+
             # TODO: Trim these.
             buildInputs = [
               binaryen
