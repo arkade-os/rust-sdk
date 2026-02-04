@@ -390,13 +390,7 @@ impl VirtualTxOutPoint {
             .as_secs() as i64;
 
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-        let current_timestamp = {
-            let window = web_sys::window().expect("should have a window in this context");
-            let performance = window
-                .performance()
-                .expect("performance should be available");
-            performance.now() as i64
-        };
+        let current_timestamp = (js_sys::Date::now() / 1000.0) as i64;
 
         current_timestamp > self.expires_at && !self.is_swept && !self.is_spent
     }
