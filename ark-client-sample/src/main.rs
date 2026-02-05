@@ -10,8 +10,10 @@ use anyhow::Context;
 use anyhow::Result;
 use ark_bdk_wallet::Wallet;
 use ark_client::lightning_invoice::Bolt11Invoice;
+use ark_client::Bip32KeyProvider;
 use ark_client::Blockchain;
 use ark_client::Error;
+use ark_client::KeyProvider;
 use ark_client::OfflineClient;
 use ark_client::SpendStatus;
 use ark_client::SqliteSwapStorage;
@@ -23,6 +25,7 @@ use ark_core::server::SubscriptionResponse;
 use ark_core::ArkAddress;
 use ark_core::ExplorerUtxo;
 use bitcoin::address::NetworkUnchecked;
+use bitcoin::bip32::Xpriv;
 use bitcoin::key::Secp256k1;
 use bitcoin::secp256k1::SecretKey;
 use bitcoin::Address;
@@ -55,9 +58,13 @@ struct Cli {
     #[arg(short, long, default_value = "ark.config.toml")]
     config: String,
 
-    /// Path to the seed file.
-    #[arg(short, long, default_value = "ark.seed")]
-    seed: String,
+    /// Path to a BIP39 mnemonic file.
+    #[arg(short, long)]
+    mnemonic: Option<String>,
+
+    /// Path to a hex-encoded secret key file.
+    #[arg(short, long)]
+    seed: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -253,16 +260,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let secp = Secp256k1::new();
 
-    let seed = fs::read_to_string(cli.seed)?;
-    let sk = SecretKey::from_str(&seed)?;
-    let kp = sk.keypair(&secp);
-
     let config = fs::read_to_string(cli.config)?;
     let config: Config = toml::from_str(&config)?;
-
-    let db = InMemoryDb::default();
-    let wallet = Wallet::new(kp, secp, Network::Regtest, config.esplora_url.as_str(), db)?;
-    let wallet = Arc::new(wallet);
 
     let esplora_client = EsploraClient::new(&config.esplora_url)?;
     let esplora_client = Arc::new(esplora_client);
@@ -272,21 +271,82 @@ async fn main() -> Result<()> {
             .await
             .map_err(|e| anyhow!(e))?,
     );
-    let client = OfflineClient::<_, _, _, StaticKeyProvider>::new_with_keypair(
-        "sample-client".to_string(),
-        kp,
-        esplora_client.clone(),
-        wallet,
-        config.ark_server_url,
-        storage,
-        config.boltz_url,
-        Duration::from_secs(30),
-    )
-    .connect()
-    .await
-    .map_err(|e| anyhow!(e))?;
 
-    match &cli.command {
+    match (cli.mnemonic, cli.seed) {
+        (Some(_), Some(_)) => bail!("specify either --mnemonic or --seed, not both"),
+        (None, None) => bail!("specify either --mnemonic or --seed"),
+        (Some(mnemonic_path), None) => {
+            let mnemonic_str = fs::read_to_string(mnemonic_path)?;
+            let mnemonic = bip39::Mnemonic::parse_normalized(mnemonic_str.trim())
+                .map_err(|e| anyhow!("invalid mnemonic: {e}"))?;
+            let seed = mnemonic.to_seed("");
+            let xpriv = Xpriv::new_master(Network::Regtest, &seed)?;
+
+            let db = InMemoryDb::default();
+            let wallet = Wallet::new_from_xpriv(
+                xpriv,
+                secp,
+                Network::Regtest,
+                config.esplora_url.as_str(),
+                db,
+            )?;
+            let wallet = Arc::new(wallet);
+
+            let client = OfflineClient::<_, _, _, Bip32KeyProvider>::new_with_bip32(
+                "sample-client".to_string(),
+                xpriv,
+                None,
+                esplora_client.clone(),
+                wallet,
+                config.ark_server_url,
+                storage,
+                config.boltz_url,
+                Duration::from_secs(30),
+            )
+            .connect()
+            .await
+            .map_err(|e| anyhow!(e))?;
+
+            run_command(cli.command, client, esplora_client).await?;
+        }
+        (None, Some(seed_path)) => {
+            let seed = fs::read_to_string(seed_path)?;
+            let sk = SecretKey::from_str(seed.trim())?;
+            let kp = sk.keypair(&secp);
+
+            let db = InMemoryDb::default();
+            let wallet = Wallet::new(kp, secp, Network::Regtest, config.esplora_url.as_str(), db)?;
+            let wallet = Arc::new(wallet);
+
+            let client = OfflineClient::<_, _, _, StaticKeyProvider>::new_with_keypair(
+                "sample-client".to_string(),
+                kp,
+                esplora_client.clone(),
+                wallet,
+                config.ark_server_url,
+                storage,
+                config.boltz_url,
+                Duration::from_secs(30),
+            )
+            .connect()
+            .await
+            .map_err(|e| anyhow!(e))?;
+
+            run_command(cli.command, client, esplora_client).await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_command<K: KeyProvider>(
+    command: Commands,
+    client: ark_client::Client<EsploraClient, Wallet<InMemoryDb>, SqliteSwapStorage, K>,
+    esplora_client: Arc<EsploraClient>,
+) -> Result<()> {
+    client.discover_keys(20).await.map_err(|e| anyhow!(e))?;
+
+    match &command {
         Commands::Balance => {
             let offchain_balance = client.offchain_balance().await.map_err(|e| anyhow!(e))?;
 
