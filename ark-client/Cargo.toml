@@ -19,7 +19,7 @@ bitcoin = { version = "0.32.7", features = ["rand", "serde"] }
 futures = "0.3.31"
 jiff = "0.2.1"
 lightning-invoice = { version = "0.33.2", features = ["serde"] }
-musig = { package = "ark-secp256k1", path = "../ark-rust-secp256k1", features = ["serde"] }
+musig = { package = "secp256k1", version = "0.32.0-beta.2", features = ["serde"] }
 prost = "0.13.3"
 prost-types = "0.13.3"
 rand = "0.8"

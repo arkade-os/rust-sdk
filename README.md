@@ -201,6 +201,12 @@ for tx in transactions {
 }
 ```
 
+## Minimum Supported Rust Version (MSRV)
+
+This library should compile with any combination of features on **Rust 1.75.0**.
+
+Use `Cargo-minimal.lock` to build the MSRV by copying to `Cargo.lock` and building.
+
 ## Local Development Setup
 
 ### Prerequisites

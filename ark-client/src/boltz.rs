@@ -779,7 +779,7 @@ where
         amount: SwapAmount,
         expiry_secs: Option<u64>,
     ) -> Result<ReverseSwapResult, Error> {
-        let preimage: [u8; 32] = musig::rand::random();
+        let preimage: [u8; 32] = rand::random();
         let preimage_hash_sha256 = sha256::Hash::hash(&preimage);
         let preimage_hash = ripemd160::Hash::hash(preimage_hash_sha256.as_byte_array());
 

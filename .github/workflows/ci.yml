@@ -64,7 +64,7 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@v2
       - name: Running cargo tests
-        run: RUST_BACKTRACE=1 cargo test --workspace --exclude ark-secp256k1
+        run: RUST_BACKTRACE=1 cargo test --workspace
 
   e2e-tests:
     needs: [ clippy ]
@@ -108,7 +108,7 @@ jobs:
       - name: Use minimal lockfile
         run: cp Cargo-minimal.lock Cargo.lock
       - name: Check MSRV
-        run: cargo check --workspace --exclude ark-secp256k1 --exclude e2e-tests --exclude ark-client-sample --exclude ark-dlc-sample
+        run: cargo check --workspace --exclude e2e-tests --exclude ark-client-sample --exclude ark-dlc-sample
 
   wasm_macos:
     strategy:
