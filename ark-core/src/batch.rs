@@ -647,13 +647,12 @@ pub fn prepare_delegate_psbts(
     let now = now.as_secs();
     let expire_at = now + (2 * 60);
 
-    let intent_message = intent::IntentMessage::new(
-        intent::IntentMessageType::Register,
-        Vec::new(),
-        now,
+    let intent_message = intent::IntentMessage::Register {
+        onchain_output_indexes: Vec::new(),
+        valid_at: now,
         expire_at,
-        vec![delegate_cosigner_pk],
-    );
+        own_cosigner_pks: vec![delegate_cosigner_pk],
+    };
 
     // Build the intent PSBT (unsigned)
     let (mut intent_psbt, _fake_input) =

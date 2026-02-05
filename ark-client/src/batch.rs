@@ -17,7 +17,6 @@ use ark_core::batch::sign_commitment_psbt;
 use ark_core::batch::Delegate;
 use ark_core::batch::NonceKps;
 use ark_core::intent;
-pub use ark_core::intent::IntentMessageType;
 use ark_core::script::extract_checksig_pubkeys;
 use ark_core::server::BatchTreeEventType;
 use ark_core::server::PartialSigTree;
@@ -1020,15 +1019,13 @@ where
     ///
     /// This creates a signed intent PSBT along with all the data needed to participate
     /// in the batch protocol.
-    ///
-    /// The `intent_message_type` parameter determines the intent message type sent to the server.
     pub(crate) fn prepare_intent<R>(
         &self,
         rng: &mut R,
         onchain_inputs: Vec<batch::OnChainInput>,
         vtxo_inputs: Vec<intent::Input>,
         output_type: BatchOutputType,
-        intent_message_type: IntentMessageType,
+        intent_kind: PrepareIntentKind,
     ) -> Result<PreparedIntent, Error>
     where
         R: Rng + CryptoRng,
@@ -1171,13 +1168,41 @@ where
                 Ok((sig, owner_pk))
             };
 
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| Error::ad_hoc(e.to_string()))
+            .context("failed to compute now timestamp")?;
+        let now = now.as_secs();
+        let expire_at = now + (2 * 60);
+
+        let mut onchain_output_indexes = Vec::new();
+        for (i, output) in outputs.iter().enumerate() {
+            if matches!(output, intent::Output::Onchain(_)) {
+                onchain_output_indexes.push(i);
+            }
+        }
+
+        let message = match intent_kind {
+            PrepareIntentKind::EstimateFee => intent::IntentMessage::EstimateIntentFee {
+                onchain_output_indexes,
+                valid_at: now,
+                expire_at,
+                own_cosigner_pks: vec![cosigner_pk],
+            },
+            PrepareIntentKind::Register => intent::IntentMessage::Register {
+                onchain_output_indexes,
+                valid_at: now,
+                expire_at,
+                own_cosigner_pks: vec![cosigner_pk],
+            },
+        };
+
         let intent = intent::make_intent(
             sign_for_vtxo_fn,
             sign_for_onchain_fn,
             inputs,
             outputs.clone(),
-            vec![cosigner_pk],
-            intent_message_type,
+            message,
         )?;
 
         Ok(PreparedIntent {
@@ -1205,7 +1230,7 @@ where
             onchain_inputs,
             vtxo_inputs,
             output_type,
-            IntentMessageType::Register,
+            PrepareIntentKind::Register,
         )?;
 
         let PreparedIntent {
@@ -1712,6 +1737,12 @@ where
             }
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum PrepareIntentKind {
+    Register,
+    EstimateFee,
 }
 
 #[derive(Debug, Clone)]

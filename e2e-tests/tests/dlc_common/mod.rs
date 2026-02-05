@@ -1187,13 +1187,23 @@ async fn settle(
         };
 
     let signing_kp = Keypair::from_secret_key(&secp, &sk);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("valid duration")
+        .as_secs();
+    let message = intent::IntentMessage::Register {
+        onchain_output_indexes: vec![],
+        valid_at: now,
+        expire_at: now + (2 * 60),
+        own_cosigner_pks: own_cosigner_pks.clone(),
+    };
+
     let intent = intent::make_intent(
         sign_for_vtxo_fn,
         sign_for_onchain_fn,
         batch_inputs,
         batch_outputs,
-        own_cosigner_pks.clone(),
-        intent::IntentMessageType::Register,
+        message,
     )?;
 
     let intent_id = grpc_client.register_intent(intent).await?;

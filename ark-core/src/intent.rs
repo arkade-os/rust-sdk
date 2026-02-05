@@ -30,8 +30,6 @@ use bitcoin::Txid;
 use bitcoin::Witness;
 use bitcoin::XOnlyPublicKey;
 use serde::Serialize;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 
 #[derive(Clone, Debug)]
 pub struct Input {
@@ -137,8 +135,7 @@ pub fn make_intent<SV, SO>(
     sign_for_onchain_fn: SO,
     inputs: Vec<Input>,
     outputs: Vec<Output>,
-    own_cosigner_pks: Vec<PublicKey>,
-    intent_message_type: IntentMessageType,
+    message: IntentMessage,
 ) -> Result<Intent, Error>
 where
     SV: Fn(
@@ -150,30 +147,7 @@ where
         secp256k1::Message,
     ) -> Result<(schnorr::Signature, XOnlyPublicKey), Error>,
 {
-    let mut onchain_output_indexes = Vec::new();
-    for (i, output) in outputs.iter().enumerate() {
-        if matches!(output, Output::Onchain(_)) {
-            onchain_output_indexes.push(i);
-        }
-    }
-
-    let now = SystemTime::now();
-    let now = now
-        .duration_since(UNIX_EPOCH)
-        .map_err(Error::ad_hoc)
-        .context("failed to compute now timestamp")?;
-    let now = now.as_secs();
-    let expire_at = now + (2 * 60);
-
-    let intent_message = IntentMessage {
-        intent_message_type,
-        onchain_output_indexes,
-        valid_at: now,
-        expire_at,
-        own_cosigner_pks,
-    };
-
-    let (mut proof_psbt, fake_input) = build_proof_psbt(&intent_message, &inputs, &outputs)?;
+    let (mut proof_psbt, fake_input) = build_proof_psbt(&message, &inputs, &outputs)?;
 
     for (i, proof_input) in proof_psbt.inputs.iter_mut().enumerate() {
         if i == 0 {
@@ -248,7 +222,7 @@ where
 
     Ok(Intent {
         proof: proof_psbt,
-        message: intent_message,
+        message,
     })
 }
 
@@ -383,52 +357,36 @@ fn message_hash(message: &[u8]) -> sha256::Hash {
 }
 
 #[derive(Serialize, Debug, Clone)]
-pub struct IntentMessage {
-    #[serde(rename = "type")]
-    intent_message_type: IntentMessageType,
-    // Indicates which outputs are on-chain out of all the outputs we are registering.
-    onchain_output_indexes: Vec<usize>,
-    // The time when this intent message is valid from.
-    valid_at: u64,
-    // The time when this intent message is no longer valid.
-    expire_at: u64,
-    #[serde(rename = "cosigners_public_keys")]
-    own_cosigner_pks: Vec<PublicKey>,
-}
-
-impl IntentMessage {
-    pub(crate) fn new(
-        intent_message_type: IntentMessageType,
+#[serde(tag = "type")]
+pub enum IntentMessage {
+    #[serde(rename = "register")]
+    Register {
         onchain_output_indexes: Vec<usize>,
         valid_at: u64,
         expire_at: u64,
+        #[serde(rename = "cosigners_public_keys")]
         own_cosigner_pks: Vec<PublicKey>,
-    ) -> Self {
-        Self {
-            intent_message_type,
-            onchain_output_indexes,
-            valid_at,
-            expire_at,
-            own_cosigner_pks,
-        }
-    }
+    },
+    #[serde(rename = "delete")]
+    Delete { expire_at: u64 },
+    #[serde(rename = "estimate-intent-fee")]
+    EstimateIntentFee {
+        onchain_output_indexes: Vec<usize>,
+        valid_at: u64,
+        expire_at: u64,
+        #[serde(rename = "cosigners_public_keys")]
+        own_cosigner_pks: Vec<PublicKey>,
+    },
+    #[serde(rename = "get-pending-tx")]
+    GetPendingTx { expire_at: u64 },
+}
 
+impl IntentMessage {
     pub fn encode(&self) -> Result<String, Error> {
-        // TODO: Probably should get rid of `serde` and `serde_json` if we serialize manually.
         serde_json::to_string(self)
             .map_err(Error::ad_hoc)
             .context("failed to serialize intent message to JSON")
     }
-}
-
-#[derive(Serialize, Debug, Clone)]
-pub enum IntentMessageType {
-    #[serde(rename = "register")]
-    Register,
-    #[serde(rename = "delete")]
-    Delete,
-    #[serde(rename = "estimate-intent-fee")]
-    EstimateIntentFee,
 }
 
 pub(crate) mod taptree {
@@ -556,5 +514,70 @@ pub(crate) mod taptree {
             let decoded = TapTree::decode(&encoded).unwrap();
             assert_eq!(decoded.0, scripts);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn intent_message_register_serialization() {
+        let pk = PublicKey::from_str(
+            "027b763fdd0d6d96d1ce6fb95e09e381fdae2bcbe3ed7d1a2bd95702524d5dcd8a",
+        )
+        .unwrap();
+        let msg = IntentMessage::Register {
+            onchain_output_indexes: vec![],
+            valid_at: 1762861934,
+            expire_at: 1762862054,
+            own_cosigner_pks: vec![pk],
+        };
+        let encoded = msg.encode().unwrap();
+        assert_eq!(
+            encoded,
+            r#"{"type":"register","onchain_output_indexes":[],"valid_at":1762861934,"expire_at":1762862054,"cosigners_public_keys":["027b763fdd0d6d96d1ce6fb95e09e381fdae2bcbe3ed7d1a2bd95702524d5dcd8a"]}"#
+        );
+    }
+
+    #[test]
+    fn intent_message_estimate_fee_serialization() {
+        let pk = PublicKey::from_str(
+            "027b763fdd0d6d96d1ce6fb95e09e381fdae2bcbe3ed7d1a2bd95702524d5dcd8a",
+        )
+        .unwrap();
+        let msg = IntentMessage::EstimateIntentFee {
+            onchain_output_indexes: vec![],
+            valid_at: 1762861934,
+            expire_at: 1762862054,
+            own_cosigner_pks: vec![pk],
+        };
+        let encoded = msg.encode().unwrap();
+        assert_eq!(
+            encoded,
+            r#"{"type":"estimate-intent-fee","onchain_output_indexes":[],"valid_at":1762861934,"expire_at":1762862054,"cosigners_public_keys":["027b763fdd0d6d96d1ce6fb95e09e381fdae2bcbe3ed7d1a2bd95702524d5dcd8a"]}"#
+        );
+    }
+
+    #[test]
+    fn intent_message_delete_serialization() {
+        let msg = IntentMessage::Delete {
+            expire_at: 1762862054,
+        };
+        let encoded = msg.encode().unwrap();
+        assert_eq!(encoded, r#"{"type":"delete","expire_at":1762862054}"#);
+    }
+
+    #[test]
+    fn intent_message_get_pending_tx_serialization() {
+        let msg = IntentMessage::GetPendingTx {
+            expire_at: 1762862054,
+        };
+        let encoded = msg.encode().unwrap();
+        assert_eq!(
+            encoded,
+            r#"{"type":"get-pending-tx","expire_at":1762862054}"#
+        );
     }
 }

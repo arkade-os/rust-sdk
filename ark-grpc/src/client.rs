@@ -240,6 +240,56 @@ impl Client {
         Ok(FinalizeOffchainTxResponse {})
     }
 
+    pub async fn get_pending_tx(
+        &self,
+        intent: ark_core::intent::Intent,
+    ) -> Result<Vec<ark_core::server::PendingTx>, Error> {
+        let mut client = self.ark_client()?;
+
+        let intent: Intent = intent.try_into()?;
+
+        let res = client
+            .get_pending_tx(generated::ark::v1::GetPendingTxRequest {
+                identifier: Some(
+                    generated::ark::v1::get_pending_tx_request::Identifier::Intent(intent),
+                ),
+            })
+            .await
+            .map_err(Error::request)?;
+
+        let inner = res.into_inner();
+        let base64 = base64::engine::GeneralPurpose::new(
+            &base64::alphabet::STANDARD,
+            base64::engine::GeneralPurposeConfig::new(),
+        );
+
+        inner
+            .pending_txs
+            .into_iter()
+            .map(|tx| {
+                let ark_txid = tx.ark_txid.parse().map_err(Error::conversion)?;
+
+                let signed_ark_tx = base64.decode(&tx.final_ark_tx).map_err(Error::conversion)?;
+                let signed_ark_tx = Psbt::deserialize(&signed_ark_tx).map_err(Error::conversion)?;
+
+                let signed_checkpoint_txs = tx
+                    .signed_checkpoint_txs
+                    .into_iter()
+                    .map(|cp| {
+                        let bytes = base64.decode(cp).map_err(Error::conversion)?;
+                        Psbt::deserialize(&bytes).map_err(Error::conversion)
+                    })
+                    .collect::<Result<Vec<_>, Error>>()?;
+
+                Ok(ark_core::server::PendingTx {
+                    ark_txid,
+                    signed_ark_tx,
+                    signed_checkpoint_txs,
+                })
+            })
+            .collect()
+    }
+
     pub async fn confirm_registration(&self, intent_id: String) -> Result<(), Error> {
         let mut client = self.ark_client()?;
 
