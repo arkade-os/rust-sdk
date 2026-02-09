@@ -33,10 +33,10 @@ impl TryFrom<crate::models::IntentFeeInfo> for ark_core::server::IntentFeeInfo {
 
     fn try_from(value: crate::models::IntentFeeInfo) -> Result<Self, Self::Error> {
         Ok(ark_core::server::IntentFeeInfo {
-            offchain_input: ark_core::server::parse_fee_amount(value.offchain_input),
-            offchain_output: ark_core::server::parse_fee_amount(value.offchain_output),
-            onchain_input: ark_core::server::parse_fee_amount(value.onchain_input),
-            onchain_output: ark_core::server::parse_fee_amount(value.onchain_output),
+            offchain_input: value.offchain_input,
+            offchain_output: value.offchain_output,
+            onchain_input: value.onchain_input,
+            onchain_output: value.onchain_output,
         })
     }
 }
