@@ -2,7 +2,7 @@
 name = "ark-bdk-wallet"
 version = "0.7.0"
 edition = { workspace = true }
-rust-version = "1.75"
+rust-version = "1.86"
 
 [lints]
 workspace = true
