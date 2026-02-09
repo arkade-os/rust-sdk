@@ -108,7 +108,7 @@ jobs:
       - name: Use minimal lockfile
         run: cp Cargo-minimal.lock Cargo.lock
       - name: Check MSRV
-        run: cargo check --workspace --exclude e2e-tests --exclude ark-client-sample --exclude ark-dlc-sample
+        run: cargo check --workspace --exclude e2e-tests --exclude ark-client-sample
 
   wasm_macos:
     strategy:
