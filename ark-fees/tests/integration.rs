@@ -517,3 +517,78 @@ fn test_vtxo_type_from_str() {
     assert_eq!("note".parse::<VtxoType>().unwrap(), VtxoType::Note);
     assert!("invalid".parse::<VtxoType>().is_err());
 }
+
+#[test]
+fn test_expiry_variable_defaults_to_zero() {
+    // When expiry is not provided, it defaults to 0.0 (Unix epoch).
+    // This ensures programs using `expiry` work consistently.
+
+    let estimator = Estimator::new(Config {
+        intent_offchain_input_program: "expiry + 1000.0".to_string(),
+        ..Default::default()
+    })
+    .expect("Program should compile");
+
+    // Input without expiry - should default to 0.0
+    let input = OffchainInput {
+        amount: 10000,
+        expiry: None,
+        birth: None,
+        input_type: VtxoType::Vtxo,
+        weight: 1.0,
+    };
+
+    let result = estimator.eval_offchain_input(input).unwrap();
+    // 0.0 + 1000.0 = 1000.0
+    assert!((result.0 - 1000.0).abs() < 0.001);
+
+    // Input with expiry - should use provided value
+    let input_with_expiry = OffchainInput {
+        amount: 10000,
+        expiry: Some(5000),
+        birth: None,
+        input_type: VtxoType::Vtxo,
+        weight: 1.0,
+    };
+
+    let result = estimator.eval_offchain_input(input_with_expiry).unwrap();
+    // 5000.0 + 1000.0 = 6000.0
+    assert!((result.0 - 6000.0).abs() < 0.001);
+}
+
+#[test]
+fn test_birth_variable_defaults_to_zero() {
+    // When birth is not provided, it defaults to 0.0 (Unix epoch).
+
+    let estimator = Estimator::new(Config {
+        intent_offchain_input_program: "birth + 500.0".to_string(),
+        ..Default::default()
+    })
+    .expect("Program should compile");
+
+    // Input without birth - should default to 0.0
+    let input = OffchainInput {
+        amount: 10000,
+        expiry: None,
+        birth: None,
+        input_type: VtxoType::Vtxo,
+        weight: 1.0,
+    };
+
+    let result = estimator.eval_offchain_input(input).unwrap();
+    // 0.0 + 500.0 = 500.0
+    assert!((result.0 - 500.0).abs() < 0.001);
+
+    // Input with birth - should use provided value
+    let input_with_birth = OffchainInput {
+        amount: 10000,
+        expiry: None,
+        birth: Some(2000),
+        input_type: VtxoType::Vtxo,
+        weight: 1.0,
+    };
+
+    let result = estimator.eval_offchain_input(input_with_birth).unwrap();
+    // 2000.0 + 500.0 = 2500.0
+    assert!((result.0 - 2500.0).abs() < 0.001);
+}

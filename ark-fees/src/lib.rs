@@ -251,12 +251,10 @@ fn create_offchain_input_context(input: &OffchainInput) -> Context<'static> {
     let _ = context.add_variable("inputType", input.input_type.as_str());
     let _ = context.add_variable("weight", input.weight);
 
-    if let Some(expiry) = input.expiry {
-        let _ = context.add_variable("expiry", expiry as f64);
-    }
-    if let Some(birth) = input.birth {
-        let _ = context.add_variable("birth", birth as f64);
-    }
+    // Always add expiry and birth to match validation context.
+    // Default to 0.0 (Unix epoch) when not provided.
+    let _ = context.add_variable("expiry", input.expiry.unwrap_or(0) as f64);
+    let _ = context.add_variable("birth", input.birth.unwrap_or(0) as f64);
 
     context.add_function("now", now);
     context
