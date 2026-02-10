@@ -22,6 +22,7 @@ use ark_core::server::BatchTreeEventType;
 use ark_core::server::PartialSigTree;
 use ark_core::server::StreamEvent;
 use ark_core::ArkAddress;
+use ark_core::ArkNote;
 use ark_core::ExplorerUtxo;
 use ark_core::TxGraph;
 use backon::ExponentialBuilder;
@@ -104,6 +105,78 @@ where
             .context("Failed to join batch")?;
 
         tracing::info!(%commitment_txid, "Settlement success");
+
+        Ok(Some(commitment_txid))
+    }
+
+    /// Settle _all_ prior VTXOs, boarding outputs, and the provided ArkNotes into the next batch.
+    ///
+    /// ArkNotes are bearer tokens that can be redeemed by revealing their preimage.
+    /// This method combines them with regular VTXOs and boarding outputs into a single
+    /// settlement transaction.
+    pub async fn settle_with_notes<R>(
+        &self,
+        rng: &mut R,
+        notes: Vec<ArkNote>,
+    ) -> Result<Option<Txid>, Error>
+    where
+        R: Rng + CryptoRng + Clone,
+    {
+        let (to_address, _) = self.get_offchain_address()?;
+
+        let (boarding_inputs, vtxo_inputs, mut total_amount) =
+            self.fetch_commitment_transaction_inputs().await?;
+
+        // Convert arknotes to intent inputs and add their value to total
+        let note_inputs: Vec<intent::Input> = notes
+            .iter()
+            .map(|note| {
+                total_amount += note.value();
+                note.to_intent_input()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Combine VTXO inputs with note inputs
+        let all_vtxo_inputs: Vec<intent::Input> =
+            vtxo_inputs.into_iter().chain(note_inputs).collect();
+
+        tracing::debug!(
+            offchain_address = %to_address.encode(),
+            ?boarding_inputs,
+            num_vtxo_inputs = all_vtxo_inputs.len(),
+            num_notes = notes.len(),
+            %total_amount,
+            "Attempting to settle outputs with notes"
+        );
+
+        if boarding_inputs.is_empty() && all_vtxo_inputs.is_empty() {
+            tracing::debug!("No inputs to settle");
+            return Ok(None);
+        }
+
+        let join_next_batch = || async {
+            self.join_next_batch(
+                &mut rng.clone(),
+                boarding_inputs.clone(),
+                all_vtxo_inputs.clone(),
+                BatchOutputType::Board {
+                    to_address,
+                    to_amount: total_amount,
+                },
+            )
+            .await
+        };
+
+        let commitment_txid = join_next_batch
+            .retry(ExponentialBuilder::default().with_max_times(0))
+            .sleep(sleep)
+            .notify(|err: &Error, dur: std::time::Duration| {
+                tracing::warn!("Retrying joining next batch after {dur:?}. Error: {err}");
+            })
+            .await
+            .context("Failed to join batch")?;
+
+        tracing::info!(%commitment_txid, num_notes = notes.len(), "Settlement with notes success");
 
         Ok(Some(commitment_txid))
     }
