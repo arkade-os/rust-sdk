@@ -585,13 +585,16 @@ where
     }
 
     /// Refund a VHTLC with collaboration from Boltz.
-    // TODO: This path is not supported by Boltz yet.
+    ///
+    /// This path requires Boltz's cooperation to sign the refund transaction. It allows refunding
+    /// a submarine swap before the timelock expires. For refunds after timelock expiry without
+    /// Boltz cooperation, use [`Client::refund_expired_vhtlc`] instead.
     pub async fn refund_vhtlc(&self, swap_id: &str) -> Result<Txid, Error> {
         let swap_data = self
             .swap_storage()
             .get_submarine(swap_id)
             .await?
-            .ok_or(Error::ad_hoc("Submarine swap not found"))?;
+            .ok_or(Error::ad_hoc("submarine swap not found"))?;
 
         let timeout_block_heights = swap_data.timeout_block_heights;
 
@@ -650,6 +653,7 @@ where
 
         let outputs = vec![(&refund_address, refund_amount)];
 
+        // Use the collaborative refund script which requires sender + receiver + server signatures.
         let refund_script = vhtlc.refund_script();
 
         let spend_info = vhtlc.taproot_spend_info();
@@ -663,9 +667,7 @@ where
         let refunder_pk = swap_data.refund_public_key.inner.x_only_public_key().0;
         let vhtlc_input = VtxoInput::new(
             script_ver.0,
-            Some(absolute::LockTime::from_consensus(
-                swap_data.timeout_block_heights.refund,
-            )),
+            None, // No locktime required for collaborative refund
             control_block,
             vhtlc.tapscripts(),
             script_pubkey,
@@ -683,13 +685,12 @@ where
             &self.server_info,
         )?;
 
+        // Sign the ark transaction with the sender's (user's) key.
         let kp = self.keypair_by_pk(&refunder_pk)?;
         let sign_fn =
             |_: &mut psbt::Input,
              msg: secp256k1::Message|
              -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
-                // TODO: Implement this once Boltz supports this path and we can test it.
-
                 let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &kp);
                 let pk = kp.x_only_public_key().0;
 
@@ -698,6 +699,14 @@ where
 
         sign_ark_transaction(sign_fn, &mut ark_tx, 0)?;
 
+        // Get the unsigned checkpoint - we'll sign it after arkd adds its signature.
+        let checkpoint_psbt = checkpoint_txs
+            .first()
+            .ok_or_else(|| Error::ad_hoc("no checkpoint PSBTs found"))?
+            .clone();
+
+        // Send ark transaction (with user signature) and unsigned checkpoint to Boltz.
+        // Boltz will add their signature (receiver) to the ark transaction.
         let url = format!(
             "{}/v2/swap/submarine/{swap_id}/refund/ark",
             self.inner.boltz_url
@@ -707,31 +716,67 @@ where
             .post(&url)
             .json(&RefundSwapRequest {
                 transaction: ark_tx.to_string(),
+                checkpoint: checkpoint_psbt.to_string(),
             })
             .send()
             .await
-            .map_err(Error::ad_hoc)?;
+            .map_err(Error::ad_hoc)
+            .context("failed to send refund request to Boltz")?;
 
-        let refund_response: RefundSwapResponse = response.json().await.map_err(Error::ad_hoc)?;
+        if !response.status().is_success() {
+            let error_text = response
+                .text()
+                .await
+                .map_err(|e| Error::ad_hoc(e.to_string()))
+                .context("failed to read error text")?;
+
+            return Err(Error::ad_hoc(format!(
+                "Boltz refund request failed: {error_text}"
+            )));
+        }
+
+        let refund_response: RefundSwapResponse = response
+            .json()
+            .await
+            .map_err(Error::ad_hoc)
+            .context("failed to deserialize refund response")?;
+
         if let Some(err) = refund_response.error.as_deref() {
             return Err(Error::ad_hoc(format!("Boltz refund request failed: {err}")));
         }
 
-        let signed_ark_tx = Psbt::from_str(refund_response.transaction.as_str())
+        // Parse the Boltz-signed transactions.
+        let boltz_signed_ark_tx = Psbt::from_str(&refund_response.transaction)
             .map_err(Error::ad_hoc)
-            .context("Could not parse refund transaction to psbt")?;
+            .context("could not parse refund transaction PSBT")?;
 
-        let ark_txid = signed_ark_tx.unsigned_tx.compute_txid();
+        let boltz_signed_checkpoint = Psbt::from_str(&refund_response.checkpoint)
+            .map_err(Error::ad_hoc)
+            .context("could not parse refund checkpoint PSBT")?;
 
+        let ark_txid = boltz_signed_ark_tx.unsigned_tx.compute_txid();
+
+        // Extract Boltz's signatures before sending to arkd (server strips incoming sigs).
+        let boltz_tap_script_sigs = boltz_signed_checkpoint
+            .inputs
+            .first()
+            .ok_or_else(|| Error::ad_hoc("boltz checkpoint has no inputs"))?
+            .tap_script_sigs
+            .clone();
+
+        // Submit to arkd for server signature.
+        // We send the Boltz-signed transactions so arkd can add its signature.
         let res = self
             .network_client()
-            .submit_offchain_transaction_request(signed_ark_tx, checkpoint_txs)
+            .submit_offchain_transaction_request(boltz_signed_ark_tx, vec![boltz_signed_checkpoint])
             .await?;
 
-        let mut checkpoint_psbt = res
+        // The server returns the checkpoint with its signature added.
+        // Now we need to add our (sender) signature to the checkpoint.
+        let mut server_signed_checkpoint = res
             .signed_checkpoint_txs
             .first()
-            .ok_or_else(|| Error::ad_hoc("no checkpoint PSBTs found"))?
+            .ok_or_else(|| Error::ad_hoc("no signed checkpoint PSBTs returned"))?
             .clone();
 
         let kp = self.keypair_by_pk(&refunder_pk)?;
@@ -745,18 +790,26 @@ where
                 Ok(vec![(sig, pk)])
             };
 
-        sign_checkpoint_transaction(sign_fn, &mut checkpoint_psbt)?;
+        server_signed_checkpoint
+            .inputs
+            .first_mut()
+            .ok_or_else(|| Error::ad_hoc("server checkpoint has no inputs"))?
+            .tap_script_sigs
+            .extend(boltz_tap_script_sigs);
 
+        sign_checkpoint_transaction(sign_fn, &mut server_signed_checkpoint)?;
+
+        // Finalize the transaction with the fully-signed checkpoint.
         timeout_op(
             self.inner.timeout,
             self.network_client()
-                .finalize_offchain_transaction(ark_txid, vec![checkpoint_psbt]),
+                .finalize_offchain_transaction(ark_txid, vec![server_signed_checkpoint]),
         )
         .await?
         .map_err(Error::ark_server)
         .context("failed to finalize offchain transaction")?;
 
-        tracing::info!(txid = %ark_txid, "Refunded VHTLC");
+        tracing::info!(swap_id, txid = %ark_txid, "Refunded VHTLC via collaborative refund");
 
         Ok(ark_txid)
     }
@@ -1860,11 +1913,13 @@ struct GetSwapStatusResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RefundSwapRequest {
     transaction: String,
+    checkpoint: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RefundSwapResponse {
     transaction: String,
+    checkpoint: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
