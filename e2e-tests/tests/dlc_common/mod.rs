@@ -54,6 +54,7 @@ use bitcoin::XOnlyPublicKey;
 use futures::StreamExt;
 use rand::thread_rng;
 use rand::Rng;
+use std::collections::HashMap;
 use std::time::Duration;
 use zkp::musig::new_musig_nonce_pair;
 use zkp::musig::MusigAggNonce;
@@ -347,43 +348,58 @@ pub async fn run_dlc_scenario(nigiri: &Nigiri, run_refund_scenario: bool) -> Res
         .await
         .context("failed to submit offchain TX request to fund DLC")?;
 
-    let mut alice_signed_checkpoint_psbt = res.signed_checkpoint_txs[0].clone();
-    alice_signed_checkpoint_psbt.inputs[0].witness_script =
-        dlc_checkpoint_txs[0].inputs[0].witness_script.clone();
+    // Build a map from checkpoint txid → (witness_script, keypair, xonly_pk).
+    // The server may return signed checkpoints in a different order, so we
+    // match by txid rather than assuming index order.
+    let alice_checkpoint_txid = dlc_checkpoint_txs[0].unsigned_tx.compute_txid();
+    let bob_checkpoint_txid = dlc_checkpoint_txs[1].unsigned_tx.compute_txid();
 
-    sign_checkpoint_transaction(
-        |_,
-         msg: secp256k1::Message|
-         -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
-            let sig = secp.sign_schnorr_no_aux_rand(&msg, &alice_kp);
+    let checkpoint_info: HashMap<_, _> = [
+        (
+            alice_checkpoint_txid,
+            (
+                dlc_checkpoint_txs[0].inputs[0].witness_script.clone(),
+                &alice_kp,
+                alice_xonly_pk,
+            ),
+        ),
+        (
+            bob_checkpoint_txid,
+            (
+                dlc_checkpoint_txs[1].inputs[0].witness_script.clone(),
+                &bob_kp,
+                bob_xonly_pk,
+            ),
+        ),
+    ]
+    .into_iter()
+    .collect();
 
-            Ok(vec![(sig, alice_xonly_pk)])
-        },
-        &mut alice_signed_checkpoint_psbt,
-    )
-    .context("failed to sign Alice's DLC-funding checkpoint TX")?;
+    let mut signed_checkpoints = Vec::new();
+    for mut checkpoint_psbt in res.signed_checkpoint_txs {
+        let txid = checkpoint_psbt.unsigned_tx.compute_txid();
+        let (witness_script, kp, xonly_pk) = checkpoint_info
+            .get(&txid)
+            .context("unknown checkpoint txid from server")?;
 
-    let mut bob_signed_checkpoint_psbt = res.signed_checkpoint_txs[1].clone();
-    bob_signed_checkpoint_psbt.inputs[0].witness_script =
-        dlc_checkpoint_txs[1].inputs[0].witness_script.clone();
+        checkpoint_psbt.inputs[0].witness_script = witness_script.clone();
 
-    sign_checkpoint_transaction(
-        |_,
-         msg: secp256k1::Message|
-         -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
-            let sig = secp.sign_schnorr_no_aux_rand(&msg, &bob_kp);
+        sign_checkpoint_transaction(
+            |_,
+             msg: secp256k1::Message|
+             -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
+                let sig = secp.sign_schnorr_no_aux_rand(&msg, kp);
+                Ok(vec![(sig, *xonly_pk)])
+            },
+            &mut checkpoint_psbt,
+        )
+        .context("failed to sign DLC-funding checkpoint TX")?;
 
-            Ok(vec![(sig, bob_xonly_pk)])
-        },
-        &mut bob_signed_checkpoint_psbt,
-    )
-    .context("failed to sign Bob's DLC-funding checkpoint TX")?;
+        signed_checkpoints.push(checkpoint_psbt);
+    }
 
     grpc_client
-        .finalize_offchain_transaction(
-            dlc_funding_virtual_txid,
-            vec![alice_signed_checkpoint_psbt, bob_signed_checkpoint_psbt],
-        )
+        .finalize_offchain_transaction(dlc_funding_virtual_txid, signed_checkpoints)
         .await
         .context("failed to finalize DLC-funding offchain transaction")?;
 
