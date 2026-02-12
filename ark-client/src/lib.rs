@@ -331,6 +331,42 @@ impl OffChainBalance {
     }
 }
 
+/// Balance of boarding outputs on-chain.
+///
+/// Boarding outputs have a CSV timelock. Once this timelock expires, the user can
+/// unilaterally refund the funds to their own address without server cooperation.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BoardingBalance {
+    /// Funds in confirmed boarding outputs that can still be settled via the Ark server.
+    spendable: Amount,
+    /// Funds in expired boarding outputs. CSV timelock has passed, can only be refunded on-chain.
+    expired: Amount,
+    /// Funds in unconfirmed boarding outputs.
+    pending: Amount,
+}
+
+impl BoardingBalance {
+    /// Confirmed boarding outputs that can be settled collaboratively with the Ark server.
+    pub fn spendable(&self) -> Amount {
+        self.spendable
+    }
+
+    /// Expired boarding outputs where the CSV timelock has passed.
+    /// These can only be spent unilaterally (refunded) to an on-chain address.
+    pub fn expired(&self) -> Amount {
+        self.expired
+    }
+
+    /// Unconfirmed boarding outputs still waiting for on-chain confirmation.
+    pub fn pending(&self) -> Amount {
+        self.pending
+    }
+
+    pub fn total(&self) -> Amount {
+        self.spendable + self.expired + self.pending
+    }
+}
+
 pub trait Blockchain {
     fn find_outpoints(
         &self,
@@ -821,6 +857,126 @@ where
             confirmed,
             recoverable,
         })
+    }
+
+    /// Get the balance of on-chain boarding outputs, categorized by status.
+    ///
+    /// Boarding outputs have a CSV timelock. Once expired, funds can only be refunded
+    /// unilaterally to an on-chain address (no server cooperation needed).
+    pub async fn boarding_balance(&self) -> Result<BoardingBalance, Error> {
+        let boarding_outputs = self.inner.wallet.get_boarding_outputs()?;
+
+        let mut spendable = Amount::ZERO;
+        let mut expired = Amount::ZERO;
+        let mut pending = Amount::ZERO;
+
+        // Track seen outpoints to avoid double-counting when multiple BoardingOutput
+        // instances share the same address
+        let mut seen_outpoints = HashSet::new();
+
+        let now = std::time::UNIX_EPOCH
+            .elapsed()
+            .map_err(|e| Error::ad_hoc(format!("failed to get current time: {e}")))?;
+
+        for boarding_output in boarding_outputs.iter() {
+            let boarding_address = boarding_output.address();
+
+            let utxos = timeout_op(
+                self.inner.timeout,
+                self.inner.blockchain.find_outpoints(boarding_address),
+            )
+            .await
+            .context("failed to find boarding outpoints")??;
+
+            for utxo in utxos {
+                if utxo.is_spent {
+                    continue;
+                }
+
+                if !seen_outpoints.insert(utxo.outpoint) {
+                    continue;
+                }
+
+                match utxo.confirmation_blocktime {
+                    Some(blocktime) => {
+                        let confirmation_time = Duration::from_secs(blocktime);
+                        if boarding_output
+                            .can_be_claimed_unilaterally_by_owner(now, confirmation_time)
+                        {
+                            expired += utxo.amount;
+                        } else {
+                            spendable += utxo.amount;
+                        }
+                    }
+                    None => {
+                        pending += utxo.amount;
+                    }
+                }
+            }
+        }
+
+        Ok(BoardingBalance {
+            spendable,
+            expired,
+            pending,
+        })
+    }
+
+    /// Get detailed boarding outpoints with their on-chain status.
+    ///
+    /// This method returns outpoints categorized as spendable, expired, or pending,
+    /// using each BoardingOutput's own exit_delay for accurate status determination.
+    pub async fn list_boarding_outpoints(
+        &self,
+    ) -> Result<Vec<(OutPoint, Amount, Option<u64>, &'static str)>, Error> {
+        let boarding_outputs = self.inner.wallet.get_boarding_outputs()?;
+
+        let mut result = Vec::new();
+        let mut seen_outpoints = HashSet::new();
+
+        let now = std::time::UNIX_EPOCH
+            .elapsed()
+            .map_err(|e| Error::ad_hoc(format!("failed to get current time: {e}")))?;
+
+        for boarding_output in boarding_outputs.iter() {
+            let boarding_address = boarding_output.address();
+
+            let utxos = timeout_op(
+                self.inner.timeout,
+                self.inner.blockchain.find_outpoints(boarding_address),
+            )
+            .await
+            .context("failed to find boarding outpoints")??;
+
+            for utxo in utxos {
+                if utxo.is_spent {
+                    continue;
+                }
+
+                if !seen_outpoints.insert(utxo.outpoint) {
+                    continue;
+                }
+
+                let (status, confirmation_time) = match utxo.confirmation_blocktime {
+                    Some(blocktime) => {
+                        let confirmation_time = Duration::from_secs(blocktime);
+                        let status = if boarding_output
+                            .can_be_claimed_unilaterally_by_owner(now, confirmation_time)
+                        {
+                            "expired"
+                        } else {
+                            "spendable"
+                        };
+                        (status, Some(blocktime))
+                    }
+                    None => ("pending", None),
+                };
+
+                result.push((utxo.outpoint, utxo.amount, confirmation_time, status));
+            }
+        }
+
+        Ok(result)
     }
 
     pub async fn transaction_history(&self) -> Result<Vec<history::Transaction>, Error> {
