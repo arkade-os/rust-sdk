@@ -11,6 +11,7 @@ anyhow = "1"
 ark-bdk-wallet = { path = "../ark-bdk-wallet" }
 ark-client = { path = "../ark-client", features = ["default", "sqlite", "test-utils"] }
 ark-core = { path = "../ark-core" }
+ark-grpc = { path = "../ark-grpc", features = ["test-utils"] }
 async-trait = "0.1"
 bip39 = "2"
 bitcoin = { version = "0.32.7" }

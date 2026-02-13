@@ -40,6 +40,10 @@ send-vtxo-selection actor vtxos address amount:
 settle actor:
     cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic settle
 
+# Settle ArkNotes (bearer tokens) into VTXOs for a given actor, e.g. just settle-notes alice "arknote123...,arknote456..."
+settle-notes actor notes:
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic settle --notes {{ notes }}
+
 # Subscribe to an address
 subscribe actor address:
     cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic subscribe {{ address }}
@@ -111,3 +115,7 @@ continue-pending-txs actor:
 # Submit an offchain tx WITHOUT finalizing (for testing pending tx recovery)
 submit-only actor address amount:
     cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic submit-only {{ address }} {{ amount }}
+
+# Create ArkNotes via the admin API (regtest only), e.g. just create-note 100000
+create-note amount quantity="1":
+    cargo run -p ark-client-sample -- create-note {{ amount }} --quantity {{ quantity }}

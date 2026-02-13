@@ -23,7 +23,9 @@ use ark_client::TxStatus;
 use ark_core::history;
 use ark_core::server::SubscriptionResponse;
 use ark_core::ArkAddress;
+use ark_core::ArkNote;
 use ark_core::ExplorerUtxo;
+use ark_grpc::test_utils as grpc_test_utils;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::bip32::Xpriv;
 use bitcoin::key::Secp256k1;
@@ -96,7 +98,11 @@ enum Commands {
         amount: u64,
     },
     /// Transform boarding outputs and VTXOs into fresh, confirmed VTXOs.
-    Settle,
+    Settle {
+        /// ArkNote strings to include in the settlement (comma-separated).
+        #[arg(long)]
+        notes: Option<String>,
+    },
     /// Subscribe to notifications for an Ark address.
     Subscribe {
         /// The Ark address to subscribe to.
@@ -157,6 +163,17 @@ enum Commands {
     ContinuePendingTxs,
     /// Submit an offchain tx WITHOUT finalizing (for testing pending tx recovery).
     SubmitOnly { address: ArkAddressCli, amount: u64 },
+    /// Create ArkNotes via the admin API (regtest only).
+    CreateNote {
+        /// Amount in satoshis for each note.
+        amount: u64,
+        /// Number of notes to create (default: 1).
+        #[arg(short, long, default_value = "1")]
+        quantity: u32,
+        /// Admin API URL (default: http://localhost:7071).
+        #[arg(long, default_value = "http://localhost:7071")]
+        admin_url: String,
+    },
 }
 
 #[derive(Clone)]
@@ -258,9 +275,35 @@ async fn main() -> Result<()> {
         .map_err(|_| anyhow!("failed to install crypto providers"))?;
 
     let cli = Cli::parse();
+
+    // Handle CreateNote early - it doesn't need a wallet or config
+    if let Commands::CreateNote {
+        amount,
+        quantity,
+        admin_url,
+    } = &cli.command
+    {
+        let notes = grpc_test_utils::create_notes_with_url(admin_url, *amount as u32, *quantity)
+            .await
+            .map_err(|e| anyhow!("failed to create notes: {e}"))?;
+
+        let output: Vec<_> = notes
+            .iter()
+            .map(|note| {
+                serde_json::json!({
+                    "note": note.to_encoded_string(),
+                    "value_sats": note.value().to_sat(),
+                })
+            })
+            .collect();
+
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
     let secp = Secp256k1::new();
 
-    let config = fs::read_to_string(cli.config)?;
+    let config = fs::read_to_string(&cli.config)?;
     let config: Config = toml::from_str(&config)?;
 
     let esplora_client = EsploraClient::new(&config.esplora_url)?;
@@ -393,12 +436,42 @@ async fn run_command<K: KeyProvider>(
             let address = address.encode();
             println!("{}", serde_json::json!({"address": address}));
         }
-        Commands::Settle => {
+        Commands::Settle { notes } => {
             let mut rng = thread_rng();
             // we need to call this because how our wallet works
             let _ = client.get_boarding_address();
 
-            let maybe_batch_tx = client.settle(&mut rng).await.map_err(|e| anyhow!(e))?;
+            let maybe_batch_tx = match notes {
+                Some(notes_str) => {
+                    // Parse comma-separated ArkNote strings
+                    let parsed_notes: Vec<ArkNote> = notes_str
+                        .split(',')
+                        .map(|s| {
+                            ArkNote::from_string(s.trim())
+                                .with_context(|| format!("invalid ArkNote: {s}"))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+
+                    if parsed_notes.is_empty() {
+                        bail!("No valid ArkNotes provided");
+                    }
+
+                    let total_note_value: u64 =
+                        parsed_notes.iter().map(|n| n.value().to_sat()).sum();
+                    tracing::info!(
+                        num_notes = parsed_notes.len(),
+                        total_value = total_note_value,
+                        "Settling with ArkNotes"
+                    );
+
+                    client
+                        .settle_with_notes(&mut rng, parsed_notes)
+                        .await
+                        .map_err(|e| anyhow!(e))?
+                }
+                None => client.settle(&mut rng).await.map_err(|e| anyhow!(e))?,
+            };
+
             match maybe_batch_tx {
                 None => {
                     tracing::info!("No batch transaction - maybe nothing to settle");
@@ -902,6 +975,10 @@ async fn run_command<K: KeyProvider>(
                 });
                 println!("{}", serde_json::to_string_pretty(&output)?);
             }
+        }
+        Commands::CreateNote { .. } => {
+            // Handled in main() before client setup
+            unreachable!("CreateNote is handled before client initialization");
         }
     }
 

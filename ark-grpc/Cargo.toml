@@ -28,3 +28,4 @@ tonic-prost-build = "0.14"
 default = ["tls-webpki-roots"]
 tls-native-roots = ["tonic/tls-native-roots"]
 tls-webpki-roots = ["tonic/tls-webpki-roots"]
+test-utils = []

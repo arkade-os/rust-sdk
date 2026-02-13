@@ -15,3 +15,6 @@ mod types;
 
 pub use client::*;
 pub use error::Error;
+
+#[cfg(feature = "test-utils")]
+pub mod test_utils;
