@@ -3,6 +3,7 @@ use bitcoin::OutPoint;
 use bitcoin::ScriptBuf;
 use bitcoin::TxOut;
 
+pub mod arknote;
 pub mod batch;
 pub mod boarding_output;
 pub mod coin_select;
@@ -23,6 +24,7 @@ mod tx_graph;
 mod vtxo_list;
 
 pub use ark_address::ArkAddress;
+pub use arknote::ArkNote;
 pub use boarding_output::BoardingOutput;
 pub use error::Error;
 pub use error::ErrorContext;

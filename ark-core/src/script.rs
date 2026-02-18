@@ -1,9 +1,23 @@
+use bitcoin::hashes::sha256;
+use bitcoin::hashes::Hash;
 use bitcoin::opcodes::all::*;
 use bitcoin::script::Instruction;
 use bitcoin::taproot::TaprootSpendInfo;
 use bitcoin::ScriptBuf;
 use bitcoin::XOnlyPublicKey;
 use std::fmt;
+
+/// A hash-lock script for ArkNotes.
+///
+/// The script checks that `SHA256(witness) == preimage_hash`.
+/// Anyone who knows the preimage can spend by providing it as the witness.
+pub fn arknote_script(preimage_hash: &sha256::Hash) -> ScriptBuf {
+    ScriptBuf::builder()
+        .push_opcode(OP_SHA256)
+        .push_slice(preimage_hash.as_byte_array())
+        .push_opcode(OP_EQUAL)
+        .into_script()
+}
 
 /// A conventional 2-of-2 multisignature [`ScriptBuf`].
 pub fn multisig_script(pk_0: XOnlyPublicKey, pk_1: XOnlyPublicKey) -> ScriptBuf {
