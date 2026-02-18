@@ -29,6 +29,7 @@ use bitcoin::TxOut;
 use bitcoin::Txid;
 use bitcoin::Witness;
 use bitcoin::XOnlyPublicKey;
+use serde::Deserialize;
 use serde::Serialize;
 
 #[derive(Clone, Debug)]
@@ -356,7 +357,7 @@ fn message_hash(message: &[u8]) -> sha256::Hash {
     sha256::Hash::hash(&v)
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
 pub enum IntentMessage {
     #[serde(rename = "register")]
