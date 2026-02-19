@@ -3,6 +3,7 @@ name = "ark-rs"
 version = "0.8.0"
 edition = { workspace = true }
 license = { workspace = true }
+repository = { workspace = true }
 rust-version = "1.86"
 description = "Collection of Rust crates designed to simplify building Bitcoin wallets with seamless support for both on-chain and off-chain transactions via the Ark protocol"
 

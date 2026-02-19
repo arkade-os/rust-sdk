@@ -16,6 +16,7 @@ resolver = "2"
 [workspace.package]
 license = "MIT"
 edition = "2021"
+repository = "https://github.com/arkade-os/rust-sdk"
 
 [workspace.lints.rust]
 unused-import-braces = "warn"
