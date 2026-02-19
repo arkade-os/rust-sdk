@@ -1,7 +1,8 @@
 [package]
 name = "e2e-tests"
-version = "0.7.0"
+version = "0.1.0"
 edition = { workspace = true }
+publish = false
 
 [lints]
 workspace = true
