@@ -11,8 +11,8 @@ workspace = true
 
 [dependencies]
 anyhow = "1"
-ark-client = { path = "../ark-client", default-features = false }
-ark-core = { path = "../ark-core" }
+ark-client = { path = "../ark-client", version = "0.8.0", default-features = false }
+ark-core = { path = "../ark-core", version = "0.8.0" }
 async-stream = "0.3"
 bdk_wallet = "1.0.0"
 bitcoin = { version = "0.32.7", features = ["rand"] }
