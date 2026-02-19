@@ -1,8 +1,9 @@
 [package]
 name = "ark-fees"
-version = "0.7.0"
+version = "0.8.0"
 edition = { workspace = true }
 license = { workspace = true }
+repository = { workspace = true }
 rust-version = "1.86"
 description = "Fee library using CEL for calculating Arkade transaction fees"
 
