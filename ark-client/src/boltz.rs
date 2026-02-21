@@ -148,6 +148,7 @@ where
         let data = SubmarineSwapData {
             id: swap_response.id.clone(),
             status: SwapStatus::Created,
+            preimage: None,
             preimage_hash,
             refund_public_key: refund_public_key.into(),
             claim_public_key: swap_response.claim_public_key,
@@ -239,6 +240,7 @@ where
                 SubmarineSwapData {
                     id: swap_response.id.clone(),
                     status: SwapStatus::Created,
+                    preimage: None,
                     preimage_hash,
                     refund_public_key: refund_public_key.into(),
                     claim_public_key: swap_response.claim_public_key,
@@ -266,8 +268,14 @@ where
 
     /// Wait for the Lightning invoice associated with a submarine swap to be paid by Boltz.
     ///
-    /// Boltz will first need to claim our VHTLC before paying the invoice.
-    pub async fn wait_for_invoice_paid(&self, swap_id: &str) -> Result<(), Error> {
+    /// Boltz will first need to claim our VHTLC before paying the invoice. When Boltz claims
+    /// the VHTLC, the preimage is revealed in the claim transaction's witness. This method
+    /// extracts and persists the preimage to swap storage.
+    ///
+    /// # Returns
+    ///
+    /// The 32-byte preimage that was revealed when Boltz claimed the VHTLC.
+    pub async fn wait_for_invoice_paid(&self, swap_id: &str) -> Result<[u8; 32], Error> {
         use futures::StreamExt;
 
         let stream = self.subscribe_to_swap_updates(swap_id.to_string());
@@ -279,7 +287,14 @@ where
                     tracing::debug!(swap_id, current = ?status, "Swap status");
                     match status {
                         SwapStatus::InvoicePaid => {
-                            return Ok(());
+                            let preimage = self
+                                .extract_submarine_swap_preimage(swap_id)
+                                .await
+                                .context(
+                                    "invoice paid but failed to extract preimage from claim tx",
+                                )?;
+
+                            return Ok(preimage);
                         }
                         SwapStatus::InvoiceExpired => {
                             return Err(Error::ad_hoc(format!(
@@ -310,6 +325,84 @@ where
         }
 
         Err(Error::ad_hoc("Status stream ended unexpectedly"))
+    }
+
+    /// Extract the preimage from a claimed submarine swap VHTLC.
+    ///
+    /// After Boltz claims the VHTLC, the preimage is embedded in the claim transaction's PSBT
+    /// via the `VTXO_CONDITION_KEY` unknown field. This method fetches that transaction and
+    /// extracts the preimage.
+    ///
+    /// The extracted preimage is validated against the stored preimage hash and persisted to
+    /// swap storage.
+    pub async fn extract_submarine_swap_preimage(&self, swap_id: &str) -> Result<[u8; 32], Error> {
+        let swap_data = self
+            .swap_storage()
+            .get_submarine(swap_id)
+            .await?
+            .ok_or(Error::ad_hoc("submarine swap not found"))?;
+
+        // If the preimage was already extracted, return it.
+        if let Some(preimage) = swap_data.preimage {
+            return Ok(preimage);
+        }
+
+        let vhtlc_address = swap_data.vhtlc_address;
+
+        // Find the VHTLC outpoint — it should be spent by now.
+        let virtual_tx_outpoints = self
+            .get_virtual_tx_outpoints(std::iter::once(vhtlc_address))
+            .await
+            .context("failed to get virtual tx outpoints for VHTLC address")?;
+
+        let vhtlc_outpoint = virtual_tx_outpoints
+            .iter()
+            .find(|o| o.is_spent)
+            .ok_or_else(|| Error::ad_hoc("VHTLC outpoint not found or not yet spent (claimed)"))?;
+
+        let claim_txid = vhtlc_outpoint.ark_txid.ok_or_else(|| {
+            Error::ad_hoc("VHTLC is spent but has no ark_txid (claim transaction)")
+        })?;
+
+        // Fetch the claim transaction PSBT.
+        let claim_txs = self
+            .network_client()
+            .get_virtual_txs(vec![claim_txid.to_string()], None)
+            .await
+            .map_err(|e| Error::ad_hoc(e.to_string()))
+            .context("failed to fetch claim transaction")?;
+
+        let claim_psbt = claim_txs
+            .txs
+            .first()
+            .ok_or_else(|| Error::ad_hoc("claim transaction not found"))?;
+
+        // Extract the preimage from the PSBT's unknown fields.
+        let preimage = extract_preimage_from_psbt(claim_psbt)?;
+
+        // Validate against the stored hash.
+        let computed_hash = ripemd160::Hash::hash(sha256::Hash::hash(&preimage).as_byte_array());
+        if computed_hash != swap_data.preimage_hash {
+            return Err(Error::ad_hoc(format!(
+                "extracted preimage does not match stored hash: expected {}, got {}",
+                swap_data.preimage_hash, computed_hash
+            )));
+        }
+
+        // Persist the preimage.
+        let mut updated = swap_data.clone();
+        updated.preimage = Some(preimage);
+        self.swap_storage()
+            .update_submarine(swap_id, updated)
+            .await
+            .context("failed to persist preimage to swap storage")?;
+
+        tracing::info!(
+            swap_id,
+            "Extracted and persisted preimage from claim transaction"
+        );
+
+        Ok(preimage)
     }
 
     /// Refund a VHTLC after the timelock has expired.
@@ -1719,6 +1812,62 @@ where
     }
 }
 
+/// Extract the preimage from a PSBT's `VTXO_CONDITION_KEY` unknown field.
+///
+/// The condition data is encoded as: `[num_elements] [varint_length] [preimage_bytes]`.
+/// For VHTLC claims, there is exactly one element: the 32-byte preimage.
+fn extract_preimage_from_psbt(psbt: &Psbt) -> Result<[u8; 32], Error> {
+    let condition_key = psbt::raw::Key {
+        type_value: 222,
+        key: VTXO_CONDITION_KEY.to_vec(),
+    };
+
+    for input in &psbt.inputs {
+        if let Some(condition_data) = input.unknown.get(&condition_key) {
+            if condition_data.is_empty() {
+                continue;
+            }
+
+            // First byte is the number of witness elements.
+            let num_elements = condition_data[0] as usize;
+            if num_elements == 0 {
+                continue;
+            }
+
+            // Parse the first element: varint length followed by the preimage bytes.
+            let mut cursor = std::io::Cursor::new(&condition_data[1..]);
+            let length = bitcoin::consensus::Decodable::consensus_decode(&mut cursor)
+                .map_err(|e| Error::ad_hoc(format!("failed to decode varint length: {e}")))?;
+            let length: VarInt = length;
+            let offset = cursor.position() as usize;
+            let remaining = &condition_data[1 + offset..];
+
+            if remaining.len() < length.0 as usize {
+                return Err(Error::ad_hoc(format!(
+                    "condition data too short: expected {} bytes, got {}",
+                    length.0,
+                    remaining.len()
+                )));
+            }
+
+            let preimage_bytes = &remaining[..length.0 as usize];
+
+            let preimage: [u8; 32] = preimage_bytes.try_into().map_err(|_| {
+                Error::ad_hoc(format!(
+                    "preimage has unexpected length: {} (expected 32)",
+                    preimage_bytes.len()
+                ))
+            })?;
+
+            return Ok(preimage);
+        }
+    }
+
+    Err(Error::ad_hoc(
+        "no VTXO_CONDITION_KEY found in any PSBT input",
+    ))
+}
+
 /// The amount to be shared with Boltz when creating a reverse submarine swap.
 pub enum SwapAmount {
     /// Use this value if you need to set the value to be sent by the payer on Lightning.
@@ -1743,6 +1892,8 @@ impl SwapAmount {
 pub struct SubmarineSwapData {
     /// Unique swap identifier.
     pub id: String,
+    /// Preimage for the swap (learned when Boltz claims the VHTLC).
+    pub preimage: Option<[u8; 32]>,
     /// The preimage hash of the BOLT11 invoice.
     pub preimage_hash: ripemd160::Hash,
     /// Public key of the receiving party.

@@ -231,8 +231,30 @@ impl SwapStorage for SqliteSwapStorage {
         Ok(())
     }
 
+    async fn update_submarine(&self, id: &str, data: SubmarineSwapData) -> Result<(), Error> {
+        let data_json = serde_json::to_string(&data).map_err(|e| {
+            Error::consumer(format!("Failed to serialize submarine swap data: {e}"))
+        })?;
+
+        let now = Self::current_timestamp();
+
+        let result =
+            sqlx::query("UPDATE submarine_swaps SET data = ?, updated_at = ? WHERE id = ?")
+                .bind(&data_json)
+                .bind(now)
+                .bind(id)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| Error::consumer(format!("Failed to update submarine swap: {e}")))?;
+
+        if result.rows_affected() == 0 {
+            return Err(Error::consumer(format!("Submarine swap not found: {id}")));
+        }
+
+        Ok(())
+    }
+
     async fn update_reverse(&self, id: &str, data: ReverseSwapData) -> Result<(), Error> {
-        // Serialize and save back
         let data_json = serde_json::to_string(&data)
             .map_err(|e| Error::consumer(format!("Failed to serialize reverse swap data: {e}")))?;
 
@@ -346,6 +368,7 @@ mod tests {
         SubmarineSwapData {
             id: id.to_string(),
             status: SwapStatus::Created,
+            preimage: None,
             preimage_hash: ripemd160::Hash::from_slice(&[2u8; 20]).unwrap(),
             refund_public_key: PublicKey::from_str(
                 "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
