@@ -53,6 +53,7 @@
               # Must appear _before_ `rustToolchainWithWasm`.
               rustfmt
               rustToolchainWithWasm
+              sqlite
               wabt
               wasm-bindgen-cli
               wasm-pack
