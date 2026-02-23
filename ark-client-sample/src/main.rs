@@ -411,6 +411,7 @@ async fn run_command<K: KeyProvider>(
                 serde_json::json!({
                     "offchain_confirmed": offchain_balance.confirmed(),
                     "offchain_pre_confirmed": offchain_balance.pre_confirmed(),
+                    "recoverable": offchain_balance.recoverable(),
                     "boarding": boarding,
                 })
             );
