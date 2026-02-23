@@ -286,23 +286,19 @@ where
             .map_err(Error::ad_hoc)?;
         let onchain_fee = Amount::from_sat(onchain_fee.to_satoshis());
 
-        // Deduct fee from the requested amount.
-        let net_to_amount = to_amount.checked_sub(onchain_fee).ok_or_else(|| {
-            Error::coin_select(
-                "cannot deduct fees from offboard amount ({onchain_fee} > {to_amount})",
-            )
-        })?;
-
-        let change_amount = total_amount.checked_sub(to_amount).ok_or_else(|| {
-            Error::coin_select(format!(
-                "cannot afford to send {to_amount}, only have {total_amount}"
-            ))
-        })?;
+        // Fee comes out of change, not the send amount.
+        let change_amount = total_amount
+            .checked_sub(to_amount)
+            .and_then(|a| a.checked_sub(onchain_fee))
+            .ok_or_else(|| {
+                Error::coin_select(format!(
+                    "insufficient balance: {total_amount} < {to_amount} (send) + {onchain_fee} (fee)"
+                ))
+            })?;
 
         tracing::info!(
             %to_address,
-            gross_amount = %to_amount,
-            net_amount = %net_to_amount,
+            send_amount = %to_amount,
             fee = %onchain_fee,
             change_address = %change_address.encode(),
             %change_amount,
@@ -317,7 +313,7 @@ where
                 vtxo_inputs.clone(),
                 BatchOutputType::OffBoard {
                     to_address: to_address.clone(),
-                    to_amount: net_to_amount,
+                    to_amount,
                     change_address,
                     change_amount,
                 },
@@ -402,27 +398,19 @@ where
             .map_err(Error::ad_hoc)?;
         let onchain_fee = Amount::from_sat(onchain_fee.to_satoshis());
 
-        // Deduct fee from the requested amount.
-        let net_to_amount = to_amount.checked_sub(onchain_fee).ok_or_else(|| {
-            Error::coin_select(
-                "cannot deduct fees from offboard amount ({onchain_fee} > {to_amount})",
-            )
-        })?;
-
-        // Check that inputs can cover output + fee.
+        // Fee comes out of change, not the send amount.
         let change_amount = total_input_amount
             .checked_sub(to_amount)
             .and_then(|a| a.checked_sub(onchain_fee))
             .ok_or_else(|| {
                 Error::coin_select(format!(
-                "insufficient VTXO amount: {total_input_amount} (input) < {to_amount} (to_amount) + {onchain_fee} (fee)",
-            ))
+                    "insufficient VTXO amount: {total_input_amount} < {to_amount} (send) + {onchain_fee} (fee)"
+                ))
             })?;
 
         tracing::info!(
             %to_address,
-            gross_amount = %to_amount,
-            net_amount = %net_to_amount,
+            send_amount = %to_amount,
             fee = %onchain_fee,
             change_address = %change_address.encode(),
             %change_amount,
@@ -436,7 +424,7 @@ where
                 vtxo_inputs.clone(),
                 BatchOutputType::OffBoard {
                     to_address: to_address.clone(),
-                    to_amount: net_to_amount,
+                    to_amount,
                     change_address,
                     change_amount,
                 },
