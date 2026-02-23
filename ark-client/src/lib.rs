@@ -54,6 +54,8 @@ mod send_vtxo;
 mod unilateral_exit;
 mod utils;
 
+pub use boltz::PendingVhtlcSpendTx;
+pub use boltz::PendingVhtlcSpendType;
 pub use boltz::ReverseSwapData;
 pub use boltz::SubmarineSwapData;
 pub use boltz::SwapAmount;
