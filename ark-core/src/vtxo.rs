@@ -217,9 +217,13 @@ fn calculate_leaf_depths(n: usize) -> Vec<usize> {
     // Calculate the minimum depth required for n leaves
     let min_depth = (n as f64).log2().ceil() as usize;
 
-    // Calculate the number of nodes at the deepest level
-    let nodes_at_max_depth = n - (1 << (min_depth - 1)) + 1;
-    let nodes_at_min_depth = (1 << min_depth) - nodes_at_max_depth;
+    // Calculate the number of leaves at each level.
+    // We start with 2^(min_depth-1) slots at depth min_depth-1. Each of the
+    // (n - 2^(min_depth-1)) excess leaves requires splitting one slot into two
+    // children at depth min_depth.
+    let excess = n - (1 << (min_depth - 1));
+    let nodes_at_max_depth = 2 * excess;
+    let nodes_at_min_depth = n - nodes_at_max_depth;
 
     // Create the result vector with the appropriate depths
     let mut result = Vec::with_capacity(n);
