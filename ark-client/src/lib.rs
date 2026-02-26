@@ -2,8 +2,8 @@ use crate::error::ErrorContext;
 use crate::key_provider::KeypairIndex;
 use crate::utils::sleep;
 use crate::utils::timeout_op;
-use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
+use crate::wallet::Persistence;
 use ark_core::build_anchor_tx;
 use ark_core::history;
 use ark_core::history::generate_incoming_vtxo_transaction_history;
@@ -85,11 +85,10 @@ pub const DEFAULT_GAP_LIMIT: u32 = 20;
 /// # use ark_client::{Blockchain, Client, Error, SpendStatus, TxStatus};
 /// # use ark_client::OfflineClient;
 /// # use bitcoin::key::Keypair;
-/// # use bitcoin::secp256k1::{Message, SecretKey};
+/// # use bitcoin::secp256k1::SecretKey;
 /// # use std::sync::Arc;
-/// # use bitcoin::{Address, Amount, FeeRate, Network, Psbt, Transaction, Txid, XOnlyPublicKey};
-/// # use bitcoin::secp256k1::schnorr::Signature;
-/// # use ark_client::wallet::{Balance, BoardingWallet, OnchainWallet, Persistence};
+/// # use bitcoin::{Address, Amount, FeeRate, Psbt, Transaction, Txid, XOnlyPublicKey};
+/// # use ark_client::wallet::{Balance, OnchainWallet, Persistence};
 /// # use ark_client::InMemorySwapStorage;
 /// # use ark_core::{BoardingOutput, UtxoCoinSelection, ExplorerUtxo};
 /// # use ark_client::StaticKeyProvider;
@@ -135,7 +134,7 @@ pub const DEFAULT_GAP_LIMIT: u32 = 20;
 /// # }
 ///
 /// struct MyWallet {}
-/// # impl OnchainWallet for MyWallet where {
+/// # impl OnchainWallet for MyWallet {
 /// #
 /// #     fn get_onchain_address(&self) -> Result<Address, Error> {
 /// #         unimplemented!("You can implement this function using your preferred client library such as bdk")
@@ -162,9 +161,7 @@ pub const DEFAULT_GAP_LIMIT: u32 = 20;
 /// #     }
 /// # }
 /// #
-///
-/// struct InMemoryDb {}
-/// # impl Persistence for InMemoryDb {
+/// # impl Persistence for MyWallet {
 /// #
 /// #     fn save_boarding_output(
 /// #         &self,
@@ -179,28 +176,6 @@ pub const DEFAULT_GAP_LIMIT: u32 = 20;
 /// #     }
 /// #
 /// #     fn sk_for_pk(&self, pk: &XOnlyPublicKey) -> Result<SecretKey, Error> {
-/// #         unimplemented!()
-/// #     }
-/// # }
-/// #
-/// #
-/// # impl BoardingWallet for MyWallet
-/// # where
-/// # {
-/// #     fn new_boarding_output(
-/// #         &self,
-/// #         server_pk: XOnlyPublicKey,
-/// #         exit_delay: bitcoin::Sequence,
-/// #         network: Network,
-/// #     ) -> Result<BoardingOutput, Error> {
-/// #         unimplemented!()
-/// #     }
-/// #
-/// #     fn get_boarding_outputs(&self) -> Result<Vec<BoardingOutput>, Error> {
-/// #         unimplemented!()
-/// #     }
-/// #
-/// #     fn sign_for_pk(&self, pk: &XOnlyPublicKey, msg: &Message) -> Result<Signature, Error> {
 /// #         unimplemented!()
 /// #     }
 /// # }
@@ -363,7 +338,7 @@ pub trait Blockchain {
 impl<B, W, S, K> OfflineClient<B, W, S, K>
 where
     B: Blockchain,
-    W: BoardingWallet + OnchainWallet,
+    W: OnchainWallet + Persistence,
     S: SwapStorage + 'static,
     K: KeyProvider,
 {
@@ -581,7 +556,7 @@ where
 impl<B, W, S, K> Client<B, W, S, K>
 where
     B: Blockchain,
-    W: BoardingWallet + OnchainWallet,
+    W: OnchainWallet + Persistence,
     S: SwapStorage + 'static,
     K: KeyProvider,
 {
@@ -724,15 +699,27 @@ where
         Ok(discovered_count)
     }
 
-    // At the moment we are always generating the same address.
+    /// Get a boarding address for receiving funds on-chain that can later be settled into VTXOs.
+    ///
+    /// Creates a new boarding output using the current keypair and saves it to persistence.
     pub fn get_boarding_address(&self) -> Result<Address, Error> {
         let server_info = &self.server_info;
 
-        let boarding_output = self.inner.wallet.new_boarding_output(
+        let keypair = self.next_keypair(KeypairIndex::LastUnused)?;
+        let owner_pk = keypair.x_only_public_key().0;
+
+        let boarding_output = ark_core::BoardingOutput::new(
+            self.secp(),
             server_info.signer_pk.into(),
+            owner_pk,
             server_info.boarding_exit_delay,
             server_info.network,
         )?;
+
+        // Save the boarding output and its secret key for later signing
+        self.inner
+            .wallet
+            .save_boarding_output(keypair.secret_key(), boarding_output.clone())?;
 
         Ok(boarding_output.address().clone())
     }

@@ -4,8 +4,8 @@ use crate::error::ErrorContext;
 use crate::swap_storage::SwapStorage;
 use crate::utils::sleep;
 use crate::utils::timeout_op;
-use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
+use crate::wallet::Persistence;
 use crate::Blockchain;
 use crate::Client;
 use ark_core::build_unilateral_exit_tree_txids;
@@ -30,7 +30,7 @@ use std::collections::HashSet;
 impl<B, W, S, K> Client<B, W, S, K>
 where
     B: Blockchain,
-    W: BoardingWallet + OnchainWallet,
+    W: OnchainWallet + Persistence,
     S: SwapStorage + 'static,
     K: crate::KeyProvider,
 {
@@ -268,15 +268,17 @@ where
             Some(script) => {
                 let mut res = vec![];
                 let pks = extract_checksig_pubkeys(script);
+                let secp = self.secp();
 
                 for pk in pks {
                     if let Ok(keypair) = self.keypair_by_pk(&pk) {
-                        let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &keypair);
+                        let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
                         let pk = keypair.x_only_public_key().0;
                         res.push((sig, pk))
                     }
 
-                    if let Ok(sig) = self.inner.wallet.sign_for_pk(&pk, &msg) {
+                    if let Ok(sk) = self.inner.wallet.sk_for_pk(&pk) {
+                        let sig = secp.sign_schnorr_no_aux_rand(&msg, &sk.keypair(&secp));
                         res.push((sig, pk))
                     }
                 }

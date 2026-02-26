@@ -2,8 +2,8 @@ use crate::error::ErrorContext as _;
 use crate::swap_storage::SwapStorage;
 use crate::utils::sleep;
 use crate::utils::timeout_op;
-use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
+use crate::wallet::Persistence;
 use crate::Blockchain;
 use crate::Client;
 use crate::Error;
@@ -52,7 +52,7 @@ use std::collections::HashMap;
 impl<B, W, S, K> Client<B, W, S, K>
 where
     B: Blockchain,
-    W: BoardingWallet + OnchainWallet,
+    W: OnchainWallet + Persistence,
     S: SwapStorage + 'static,
     K: crate::KeyProvider,
 {
@@ -1003,7 +1003,7 @@ where
         &self,
     ) -> Result<(Vec<batch::OnChainInput>, Vec<intent::Input>, Amount), Error> {
         // Get all known boarding outputs.
-        let boarding_outputs = self.inner.wallet.get_boarding_outputs()?;
+        let boarding_outputs = self.inner.wallet.load_boarding_outputs()?;
 
         let mut boarding_inputs: Vec<batch::OnChainInput> = Vec::new();
         let mut total_amount = Amount::ZERO;
@@ -1236,11 +1236,12 @@ where
                     })?;
 
                 let owner_pk = onchain_input.boarding_output().owner_pk();
-                let sig = self
+                let sk = self
                     .inner
                     .wallet
-                    .sign_for_pk(&owner_pk, &msg)
+                    .sk_for_pk(&owner_pk)
                     .map_err(|e| ark_core::Error::ad_hoc(e.to_string()))?;
+                let sig = secp.sign_schnorr_no_aux_rand(&msg, &sk.keypair(&secp));
 
                 Ok((sig, owner_pk))
             };
@@ -1737,10 +1738,13 @@ where
                                 schnorr::Signature,
                                 ark_core::Error,
                             > {
-                                self.inner
+                                let sk = self
+                                    .inner
                                     .wallet
-                                    .sign_for_pk(pk, msg)
-                                    .map_err(|e| ark_core::Error::ad_hoc(e.to_string()))
+                                    .sk_for_pk(pk)
+                                    .map_err(|e| ark_core::Error::ad_hoc(e.to_string()))?;
+                                let secp = self.secp();
+                                Ok(secp.sign_schnorr_no_aux_rand(msg, &sk.keypair(secp)))
                             };
 
                             sign_commitment_psbt(
