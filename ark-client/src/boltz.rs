@@ -2021,6 +2021,28 @@ where
         }
     }
 
+    /// Sign and finalize all pending VHTLC spend transactions.
+    pub async fn continue_pending_vhtlc_spend_txs(&self) -> Result<Vec<Txid>, Error> {
+        let pending = self.list_pending_vhtlc_spend_txs().await?;
+
+        let mut finalized = Vec::new();
+        for tx in &pending {
+            match self.continue_pending_vhtlc_spend_tx(tx).await {
+                Ok(txid) => finalized.push(txid),
+                Err(e) => {
+                    tracing::warn!(
+                        ark_txid = %tx.pending_tx.ark_txid,
+                        swap_id = tx.spend_type.swap_id(),
+                        ?e,
+                        "Failed to finalize pending VHTLC spend tx"
+                    );
+                }
+            }
+        }
+
+        Ok(finalized)
+    }
+
     /// Sign and finalize a pending claim VHTLC checkpoint.
     async fn continue_pending_claim(
         &self,

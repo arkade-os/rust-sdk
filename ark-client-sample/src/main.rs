@@ -161,6 +161,13 @@ enum Commands {
     ListPendingTxs,
     /// Continue and finalize any pending offchain transactions.
     ContinuePendingTxs,
+    /// List pending (submitted but not finalized) VHTLC swap transactions.
+    ListPendingSwapTxs,
+    /// Continue and finalize a pending VHTLC swap transaction by Boltz swap ID.
+    ContinuePendingSwapTxs {
+        /// The Boltz swap ID of the pending VHTLC swap transaction to finalize.
+        swap_id: String,
+    },
     /// Submit an offchain tx WITHOUT finalizing (for testing pending tx recovery).
     SubmitOnly { address: ArkAddressCli, amount: u64 },
     /// Create ArkNotes via the admin API (regtest only).
@@ -975,6 +982,64 @@ async fn run_command<K: KeyProvider>(
                     "finalized_txids": finalized.iter().map(|t| t.to_string()).collect::<Vec<_>>()
                 });
                 println!("{}", serde_json::to_string_pretty(&output)?);
+            }
+        }
+        Commands::ListPendingSwapTxs => {
+            let pending = client
+                .list_pending_vhtlc_spend_txs()
+                .await
+                .map_err(|e| anyhow!(e))?;
+
+            let entries: Vec<_> = pending
+                .iter()
+                .map(|tx| {
+                    let swap_id = tx.spend_type.swap_id().to_string();
+                    let ark_txid = tx.pending_tx.ark_txid.to_string();
+                    let spend_type = match &tx.spend_type {
+                        ark_client::PendingVhtlcSpendType::Claim { .. } => "claim",
+                        ark_client::PendingVhtlcSpendType::CollaborativeRefund { .. } => {
+                            "collaborative_refund"
+                        }
+                        ark_client::PendingVhtlcSpendType::ExpiredRefund { .. } => "expired_refund",
+                    };
+                    serde_json::json!({
+                        "swap_id": swap_id,
+                        "ark_txid": ark_txid,
+                        "spend_type": spend_type,
+                    })
+                })
+                .collect();
+
+            println!("{}", serde_json::to_string_pretty(&entries)?);
+        }
+        Commands::ContinuePendingSwapTxs { swap_id } => {
+            let pending = client
+                .list_pending_vhtlc_spend_txs()
+                .await
+                .map_err(|e| anyhow!(e))?;
+
+            let matched = pending
+                .into_iter()
+                .find(|tx| tx.spend_type.swap_id() == swap_id.as_str());
+
+            match matched {
+                None => {
+                    anyhow::bail!(
+                        "No pending VHTLC swap transaction found with swap_id: {swap_id}"
+                    );
+                }
+                Some(pending_tx) => {
+                    let txid = client
+                        .continue_pending_vhtlc_spend_tx(&pending_tx)
+                        .await
+                        .map_err(|e| anyhow!(e))?;
+
+                    let output = serde_json::json!({
+                        "swap_id": swap_id,
+                        "finalized_txid": txid.to_string(),
+                    });
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                }
             }
         }
         Commands::CreateNote { .. } => {
