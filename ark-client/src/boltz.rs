@@ -1906,19 +1906,37 @@ where
 
             // Build an intent to fetch the pending tx from the server.
             // We prove ownership using the forfeit-like spend path that we can sign.
-            let intent_input = intent::Input::new(
-                vtxo.outpoint,
-                bitcoin::Sequence::ZERO,
-                None,
-                TxOut {
-                    value: vtxo.amount,
-                    script_pubkey: info.script_pubkey.clone(),
-                },
-                vhtlc_tapscripts(&info.vhtlc),
-                info.intent_spend_info.clone(),
-                false,
-                vtxo.is_swept,
-            );
+            // If we have a preimage (reverse swap claim path), include it as extra
+            // witness so the server can verify the intent proof for the claim script.
+            let intent_input = match info.preimage {
+                Some(preimage) => intent::Input::new_with_extra_witness(
+                    vtxo.outpoint,
+                    bitcoin::Sequence::ZERO,
+                    None,
+                    TxOut {
+                        value: vtxo.amount,
+                        script_pubkey: info.script_pubkey.clone(),
+                    },
+                    vhtlc_tapscripts(&info.vhtlc),
+                    info.intent_spend_info.clone(),
+                    false,
+                    vtxo.is_swept,
+                    vec![preimage.to_vec()],
+                ),
+                None => intent::Input::new(
+                    vtxo.outpoint,
+                    bitcoin::Sequence::ZERO,
+                    None,
+                    TxOut {
+                        value: vtxo.amount,
+                        script_pubkey: info.script_pubkey.clone(),
+                    },
+                    vhtlc_tapscripts(&info.vhtlc),
+                    info.intent_spend_info.clone(),
+                    false,
+                    vtxo.is_swept,
+                ),
+            };
 
             let sign_for_vtxo_fn = |input: &mut psbt::Input,
                                     msg: secp256k1::Message|
