@@ -1034,6 +1034,10 @@ where
         self.inner.key_provider.get_keypair_for_pk(pk)
     }
 
+    fn derivation_index_for_pk(&self, pk: &XOnlyPublicKey) -> Option<u32> {
+        self.inner.key_provider.get_derivation_index_for_pk(pk)
+    }
+
     fn secp(&self) -> &Secp256k1<All> {
         &self.inner.secp
     }

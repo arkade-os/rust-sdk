@@ -138,9 +138,10 @@ where
         &self,
         invoice: Bolt11Invoice,
     ) -> Result<SubmarineSwapData, Error> {
-        let refund_public_key = self
-            .next_keypair(crate::key_provider::KeypairIndex::New)?
-            .public_key();
+        let refund_keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
+        let refund_public_key = refund_keypair.public_key();
+        let key_derivation_index =
+            self.derivation_index_for_pk(&refund_keypair.x_only_public_key().0);
 
         let preimage_hash = invoice.payment_hash();
         let preimage_hash = ripemd160::Hash::hash(preimage_hash.as_byte_array());
@@ -197,6 +198,7 @@ where
             amount: swap_response.expected_amount,
             invoice: request.invoice.clone(),
             created_at: created_at.as_secs(),
+            key_derivation_index,
         };
 
         self.swap_storage()
@@ -228,8 +230,10 @@ where
         &self,
         invoice: Bolt11Invoice,
     ) -> Result<SubmarineSwapResult, Error> {
-        let keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
-        let refund_public_key = keypair.public_key();
+        let refund_keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
+        let refund_public_key = refund_keypair.public_key();
+        let key_derivation_index =
+            self.derivation_index_for_pk(&refund_keypair.x_only_public_key().0);
 
         let preimage_hash = invoice.payment_hash();
         let preimage_hash = ripemd160::Hash::hash(preimage_hash.as_byte_array());
@@ -289,6 +293,7 @@ where
                     amount: swap_response.expected_amount,
                     invoice: request.invoice.clone(),
                     created_at: created_at.as_secs(),
+                    key_derivation_index,
                 },
             )
             .await?;
@@ -968,9 +973,10 @@ where
         let preimage_hash_sha256 = sha256::Hash::hash(&preimage);
         let preimage_hash = ripemd160::Hash::hash(preimage_hash_sha256.as_byte_array());
 
-        let claim_public_key = self
-            .next_keypair(crate::key_provider::KeypairIndex::New)?
-            .public_key();
+        let claim_keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
+        let claim_public_key = claim_keypair.public_key();
+        let key_derivation_index =
+            self.derivation_index_for_pk(&claim_keypair.x_only_public_key().0);
 
         let (invoice_amount, onchain_amount) = match amount {
             SwapAmount::Invoice(amount) => (Some(amount), None),
@@ -1036,6 +1042,7 @@ where
             claim_public_key: claim_public_key.into(),
             timeout_block_heights: response.timeout_block_heights,
             created_at: created_at.as_secs(),
+            key_derivation_index,
         };
 
         self.swap_storage()
@@ -1077,8 +1084,10 @@ where
     ) -> Result<ReverseSwapResult, Error> {
         let preimage_hash = ripemd160::Hash::hash(preimage_hash_sha256.as_byte_array());
 
-        let keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
-        let claim_public_key = keypair.public_key();
+        let claim_keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
+        let claim_public_key = claim_keypair.public_key();
+        let key_derivation_index =
+            self.derivation_index_for_pk(&claim_keypair.x_only_public_key().0);
 
         let (invoice_amount, onchain_amount) = match amount {
             SwapAmount::Invoice(amount) => (Some(amount), None),
@@ -1144,6 +1153,7 @@ where
             claim_public_key: claim_public_key.into(),
             timeout_block_heights: response.timeout_block_heights,
             created_at: created_at.as_secs(),
+            key_derivation_index,
         };
 
         self.swap_storage()
@@ -2256,6 +2266,67 @@ where
     }
 
     /// Collect info about all active (non-terminal) VHTLCs from swap storage.
+    /// Ensure a swap key is loaded into the key provider's cache so
+    /// `keypair_by_pk` can find it during intent signing.
+    ///
+    /// If `key_derivation_index` is `Some`, derives and caches the key at that index.
+    /// For legacy swap data (`None`), falls back to scanning a limited range of
+    /// indices beyond the current discovery frontier.
+    fn ensure_swap_key_cached(
+        &self,
+        pk: &XOnlyPublicKey,
+        key_derivation_index: Option<u32>,
+        swap_id: &str,
+    ) {
+        // Already in cache — nothing to do.
+        if self.keypair_by_pk(pk).is_ok() {
+            return;
+        }
+
+        if let Some(index) = key_derivation_index {
+            match self
+                .inner
+                .key_provider
+                .derive_at_discovery_index(index)
+            {
+                Ok(Some(kp)) if kp.x_only_public_key().0 == *pk => {
+                    if let Err(e) = self.inner.key_provider.cache_discovered_keypair(index, kp) {
+                        tracing::warn!(swap_id, %e, "Failed to cache swap key");
+                    }
+                }
+                Ok(_) => {
+                    tracing::warn!(
+                        swap_id,
+                        index,
+                        "Key at stored derivation index does not match swap pubkey"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(swap_id, index, %e, "Failed to derive key at stored index");
+                }
+            }
+        } else {
+            // Legacy data without stored index — scan a limited range.
+            const SCAN_RANGE: u32 = 50;
+            for i in 0..SCAN_RANGE {
+                match self.inner.key_provider.derive_at_discovery_index(i) {
+                    Ok(Some(kp)) if kp.x_only_public_key().0 == *pk => {
+                        if let Err(e) = self.inner.key_provider.cache_discovered_keypair(i, kp) {
+                            tracing::warn!(swap_id, %e, "Failed to cache swap key");
+                        }
+                        return;
+                    }
+                    Ok(_) => continue,
+                    Err(_) => break,
+                }
+            }
+            tracing::warn!(
+                swap_id,
+                "Could not find swap key in first {SCAN_RANGE} derivation indices (legacy swap data)"
+            );
+        }
+    }
+
     async fn collect_active_vhtlc_infos(&self) -> Result<Vec<VhtlcInfo>, Error> {
         let submarine_swaps = self
             .swap_storage()
@@ -2275,6 +2346,13 @@ where
             if swap.status.is_terminal() {
                 continue;
             }
+
+            // Ensure the refund key (sender) is in the key cache.
+            self.ensure_swap_key_cached(
+                &swap.refund_public_key.inner.x_only_public_key().0,
+                swap.key_derivation_index,
+                &swap.id,
+            );
 
             let vhtlc = self.build_vhtlc_script(
                 swap.claim_public_key,
@@ -2316,6 +2394,13 @@ where
             if swap.status.is_terminal() {
                 continue;
             }
+
+            // Ensure the claim key (receiver) is in the key cache.
+            self.ensure_swap_key_cached(
+                &swap.claim_public_key.inner.x_only_public_key().0,
+                swap.key_derivation_index,
+                &swap.id,
+            );
 
             let vhtlc = self.build_vhtlc_script(
                 swap.claim_public_key,
@@ -2622,6 +2707,11 @@ pub struct SubmarineSwapData {
     pub status: SwapStatus,
     /// UNIX timestamp when swap was created.
     pub created_at: u64,
+    /// BIP32 derivation index of the refund key (sender).
+    ///
+    /// `None` for legacy swap data created before this field was added.
+    #[serde(default)]
+    pub key_derivation_index: Option<u32>,
 }
 
 /// Data related to a reverse submarine swap.
@@ -2649,6 +2739,11 @@ pub struct ReverseSwapData {
     pub status: SwapStatus,
     /// UNIX timestamp when swap was created.
     pub created_at: u64,
+    /// BIP32 derivation index of the claim key (receiver).
+    ///
+    /// `None` for legacy swap data created before this field was added.
+    #[serde(default)]
+    pub key_derivation_index: Option<u32>,
 }
 
 /// All possible states of a Boltz swap.
