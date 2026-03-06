@@ -572,14 +572,6 @@ where
             tracing::warn!(?error, "Failed during key discovery");
         };
 
-        if let Err(error) = client.continue_pending_offchain_txs().await {
-            tracing::warn!(?error, "Failed to recover pending transactions");
-        };
-
-        if let Err(error) = client.continue_pending_vhtlc_spend_txs().await {
-            tracing::warn!(?error, "Failed to recover pending VHTLC transactions");
-        };
-
         Ok(client)
     }
 }
