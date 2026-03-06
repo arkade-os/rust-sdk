@@ -101,6 +101,14 @@ impl PendingVhtlcSpendType {
             | Self::ExpiredRefund { swap_id } => swap_id,
         }
     }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Claim { .. } => "Claim",
+            Self::CollaborativeRefund { .. } => "CollaborativeRefund",
+            Self::ExpiredRefund { .. } => "ExpiredRefund",
+        }
+    }
 }
 
 /// A pending (submitted but not finalized) VHTLC spend transaction.
@@ -2007,7 +2015,7 @@ where
                 tracing::info!(
                     ark_txid = %pending_tx.ark_txid,
                     swap_id = spend_type.swap_id(),
-                    spend_type = ?std::mem::discriminant(&spend_type),
+                    spend_type = spend_type.name(),
                     "Found pending VHTLC spend transaction"
                 );
 
@@ -2284,11 +2292,7 @@ where
         }
 
         if let Some(index) = key_derivation_index {
-            match self
-                .inner
-                .key_provider
-                .derive_at_discovery_index(index)
-            {
+            match self.inner.key_provider.derive_at_discovery_index(index) {
                 Ok(Some(kp)) if kp.x_only_public_key().0 == *pk => {
                     if let Err(e) = self.inner.key_provider.cache_discovered_keypair(index, kp) {
                         tracing::warn!(swap_id, %e, "Failed to cache swap key");
