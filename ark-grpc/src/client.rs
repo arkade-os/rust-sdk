@@ -38,6 +38,7 @@ use ark_core::server::Info;
 use ark_core::server::NoncePks;
 use ark_core::server::PartialSigTree;
 use ark_core::server::StreamEvent;
+use ark_core::server::StreamStartedEvent;
 use ark_core::server::StreamTransactionData;
 use ark_core::server::SubmitOffchainTxResponse;
 use ark_core::server::SubscriptionEvent;
@@ -635,6 +636,14 @@ impl TryFrom<generated::ark::v1::BatchStartedEvent> for BatchStartedEvent {
     }
 }
 
+impl TryFrom<generated::ark::v1::StreamStartedEvent> for StreamStartedEvent {
+    type Error = Error;
+
+    fn try_from(value: generated::ark::v1::StreamStartedEvent) -> Result<Self, Self::Error> {
+        Ok(StreamStartedEvent { id: value.id })
+    }
+}
+
 impl TryFrom<generated::ark::v1::BatchFinalizationEvent> for BatchFinalizationEvent {
     type Error = Error;
 
@@ -805,6 +814,9 @@ impl TryFrom<generated::ark::v1::get_event_stream_response::Event> for StreamEve
         value: generated::ark::v1::get_event_stream_response::Event,
     ) -> Result<Self, Self::Error> {
         Ok(match value {
+            generated::ark::v1::get_event_stream_response::Event::StreamStarted(e) => {
+                StreamEvent::StreamStarted(e.try_into()?)
+            }
             generated::ark::v1::get_event_stream_response::Event::BatchStarted(e) => {
                 StreamEvent::BatchStarted(e.try_into()?)
             }
@@ -1144,6 +1156,8 @@ impl From<GetVtxosRequest> for generated::ark::v1::GetVtxosRequest {
                 recoverable_only,
                 page,
                 pending_only,
+                after: value.after().unwrap_or(0) as i64,
+                before: value.before().unwrap_or(0) as i64,
             },
             GetVtxosRequestReference::OutPoints(outpoints) => Self {
                 scripts: Vec::new(),
@@ -1153,6 +1167,8 @@ impl From<GetVtxosRequest> for generated::ark::v1::GetVtxosRequest {
                 recoverable_only,
                 page,
                 pending_only,
+                after: value.after().unwrap_or(0) as i64,
+                before: value.before().unwrap_or(0) as i64,
             },
         }
     }

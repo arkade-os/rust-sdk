@@ -984,6 +984,7 @@ where
                         tracing::debug!("Unrelated batch failed: {e:?}");
                     }
                     StreamEvent::Heartbeat => {}
+                    StreamEvent::StreamStarted(_) => {}
                 },
                 Some(Err(e)) => {
                     tracing::error!("Got error from event stream");
@@ -1783,6 +1784,7 @@ where
                         tracing::debug!("Unrelated batch failed: {e:?}");
                     }
                     StreamEvent::Heartbeat => {}
+                    StreamEvent::StreamStarted(_) => {}
                 },
                 Some(Err(e)) => {
                     tracing::error!("Got error from event stream");

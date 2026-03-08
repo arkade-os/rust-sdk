@@ -10,6 +10,7 @@ All URIs are relative to _http://localhost_
 | [**ark_service_finalize_tx**](ArkServiceApi.md#ark_service_finalize_tx)                             | **POST** /v1/tx/finalize                 |             |
 | [**ark_service_get_event_stream**](ArkServiceApi.md#ark_service_get_event_stream)                   | **GET** /v1/batch/events                 |             |
 | [**ark_service_get_info**](ArkServiceApi.md#ark_service_get_info)                                   | **GET** /v1/info                         |             |
+| [**ark_service_get_intent**](ArkServiceApi.md#ark_service_get_intent)                               | **GET** /v1/intent                       |             |
 | [**ark_service_get_pending_tx**](ArkServiceApi.md#ark_service_get_pending_tx)                       | **POST** /v1/tx/pending                  |             |
 | [**ark_service_get_transactions_stream**](ArkServiceApi.md#ark_service_get_transactions_stream)     | **GET** /v1/txs                          |             |
 | [**ark_service_register_intent**](ArkServiceApi.md#ark_service_register_intent)                     | **POST** /v1/batch/registerIntent        |             |
@@ -17,6 +18,7 @@ All URIs are relative to _http://localhost_
 | [**ark_service_submit_tree_nonces**](ArkServiceApi.md#ark_service_submit_tree_nonces)               | **POST** /v1/batch/tree/submitNonces     |             |
 | [**ark_service_submit_tree_signatures**](ArkServiceApi.md#ark_service_submit_tree_signatures)       | **POST** /v1/batch/tree/submitSignatures |             |
 | [**ark_service_submit_tx**](ArkServiceApi.md#ark_service_submit_tx)                                 | **POST** /v1/tx/submit                   |             |
+| [**ark_service_update_stream_topics**](ArkServiceApi.md#ark_service_update_stream_topics)           | **POST** /v1/batch/updateTopics          |             |
 
 ## ark_service_confirm_registration
 
@@ -130,7 +132,7 @@ No authorization required
 
 > models::GetEventStreamResponse ark_service_get_event_stream(topics)
 
-GetEventStream is a server-side streaming RPC that allows clients to receive a stream of events related to batch processing. Clients should use this stream as soon as they are ready to join a batch and can listen for various events such as batch start, batch finalization, and other related activities. The server pushes these events to the client in real-time as soon as its ready to move to the next phase of the batch processing.
+GetEventStream is a server-side streaming RPC that allows clients to receive a stream of events related to batch processing. Clients should use this stream as soon as they are ready to join a batch and can listen for various events such as batch start, batch finalization, and other related activities. The server pushes these events to the client in real-time as soon as its ready to move to the next phase of the batch processing. Upon creation of the stream, the event StreamStartedEvent is immediately sent, which passes along the stream id, to be used by the client for future calls to UpdateStreamTopics.
 
 ### Parameters
 
@@ -166,6 +168,31 @@ This endpoint does not need any parameter.
 ### Return type
 
 [**models::GetInfoResponse**](GetInfoResponse.md)
+
+### Authorization
+
+No authorization required
+
+### HTTP request headers
+
+- **Content-Type**: Not defined
+- **Accept**: application/json
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+## ark_service_get_intent
+
+> models::GetIntentResponse ark_service_get_intent(txid)
+
+### Parameters
+
+| Name     | Type               | Description | Required | Notes |
+| -------- | ------------------ | ----------- | -------- | ----- |
+| **txid** | Option<**String**> |             |          |       |
+
+### Return type
+
+[**models::GetIntentResponse**](GetIntentResponse.md)
 
 ### Authorization
 
@@ -353,6 +380,33 @@ SubmitTx is the first leg of the process of spending vtxos offchain and allows a
 ### Return type
 
 [**models::SubmitTxResponse**](SubmitTxResponse.md)
+
+### Authorization
+
+No authorization required
+
+### HTTP request headers
+
+- **Content-Type**: application/json
+- **Accept**: application/json
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+## ark_service_update_stream_topics
+
+> models::UpdateStreamTopicsResponse ark_service_update_stream_topics(update_stream_topics_request)
+
+UpdateStreamTopics allows a client to modify the topics of their event stream. They can add, remove, or specify a list of topics, providing them control over the events received on the event stream.
+
+### Parameters
+
+| Name                             | Type                                                          | Description | Required   | Notes |
+| -------------------------------- | ------------------------------------------------------------- | ----------- | ---------- | ----- |
+| **update_stream_topics_request** | [**UpdateStreamTopicsRequest**](UpdateStreamTopicsRequest.md) |             | [required] |       |
+
+### Return type
+
+[**models::UpdateStreamTopicsResponse**](UpdateStreamTopicsResponse.md)
 
 ### Authorization
 

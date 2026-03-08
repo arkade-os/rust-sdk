@@ -5,8 +5,8 @@
 | Name                    | Type                                                                                   | Description | Notes      |
 | ----------------------- | -------------------------------------------------------------------------------------- | ----------- | ---------- |
 | **batches**             | Option<[**std::collections::HashMap<String, models::IndexerBatch>**](IndexerBatch.md)> |             | [optional] |
-| **ended_at**            | Option<**String**>                                                                     |             | [optional] |
-| **started_at**          | Option<**String**>                                                                     |             | [optional] |
+| **ended_at**            | Option<**i64**>                                                                        |             | [optional] |
+| **started_at**          | Option<**i64**>                                                                        |             | [optional] |
 | **total_input_amount**  | Option<**i32**>                                                                        |             | [optional] |
 | **total_input_vtxos**   | Option<**i32**>                                                                        |             | [optional] |
 | **total_output_amount** | Option<**i32**>                                                                        |             | [optional] |

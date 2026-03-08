@@ -4,6 +4,7 @@ All URIs are relative to _http://localhost_
 
 | Method                                                                                                                | HTTP request                                                                      | Description |
 | --------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- | ----------- |
+| [**indexer_service_get_asset**](IndexerServiceApi.md#indexer_service_get_asset)                                       | **GET** /v1/indexer/asset/{asset_id}                                              |             |
 | [**indexer_service_get_batch_sweep_transactions**](IndexerServiceApi.md#indexer_service_get_batch_sweep_transactions) | **GET** /v1/indexer/batch/{batch_outpoint.txid}/{batch_outpoint.vout}/sweepTxs    |             |
 | [**indexer_service_get_commitment_tx**](IndexerServiceApi.md#indexer_service_get_commitment_tx)                       | **GET** /v1/indexer/commitmentTx/{txid}                                           |             |
 | [**indexer_service_get_connectors**](IndexerServiceApi.md#indexer_service_get_connectors)                             | **GET** /v1/indexer/commitmentTx/{txid}/connectors                                |             |
@@ -16,6 +17,33 @@ All URIs are relative to _http://localhost_
 | [**indexer_service_get_vtxos**](IndexerServiceApi.md#indexer_service_get_vtxos)                                       | **GET** /v1/indexer/vtxos                                                         |             |
 | [**indexer_service_subscribe_for_scripts**](IndexerServiceApi.md#indexer_service_subscribe_for_scripts)               | **POST** /v1/indexer/script/subscribe                                             |             |
 | [**indexer_service_unsubscribe_for_scripts**](IndexerServiceApi.md#indexer_service_unsubscribe_for_scripts)           | **POST** /v1/indexer/script/unsubscribe                                           |             |
+
+## indexer_service_get_asset
+
+> models::GetAssetResponse indexer_service_get_asset(asset_id)
+
+GetAsset returns the asset information and metadata for the specified asset ID.
+
+### Parameters
+
+| Name         | Type       | Description | Required   | Notes |
+| ------------ | ---------- | ----------- | ---------- | ----- |
+| **asset_id** | **String** |             | [required] |       |
+
+### Return type
+
+[**models::GetAssetResponse**](GetAssetResponse.md)
+
+### Authorization
+
+No authorization required
+
+### HTTP request headers
+
+- **Content-Type**: Not defined
+- **Accept**: application/json
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
 
 ## indexer_service_get_batch_sweep_transactions
 
@@ -278,22 +306,24 @@ No authorization required
 
 ## indexer_service_get_vtxos
 
-> models::GetVtxosResponse indexer_service_get_vtxos(scripts, outpoints, spendable_only, spent_only, recoverable_only, pending_only, page_period_size, page_period_index)
+> models::GetVtxosResponse indexer_service_get_vtxos(scripts, outpoints, spendable_only, spent_only, recoverable_only, pending_only, after, before, page_period_size, page_period_index)
 
 GetVtxos returns the list of vtxos based on the provided filter. Vtxos can be retrieved either by addresses or by outpoints, and optionally filtered by spendable or spent only. The response may be paginated if the results span multiple pages.
 
 ### Parameters
 
-| Name                  | Type                                 | Description                                                                                            | Required | Notes |
-| --------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------ | -------- | ----- |
-| **scripts**           | Option<[**Vec<String>**](String.md)> | Either specify a list of vtxo scripts.                                                                 |          |       |
-| **outpoints**         | Option<[**Vec<String>**](String.md)> | Or specify a list of vtxo outpoints. The 2 filters are mutually exclusive.                             |          |       |
-| **spendable_only**    | Option<**bool**>                     | Retrieve only spendable vtxos                                                                          |          |       |
-| **spent_only**        | Option<**bool**>                     | Retrieve only spent vtxos.                                                                             |          |       |
-| **recoverable_only**  | Option<**bool**>                     | Retrieve only recoverable vtxos (notes, subdust or swept vtxos). The 3 filters are mutually exclusive, |          |       |
-| **pending_only**      | Option<**bool**>                     | Include only spent vtxos that are not finalized.                                                       |          |       |
-| **page_period_size**  | Option<**i32**>                      |                                                                                                        |          |       |
-| **page_period_index** | Option<**i32**>                      |                                                                                                        |          |       |
+| Name                  | Type                                 | Description                                                                                                                                                     | Required | Notes |
+| --------------------- | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ----- |
+| **scripts**           | Option<[**Vec<String>**](String.md)> | Either specify a list of vtxo scripts.                                                                                                                          |          |       |
+| **outpoints**         | Option<[**Vec<String>**](String.md)> | Or specify a list of vtxo outpoints. The 2 filters are mutually exclusive.                                                                                      |          |       |
+| **spendable_only**    | Option<**bool**>                     | Retrieve only spendable vtxos                                                                                                                                   |          |       |
+| **spent_only**        | Option<**bool**>                     | Retrieve only spent vtxos.                                                                                                                                      |          |       |
+| **recoverable_only**  | Option<**bool**>                     | Retrieve only recoverable vtxos (notes, subdust or swept vtxos). The 3 filters are mutually exclusive,                                                          |          |       |
+| **pending_only**      | Option<**bool**>                     | Include only spent vtxos that are not finalized.                                                                                                                |          |       |
+| **after**             | Option<**i64**>                      | Include only vtxos with last update after the given unix time in milliseconds. A value of 0 means no lower bound.                                               |          |       |
+| **before**            | Option<**i64**>                      | Include only vtxos with last update before the given unix time in milliseconds, greater value than the after when specified. A value of 0 means no upper bound. |          |       |
+| **page_period_size**  | Option<**i32**>                      |                                                                                                                                                                 |          |       |
+| **page_period_index** | Option<**i32**>                      |                                                                                                                                                                 |          |       |
 
 ### Return type
 

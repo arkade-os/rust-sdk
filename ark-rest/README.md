@@ -31,6 +31,7 @@ All URIs are relative to _http://localhost_
 | _ArkServiceApi_               | [**ark_service_finalize_tx**](docs/ArkServiceApi.md#ark_service_finalize_tx)                                               | **POST** /v1/tx/finalize                                                          |             |
 | _ArkServiceApi_               | [**ark_service_get_event_stream**](docs/ArkServiceApi.md#ark_service_get_event_stream)                                     | **GET** /v1/batch/events                                                          |             |
 | _ArkServiceApi_               | [**ark_service_get_info**](docs/ArkServiceApi.md#ark_service_get_info)                                                     | **GET** /v1/info                                                                  |             |
+| _ArkServiceApi_               | [**ark_service_get_intent**](docs/ArkServiceApi.md#ark_service_get_intent)                                                 | **GET** /v1/intent                                                                |             |
 | _ArkServiceApi_               | [**ark_service_get_pending_tx**](docs/ArkServiceApi.md#ark_service_get_pending_tx)                                         | **POST** /v1/tx/pending                                                           |             |
 | _ArkServiceApi_               | [**ark_service_get_transactions_stream**](docs/ArkServiceApi.md#ark_service_get_transactions_stream)                       | **GET** /v1/txs                                                                   |             |
 | _ArkServiceApi_               | [**ark_service_register_intent**](docs/ArkServiceApi.md#ark_service_register_intent)                                       | **POST** /v1/batch/registerIntent                                                 |             |
@@ -38,6 +39,8 @@ All URIs are relative to _http://localhost_
 | _ArkServiceApi_               | [**ark_service_submit_tree_nonces**](docs/ArkServiceApi.md#ark_service_submit_tree_nonces)                                 | **POST** /v1/batch/tree/submitNonces                                              |             |
 | _ArkServiceApi_               | [**ark_service_submit_tree_signatures**](docs/ArkServiceApi.md#ark_service_submit_tree_signatures)                         | **POST** /v1/batch/tree/submitSignatures                                          |             |
 | _ArkServiceApi_               | [**ark_service_submit_tx**](docs/ArkServiceApi.md#ark_service_submit_tx)                                                   | **POST** /v1/tx/submit                                                            |             |
+| _ArkServiceApi_               | [**ark_service_update_stream_topics**](docs/ArkServiceApi.md#ark_service_update_stream_topics)                             | **POST** /v1/batch/updateTopics                                                   |             |
+| _IndexerServiceApi_           | [**indexer_service_get_asset**](docs/IndexerServiceApi.md#indexer_service_get_asset)                                       | **GET** /v1/indexer/asset/{asset_id}                                              |             |
 | _IndexerServiceApi_           | [**indexer_service_get_batch_sweep_transactions**](docs/IndexerServiceApi.md#indexer_service_get_batch_sweep_transactions) | **GET** /v1/indexer/batch/{batch_outpoint.txid}/{batch_outpoint.vout}/sweepTxs    |             |
 | _IndexerServiceApi_           | [**indexer_service_get_commitment_tx**](docs/IndexerServiceApi.md#indexer_service_get_commitment_tx)                       | **GET** /v1/indexer/commitmentTx/{txid}                                           |             |
 | _IndexerServiceApi_           | [**indexer_service_get_connectors**](docs/IndexerServiceApi.md#indexer_service_get_connectors)                             | **GET** /v1/indexer/commitmentTx/{txid}/connectors                                |             |
@@ -64,6 +67,8 @@ All URIs are relative to _http://localhost_
 ## Documentation For Models
 
 - [Any](docs/Any.md)
+- [Asset](docs/Asset.md)
+- [AssetMetadata](docs/AssetMetadata.md)
 - [Balance](docs/Balance.md)
 - [BatchFailedEvent](docs/BatchFailedEvent.md)
 - [BatchFinalizationEvent](docs/BatchFinalizationEvent.md)
@@ -80,6 +85,8 @@ All URIs are relative to _http://localhost_
 - [FeeInfo](docs/FeeInfo.md)
 - [FinalizeTxRequest](docs/FinalizeTxRequest.md)
 - [GenSeedResponse](docs/GenSeedResponse.md)
+- [GetAssetRequest](docs/GetAssetRequest.md)
+- [GetAssetResponse](docs/GetAssetResponse.md)
 - [GetBalanceResponse](docs/GetBalanceResponse.md)
 - [GetBatchSweepTransactionsRequest](docs/GetBatchSweepTransactionsRequest.md)
 - [GetBatchSweepTransactionsResponse](docs/GetBatchSweepTransactionsResponse.md)
@@ -92,6 +99,8 @@ All URIs are relative to _http://localhost_
 - [GetForfeitTxsRequest](docs/GetForfeitTxsRequest.md)
 - [GetForfeitTxsResponse](docs/GetForfeitTxsResponse.md)
 - [GetInfoResponse](docs/GetInfoResponse.md)
+- [GetIntentRequest](docs/GetIntentRequest.md)
+- [GetIntentResponse](docs/GetIntentResponse.md)
 - [GetPendingTxRequest](docs/GetPendingTxRequest.md)
 - [GetPendingTxResponse](docs/GetPendingTxResponse.md)
 - [GetStatusResponse](docs/GetStatusResponse.md)
@@ -108,6 +117,7 @@ All URIs are relative to _http://localhost_
 - [GetVtxoTreeResponse](docs/GetVtxoTreeResponse.md)
 - [GetVtxosRequest](docs/GetVtxosRequest.md)
 - [GetVtxosResponse](docs/GetVtxosResponse.md)
+- [IndexerAsset](docs/IndexerAsset.md)
 - [IndexerBatch](docs/IndexerBatch.md)
 - [IndexerChain](docs/IndexerChain.md)
 - [IndexerChainedTxType](docs/IndexerChainedTxType.md)
@@ -124,13 +134,16 @@ All URIs are relative to _http://localhost_
 - [Intent](docs/Intent.md)
 - [IntentFeeInfo](docs/IntentFeeInfo.md)
 - [LoadSignerRequest](docs/LoadSignerRequest.md)
+- [ModifyTopics](docs/ModifyTopics.md)
 - [Outpoint](docs/Outpoint.md)
+- [OverwriteTopics](docs/OverwriteTopics.md)
 - [PendingTx](docs/PendingTx.md)
 - [RegisterIntentRequest](docs/RegisterIntentRequest.md)
 - [RegisterIntentResponse](docs/RegisterIntentResponse.md)
 - [RestoreRequest](docs/RestoreRequest.md)
 - [ScheduledSession](docs/ScheduledSession.md)
 - [Status](docs/Status.md)
+- [StreamStartedEvent](docs/StreamStartedEvent.md)
 - [SubmitSignedForfeitTxsRequest](docs/SubmitSignedForfeitTxsRequest.md)
 - [SubmitTreeNoncesRequest](docs/SubmitTreeNoncesRequest.md)
 - [SubmitTreeSignaturesRequest](docs/SubmitTreeSignaturesRequest.md)
@@ -148,6 +161,8 @@ All URIs are relative to _http://localhost_
 - [TxNotification](docs/TxNotification.md)
 - [UnlockRequest](docs/UnlockRequest.md)
 - [UnsubscribeForScriptsRequest](docs/UnsubscribeForScriptsRequest.md)
+- [UpdateStreamTopicsRequest](docs/UpdateStreamTopicsRequest.md)
+- [UpdateStreamTopicsResponse](docs/UpdateStreamTopicsResponse.md)
 - [Vtxo](docs/Vtxo.md)
 - [WithdrawRequest](docs/WithdrawRequest.md)
 - [WithdrawResponse](docs/WithdrawResponse.md)

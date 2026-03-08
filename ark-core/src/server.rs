@@ -216,6 +216,8 @@ pub struct GetVtxosRequest {
     reference: GetVtxosRequestReference,
     filter: Option<GetVtxosRequestFilter>,
     page: Option<PageRequest>,
+    before: Option<u64>,
+    after: Option<u64>,
 }
 
 /// Page request for paginated queries.
@@ -237,6 +239,8 @@ impl GetVtxosRequest {
             reference: GetVtxosRequestReference::Scripts(scripts),
             filter: None,
             page: None,
+            before: None,
+            after: None,
         }
     }
 
@@ -245,6 +249,8 @@ impl GetVtxosRequest {
             reference: GetVtxosRequestReference::OutPoints(outpoints.to_vec()),
             filter: None,
             page: None,
+            before: None,
+            after: None,
         }
     }
 
@@ -309,6 +315,27 @@ impl GetVtxosRequest {
 
     pub fn page(&self) -> Option<PageRequest> {
         self.page
+    }
+
+    pub fn with_before(self, before: u64) -> Self {
+        Self {
+            before: Some(before),
+            ..self
+        }
+    }
+
+    pub fn with_after(self, after: u64) -> Self {
+        Self {
+            after: Some(after),
+            ..self
+        }
+    }
+
+    pub fn before(&self) -> Option<u64> {
+        self.before
+    }
+    pub fn after(&self) -> Option<u64> {
+        self.after
     }
 }
 
@@ -454,6 +481,11 @@ pub struct DeprecatedSigner {
 }
 
 #[derive(Debug, Clone)]
+pub struct StreamStartedEvent {
+    pub id: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct BatchStartedEvent {
     pub id: String,
     pub intent_id_hashes: Vec<String>,
@@ -524,6 +556,7 @@ pub enum BatchTreeEventType {
 
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
+    StreamStarted(StreamStartedEvent),
     BatchStarted(BatchStartedEvent),
     BatchFinalization(BatchFinalizationEvent),
     BatchFinalized(BatchFinalizedEvent),
@@ -539,6 +572,7 @@ pub enum StreamEvent {
 impl StreamEvent {
     pub fn name(&self) -> String {
         let s = match self {
+            StreamEvent::StreamStarted(_) => "StreamStarted",
             StreamEvent::BatchStarted(_) => "BatchStarted",
             StreamEvent::BatchFinalization(_) => "BatchFinalization",
             StreamEvent::BatchFinalized(_) => "BatchFinalized",

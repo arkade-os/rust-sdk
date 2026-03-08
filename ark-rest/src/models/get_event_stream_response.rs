@@ -24,6 +24,8 @@ pub struct GetEventStreamResponse {
     pub batch_started: Option<models::BatchStartedEvent>,
     #[serde(rename = "heartbeat", skip_serializing_if = "Option::is_none")]
     pub heartbeat: Option<serde_json::Value>,
+    #[serde(rename = "streamStarted", skip_serializing_if = "Option::is_none")]
+    pub stream_started: Option<models::StreamStartedEvent>,
     #[serde(rename = "treeNonces", skip_serializing_if = "Option::is_none")]
     pub tree_nonces: Option<models::TreeNoncesEvent>,
     #[serde(
@@ -47,6 +49,7 @@ impl GetEventStreamResponse {
             batch_finalized: None,
             batch_started: None,
             heartbeat: None,
+            stream_started: None,
             tree_nonces: None,
             tree_nonces_aggregated: None,
             tree_signature: None,

@@ -18,6 +18,8 @@ pub struct Vtxo {
     pub amount: Option<String>,
     #[serde(rename = "arkTxid", skip_serializing_if = "Option::is_none")]
     pub ark_txid: Option<String>,
+    #[serde(rename = "assets", skip_serializing_if = "Option::is_none")]
+    pub assets: Option<Vec<models::Asset>>,
     #[serde(rename = "commitmentTxids", skip_serializing_if = "Option::is_none")]
     pub commitment_txids: Option<Vec<String>>,
     #[serde(rename = "createdAt", skip_serializing_if = "Option::is_none")]
@@ -47,6 +49,7 @@ impl Vtxo {
         Vtxo {
             amount: None,
             ark_txid: None,
+            assets: None,
             commitment_txids: None,
             created_at: None,
             expires_at: None,
