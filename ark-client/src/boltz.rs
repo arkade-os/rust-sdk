@@ -2277,57 +2277,47 @@ where
     /// Ensure a swap key is loaded into the key provider's cache so
     /// `keypair_by_pk` can find it during intent signing.
     ///
-    /// If `key_derivation_index` is `Some`, derives and caches the key at that index.
-    /// For legacy swap data (`None`), falls back to scanning a limited range of
-    /// indices beyond the current discovery frontier.
+    /// Returns `true` if the key is available (already cached or successfully derived).
+    /// Returns `false` for legacy swap data without a stored derivation index.
     fn ensure_swap_key_cached(
         &self,
         pk: &XOnlyPublicKey,
         key_derivation_index: Option<u32>,
         swap_id: &str,
-    ) {
+    ) -> bool {
         // Already in cache — nothing to do.
         if self.keypair_by_pk(pk).is_ok() {
-            return;
+            return true;
         }
 
-        if let Some(index) = key_derivation_index {
-            match self.inner.key_provider.derive_at_discovery_index(index) {
-                Ok(Some(kp)) if kp.x_only_public_key().0 == *pk => {
-                    if let Err(e) = self.inner.key_provider.cache_discovered_keypair(index, kp) {
-                        tracing::warn!(swap_id, %e, "Failed to cache swap key");
-                    }
-                }
-                Ok(_) => {
-                    tracing::warn!(
-                        swap_id,
-                        index,
-                        "Key at stored derivation index does not match swap pubkey"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(swap_id, index, %e, "Failed to derive key at stored index");
-                }
-            }
-        } else {
-            // Legacy data without stored index — scan a limited range.
-            const SCAN_RANGE: u32 = 50;
-            for i in 0..SCAN_RANGE {
-                match self.inner.key_provider.derive_at_discovery_index(i) {
-                    Ok(Some(kp)) if kp.x_only_public_key().0 == *pk => {
-                        if let Err(e) = self.inner.key_provider.cache_discovered_keypair(i, kp) {
-                            tracing::warn!(swap_id, %e, "Failed to cache swap key");
-                        }
-                        return;
-                    }
-                    Ok(_) => continue,
-                    Err(_) => break,
-                }
-            }
+        let Some(index) = key_derivation_index else {
             tracing::warn!(
                 swap_id,
-                "Could not find swap key in first {SCAN_RANGE} derivation indices (legacy swap data)"
+                "Legacy swap data without derivation index, skipping recovery"
             );
+            return false;
+        };
+
+        match self.inner.key_provider.derive_at_discovery_index(index) {
+            Ok(Some(kp)) if kp.x_only_public_key().0 == *pk => {
+                if let Err(e) = self.inner.key_provider.cache_discovered_keypair(index, kp) {
+                    tracing::warn!(swap_id, %e, "Failed to cache swap key");
+                    return false;
+                }
+                true
+            }
+            Ok(_) => {
+                tracing::warn!(
+                    swap_id,
+                    index,
+                    "Key at stored derivation index does not match swap pubkey"
+                );
+                false
+            }
+            Err(e) => {
+                tracing::warn!(swap_id, index, %e, "Failed to derive key at stored index");
+                false
+            }
         }
     }
 
@@ -2352,11 +2342,13 @@ where
             }
 
             // Ensure the refund key (sender) is in the key cache.
-            self.ensure_swap_key_cached(
+            if !self.ensure_swap_key_cached(
                 &swap.refund_public_key.inner.x_only_public_key().0,
                 swap.key_derivation_index,
                 &swap.id,
-            );
+            ) {
+                continue;
+            }
 
             let vhtlc = self.build_vhtlc_script(
                 swap.claim_public_key,
@@ -2400,11 +2392,13 @@ where
             }
 
             // Ensure the claim key (receiver) is in the key cache.
-            self.ensure_swap_key_cached(
+            if !self.ensure_swap_key_cached(
                 &swap.claim_public_key.inner.x_only_public_key().0,
                 swap.key_derivation_index,
                 &swap.id,
-            );
+            ) {
+                continue;
+            }
 
             let vhtlc = self.build_vhtlc_script(
                 swap.claim_public_key,
