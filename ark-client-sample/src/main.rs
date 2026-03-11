@@ -667,12 +667,12 @@ async fn run_command<K: KeyProvider>(
 
             tracing::info!(swap_id, "Payment sent, waiting for finalization");
 
-            let preimage = client
+            client
                 .wait_for_invoice_paid(swap_id.as_str())
                 .await
                 .map_err(|e| anyhow!(e))?;
 
-            tracing::info!(swap_id, preimage = %bitcoin::hex::DisplayHex::to_lower_hex_string(&preimage), "Payment made");
+            tracing::info!(swap_id, "Payment made");
         }
         Commands::RefundSwap { swap_id } => {
             let txid = client
