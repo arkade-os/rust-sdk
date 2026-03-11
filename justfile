@@ -145,8 +145,8 @@ arkd-wallet-run:
 
     set -euxo pipefail
 
-    # Start up pgnbxplorer and nbxplorer
-    docker compose -f $ARKD_DIR/docker-compose.regtest.yml up -d pgnbxplorer nbxplorer
+    # Start up pg and nbxplorer
+    docker compose -f $ARKD_DIR/docker-compose.regtest.yml up -d pg nbxplorer
 
     just _wait-for-docker-log nbxplorer "Now listening on: http://0.0.0.0:32838" 30
 
