@@ -15,7 +15,7 @@
   "exec": {
     "commands": [
       {
-        "command": "rustup run nightly rustfmt",
+        "command": "rustup run nightly-2026-03-07 rustfmt",
         "exts": [
           "rs"
         ]
