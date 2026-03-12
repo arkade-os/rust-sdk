@@ -191,6 +191,9 @@ impl Client {
         let page_period_size: Option<i32> = request.page().map(|p| p.size);
         let page_period_index: Option<i32> = request.page().map(|p| p.index);
 
+        let before = request.before().map(|b| b as i64);
+        let after = request.after().map(|b| b as i64);
+
         let response = indexer_service_get_vtxos(
             &self.configuration,
             scripts,
@@ -199,6 +202,8 @@ impl Client {
             spent_only,
             recoverable_only,
             pending_only,
+            before,
+            after,
             page_period_size,
             page_period_index,
         )

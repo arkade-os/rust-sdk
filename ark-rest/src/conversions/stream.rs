@@ -9,6 +9,7 @@ use ark_core::server::BatchFinalizedEvent;
 use ark_core::server::BatchStartedEvent;
 use ark_core::server::NoncePks;
 use ark_core::server::StreamEvent;
+use ark_core::server::StreamStartedEvent;
 use ark_core::server::TreeNoncesAggregatedEvent;
 use ark_core::server::TreeSignatureEvent;
 use ark_core::server::TreeSigningStartedEvent;
@@ -69,6 +70,18 @@ impl TryFrom<models::BatchStartedEvent> for BatchStartedEvent {
                 .ok_or_else(|| ConversionError("Missing batch id".to_string()))?,
             intent_id_hashes: event.intent_id_hashes.unwrap_or_default(),
             batch_expiry: parse_sequence_number(expiry)?,
+        })
+    }
+}
+
+impl TryFrom<models::StreamStartedEvent> for StreamStartedEvent {
+    type Error = ConversionError;
+
+    fn try_from(event: models::StreamStartedEvent) -> Result<Self, Self::Error> {
+        Ok(StreamStartedEvent {
+            id: event
+                .id
+                .ok_or_else(|| ConversionError("Missing batch id".to_string()))?,
         })
     }
 }

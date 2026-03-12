@@ -4,11 +4,12 @@
 
 | Name                 | Type                                        | Description | Notes      |
 | -------------------- | ------------------------------------------- | ----------- | ---------- |
-| **amount**           | Option<**String**>                          |             | [optional] |
+| **amount**           | Option<**i32**>                             |             | [optional] |
 | **ark_txid**         | Option<**String**>                          |             | [optional] |
+| **assets**           | Option<[**Vec<models::Asset>**](Asset.md)>  |             | [optional] |
 | **commitment_txids** | Option<**Vec<String>**>                     |             | [optional] |
-| **created_at**       | Option<**String**>                          |             | [optional] |
-| **expires_at**       | Option<**String**>                          |             | [optional] |
+| **created_at**       | Option<**i64**>                             |             | [optional] |
+| **expires_at**       | Option<**i64**>                             |             | [optional] |
 | **is_preconfirmed**  | Option<**bool**>                            |             | [optional] |
 | **is_spent**         | Option<**bool**>                            |             | [optional] |
 | **is_swept**         | Option<**bool**>                            |             | [optional] |

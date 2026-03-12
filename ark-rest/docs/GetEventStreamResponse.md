@@ -9,6 +9,7 @@
 | **batch_finalized**        | Option<[**models::BatchFinalizedEvent**](BatchFinalizedEvent.md)>             |             | [optional] |
 | **batch_started**          | Option<[**models::BatchStartedEvent**](BatchStartedEvent.md)>                 |             | [optional] |
 | **heartbeat**              | Option<[**serde_json::Value**](.md)>                                          |             | [optional] |
+| **stream_started**         | Option<[**models::StreamStartedEvent**](StreamStartedEvent.md)>               |             | [optional] |
 | **tree_nonces**            | Option<[**models::TreeNoncesEvent**](TreeNoncesEvent.md)>                     |             | [optional] |
 | **tree_nonces_aggregated** | Option<[**models::TreeNoncesAggregatedEvent**](TreeNoncesAggregatedEvent.md)> |             | [optional] |
 | **tree_signature**         | Option<[**models::TreeSignatureEvent**](TreeSignatureEvent.md)>               |             | [optional] |

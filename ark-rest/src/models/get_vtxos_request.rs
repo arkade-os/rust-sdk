@@ -14,6 +14,14 @@ use serde::Serialize;
 
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GetVtxosRequest {
+    /// Include only vtxos with last update after the given unix time in milliseconds. A value of 0
+    /// means no lower bound.
+    #[serde(rename = "after", skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+    /// Include only vtxos with last update before the given unix time in milliseconds, greater
+    /// value than the after when specified. A value of 0 means no upper bound.
+    #[serde(rename = "before", skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
     /// Or specify a list of vtxo outpoints. The 2 filters are mutually exclusive.
     #[serde(rename = "outpoints", skip_serializing_if = "Option::is_none")]
     pub outpoints: Option<Vec<String>>,
@@ -40,6 +48,8 @@ pub struct GetVtxosRequest {
 impl GetVtxosRequest {
     pub fn new() -> GetVtxosRequest {
         GetVtxosRequest {
+            after: None,
+            before: None,
             outpoints: None,
             page: None,
             pending_only: None,

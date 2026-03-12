@@ -7,6 +7,19 @@
   },
   "components": {
     "schemas": {
+      "Asset": {
+        "title": "Asset",
+        "type": "object",
+        "properties": {
+          "amount": {
+            "type": "integer",
+            "format": "uint64"
+          },
+          "assetId": {
+            "type": "string"
+          }
+        }
+      },
       "BatchFailedEvent": {
         "title": "BatchFailedEvent",
         "type": "object",
@@ -48,7 +61,8 @@
         "type": "object",
         "properties": {
           "batchExpiry": {
-            "type": "string"
+            "type": "integer",
+            "format": "int64"
           },
           "id": {
             "type": "string"
@@ -66,7 +80,8 @@
         "type": "object",
         "properties": {
           "cutoffDate": {
-            "type": "string"
+            "type": "integer",
+            "format": "int64"
           },
           "pubkey": {
             "type": "string"
@@ -189,18 +204,31 @@
         "type": "object",
         "properties": {
           "duration": {
-            "type": "string"
+            "type": "integer",
+            "format": "int64"
           },
           "fees": {
             "$ref": "#/components/schemas/FeeInfo"
           },
           "nextEndTime": {
-            "type": "string"
+            "type": "integer",
+            "format": "int64"
           },
           "nextStartTime": {
-            "type": "string"
+            "type": "integer",
+            "format": "int64"
           },
           "period": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "StreamStartedEvent": {
+        "title": "StreamStartedEvent",
+        "type": "object",
+        "properties": {
+          "id": {
             "type": "string"
           }
         }
@@ -380,10 +408,17 @@
         "type": "object",
         "properties": {
           "amount": {
-            "type": "string"
+            "type": "integer",
+            "format": "uint64"
           },
           "arkTxid": {
             "type": "string"
+          },
+          "assets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Asset"
+            }
           },
           "commitmentTxids": {
             "type": "array",
@@ -392,10 +427,12 @@
             }
           },
           "createdAt": {
-            "type": "string"
+            "type": "integer",
+            "format": "int64"
           },
           "expiresAt": {
-            "type": "string"
+            "type": "integer",
+            "format": "int64"
           },
           "isPreconfirmed": {
             "type": "boolean"
@@ -474,7 +511,8 @@
         "type": "object",
         "properties": {
           "fee": {
-            "type": "string"
+            "type": "integer",
+            "format": "int64"
           }
         }
       },
@@ -528,6 +566,9 @@
           "heartbeat": {
             "$ref": "#/components/schemas/Heartbeat"
           },
+          "streamStarted": {
+            "$ref": "#/components/schemas/StreamStartedEvent"
+          },
           "treeNonces": {
             "$ref": "#/components/schemas/TreeNoncesEvent"
           },
@@ -554,7 +595,8 @@
         "type": "object",
         "properties": {
           "boardingExitDelay": {
-            "type": "string"
+            "type": "integer",
+            "format": "int64"
           },
           "checkpointTapscript": {
             "type": "string"
@@ -569,7 +611,8 @@
             "type": "string"
           },
           "dust": {
-            "type": "string"
+            "type": "integer",
+            "format": "int64"
           },
           "fees": {
             "$ref": "#/components/schemas/FeeInfo"
@@ -579,6 +622,10 @@
           },
           "forfeitPubkey": {
             "type": "string"
+          },
+          "maxTxWeight": {
+            "type": "integer",
+            "format": "int64"
           },
           "network": {
             "type": "string"
@@ -593,30 +640,54 @@
             }
           },
           "sessionDuration": {
-            "type": "string"
+            "type": "integer",
+            "format": "int64"
           },
           "signerPubkey": {
             "type": "string"
           },
           "unilateralExitDelay": {
-            "type": "string"
+            "type": "integer",
+            "format": "int64"
           },
           "utxoMaxAmount": {
-            "type": "string",
-            "description": "-1 means no limit (default), 0 means boarding not allowed"
+            "type": "integer",
+            "description": "-1 means no limit (default), 0 means boarding not allowed",
+            "format": "int64"
           },
           "utxoMinAmount": {
-            "type": "string"
+            "type": "integer",
+            "format": "int64"
           },
           "version": {
             "type": "string"
           },
           "vtxoMaxAmount": {
-            "type": "string",
-            "description": "-1 means no limit (default)"
+            "type": "integer",
+            "description": "-1 means no limit (default)",
+            "format": "int64"
           },
           "vtxoMinAmount": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "GetIntentRequest": {
+        "title": "GetIntentRequest",
+        "type": "object",
+        "properties": {
+          "txid": {
             "type": "string"
+          }
+        }
+      },
+      "GetIntentResponse": {
+        "title": "GetIntentResponse",
+        "type": "object",
+        "properties": {
+          "intent": {
+            "$ref": "#/components/schemas/Intent"
           }
         }
       },
@@ -657,6 +728,36 @@
           },
           "heartbeat": {
             "$ref": "#/components/schemas/Heartbeat"
+          }
+        }
+      },
+      "ModifyTopics": {
+        "title": "ModifyTopics",
+        "type": "object",
+        "properties": {
+          "addTopics": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "removeTopics": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "OverwriteTopics": {
+        "title": "OverwriteTopics",
+        "type": "object",
+        "properties": {
+          "topics": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       },
@@ -796,6 +897,85 @@
           }
         }
       },
+      "UpdateStreamTopicsRequest": {
+        "title": "UpdateStreamTopicsRequest",
+        "type": "object",
+        "description": "Adding and removing topics can both be supplied in the same request,\nallowing for simultaneous changes.\noverwrite_topics will take precedence, and if set, then the add/remove\ntopics are ignored. The stream_id is required.",
+        "properties": {
+          "modify": {
+            "$ref": "#/components/schemas/ModifyTopics"
+          },
+          "overwrite": {
+            "$ref": "#/components/schemas/OverwriteTopics"
+          },
+          "streamId": {
+            "type": "string"
+          }
+        }
+      },
+      "UpdateStreamTopicsResponse": {
+        "title": "UpdateStreamTopicsResponse",
+        "type": "object",
+        "properties": {
+          "allTopics": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "topicsAdded": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "topicsRemoved": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "AssetMetadata": {
+        "title": "AssetMetadata",
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        }
+      },
+      "GetAssetRequest": {
+        "title": "GetAssetRequest",
+        "type": "object",
+        "properties": {
+          "assetId": {
+            "type": "string"
+          }
+        }
+      },
+      "GetAssetResponse": {
+        "title": "GetAssetResponse",
+        "type": "object",
+        "properties": {
+          "assetId": {
+            "type": "string"
+          },
+          "controlAsset": {
+            "type": "string"
+          },
+          "metadata": {
+            "type": "string"
+          },
+          "supply": {
+            "type": "string"
+          }
+        }
+      },
       "GetBatchSweepTransactionsRequest": {
         "title": "GetBatchSweepTransactionsRequest",
         "type": "object",
@@ -837,10 +1017,12 @@
             }
           },
           "endedAt": {
-            "type": "string"
+            "type": "integer",
+            "format": "int64"
           },
           "startedAt": {
-            "type": "string"
+            "type": "integer",
+            "format": "int64"
           },
           "totalInputAmount": {
             "type": "integer",
@@ -1050,6 +1232,16 @@
         "title": "GetVtxosRequest",
         "type": "object",
         "properties": {
+          "after": {
+            "type": "integer",
+            "description": "Include only vtxos with last update after the given unix time in milliseconds.\nA value of 0 means no lower bound.",
+            "format": "int64"
+          },
+          "before": {
+            "type": "integer",
+            "description": "Include only vtxos with last update before the given unix time in milliseconds,\ngreater value than the after when specified. A value of 0 means no upper bound.",
+            "format": "int64"
+          },
           "outpoints": {
             "type": "array",
             "description": "Or specify a list of vtxo outpoints. The 2 filters are mutually exclusive.",
@@ -1100,12 +1292,26 @@
           }
         }
       },
+      "IndexerAsset": {
+        "title": "IndexerAsset",
+        "type": "object",
+        "properties": {
+          "amount": {
+            "type": "integer",
+            "format": "uint64"
+          },
+          "assetId": {
+            "type": "string"
+          }
+        }
+      },
       "IndexerBatch": {
         "title": "IndexerBatch",
         "type": "object",
         "properties": {
           "expiresAt": {
-            "type": "string"
+            "type": "integer",
+            "format": "int64"
           },
           "swept": {
             "type": "boolean"
@@ -1125,7 +1331,8 @@
         "type": "object",
         "properties": {
           "expiresAt": {
-            "type": "string"
+            "type": "integer",
+            "format": "int64"
           },
           "spends": {
             "type": "array",
@@ -1278,13 +1485,15 @@
         "type": "object",
         "properties": {
           "amount": {
-            "type": "string"
+            "type": "integer",
+            "format": "uint64"
           },
           "commitmentTxid": {
             "type": "string"
           },
           "createdAt": {
-            "type": "string"
+            "type": "integer",
+            "format": "int64"
           },
           "isSettled": {
             "type": "boolean"
@@ -1315,10 +1524,17 @@
         "type": "object",
         "properties": {
           "amount": {
-            "type": "string"
+            "type": "integer",
+            "format": "uint64"
           },
           "arkTxid": {
             "type": "string"
+          },
+          "assets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IndexerAsset"
+            }
           },
           "commitmentTxids": {
             "type": "array",
@@ -1327,10 +1543,12 @@
             }
           },
           "createdAt": {
-            "type": "string"
+            "type": "integer",
+            "format": "int64"
           },
           "expiresAt": {
-            "type": "string"
+            "type": "integer",
+            "format": "int64"
           },
           "isPreconfirmed": {
             "type": "boolean"
@@ -1561,7 +1779,8 @@
             "description": "if all=true, amount is ignored and all available balance is withdrawn including connectors account funds\nmust be used carefully to not make connectors utxos unspendable, making forfeit txs invalid"
           },
           "amount": {
-            "type": "string"
+            "type": "integer",
+            "format": "uint64"
           }
         }
       },
@@ -1722,7 +1941,7 @@
         "tags": [
           "ArkService"
         ],
-        "description": "GetEventStream is a server-side streaming RPC that allows clients to receive a stream of\nevents related to batch processing.\nClients should use this stream as soon as they are ready to join a batch and can listen for\nvarious events such as batch start, batch finalization, and other related activities.\nThe server pushes these events to the client in real-time as soon as its ready to move to the\nnext phase of the batch processing.",
+        "description": "GetEventStream is a server-side streaming RPC that allows clients to receive a stream of\nevents related to batch processing.\nClients should use this stream as soon as they are ready to join a batch and can listen for\nvarious events such as batch start, batch finalization, and other related activities.\nThe server pushes these events to the client in real-time as soon as its ready to move to the\nnext phase of the batch processing. Upon creation of the stream, the event StreamStartedEvent\nis immediately sent, which passes along the stream id, to be used by the client for future\ncalls to UpdateStreamTopics.",
         "operationId": "ArkService_GetEventStream",
         "parameters": [
           {
@@ -1926,6 +2145,47 @@
         }
       }
     },
+    "/v1/batch/updateTopics": {
+      "post": {
+        "tags": [
+          "ArkService"
+        ],
+        "description": "UpdateStreamTopics allows a client to modify the topics of their event stream. They can add,\nremove, or specify a list of topics, providing them control over the events received on the\nevent stream.",
+        "operationId": "ArkService_UpdateStreamTopics",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateStreamTopicsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "a successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateStreamTopicsResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Status"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/info": {
       "get": {
         "tags": [
@@ -1940,6 +2200,45 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/GetInfoResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Status"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/intent": {
+      "get": {
+        "tags": [
+          "ArkService"
+        ],
+        "operationId": "ArkService_GetIntent",
+        "parameters": [
+          {
+            "name": "txid",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "a successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetIntentResponse"
                 }
               }
             }
@@ -2094,6 +2393,47 @@
               "text/event-stream": {
                 "schema": {
                   "$ref": "#/components/schemas/GetTransactionsStreamResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Status"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/indexer/asset/{asset_id}": {
+      "get": {
+        "tags": [
+          "IndexerService"
+        ],
+        "description": "GetAsset returns the asset information and metadata for the specified asset ID.",
+        "operationId": "IndexerService_GetAsset",
+        "parameters": [
+          {
+            "name": "assetId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "a successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetAssetResponse"
                 }
               }
             }
@@ -2763,6 +3103,24 @@
             "description": "Include only spent vtxos that are not finalized.",
             "schema": {
               "type": "boolean"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Include only vtxos with last update after the given unix time in milliseconds.\nA value of 0 means no lower bound.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "Include only vtxos with last update before the given unix time in milliseconds,\ngreater value than the after when specified. A value of 0 means no upper bound.",
+            "schema": {
+              "type": "integer",
+              "format": "int64"
             }
           },
           {

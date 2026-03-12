@@ -33,6 +33,8 @@ pub struct GetInfoResponse {
     pub forfeit_address: Option<String>,
     #[serde(rename = "forfeitPubkey", skip_serializing_if = "Option::is_none")]
     pub forfeit_pubkey: Option<String>,
+    #[serde(rename = "maxTxWeight", skip_serializing_if = "Option::is_none")]
+    pub max_tx_weight: Option<String>,
     #[serde(rename = "network", skip_serializing_if = "Option::is_none")]
     pub network: Option<String>,
     #[serde(rename = "scheduledSession", skip_serializing_if = "Option::is_none")]
@@ -73,6 +75,7 @@ impl GetInfoResponse {
             fees: None,
             forfeit_address: None,
             forfeit_pubkey: None,
+            max_tx_weight: None,
             network: None,
             scheduled_session: None,
             service_status: None,

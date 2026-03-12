@@ -66,6 +66,14 @@ pub enum ArkServiceGetInfoError {
     UnknownValue(serde_json::Value),
 }
 
+/// struct for typed errors of method [`ark_service_get_intent`]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ArkServiceGetIntentError {
+    DefaultResponse(models::Status),
+    UnknownValue(serde_json::Value),
+}
+
 /// struct for typed errors of method [`ark_service_get_pending_tx`]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -118,6 +126,14 @@ pub enum ArkServiceSubmitTreeSignaturesError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ArkServiceSubmitTxError {
+    DefaultResponse(models::Status),
+    UnknownValue(serde_json::Value),
+}
+
+/// struct for typed errors of method [`ark_service_update_stream_topics`]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ArkServiceUpdateStreamTopicsError {
     DefaultResponse(models::Status),
     UnknownValue(serde_json::Value),
 }
@@ -322,7 +338,9 @@ pub async fn ark_service_finalize_tx(
 /// related to batch processing. Clients should use this stream as soon as they are ready to join a
 /// batch and can listen for various events such as batch start, batch finalization, and other
 /// related activities. The server pushes these events to the client in real-time as soon as its
-/// ready to move to the next phase of the batch processing.
+/// ready to move to the next phase of the batch processing. Upon creation of the stream, the event
+/// StreamStartedEvent is immediately sent, which passes along the stream id, to be used by the
+/// client for future calls to UpdateStreamTopics.
 pub async fn ark_service_get_event_stream(
     configuration: &configuration::Configuration,
     topics: Option<Vec<String>>,
@@ -417,6 +435,52 @@ pub async fn ark_service_get_info(
     } else {
         let content = resp.text().await?;
         let entity: Option<ArkServiceGetInfoError> = serde_json::from_str(&content).ok();
+        Err(Error::ResponseError(ResponseContent {
+            status,
+            content,
+            entity,
+        }))
+    }
+}
+
+pub async fn ark_service_get_intent(
+    configuration: &configuration::Configuration,
+    txid: Option<&str>,
+) -> Result<models::GetIntentResponse, Error<ArkServiceGetIntentError>> {
+    // add a prefix to parameters to efficiently prevent name collisions
+    let p_txid = txid;
+
+    let uri_str = format!("{}/v1/intent", configuration.base_path);
+    let mut req_builder = configuration.client.request(reqwest::Method::GET, &uri_str);
+
+    if let Some(ref param_value) = p_txid {
+        req_builder = req_builder.query(&[("txid", &param_value.to_string())]);
+    }
+    if let Some(ref user_agent) = configuration.user_agent {
+        req_builder = req_builder.header(reqwest::header::USER_AGENT, user_agent.clone());
+    }
+
+    let req = req_builder.build()?;
+    let resp = configuration.client.execute(req).await?;
+
+    let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream");
+    let content_type = super::ContentType::from(content_type);
+
+    if !status.is_client_error() && !status.is_server_error() {
+        let content = resp.text().await?;
+        match content_type {
+            ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::GetIntentResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::GetIntentResponse`")))),
+        }
+    } else {
+        let content = resp.text().await?;
+        let entity: Option<ArkServiceGetIntentError> = serde_json::from_str(&content).ok();
         Err(Error::ResponseError(ResponseContent {
             status,
             content,
@@ -758,6 +822,55 @@ pub async fn ark_service_submit_tx(
     } else {
         let content = resp.text().await?;
         let entity: Option<ArkServiceSubmitTxError> = serde_json::from_str(&content).ok();
+        Err(Error::ResponseError(ResponseContent {
+            status,
+            content,
+            entity,
+        }))
+    }
+}
+
+/// UpdateStreamTopics allows a client to modify the topics of their event stream. They can add,
+/// remove, or specify a list of topics, providing them control over the events received on the
+/// event stream.
+pub async fn ark_service_update_stream_topics(
+    configuration: &configuration::Configuration,
+    update_stream_topics_request: models::UpdateStreamTopicsRequest,
+) -> Result<models::UpdateStreamTopicsResponse, Error<ArkServiceUpdateStreamTopicsError>> {
+    // add a prefix to parameters to efficiently prevent name collisions
+    let p_update_stream_topics_request = update_stream_topics_request;
+
+    let uri_str = format!("{}/v1/batch/updateTopics", configuration.base_path);
+    let mut req_builder = configuration
+        .client
+        .request(reqwest::Method::POST, &uri_str);
+
+    if let Some(ref user_agent) = configuration.user_agent {
+        req_builder = req_builder.header(reqwest::header::USER_AGENT, user_agent.clone());
+    }
+    req_builder = req_builder.json(&p_update_stream_topics_request);
+
+    let req = req_builder.build()?;
+    let resp = configuration.client.execute(req).await?;
+
+    let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream");
+    let content_type = super::ContentType::from(content_type);
+
+    if !status.is_client_error() && !status.is_server_error() {
+        let content = resp.text().await?;
+        match content_type {
+            ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::UpdateStreamTopicsResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::UpdateStreamTopicsResponse`")))),
+        }
+    } else {
+        let content = resp.text().await?;
+        let entity: Option<ArkServiceUpdateStreamTopicsError> = serde_json::from_str(&content).ok();
         Err(Error::ResponseError(ResponseContent {
             status,
             content,

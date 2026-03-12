@@ -6,6 +6,19 @@
   },
   "components": {
     "schemas": {
+      "Asset": {
+        "title": "Asset",
+        "type": "object",
+        "properties": {
+          "amount": {
+            "type": "integer",
+            "format": "uint64"
+          },
+          "assetId": {
+            "type": "string"
+          }
+        }
+      },
       "BatchFailedEvent": {
         "title": "BatchFailedEvent",
         "type": "object",
@@ -47,7 +60,8 @@
         "type": "object",
         "properties": {
           "batchExpiry": {
-            "type": "string"
+            "type": "integer",
+            "format": "int64"
           },
           "id": {
             "type": "string"
@@ -65,7 +79,8 @@
         "type": "object",
         "properties": {
           "cutoffDate": {
-            "type": "string"
+            "type": "integer",
+            "format": "int64"
           },
           "pubkey": {
             "type": "string"
@@ -188,18 +203,31 @@
         "type": "object",
         "properties": {
           "duration": {
-            "type": "string"
+            "type": "integer",
+            "format": "int64"
           },
           "fees": {
             "$ref": "#/components/schemas/FeeInfo"
           },
           "nextEndTime": {
-            "type": "string"
+            "type": "integer",
+            "format": "int64"
           },
           "nextStartTime": {
-            "type": "string"
+            "type": "integer",
+            "format": "int64"
           },
           "period": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "StreamStartedEvent": {
+        "title": "StreamStartedEvent",
+        "type": "object",
+        "properties": {
+          "id": {
             "type": "string"
           }
         }
@@ -379,10 +407,17 @@
         "type": "object",
         "properties": {
           "amount": {
-            "type": "string"
+            "type": "integer",
+            "format": "uint64"
           },
           "arkTxid": {
             "type": "string"
+          },
+          "assets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Asset"
+            }
           },
           "commitmentTxids": {
             "type": "array",
@@ -391,10 +426,12 @@
             }
           },
           "createdAt": {
-            "type": "string"
+            "type": "integer",
+            "format": "int64"
           },
           "expiresAt": {
-            "type": "string"
+            "type": "integer",
+            "format": "int64"
           },
           "isPreconfirmed": {
             "type": "boolean"

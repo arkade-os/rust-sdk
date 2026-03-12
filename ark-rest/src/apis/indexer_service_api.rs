@@ -18,6 +18,14 @@ use serde::de::Error as _;
 use serde::Deserialize;
 use serde::Serialize;
 
+/// struct for typed errors of method [`indexer_service_get_asset`]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum IndexerServiceGetAssetError {
+    DefaultResponse(models::Status),
+    UnknownValue(serde_json::Value),
+}
+
 /// struct for typed errors of method [`indexer_service_get_batch_sweep_transactions`]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -112,6 +120,54 @@ pub enum IndexerServiceSubscribeForScriptsError {
 pub enum IndexerServiceUnsubscribeForScriptsError {
     DefaultResponse(models::Status),
     UnknownValue(serde_json::Value),
+}
+
+/// GetAsset returns the asset information and metadata for the specified asset ID.
+pub async fn indexer_service_get_asset(
+    configuration: &configuration::Configuration,
+    asset_id: &str,
+) -> Result<models::GetAssetResponse, Error<IndexerServiceGetAssetError>> {
+    // add a prefix to parameters to efficiently prevent name collisions
+    let p_asset_id = asset_id;
+
+    let uri_str = format!(
+        "{}/v1/indexer/asset/{}",
+        configuration.base_path,
+        crate::apis::urlencode(p_asset_id)
+    );
+    let mut req_builder = configuration.client.request(reqwest::Method::GET, &uri_str);
+
+    if let Some(ref user_agent) = configuration.user_agent {
+        req_builder = req_builder.header(reqwest::header::USER_AGENT, user_agent.clone());
+    }
+
+    let req = req_builder.build()?;
+    let resp = configuration.client.execute(req).await?;
+
+    let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream");
+    let content_type = super::ContentType::from(content_type);
+
+    if !status.is_client_error() && !status.is_server_error() {
+        let content = resp.text().await?;
+        match content_type {
+            ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::GetAssetResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::GetAssetResponse`")))),
+        }
+    } else {
+        let content = resp.text().await?;
+        let entity: Option<IndexerServiceGetAssetError> = serde_json::from_str(&content).ok();
+        Err(Error::ResponseError(ResponseContent {
+            status,
+            content,
+            entity,
+        }))
+    }
 }
 
 /// GetBatchSweepTransactions returns the list of transaction (txid) that swept a given batch
@@ -356,9 +412,9 @@ pub async fn indexer_service_get_subscription(
     let p_subscription_id = subscription_id;
 
     let uri_str = format!(
-        "{}/v1/indexer/script/subscription/{subscription_id}",
+        "{}/v1/indexer/script/subscription/{}",
         configuration.base_path,
-        subscription_id = crate::apis::urlencode(p_subscription_id)
+        crate::apis::urlencode(p_subscription_id)
     );
     let mut req_builder = configuration.client.request(reqwest::Method::GET, &uri_str);
 
@@ -655,6 +711,8 @@ pub async fn indexer_service_get_vtxos(
     spent_only: Option<bool>,
     recoverable_only: Option<bool>,
     pending_only: Option<bool>,
+    after: Option<i64>,
+    before: Option<i64>,
     page_period_size: Option<i32>,
     page_period_index: Option<i32>,
 ) -> Result<models::GetVtxosResponse, Error<IndexerServiceGetVtxosError>> {
@@ -665,6 +723,8 @@ pub async fn indexer_service_get_vtxos(
     let p_spent_only = spent_only;
     let p_recoverable_only = recoverable_only;
     let p_pending_only = pending_only;
+    let p_after = after;
+    let p_before = before;
     let p_page_period_size = page_period_size;
     let p_page_period_index = page_period_index;
 
@@ -720,6 +780,12 @@ pub async fn indexer_service_get_vtxos(
     }
     if let Some(ref param_value) = p_pending_only {
         req_builder = req_builder.query(&[("pendingOnly", &param_value.to_string())]);
+    }
+    if let Some(ref param_value) = p_after {
+        req_builder = req_builder.query(&[("after", &param_value.to_string())]);
+    }
+    if let Some(ref param_value) = p_before {
+        req_builder = req_builder.query(&[("before", &param_value.to_string())]);
     }
     if let Some(ref param_value) = p_page_period_size {
         req_builder = req_builder.query(&[("page.size", &param_value.to_string())]);

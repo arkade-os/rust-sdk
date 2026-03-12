@@ -4,6 +4,8 @@ Cargo.toml
 README.md
 docs/Any.md
 docs/ArkServiceApi.md
+docs/Asset.md
+docs/AssetMetadata.md
 docs/Balance.md
 docs/BatchFailedEvent.md
 docs/BatchFinalizationEvent.md
@@ -20,6 +22,8 @@ docs/EstimateIntentFeeResponse.md
 docs/FeeInfo.md
 docs/FinalizeTxRequest.md
 docs/GenSeedResponse.md
+docs/GetAssetRequest.md
+docs/GetAssetResponse.md
 docs/GetBalanceResponse.md
 docs/GetBatchSweepTransactionsRequest.md
 docs/GetBatchSweepTransactionsResponse.md
@@ -32,6 +36,8 @@ docs/GetEventStreamResponse.md
 docs/GetForfeitTxsRequest.md
 docs/GetForfeitTxsResponse.md
 docs/GetInfoResponse.md
+docs/GetIntentRequest.md
+docs/GetIntentResponse.md
 docs/GetPendingTxRequest.md
 docs/GetPendingTxResponse.md
 docs/GetStatusResponse.md
@@ -48,6 +54,7 @@ docs/GetVtxoTreeRequest.md
 docs/GetVtxoTreeResponse.md
 docs/GetVtxosRequest.md
 docs/GetVtxosResponse.md
+docs/IndexerAsset.md
 docs/IndexerBatch.md
 docs/IndexerChain.md
 docs/IndexerChainedTxType.md
@@ -65,7 +72,9 @@ docs/Input.md
 docs/Intent.md
 docs/IntentFeeInfo.md
 docs/LoadSignerRequest.md
+docs/ModifyTopics.md
 docs/Outpoint.md
+docs/OverwriteTopics.md
 docs/PendingTx.md
 docs/RegisterIntentRequest.md
 docs/RegisterIntentResponse.md
@@ -73,6 +82,7 @@ docs/RestoreRequest.md
 docs/ScheduledSession.md
 docs/SignerManagerServiceApi.md
 docs/Status.md
+docs/StreamStartedEvent.md
 docs/SubmitSignedForfeitTxsRequest.md
 docs/SubmitTreeNoncesRequest.md
 docs/SubmitTreeSignaturesRequest.md
@@ -90,6 +100,8 @@ docs/TxData.md
 docs/TxNotification.md
 docs/UnlockRequest.md
 docs/UnsubscribeForScriptsRequest.md
+docs/UpdateStreamTopicsRequest.md
+docs/UpdateStreamTopicsResponse.md
 docs/Vtxo.md
 docs/WalletInitializerServiceApi.md
 docs/WalletServiceApi.md
@@ -105,6 +117,8 @@ src/apis/wallet_initializer_service_api.rs
 src/apis/wallet_service_api.rs
 src/lib.rs
 src/models/any.rs
+src/models/asset.rs
+src/models/asset_metadata.rs
 src/models/balance.rs
 src/models/batch_failed_event.rs
 src/models/batch_finalization_event.rs
@@ -121,6 +135,8 @@ src/models/estimate_intent_fee_response.rs
 src/models/fee_info.rs
 src/models/finalize_tx_request.rs
 src/models/gen_seed_response.rs
+src/models/get_asset_request.rs
+src/models/get_asset_response.rs
 src/models/get_balance_response.rs
 src/models/get_batch_sweep_transactions_request.rs
 src/models/get_batch_sweep_transactions_response.rs
@@ -133,6 +149,8 @@ src/models/get_event_stream_response.rs
 src/models/get_forfeit_txs_request.rs
 src/models/get_forfeit_txs_response.rs
 src/models/get_info_response.rs
+src/models/get_intent_request.rs
+src/models/get_intent_response.rs
 src/models/get_pending_tx_request.rs
 src/models/get_pending_tx_response.rs
 src/models/get_status_response.rs
@@ -149,6 +167,7 @@ src/models/get_vtxo_tree_request.rs
 src/models/get_vtxo_tree_response.rs
 src/models/get_vtxos_request.rs
 src/models/get_vtxos_response.rs
+src/models/indexer_asset.rs
 src/models/indexer_batch.rs
 src/models/indexer_chain.rs
 src/models/indexer_chained_tx_type.rs
@@ -166,13 +185,16 @@ src/models/intent.rs
 src/models/intent_fee_info.rs
 src/models/load_signer_request.rs
 src/models/mod.rs
+src/models/modify_topics.rs
 src/models/outpoint.rs
+src/models/overwrite_topics.rs
 src/models/pending_tx.rs
 src/models/register_intent_request.rs
 src/models/register_intent_response.rs
 src/models/restore_request.rs
 src/models/scheduled_session.rs
 src/models/status.rs
+src/models/stream_started_event.rs
 src/models/submit_signed_forfeit_txs_request.rs
 src/models/submit_tree_nonces_request.rs
 src/models/submit_tree_signatures_request.rs
@@ -190,6 +212,8 @@ src/models/tx_data.rs
 src/models/tx_notification.rs
 src/models/unlock_request.rs
 src/models/unsubscribe_for_scripts_request.rs
+src/models/update_stream_topics_request.rs
+src/models/update_stream_topics_response.rs
 src/models/vtxo.rs
 src/models/withdraw_request.rs
 src/models/withdraw_response.rs

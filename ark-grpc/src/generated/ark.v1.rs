@@ -138,7 +138,7 @@ pub struct Input {
     #[prost(message, optional, tag = "2")]
     pub taproot_tree: ::core::option::Option<Tapscripts>,
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Vtxo {
     #[prost(message, optional, tag = "1")]
     pub outpoint: ::core::option::Option<Outpoint>,
@@ -166,6 +166,15 @@ pub struct Vtxo {
     pub settled_by: ::prost::alloc::string::String,
     #[prost(string, tag = "13")]
     pub ark_txid: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "14")]
+    pub assets: ::prost::alloc::vec::Vec<Asset>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Asset {
+    #[prost(string, tag = "1")]
+    pub asset_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "2")]
+    pub amount: u64,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct TxData {
@@ -340,6 +349,11 @@ pub struct TreeSignatureEvent {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Heartbeat {}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StreamStartedEvent {
+    #[prost(string, tag = "1")]
+    pub id: ::prost::alloc::string::String,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ErrorDetails {
     #[prost(int32, tag = "1")]
@@ -397,6 +411,8 @@ pub struct GetInfoResponse {
         ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
     #[prost(string, tag = "19")]
     pub digest: ::prost::alloc::string::String,
+    #[prost(int64, tag = "20")]
+    pub max_tx_weight: i64,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RegisterIntentRequest {
@@ -480,7 +496,7 @@ pub struct GetEventStreamRequest {
 pub struct GetEventStreamResponse {
     #[prost(
         oneof = "get_event_stream_response::Event",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10"
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11"
     )]
     pub event: ::core::option::Option<get_event_stream_response::Event>,
 }
@@ -508,7 +524,51 @@ pub mod get_event_stream_response {
         TreeNonces(super::TreeNoncesEvent),
         #[prost(message, tag = "10")]
         Heartbeat(super::Heartbeat),
+        #[prost(message, tag = "11")]
+        StreamStarted(super::StreamStartedEvent),
     }
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ModifyTopics {
+    #[prost(string, repeated, tag = "1")]
+    pub add_topics: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "2")]
+    pub remove_topics: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct OverwriteTopics {
+    #[prost(string, repeated, tag = "1")]
+    pub topics: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+/// Adding and removing topics can both be supplied in the same request,
+/// allowing for simultaneous changes.
+/// overwrite_topics will take precedence, and if set, then the add/remove
+/// topics are ignored. The stream_id is required.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UpdateStreamTopicsRequest {
+    #[prost(string, tag = "1")]
+    pub stream_id: ::prost::alloc::string::String,
+    #[prost(oneof = "update_stream_topics_request::TopicsChange", tags = "2, 3")]
+    pub topics_change: ::core::option::Option<update_stream_topics_request::TopicsChange>,
+}
+/// Nested message and enum types in `UpdateStreamTopicsRequest`.
+pub mod update_stream_topics_request {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum TopicsChange {
+        #[prost(message, tag = "2")]
+        Modify(super::ModifyTopics),
+        #[prost(message, tag = "3")]
+        Overwrite(super::OverwriteTopics),
+    }
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UpdateStreamTopicsResponse {
+    #[prost(string, repeated, tag = "1")]
+    pub topics_added: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "2")]
+    pub topics_removed: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "3")]
+    pub all_topics: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SubmitTxRequest {
@@ -571,6 +631,24 @@ pub mod get_transactions_stream_response {
         #[prost(message, tag = "3")]
         Heartbeat(super::Heartbeat),
     }
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetIntentRequest {
+    #[prost(oneof = "get_intent_request::Filter", tags = "1")]
+    pub filter: ::core::option::Option<get_intent_request::Filter>,
+}
+/// Nested message and enum types in `GetIntentRequest`.
+pub mod get_intent_request {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Filter {
+        #[prost(string, tag = "1")]
+        Txid(::prost::alloc::string::String),
+    }
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetIntentResponse {
+    #[prost(message, optional, tag = "1")]
+    pub intent: ::core::option::Option<Intent>,
 }
 /// Generated client implementations.
 pub mod ark_service_client {
@@ -821,7 +899,9 @@ pub mod ark_service_client {
         /// Clients should use this stream as soon as they are ready to join a batch and can listen
         /// for various events such as batch start, batch finalization, and other related
         /// activities. The server pushes these events to the client in real-time as soon as
-        /// its ready to move to the next phase of the batch processing.
+        /// its ready to move to the next phase of the batch processing. Upon creation of
+        /// the stream, the event StreamStartedEvent is immediately sent, which passes along
+        /// the stream id, to be used by the client for future calls to UpdateStreamTopics.
         pub async fn get_event_stream(
             &mut self,
             request: impl tonic::IntoRequest<super::GetEventStreamRequest>,
@@ -838,6 +918,25 @@ pub mod ark_service_client {
             req.extensions_mut()
                 .insert(GrpcMethod::new("ark.v1.ArkService", "GetEventStream"));
             self.inner.server_streaming(req, path, codec).await
+        }
+        /// UpdateStreamTopics allows a client to modify the topics of their event stream. They can
+        /// add, remove, or specify a list of topics, providing them control over the events
+        /// received on the event stream.
+        pub async fn update_stream_topics(
+            &mut self,
+            request: impl tonic::IntoRequest<super::UpdateStreamTopicsRequest>,
+        ) -> std::result::Result<tonic::Response<super::UpdateStreamTopicsResponse>, tonic::Status>
+        {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path =
+                http::uri::PathAndQuery::from_static("/ark.v1.ArkService/UpdateStreamTopics");
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ark.v1.ArkService", "UpdateStreamTopics"));
+            self.inner.unary(req, path, codec).await
         }
         /// SubmitTx is the first leg of the process of spending vtxos offchain and allows a client
         /// to submit a signed Ark transaction and the unsigned checkpoint transactions.
@@ -917,6 +1016,20 @@ pub mod ark_service_client {
                 "GetTransactionsStream",
             ));
             self.inner.server_streaming(req, path, codec).await
+        }
+        pub async fn get_intent(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetIntentRequest>,
+        ) -> std::result::Result<tonic::Response<super::GetIntentResponse>, tonic::Status> {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/ark.v1.ArkService/GetIntent");
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ark.v1.ArkService", "GetIntent"));
+            self.inner.unary(req, path, codec).await
         }
     }
 }
@@ -1433,6 +1546,14 @@ pub struct GetVtxosRequest {
     /// Include only spent vtxos that are not finalized.
     #[prost(bool, tag = "7")]
     pub pending_only: bool,
+    /// Include only vtxos with last update after the given unix time in milliseconds.
+    /// A value of 0 means no lower bound.
+    #[prost(int64, tag = "8")]
+    pub after: i64,
+    /// Include only vtxos with last update before the given unix time in milliseconds,
+    /// greater value than the after when specified. A value of 0 means no upper bound.
+    #[prost(int64, tag = "9")]
+    pub before: i64,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetVtxosResponse {
@@ -1470,6 +1591,29 @@ pub struct GetVirtualTxsResponse {
     pub page: ::core::option::Option<IndexerPageResponse>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetAssetRequest {
+    #[prost(string, tag = "1")]
+    pub asset_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetAssetResponse {
+    #[prost(string, tag = "1")]
+    pub asset_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub supply: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub metadata: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub control_asset: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AssetMetadata {
+    #[prost(string, tag = "1")]
+    pub key: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub value: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetBatchSweepTransactionsRequest {
     #[prost(message, optional, tag = "1")]
     pub batch_outpoint: ::core::option::Option<IndexerOutpoint>,
@@ -1505,7 +1649,7 @@ pub struct IndexerNode {
     #[prost(map = "uint32, string", tag = "2")]
     pub children: ::std::collections::HashMap<u32, ::prost::alloc::string::String>,
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct IndexerVtxo {
     #[prost(message, optional, tag = "1")]
     pub outpoint: ::core::option::Option<IndexerOutpoint>,
@@ -1533,6 +1677,15 @@ pub struct IndexerVtxo {
     pub settled_by: ::prost::alloc::string::String,
     #[prost(string, tag = "13")]
     pub ark_txid: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "14")]
+    pub assets: ::prost::alloc::vec::Vec<IndexerAsset>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct IndexerAsset {
+    #[prost(string, tag = "1")]
+    pub asset_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "2")]
+    pub amount: u64,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct IndexerChain {
@@ -1953,6 +2106,21 @@ pub mod indexer_service_client {
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("ark.v1.IndexerService", "GetVirtualTxs"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// GetAsset returns the asset information and metadata for the specified asset ID.
+        pub async fn get_asset(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetAssetRequest>,
+        ) -> std::result::Result<tonic::Response<super::GetAssetResponse>, tonic::Status> {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/ark.v1.IndexerService/GetAsset");
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ark.v1.IndexerService", "GetAsset"));
             self.inner.unary(req, path, codec).await
         }
         /// GetBatchSweepTransactions returns the list of transaction (txid) that swept a given
