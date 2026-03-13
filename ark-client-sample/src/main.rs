@@ -392,26 +392,16 @@ async fn run_command<K: KeyProvider>(
     match &command {
         Commands::Balance => {
             let offchain_balance = client.offchain_balance().await.map_err(|e| anyhow!(e))?;
-
-            let boarding = {
-                let boarding_output = client.get_boarding_address().map_err(|e| anyhow!(e))?;
-                let outpoints = esplora_client
-                    .find_outpoints(&boarding_output)
-                    .await
-                    .map_err(|e| anyhow!(e))?;
-
-                let (_, unspent): (Vec<_>, Vec<_>) =
-                    outpoints.into_iter().partition(|u| u.is_spent);
-
-                unspent.iter().map(|u| u.amount).sum::<Amount>()
-            };
+            let boarding_balance = client.boarding_balance().await.map_err(|e| anyhow!(e))?;
 
             println!(
                 "{}",
                 serde_json::json!({
                     "offchain_confirmed": offchain_balance.confirmed(),
                     "offchain_pre_confirmed": offchain_balance.pre_confirmed(),
-                    "boarding": boarding,
+                    "boarding_spendable": boarding_balance.spendable(),
+                    "boarding_expired": boarding_balance.expired(),
+                    "boarding_pending": boarding_balance.pending(),
                 })
             );
         }
@@ -728,36 +718,35 @@ async fn run_command<K: KeyProvider>(
                     .then_with(|| b.amount_sats.cmp(&a.amount_sats))
             });
 
-            // Get boarding outputs
-            let boarding_output = client.get_boarding_address().map_err(|e| anyhow!(e))?;
-            let outpoints = esplora_client
-                .find_outpoints(&boarding_output)
-                .await
-                .map_err(|e| anyhow!(e))?;
+            // Get boarding outputs using per-output exit delays for accurate status
+            let boarding_outpoints = client.list_boarding_outpoints().await.map_err(|e| anyhow!(e))?;
 
             let mut boarding_entries: Vec<BoardingEntry> = Vec::new();
-            for o in outpoints {
-                if !o.is_spent {
-                    boarding_entries.push(BoardingEntry {
-                        outpoint: o.outpoint.to_string(),
-                        amount_sats: o.amount.to_sat(),
-                        confirmation_time: o
-                            .confirmation_blocktime
-                            .map(|t| format_timestamp(t as i64))
-                            .transpose()?,
-                        status: if o.confirmation_blocktime.is_some() {
-                            "confirmed".to_string()
-                        } else {
-                            "pending".to_string()
-                        },
-                    });
-                }
+
+            for (outpoint, amount, confirmation_blocktime, status) in boarding_outpoints {
+                let confirmation_time = match confirmation_blocktime {
+                    Some(blocktime) => Some(format_timestamp(blocktime as i64)?),
+                    None => None,
+                };
+
+                boarding_entries.push(BoardingEntry {
+                    outpoint: outpoint.to_string(),
+                    amount_sats: amount.to_sat(),
+                    confirmation_time,
+                    status: status.to_string(),
+                });
             }
 
-            // Sort boarding by confirmation time (earliest first), then amount (largest first)
+            // Sort boarding by status (expired first so user knows to refund), then amount
             boarding_entries.sort_by(|a, b| {
-                a.confirmation_time
-                    .cmp(&b.confirmation_time)
+                let status_order = |s: &str| match s {
+                    "expired" => 0,
+                    "spendable" => 1,
+                    "pending" => 2,
+                    _ => 3,
+                };
+                status_order(&a.status)
+                    .cmp(&status_order(&b.status))
                     .then_with(|| b.amount_sats.cmp(&a.amount_sats))
             });
 
