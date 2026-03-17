@@ -3,6 +3,7 @@ members = [
   "ark-fees",
   "ark-client",
   "ark-core",
+  "ark-delegator",
   "ark-grpc",
   "ark-rest",
   "ark-bdk-wallet",
