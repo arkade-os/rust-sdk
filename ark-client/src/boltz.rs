@@ -431,12 +431,14 @@ where
         })?;
 
         // Fetch the claim transaction PSBT.
-        let claim_txs = self
-            .network_client()
-            .get_virtual_txs(vec![claim_txid.to_string()], None)
-            .await
-            .map_err(|e| Error::ad_hoc(e.to_string()))
-            .context("failed to fetch claim transaction")?;
+        let claim_txs = timeout_op(
+            self.inner.timeout,
+            self.network_client()
+                .get_virtual_txs(vec![claim_txid.to_string()], None),
+        )
+        .await?
+        .map_err(|e| Error::ad_hoc(e.to_string()))
+        .context("failed to fetch claim transaction")?;
 
         let claim_psbt = claim_txs
             .txs
