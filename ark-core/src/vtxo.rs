@@ -1,5 +1,6 @@
 use crate::ark_address::ArkAddress;
 use crate::script::csv_sig_script;
+use crate::script::multisig_3of3_script;
 use crate::script::multisig_script;
 use crate::script::tr_script_pubkey;
 use crate::Error;
@@ -24,6 +25,8 @@ use std::time::Duration;
 pub struct Vtxo {
     server_forfeit: XOnlyPublicKey,
     owner: XOnlyPublicKey,
+    /// The delegator's public key, if this VTXO has a delegate spending path.
+    delegator: Option<XOnlyPublicKey>,
     spend_info: TaprootSpendInfo,
     /// All the scripts in this VTXO's Taproot tree.
     tapscripts: Vec<ScriptBuf>,
@@ -34,8 +37,11 @@ pub struct Vtxo {
 }
 
 impl Vtxo {
-    /// 64 bytes per pubkey.
+    /// 64 bytes per signature in a 2-of-2 multisig witness.
     pub const FORFEIT_WITNESS_SIZE: usize = 64 * 2;
+
+    /// 64 bytes per signature in a 3-of-3 multisig witness (delegate path).
+    pub const DELEGATE_WITNESS_SIZE: usize = 64 * 3;
 
     /// Build a VTXO, by providing all the scripts to be included in the Taproot tree.
     ///
@@ -85,6 +91,7 @@ impl Vtxo {
         Ok(Self {
             server_forfeit,
             owner,
+            delegator: None,
             spend_info,
             tapscripts: scripts,
             address,
@@ -118,6 +125,44 @@ impl Vtxo {
         )
     }
 
+    /// Build a VTXO with a delegate spending path.
+    ///
+    /// This creates a 3-leaf Taproot tree:
+    /// 1. **Forfeit**: 2-of-2 multisig (server + owner)
+    /// 2. **Exit**: CSV-timelocked owner signature
+    /// 3. **Delegate**: 3-of-3 multisig (owner + delegator + server)
+    ///
+    /// The delegate path allows a third-party delegator service to cooperate with the owner and
+    /// the server to renew VTXOs before they expire.
+    pub fn new_with_delegator<C>(
+        secp: &Secp256k1<C>,
+        server_signer: XOnlyPublicKey,
+        owner: XOnlyPublicKey,
+        delegator: XOnlyPublicKey,
+        exit_delay: bitcoin::Sequence,
+        network: Network,
+    ) -> Result<Self, Error>
+    where
+        C: Verification,
+    {
+        let forfeit_script = multisig_script(server_signer, owner);
+        let redeem_script = csv_sig_script(exit_delay, owner);
+        let delegate_script = multisig_3of3_script(owner, delegator, server_signer);
+
+        let mut vtxo = Self::new_with_custom_scripts(
+            secp,
+            server_signer,
+            owner,
+            vec![forfeit_script, redeem_script, delegate_script],
+            exit_delay,
+            network,
+        )?;
+
+        vtxo.delegator = Some(delegator);
+
+        Ok(vtxo)
+    }
+
     pub fn script_pubkey(&self) -> ScriptBuf {
         self.address.script_pubkey()
     }
@@ -132,6 +177,10 @@ impl Vtxo {
 
     pub fn server_pk(&self) -> XOnlyPublicKey {
         self.server_forfeit
+    }
+
+    pub fn delegator_pk(&self) -> Option<XOnlyPublicKey> {
+        self.delegator
     }
 
     pub fn exit_delay(&self) -> bitcoin::Sequence {
@@ -185,6 +234,24 @@ impl Vtxo {
         Ok((exit_script, control_block))
     }
 
+    /// The spend info for the delegate branch of a VTXO constructed with
+    /// [`Vtxo::new_with_delegator`].
+    ///
+    /// Returns an error if the VTXO was not built with a delegator.
+    pub fn delegate_spend_info(&self) -> Result<(ScriptBuf, taproot::ControlBlock), Error> {
+        let delegator = self
+            .delegator
+            .ok_or(Error::ad_hoc("VTXO has no delegate path"))?;
+
+        let delegate_script = multisig_3of3_script(self.owner, delegator, self.server_forfeit);
+
+        let control_block = self
+            .get_spend_info(delegate_script.clone())
+            .context("missing delegate script")?;
+
+        Ok((delegate_script, control_block))
+    }
+
     pub fn tapscripts(&self) -> Vec<ScriptBuf> {
         self.tapscripts.clone()
     }
@@ -235,4 +302,90 @@ fn calculate_leaf_depths(n: usize) -> Vec<usize> {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin::secp256k1::Secp256k1;
+    use std::str::FromStr;
+
+    fn test_keys() -> (XOnlyPublicKey, XOnlyPublicKey, XOnlyPublicKey) {
+        let server = XOnlyPublicKey::from_str(
+            "18845781f631c48f1c9709e23092067d06837f30aa0cd0544ac887fe91ddd166",
+        )
+        .unwrap();
+        let owner = XOnlyPublicKey::from_str(
+            "28845781f631c48f1c9709e23092067d06837f30aa0cd0544ac887fe91ddd166",
+        )
+        .unwrap();
+        let delegator = XOnlyPublicKey::from_str(
+            "38845781f631c48f1c9709e23092067d06837f30aa0cd0544ac887fe91ddd166",
+        )
+        .unwrap();
+        (server, owner, delegator)
+    }
+
+    #[test]
+    fn new_with_delegator_has_three_tapscripts() {
+        let secp = Secp256k1::new();
+        let (server, owner, delegator) = test_keys();
+        let exit_delay = bitcoin::Sequence::from_seconds_ceil(86400).unwrap();
+
+        let vtxo =
+            Vtxo::new_with_delegator(&secp, server, owner, delegator, exit_delay, Network::Regtest)
+                .unwrap();
+
+        assert_eq!(vtxo.tapscripts().len(), 3);
+        assert_eq!(vtxo.delegator_pk(), Some(delegator));
+    }
+
+    #[test]
+    fn delegator_vtxo_all_spend_paths_resolve() {
+        let secp = Secp256k1::new();
+        let (server, owner, delegator) = test_keys();
+        let exit_delay = bitcoin::Sequence::from_seconds_ceil(86400).unwrap();
+
+        let vtxo =
+            Vtxo::new_with_delegator(&secp, server, owner, delegator, exit_delay, Network::Regtest)
+                .unwrap();
+
+        // All three spend paths should produce valid spend info.
+        let (forfeit_script, _cb) = vtxo.forfeit_spend_info().unwrap();
+        let (exit_script, _cb) = vtxo.exit_spend_info().unwrap();
+        let (delegate_script, _cb) = vtxo.delegate_spend_info().unwrap();
+
+        // Scripts should be distinct.
+        assert_ne!(forfeit_script, exit_script);
+        assert_ne!(forfeit_script, delegate_script);
+        assert_ne!(exit_script, delegate_script);
+    }
+
+    #[test]
+    fn default_vtxo_has_no_delegate_path() {
+        let secp = Secp256k1::new();
+        let (server, owner, _) = test_keys();
+        let exit_delay = bitcoin::Sequence::from_seconds_ceil(86400).unwrap();
+
+        let vtxo = Vtxo::new_default(&secp, server, owner, exit_delay, Network::Regtest).unwrap();
+
+        assert!(vtxo.delegator_pk().is_none());
+        assert!(vtxo.delegate_spend_info().is_err());
+    }
+
+    #[test]
+    fn delegator_vtxo_address_differs_from_default() {
+        let secp = Secp256k1::new();
+        let (server, owner, delegator) = test_keys();
+        let exit_delay = bitcoin::Sequence::from_seconds_ceil(86400).unwrap();
+
+        let default =
+            Vtxo::new_default(&secp, server, owner, exit_delay, Network::Regtest).unwrap();
+        let with_delegator =
+            Vtxo::new_with_delegator(&secp, server, owner, delegator, exit_delay, Network::Regtest)
+                .unwrap();
+
+        // Different taproot trees should produce different addresses.
+        assert_ne!(default.address(), with_delegator.address());
+    }
 }
