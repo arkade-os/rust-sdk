@@ -1,38 +1,45 @@
 #![allow(clippy::unwrap_used)]
 
 use crate::common::Nigiri;
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
-use ark_core::batch;
-use ark_core::batch::aggregate_nonces;
-use ark_core::batch::create_and_sign_forfeit_txs;
-use ark_core::batch::generate_nonce_tree;
-use ark_core::batch::sign_batch_tree_tx;
-use ark_core::batch::sign_commitment_psbt;
-use ark_core::boarding_output::list_boarding_outpoints;
-use ark_core::boarding_output::BoardingOutpoints;
-use ark_core::intent;
-use ark_core::script::csv_sig_script;
-use ark_core::script::multisig_script;
-use ark_core::send;
-use ark_core::send::build_offchain_transactions;
-use ark_core::send::sign_ark_transaction;
-use ark_core::send::sign_checkpoint_transaction;
-use ark_core::send::OffchainTransactions;
-use ark_core::server;
-use ark_core::server::BatchTreeEventType;
-use ark_core::server::GetVtxosRequest;
-use ark_core::server::StreamEvent;
-use ark_core::server::VirtualTxOutPoint;
+use anyhow::bail;
 use ark_core::ArkAddress;
 use ark_core::BoardingOutput;
 use ark_core::ExplorerUtxo;
 use ark_core::TxGraph;
 use ark_core::Vtxo;
 use ark_core::VtxoList;
-use bitcoin::hashes::sha256;
+use ark_core::batch;
+use ark_core::batch::aggregate_nonces;
+use ark_core::batch::create_and_sign_forfeit_txs;
+use ark_core::batch::generate_nonce_tree;
+use ark_core::batch::sign_batch_tree_tx;
+use ark_core::batch::sign_commitment_psbt;
+use ark_core::boarding_output::BoardingOutpoints;
+use ark_core::boarding_output::list_boarding_outpoints;
+use ark_core::intent;
+use ark_core::script::csv_sig_script;
+use ark_core::script::multisig_script;
+use ark_core::send;
+use ark_core::send::OffchainTransactions;
+use ark_core::send::build_offchain_transactions;
+use ark_core::send::sign_ark_transaction;
+use ark_core::send::sign_checkpoint_transaction;
+use ark_core::server;
+use ark_core::server::BatchTreeEventType;
+use ark_core::server::GetVtxosRequest;
+use ark_core::server::StreamEvent;
+use ark_core::server::VirtualTxOutPoint;
+use bitcoin::Amount;
+use bitcoin::OutPoint;
+use bitcoin::Psbt;
+use bitcoin::ScriptBuf;
+use bitcoin::TxOut;
+use bitcoin::Txid;
+use bitcoin::XOnlyPublicKey;
 use bitcoin::hashes::Hash;
+use bitcoin::hashes::sha256;
 use bitcoin::hex::DisplayHex;
 use bitcoin::key::Keypair;
 use bitcoin::key::Secp256k1;
@@ -42,25 +49,18 @@ use bitcoin::opcodes::all::OP_CLTV;
 use bitcoin::opcodes::all::OP_DROP;
 use bitcoin::psbt;
 use bitcoin::secp256k1;
-use bitcoin::secp256k1::schnorr;
 use bitcoin::secp256k1::SecretKey;
-use bitcoin::Amount;
-use bitcoin::OutPoint;
-use bitcoin::Psbt;
-use bitcoin::ScriptBuf;
-use bitcoin::TxOut;
-use bitcoin::Txid;
-use bitcoin::XOnlyPublicKey;
+use bitcoin::secp256k1::schnorr;
 use futures::StreamExt;
-use rand::thread_rng;
 use rand::Rng;
+use rand::thread_rng;
 use std::collections::HashMap;
 use std::time::Duration;
-use zkp::musig::new_musig_nonce_pair;
 use zkp::musig::MusigAggNonce;
 use zkp::musig::MusigKeyAggCache;
 use zkp::musig::MusigSession;
 use zkp::musig::MusigSessionId;
+use zkp::musig::new_musig_nonce_pair;
 
 pub async fn run_dlc_scenario(nigiri: &Nigiri, run_refund_scenario: bool) -> Result<()> {
     // We instantiate an oracle that attests to coin flips.
@@ -1240,10 +1240,17 @@ async fn settle(
 
     let mut vtxo_graph_chunks = Vec::new();
 
-    let batch_started_event = match event_stream.next().await {
-        Some(Ok(StreamEvent::BatchStarted(e))) => e,
-        other => bail!("Did not get batch signing event: {other:?}"),
-    };
+    let batch_started_event;
+    loop {
+        match event_stream.next().await {
+            Some(Ok(StreamEvent::StreamStarted(_))) => {}
+            Some(Ok(StreamEvent::BatchStarted(e))) => {
+                batch_started_event = e;
+                break;
+            }
+            other => bail!("Did not get batch signing event: {other:?}"),
+        };
+    }
 
     let hash = sha256::Hash::hash(intent_id.as_bytes());
     let hash = hash.as_byte_array().to_vec().to_lower_hex_string();
