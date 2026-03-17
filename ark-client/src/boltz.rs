@@ -2549,7 +2549,13 @@ where
         checkpoint_psbt: &mut Psbt,
         signed_ark_tx: &Psbt,
     ) -> Result<(), Error> {
-        if checkpoint_psbt.inputs[0].witness_script.is_some() {
+        if checkpoint_psbt
+            .inputs
+            .first()
+            .ok_or_else(|| Error::ad_hoc("checkpoint PSBT has no inputs"))?
+            .witness_script
+            .is_some()
+        {
             return Ok(());
         }
 
@@ -2576,7 +2582,11 @@ where
                 ))
             })?;
 
-        checkpoint_psbt.inputs[0].witness_script = Some(witness_script);
+        checkpoint_psbt
+            .inputs
+            .first_mut()
+            .ok_or_else(|| Error::ad_hoc("checkpoint PSBT has no inputs"))?
+            .witness_script = Some(witness_script);
         Ok(())
     }
 }
