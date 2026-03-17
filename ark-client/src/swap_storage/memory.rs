@@ -88,14 +88,24 @@ impl SwapStorage for InMemorySwapStorage {
 
     async fn update_submarine(&self, id: &str, data: SubmarineSwapData) -> Result<(), Error> {
         let mut swaps = self.submarine_swaps.lock().expect("lock");
-        swaps.insert(id.to_string(), data);
-        Ok(())
+        match swaps.get_mut(id) {
+            Some(entry) => {
+                *entry = data;
+                Ok(())
+            }
+            None => Err(Error::consumer(format!("submarine swap not found: {id}"))),
+        }
     }
 
     async fn update_reverse(&self, id: &str, data: ReverseSwapData) -> Result<(), Error> {
         let mut swaps = self.reverse_swaps.lock().expect("lock");
-        swaps.insert(id.to_string(), data);
-        Ok(())
+        match swaps.get_mut(id) {
+            Some(entry) => {
+                *entry = data;
+                Ok(())
+            }
+            None => Err(Error::consumer(format!("reverse swap not found: {id}"))),
+        }
     }
 
     async fn list_all_submarine(&self) -> Result<Vec<SubmarineSwapData>, Error> {
