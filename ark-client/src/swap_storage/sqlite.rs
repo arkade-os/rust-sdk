@@ -472,6 +472,22 @@ mod tests {
         let remaining = storage.list_all_submarine().await.unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id, "swap2");
+
+        // Test update_submarine with preimage persistence
+        let mut updated_swap2 = swap2.clone();
+        updated_swap2.preimage = Some([7u8; 32]);
+        updated_swap2.status = SwapStatus::InvoicePaid;
+        storage
+            .update_submarine("swap2", updated_swap2.clone())
+            .await
+            .unwrap();
+        let from_db = storage.get_submarine("swap2").await.unwrap().unwrap();
+        assert_eq!(from_db.preimage, Some([7u8; 32]));
+        assert_eq!(from_db.status, SwapStatus::InvoicePaid);
+
+        // Test update_submarine on non-existent swap returns error
+        let result = storage.update_submarine("nonexistent", updated_swap2).await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]
