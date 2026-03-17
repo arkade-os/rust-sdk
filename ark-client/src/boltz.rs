@@ -8,12 +8,14 @@ use crate::Blockchain;
 use crate::Client;
 use crate::Error;
 use ark_core::intent;
+use ark_core::script::extract_checksig_pubkeys;
 use ark_core::send::build_offchain_transactions;
 use ark_core::send::sign_ark_transaction;
 use ark_core::send::sign_checkpoint_transaction;
 use ark_core::send::OffchainTransactions;
 use ark_core::send::VtxoInput;
 use ark_core::server::parse_sequence_number;
+use ark_core::server::PendingTx;
 use ark_core::vhtlc::VhtlcOptions;
 use ark_core::vhtlc::VhtlcScript;
 use ark_core::ArkAddress;
@@ -33,6 +35,7 @@ use bitcoin::taproot::LeafVersion;
 use bitcoin::Amount;
 use bitcoin::Psbt;
 use bitcoin::PublicKey;
+use bitcoin::ScriptBuf;
 use bitcoin::TxOut;
 use bitcoin::Txid;
 use bitcoin::VarInt;
@@ -70,6 +73,51 @@ pub struct ClaimVhtlcResult {
     pub preimage: [u8; 32],
 }
 
+/// The type of VHTLC spend that was submitted but not yet finalized.
+///
+/// Determined by matching the spend script in the pending transaction's PSBT against the known
+/// VHTLC spend paths.
+#[derive(Clone, Debug)]
+pub enum PendingVhtlcSpendType {
+    /// Claim via `claim_script`: preimage + receiver + server.
+    ///
+    /// Used in reverse submarine swaps (receiving Lightning → Ark).
+    Claim { swap_id: String, preimage: [u8; 32] },
+    /// Collaborative refund via `refund_script`: sender + receiver (Boltz) + server.
+    ///
+    /// Used in submarine swaps when Boltz cooperates.
+    CollaborativeRefund { swap_id: String },
+    /// Expired refund via `refund_without_receiver_script`: CLTV timeout + sender + server.
+    ///
+    /// Used in submarine swaps when the timelock has expired and Boltz is unavailable.
+    ExpiredRefund { swap_id: String },
+}
+
+impl PendingVhtlcSpendType {
+    pub fn swap_id(&self) -> &str {
+        match self {
+            Self::Claim { swap_id, .. }
+            | Self::CollaborativeRefund { swap_id }
+            | Self::ExpiredRefund { swap_id } => swap_id,
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Claim { .. } => "Claim",
+            Self::CollaborativeRefund { .. } => "CollaborativeRefund",
+            Self::ExpiredRefund { .. } => "ExpiredRefund",
+        }
+    }
+}
+
+/// A pending (submitted but not finalized) VHTLC spend transaction.
+#[derive(Clone, Debug)]
+pub struct PendingVhtlcSpendTx {
+    pub spend_type: PendingVhtlcSpendType,
+    pub pending_tx: PendingTx,
+}
+
 impl<B, W, S, K> Client<B, W, S, K>
 where
     B: Blockchain,
@@ -98,9 +146,10 @@ where
         &self,
         invoice: Bolt11Invoice,
     ) -> Result<SubmarineSwapData, Error> {
-        let refund_public_key = self
-            .next_keypair(crate::key_provider::KeypairIndex::New)?
-            .public_key();
+        let refund_keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
+        let refund_public_key = refund_keypair.public_key();
+        let key_derivation_index =
+            self.derivation_index_for_pk(&refund_keypair.x_only_public_key().0);
 
         let preimage_hash = invoice.payment_hash();
         let preimage_hash = ripemd160::Hash::hash(preimage_hash.as_byte_array());
@@ -148,6 +197,7 @@ where
         let data = SubmarineSwapData {
             id: swap_response.id.clone(),
             status: SwapStatus::Created,
+            preimage: None,
             preimage_hash,
             refund_public_key: refund_public_key.into(),
             claim_public_key: swap_response.claim_public_key,
@@ -156,6 +206,7 @@ where
             amount: swap_response.expected_amount,
             invoice: request.invoice.clone(),
             created_at: created_at.as_secs(),
+            key_derivation_index,
         };
 
         self.swap_storage()
@@ -187,8 +238,10 @@ where
         &self,
         invoice: Bolt11Invoice,
     ) -> Result<SubmarineSwapResult, Error> {
-        let keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
-        let refund_public_key = keypair.public_key();
+        let refund_keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
+        let refund_public_key = refund_keypair.public_key();
+        let key_derivation_index =
+            self.derivation_index_for_pk(&refund_keypair.x_only_public_key().0);
 
         let preimage_hash = invoice.payment_hash();
         let preimage_hash = ripemd160::Hash::hash(preimage_hash.as_byte_array());
@@ -239,6 +292,7 @@ where
                 SubmarineSwapData {
                     id: swap_response.id.clone(),
                     status: SwapStatus::Created,
+                    preimage: None,
                     preimage_hash,
                     refund_public_key: refund_public_key.into(),
                     claim_public_key: swap_response.claim_public_key,
@@ -247,6 +301,7 @@ where
                     amount: swap_response.expected_amount,
                     invoice: request.invoice.clone(),
                     created_at: created_at.as_secs(),
+                    key_derivation_index,
                 },
             )
             .await?;
@@ -266,8 +321,14 @@ where
 
     /// Wait for the Lightning invoice associated with a submarine swap to be paid by Boltz.
     ///
-    /// Boltz will first need to claim our VHTLC before paying the invoice.
-    pub async fn wait_for_invoice_paid(&self, swap_id: &str) -> Result<(), Error> {
+    /// Boltz will first need to claim our VHTLC before paying the invoice. When Boltz claims
+    /// the VHTLC, the preimage is revealed in the claim transaction's witness. This method
+    /// extracts and persists the preimage to swap storage.
+    ///
+    /// # Returns
+    ///
+    /// The 32-byte preimage that was revealed when Boltz claimed the VHTLC.
+    pub async fn wait_for_invoice_paid(&self, swap_id: &str) -> Result<[u8; 32], Error> {
         use futures::StreamExt;
 
         let stream = self.subscribe_to_swap_updates(swap_id.to_string());
@@ -279,7 +340,27 @@ where
                     tracing::debug!(swap_id, current = ?status, "Swap status");
                     match status {
                         SwapStatus::InvoicePaid => {
-                            return Ok(());
+                            let deadline = tokio::time::Instant::now() + self.inner.timeout;
+
+                            loop {
+                                match self.extract_submarine_swap_preimage(swap_id).await {
+                                    Ok(preimage) => return Ok(preimage),
+                                    Err(e) => {
+                                        if tokio::time::Instant::now() >= deadline {
+                                            return Err(e.context(
+                                                "invoice paid but failed to extract preimage from claim tx",
+                                            ));
+                                        }
+
+                                        tracing::debug!(
+                                            swap_id,
+                                            "Preimage not available yet, retrying: {e}"
+                                        );
+                                    }
+                                }
+
+                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            }
                         }
                         SwapStatus::InvoiceExpired => {
                             return Err(Error::ad_hoc(format!(
@@ -310,6 +391,85 @@ where
         }
 
         Err(Error::ad_hoc("Status stream ended unexpectedly"))
+    }
+
+    /// Extract the preimage from a claimed submarine swap VHTLC.
+    ///
+    /// After Boltz claims the VHTLC, the preimage is embedded in the claim transaction's PSBT
+    /// via the `VTXO_CONDITION_KEY` unknown field. This method fetches that transaction and
+    /// extracts the preimage.
+    ///
+    /// The extracted preimage is validated against the stored preimage hash and persisted to
+    /// swap storage.
+    pub async fn extract_submarine_swap_preimage(&self, swap_id: &str) -> Result<[u8; 32], Error> {
+        let mut swap_data = self
+            .swap_storage()
+            .get_submarine(swap_id)
+            .await?
+            .ok_or(Error::ad_hoc("submarine swap not found"))?;
+
+        // If the preimage was already extracted, return it.
+        if let Some(preimage) = swap_data.preimage {
+            return Ok(preimage);
+        }
+
+        let vhtlc_address = swap_data.vhtlc_address;
+
+        // Find the VHTLC outpoint — it should be spent by now.
+        let virtual_tx_outpoints = self
+            .get_virtual_tx_outpoints(std::iter::once(vhtlc_address))
+            .await
+            .context("failed to get virtual tx outpoints for VHTLC address")?;
+
+        let vhtlc_outpoint = virtual_tx_outpoints
+            .iter()
+            .find(|o| o.is_spent)
+            .ok_or_else(|| Error::ad_hoc("VHTLC outpoint not found or not yet spent (claimed)"))?;
+
+        let claim_txid = vhtlc_outpoint.ark_txid.ok_or_else(|| {
+            Error::ad_hoc("VHTLC is spent but has no ark_txid (claim transaction)")
+        })?;
+
+        // Fetch the claim transaction PSBT.
+        let claim_txs = timeout_op(
+            self.inner.timeout,
+            self.network_client()
+                .get_virtual_txs(vec![claim_txid.to_string()], None),
+        )
+        .await?
+        .map_err(|e| Error::ad_hoc(e.to_string()))
+        .context("failed to fetch claim transaction")?;
+
+        let claim_psbt = claim_txs
+            .txs
+            .first()
+            .ok_or_else(|| Error::ad_hoc("claim transaction not found"))?;
+
+        // Extract the preimage from the PSBT's unknown fields.
+        let preimage = extract_preimage_from_psbt(claim_psbt)?;
+
+        // Validate against the stored hash.
+        let computed_hash = ripemd160::Hash::hash(sha256::Hash::hash(&preimage).as_byte_array());
+        if computed_hash != swap_data.preimage_hash {
+            return Err(Error::ad_hoc(format!(
+                "extracted preimage does not match stored hash: expected {}, got {}",
+                swap_data.preimage_hash, computed_hash
+            )));
+        }
+
+        // Persist the preimage.
+        swap_data.preimage = Some(preimage);
+        self.swap_storage()
+            .update_submarine(swap_id, swap_data)
+            .await
+            .context("failed to persist preimage to swap storage")?;
+
+        tracing::info!(
+            swap_id,
+            "Extracted and persisted preimage from claim transaction"
+        );
+
+        Ok(preimage)
     }
 
     /// Refund a VHTLC after the timelock has expired.
@@ -836,9 +996,10 @@ where
         let preimage_hash_sha256 = sha256::Hash::hash(&preimage);
         let preimage_hash = ripemd160::Hash::hash(preimage_hash_sha256.as_byte_array());
 
-        let claim_public_key = self
-            .next_keypair(crate::key_provider::KeypairIndex::New)?
-            .public_key();
+        let claim_keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
+        let claim_public_key = claim_keypair.public_key();
+        let key_derivation_index =
+            self.derivation_index_for_pk(&claim_keypair.x_only_public_key().0);
 
         let (invoice_amount, onchain_amount) = match amount {
             SwapAmount::Invoice(amount) => (Some(amount), None),
@@ -904,6 +1065,7 @@ where
             claim_public_key: claim_public_key.into(),
             timeout_block_heights: response.timeout_block_heights,
             created_at: created_at.as_secs(),
+            key_derivation_index,
         };
 
         self.swap_storage()
@@ -945,8 +1107,10 @@ where
     ) -> Result<ReverseSwapResult, Error> {
         let preimage_hash = ripemd160::Hash::hash(preimage_hash_sha256.as_byte_array());
 
-        let keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
-        let claim_public_key = keypair.public_key();
+        let claim_keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
+        let claim_public_key = claim_keypair.public_key();
+        let key_derivation_index =
+            self.derivation_index_for_pk(&claim_keypair.x_only_public_key().0);
 
         let (invoice_amount, onchain_amount) = match amount {
             SwapAmount::Invoice(amount) => (Some(amount), None),
@@ -1012,6 +1176,7 @@ where
             claim_public_key: claim_public_key.into(),
             timeout_block_heights: response.timeout_block_heights,
             created_at: created_at.as_secs(),
+            key_derivation_index,
         };
 
         self.swap_storage()
@@ -1717,6 +1882,807 @@ where
             }
         }
     }
+
+    // Pending VHTLC spend recovery.
+
+    /// List pending (submitted but not finalized) VHTLC spend transactions.
+    ///
+    /// This checks all non-terminal swaps in storage, queries the server for pending VTXOs
+    /// on their VHTLC addresses, and determines the spend type from the PSBT data.
+    pub async fn list_pending_vhtlc_spend_txs(&self) -> Result<Vec<PendingVhtlcSpendTx>, Error> {
+        let vhtlc_infos = self.collect_active_vhtlc_infos().await?;
+
+        if vhtlc_infos.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let addresses = vhtlc_infos.iter().map(|info| info.address);
+        let request = ark_core::server::GetVtxosRequest::new_for_addresses(addresses)
+            .pending_only()
+            .map_err(Error::from)?;
+
+        let vtxos = self
+            .fetch_all_vtxos(request)
+            .await
+            .context("failed to fetch pending VHTLC VTXOs")?;
+
+        tracing::debug!(
+            num_pending_vtxos = vtxos.len(),
+            "Fetched pending VHTLC VTXOs"
+        );
+
+        if vtxos.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Map script_pubkey → VhtlcInfo for lookup.
+        let info_by_script: std::collections::HashMap<_, _> = vhtlc_infos
+            .iter()
+            .map(|info| (info.script_pubkey.clone(), info))
+            .collect();
+
+        let secp = Secp256k1::new();
+        let mut results = Vec::new();
+        let mut seen_ark_txids = std::collections::HashSet::new();
+
+        for vtxo in &vtxos {
+            let info = match info_by_script.get(&vtxo.script) {
+                Some(info) => info,
+                None => {
+                    tracing::warn!(
+                        outpoint = %vtxo.outpoint,
+                        "Skipping pending VHTLC VTXO with unknown script"
+                    );
+                    continue;
+                }
+            };
+
+            // Build an intent to fetch the pending tx from the server.
+            // We prove ownership using the forfeit-like spend path that we can sign.
+            // If we have a preimage (reverse swap claim path), include it as extra
+            // witness so the server can verify the intent proof for the claim script.
+            let intent_input = match info.preimage {
+                Some(preimage) => intent::Input::new_with_extra_witness(
+                    vtxo.outpoint,
+                    bitcoin::Sequence::ZERO,
+                    None,
+                    TxOut {
+                        value: vtxo.amount,
+                        script_pubkey: info.script_pubkey.clone(),
+                    },
+                    vhtlc_tapscripts(&info.vhtlc),
+                    info.intent_spend_info.clone(),
+                    false,
+                    vtxo.is_swept,
+                    vec![preimage.to_vec()],
+                ),
+                None => intent::Input::new(
+                    vtxo.outpoint,
+                    bitcoin::Sequence::ZERO,
+                    None,
+                    TxOut {
+                        value: vtxo.amount,
+                        script_pubkey: info.script_pubkey.clone(),
+                    },
+                    vhtlc_tapscripts(&info.vhtlc),
+                    info.intent_spend_info.clone(),
+                    false,
+                    vtxo.is_swept,
+                ),
+            };
+
+            let sign_for_vtxo_fn = |input: &mut psbt::Input,
+                                    msg: secp256k1::Message|
+             -> Result<
+                Vec<(schnorr::Signature, XOnlyPublicKey)>,
+                ark_core::Error,
+            > {
+                match &input.witness_script {
+                    None => Err(ark_core::Error::ad_hoc(
+                        "Missing witness script when signing get-pending-tx intent for VHTLC",
+                    )),
+                    Some(script) => {
+                        let pks = extract_checksig_pubkeys(script);
+                        let mut res = vec![];
+                        for pk in &pks {
+                            if let Ok(keypair) = self.keypair_by_pk(pk) {
+                                let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
+                                res.push((sig, keypair.x_only_public_key().0));
+                            }
+                        }
+                        Ok(res)
+                    }
+                }
+            };
+
+            let sign_for_onchain_fn =
+                |_: &mut psbt::Input,
+                 _: secp256k1::Message|
+                 -> Result<(schnorr::Signature, XOnlyPublicKey), ark_core::Error> {
+                    Err(ark_core::Error::ad_hoc(
+                        "unexpected onchain input in get-pending-tx intent",
+                    ))
+                };
+
+            let message = intent::IntentMessage::GetPendingTx { expire_at: 0 };
+            let get_pending_intent = intent::make_intent(
+                sign_for_vtxo_fn,
+                sign_for_onchain_fn,
+                vec![intent_input],
+                vec![],
+                message,
+            )?;
+
+            let pending_txs = self
+                .network_client()
+                .get_pending_tx(get_pending_intent)
+                .await
+                .map_err(Error::ark_server)
+                .context("failed to get pending VHTLC transactions")?;
+
+            for pending_tx in pending_txs {
+                if !seen_ark_txids.insert(pending_tx.ark_txid) {
+                    continue;
+                }
+
+                let spend_type = Self::identify_vhtlc_spend_type(info, &pending_tx)?;
+
+                tracing::info!(
+                    ark_txid = %pending_tx.ark_txid,
+                    swap_id = spend_type.swap_id(),
+                    spend_type = spend_type.name(),
+                    "Found pending VHTLC spend transaction"
+                );
+
+                results.push(PendingVhtlcSpendTx {
+                    spend_type,
+                    pending_tx,
+                });
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Continue (finalize) a pending VHTLC spend transaction.
+    ///
+    /// Handles the different spend types appropriately:
+    /// - **Claim**: signs the checkpoint with the claim key and injects the preimage.
+    /// - **CollaborativeRefund**: re-requests Boltz's signature, then signs with the refund key.
+    /// - **ExpiredRefund**: signs the checkpoint with the refund key (no Boltz needed).
+    pub async fn continue_pending_vhtlc_spend_tx(
+        &self,
+        pending: &PendingVhtlcSpendTx,
+    ) -> Result<Txid, Error> {
+        let ark_txid = pending.pending_tx.ark_txid;
+
+        match &pending.spend_type {
+            PendingVhtlcSpendType::Claim { preimage, .. } => {
+                self.continue_pending_claim(ark_txid, &pending.pending_tx, *preimage)
+                    .await
+            }
+            PendingVhtlcSpendType::CollaborativeRefund { swap_id } => {
+                self.continue_pending_collaborative_refund(ark_txid, &pending.pending_tx, swap_id)
+                    .await
+            }
+            PendingVhtlcSpendType::ExpiredRefund { .. } => {
+                self.continue_pending_expired_refund(ark_txid, &pending.pending_tx)
+                    .await
+            }
+        }
+    }
+
+    /// Sign and finalize all pending VHTLC spend transactions.
+    pub async fn continue_pending_vhtlc_spend_txs(&self) -> Result<Vec<Txid>, Error> {
+        let pending = self.list_pending_vhtlc_spend_txs().await?;
+
+        let mut finalized = Vec::new();
+        for tx in &pending {
+            match self.continue_pending_vhtlc_spend_tx(tx).await {
+                Ok(txid) => finalized.push(txid),
+                Err(e) => {
+                    tracing::warn!(
+                        ark_txid = %tx.pending_tx.ark_txid,
+                        swap_id = tx.spend_type.swap_id(),
+                        ?e,
+                        "Failed to finalize pending VHTLC spend tx"
+                    );
+                }
+            }
+        }
+
+        Ok(finalized)
+    }
+
+    /// Sign and finalize a pending claim VHTLC checkpoint.
+    async fn continue_pending_claim(
+        &self,
+        ark_txid: Txid,
+        pending_tx: &PendingTx,
+        preimage: [u8; 32],
+    ) -> Result<Txid, Error> {
+        let mut signed_checkpoint_txs = pending_tx.signed_checkpoint_txs.clone();
+
+        for checkpoint_psbt in signed_checkpoint_txs.iter_mut() {
+            Self::restore_witness_script_if_needed(checkpoint_psbt, &pending_tx.signed_ark_tx)?;
+
+            // Inject preimage into checkpoint inputs before signing.
+            Self::inject_preimage_into_psbt(checkpoint_psbt, preimage);
+
+            self.sign_checkpoint_with_own_keys(checkpoint_psbt)?;
+        }
+
+        timeout_op(
+            self.inner.timeout,
+            self.network_client()
+                .finalize_offchain_transaction(ark_txid, signed_checkpoint_txs),
+        )
+        .await?
+        .map_err(Error::ark_server)
+        .context("failed to finalize pending claim transaction")?;
+
+        tracing::info!(txid = %ark_txid, "Finalized pending VHTLC claim");
+        Ok(ark_txid)
+    }
+
+    /// Re-request Boltz's signature and finalize a pending collaborative refund.
+    async fn continue_pending_collaborative_refund(
+        &self,
+        ark_txid: Txid,
+        pending_tx: &PendingTx,
+        swap_id: &str,
+    ) -> Result<Txid, Error> {
+        // For collaborative refunds, the server stripped Boltz's signatures when we
+        // submitted. We need to re-request them from Boltz.
+        //
+        // Re-send the ark tx and each checkpoint to Boltz's refund endpoint to get fresh
+        // signatures from them.
+        let url = format!(
+            "{}/v2/swap/submarine/{swap_id}/refund/ark",
+            self.inner.boltz_url
+        );
+        let client = reqwest::Client::new();
+
+        let mut signed_checkpoint_txs = Vec::new();
+
+        for checkpoint_psbt in &pending_tx.signed_checkpoint_txs {
+            let response = client
+                .post(&url)
+                .json(&RefundSwapRequest {
+                    transaction: pending_tx.signed_ark_tx.to_string(),
+                    checkpoint: checkpoint_psbt.to_string(),
+                })
+                .send()
+                .await
+                .map_err(Error::ad_hoc)
+                .context("failed to re-request Boltz refund signature")?;
+
+            if !response.status().is_success() {
+                let error_text = response
+                    .text()
+                    .await
+                    .map_err(|e| Error::ad_hoc(e.to_string()))
+                    .context("failed to read Boltz error text")?;
+
+                return Err(Error::ad_hoc(format!(
+                    "Boltz refund re-sign request failed: {error_text}"
+                )));
+            }
+
+            let refund_response: RefundSwapResponse = response
+                .json()
+                .await
+                .map_err(Error::ad_hoc)
+                .context("failed to deserialize Boltz refund response")?;
+
+            if let Some(err) = refund_response.error.as_deref() {
+                return Err(Error::ad_hoc(format!("Boltz refund re-sign failed: {err}")));
+            }
+
+            let boltz_signed_checkpoint = Psbt::from_str(&refund_response.checkpoint)
+                .map_err(Error::ad_hoc)
+                .context("could not parse Boltz-signed checkpoint PSBT")?;
+
+            // Extract Boltz's tap_script_sigs.
+            let boltz_tap_script_sigs = boltz_signed_checkpoint
+                .inputs
+                .first()
+                .ok_or_else(|| Error::ad_hoc("Boltz checkpoint has no inputs"))?
+                .tap_script_sigs
+                .clone();
+
+            // Start from the server's checkpoint (which has the server's signature).
+            let mut final_checkpoint = checkpoint_psbt.clone();
+            Self::restore_witness_script_if_needed(
+                &mut final_checkpoint,
+                &pending_tx.signed_ark_tx,
+            )?;
+
+            // Merge Boltz's signatures.
+            final_checkpoint
+                .inputs
+                .first_mut()
+                .ok_or_else(|| Error::ad_hoc("checkpoint has no inputs"))?
+                .tap_script_sigs
+                .extend(boltz_tap_script_sigs);
+
+            // Add our (sender) signature.
+            self.sign_checkpoint_with_own_keys(&mut final_checkpoint)?;
+
+            signed_checkpoint_txs.push(final_checkpoint);
+        }
+
+        timeout_op(
+            self.inner.timeout,
+            self.network_client()
+                .finalize_offchain_transaction(ark_txid, signed_checkpoint_txs),
+        )
+        .await?
+        .map_err(Error::ark_server)
+        .context("failed to finalize pending collaborative refund")?;
+
+        tracing::info!(txid = %ark_txid, swap_id, "Finalized pending collaborative refund");
+        Ok(ark_txid)
+    }
+
+    /// Sign and finalize a pending expired refund checkpoint.
+    async fn continue_pending_expired_refund(
+        &self,
+        ark_txid: Txid,
+        pending_tx: &PendingTx,
+    ) -> Result<Txid, Error> {
+        let mut signed_checkpoint_txs = pending_tx.signed_checkpoint_txs.clone();
+
+        for checkpoint_psbt in signed_checkpoint_txs.iter_mut() {
+            Self::restore_witness_script_if_needed(checkpoint_psbt, &pending_tx.signed_ark_tx)?;
+            self.sign_checkpoint_with_own_keys(checkpoint_psbt)?;
+        }
+
+        timeout_op(
+            self.inner.timeout,
+            self.network_client()
+                .finalize_offchain_transaction(ark_txid, signed_checkpoint_txs),
+        )
+        .await?
+        .map_err(Error::ark_server)
+        .context("failed to finalize pending expired refund")?;
+
+        tracing::info!(txid = %ark_txid, "Finalized pending expired VHTLC refund");
+        Ok(ark_txid)
+    }
+
+    // Private helpers for pending VHTLC recovery.
+
+    /// Reconstruct a [`VhtlcScript`] from swap data fields.
+    fn build_vhtlc_script(
+        &self,
+        claim_public_key: PublicKey,
+        refund_public_key: PublicKey,
+        preimage_hash: ripemd160::Hash,
+        timeout_block_heights: &TimeoutBlockHeights,
+    ) -> Result<VhtlcScript, Error> {
+        VhtlcScript::new(
+            VhtlcOptions {
+                sender: refund_public_key.inner.x_only_public_key().0,
+                receiver: claim_public_key.inner.x_only_public_key().0,
+                server: self.server_info.signer_pk.into(),
+                preimage_hash,
+                refund_locktime: timeout_block_heights.refund,
+                unilateral_claim_delay: parse_sequence_number(
+                    timeout_block_heights.unilateral_claim as i64,
+                )
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
+                unilateral_refund_delay: parse_sequence_number(
+                    timeout_block_heights.unilateral_refund as i64,
+                )
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral refund timeout: {e}")))?,
+                unilateral_refund_without_receiver_delay: parse_sequence_number(
+                    timeout_block_heights.unilateral_refund_without_receiver as i64,
+                )
+                .map_err(|e| {
+                    Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
+                })?,
+            },
+            self.server_info.network,
+        )
+        .map_err(Error::ad_hoc)
+    }
+
+    /// Collect info about all active (non-terminal) VHTLCs from swap storage.
+    /// Ensure a swap key is loaded into the key provider's cache so
+    /// `keypair_by_pk` can find it during intent signing.
+    ///
+    /// Returns `true` if the key is available (already cached or successfully derived).
+    /// Returns `false` for legacy swap data without a stored derivation index.
+    fn ensure_swap_key_cached(
+        &self,
+        pk: &XOnlyPublicKey,
+        key_derivation_index: Option<u32>,
+        swap_id: &str,
+    ) -> bool {
+        // Already in cache — nothing to do.
+        if self.keypair_by_pk(pk).is_ok() {
+            return true;
+        }
+
+        let Some(index) = key_derivation_index else {
+            tracing::warn!(
+                swap_id,
+                "Legacy swap data without derivation index, skipping recovery"
+            );
+            return false;
+        };
+
+        match self.inner.key_provider.derive_at_discovery_index(index) {
+            Ok(Some(kp)) if kp.x_only_public_key().0 == *pk => {
+                if let Err(e) = self.inner.key_provider.cache_discovered_keypair(index, kp) {
+                    tracing::warn!(swap_id, %e, "Failed to cache swap key");
+                    return false;
+                }
+                true
+            }
+            Ok(_) => {
+                tracing::warn!(
+                    swap_id,
+                    index,
+                    "Key at stored derivation index does not match swap pubkey"
+                );
+                false
+            }
+            Err(e) => {
+                tracing::warn!(swap_id, index, %e, "Failed to derive key at stored index");
+                false
+            }
+        }
+    }
+
+    async fn collect_active_vhtlc_infos(&self) -> Result<Vec<VhtlcInfo>, Error> {
+        let submarine_swaps = self
+            .swap_storage()
+            .list_all_submarine()
+            .await
+            .context("failed to list submarine swaps")?;
+
+        let reverse_swaps = self
+            .swap_storage()
+            .list_all_reverse()
+            .await
+            .context("failed to list reverse swaps")?;
+
+        let mut infos = Vec::new();
+
+        for swap in &submarine_swaps {
+            if swap.status.is_terminal() {
+                continue;
+            }
+
+            // Ensure the refund key (sender) is in the key cache.
+            if !self.ensure_swap_key_cached(
+                &swap.refund_public_key.inner.x_only_public_key().0,
+                swap.key_derivation_index,
+                &swap.id,
+            ) {
+                continue;
+            }
+
+            let vhtlc = self.build_vhtlc_script(
+                swap.claim_public_key,
+                swap.refund_public_key,
+                swap.preimage_hash,
+                &swap.timeout_block_heights,
+            )?;
+
+            if vhtlc.address() != swap.vhtlc_address {
+                tracing::warn!(
+                    swap_id = swap.id,
+                    "VHTLC address mismatch for submarine swap, skipping"
+                );
+                continue;
+            }
+
+            // For submarine swaps, the user is the sender (refund key).
+            // Use refund_without_receiver_script as the intent proof — it only requires
+            // sender + server, and we can always sign for sender.
+            let refund_script = vhtlc.refund_without_receiver_script();
+            let spend_info = vhtlc.taproot_spend_info();
+            let control_block = spend_info
+                .control_block(&(refund_script.clone(), LeafVersion::TapScript))
+                .ok_or_else(|| {
+                    Error::ad_hoc("control block not found for refund_without_receiver script")
+                })?;
+
+            infos.push(VhtlcInfo {
+                swap_id: swap.id.clone(),
+                address: swap.vhtlc_address,
+                script_pubkey: vhtlc.script_pubkey(),
+                vhtlc,
+                intent_spend_info: (refund_script, control_block),
+                preimage: swap.preimage,
+            });
+        }
+
+        for swap in &reverse_swaps {
+            if swap.status.is_terminal() {
+                continue;
+            }
+
+            // Ensure the claim key (receiver) is in the key cache.
+            if !self.ensure_swap_key_cached(
+                &swap.claim_public_key.inner.x_only_public_key().0,
+                swap.key_derivation_index,
+                &swap.id,
+            ) {
+                continue;
+            }
+
+            let vhtlc = self.build_vhtlc_script(
+                swap.claim_public_key,
+                swap.refund_public_key,
+                swap.preimage_hash,
+                &swap.timeout_block_heights,
+            )?;
+
+            if vhtlc.address() != swap.vhtlc_address {
+                tracing::warn!(
+                    swap_id = swap.id,
+                    "VHTLC address mismatch for reverse swap, skipping"
+                );
+                continue;
+            }
+
+            // For reverse swaps, the user is the receiver (claim key).
+            // Use claim_script as the intent proof — we need to sign with the receiver key.
+            let claim_script = vhtlc.claim_script();
+            let spend_info = vhtlc.taproot_spend_info();
+            let control_block = spend_info
+                .control_block(&(claim_script.clone(), LeafVersion::TapScript))
+                .ok_or_else(|| Error::ad_hoc("control block not found for claim script"))?;
+
+            infos.push(VhtlcInfo {
+                swap_id: swap.id.clone(),
+                address: swap.vhtlc_address,
+                script_pubkey: vhtlc.script_pubkey(),
+                vhtlc,
+                intent_spend_info: (claim_script, control_block),
+                preimage: swap.preimage,
+            });
+        }
+
+        Ok(infos)
+    }
+
+    /// Determine the spend type by comparing the PSBT's spend script against known VHTLC scripts.
+    fn identify_vhtlc_spend_type(
+        info: &VhtlcInfo,
+        pending_tx: &PendingTx,
+    ) -> Result<PendingVhtlcSpendType, Error> {
+        // Extract the spend script from the ark tx's PSBT input tap_scripts.
+        let spend_script = pending_tx
+            .signed_ark_tx
+            .inputs
+            .iter()
+            .find_map(|input| {
+                input.tap_scripts.values().find_map(|(script, _)| {
+                    // Match against this VHTLC's known scripts.
+                    let claim = info.vhtlc.claim_script();
+                    let refund = info.vhtlc.refund_script();
+                    let refund_no_recv = info.vhtlc.refund_without_receiver_script();
+
+                    if *script == claim || *script == refund || *script == refund_no_recv {
+                        Some(script.clone())
+                    } else {
+                        None
+                    }
+                })
+            })
+            .ok_or_else(|| {
+                Error::ad_hoc(format!(
+                    "could not identify spend script in pending tx {} for swap {}",
+                    pending_tx.ark_txid, info.swap_id
+                ))
+            })?;
+
+        let claim_script = info.vhtlc.claim_script();
+        let refund_script = info.vhtlc.refund_script();
+
+        if spend_script == claim_script {
+            // Claim — we need the preimage. Try to extract it from the ark tx PSBT
+            // (it was injected as extra witness data when the tx was originally signed),
+            // falling back to what's stored in swap data.
+            let preimage = extract_preimage_from_psbt(&pending_tx.signed_ark_tx)
+                .ok()
+                .or(info.preimage)
+                .ok_or_else(|| {
+                    Error::ad_hoc(format!(
+                        "cannot recover preimage for pending claim of swap {}",
+                        info.swap_id
+                    ))
+                })?;
+
+            Ok(PendingVhtlcSpendType::Claim {
+                swap_id: info.swap_id.clone(),
+                preimage,
+            })
+        } else if spend_script == refund_script {
+            Ok(PendingVhtlcSpendType::CollaborativeRefund {
+                swap_id: info.swap_id.clone(),
+            })
+        } else {
+            Ok(PendingVhtlcSpendType::ExpiredRefund {
+                swap_id: info.swap_id.clone(),
+            })
+        }
+    }
+
+    /// Inject a preimage into all inputs of a PSBT via the `VTXO_CONDITION_KEY` unknown field.
+    fn inject_preimage_into_psbt(psbt: &mut Psbt, preimage: [u8; 32]) {
+        let mut bytes = vec![1];
+        let length = VarInt::from(preimage.len() as u64);
+        length
+            .consensus_encode(&mut bytes)
+            .expect("valid length encoding");
+        bytes.write_all(&preimage).expect("valid preimage encoding");
+
+        let key = psbt::raw::Key {
+            type_value: 222,
+            key: VTXO_CONDITION_KEY.to_vec(),
+        };
+
+        for input in &mut psbt.inputs {
+            input.unknown.insert(key.clone(), bytes.clone());
+        }
+    }
+
+    /// Sign a checkpoint PSBT by matching pubkeys in the witness script against our keys.
+    fn sign_checkpoint_with_own_keys(&self, checkpoint_psbt: &mut Psbt) -> Result<(), Error> {
+        let sign_fn =
+            |input: &mut psbt::Input,
+             msg: secp256k1::Message|
+             -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
+                let script = input.witness_script.as_ref().ok_or_else(|| {
+                    ark_core::Error::ad_hoc("missing witness script for checkpoint signing")
+                })?;
+                let pks = extract_checksig_pubkeys(script);
+                let mut res = vec![];
+                for pk in pks {
+                    if let Ok(keypair) = self.keypair_by_pk(&pk) {
+                        let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &keypair);
+                        res.push((sig, keypair.x_only_public_key().0));
+                    }
+                }
+                Ok(res)
+            };
+
+        sign_checkpoint_transaction(sign_fn, checkpoint_psbt)?;
+        Ok(())
+    }
+
+    /// Restore the witness_script on a checkpoint PSBT if the server stripped it.
+    ///
+    /// This is the same logic used by [`Client::continue_pending_offchain_txs`].
+    fn restore_witness_script_if_needed(
+        checkpoint_psbt: &mut Psbt,
+        signed_ark_tx: &Psbt,
+    ) -> Result<(), Error> {
+        if checkpoint_psbt
+            .inputs
+            .first()
+            .ok_or_else(|| Error::ad_hoc("checkpoint PSBT has no inputs"))?
+            .witness_script
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        let checkpoint_txid = checkpoint_psbt.unsigned_tx.compute_txid();
+
+        let ark_input_idx = signed_ark_tx
+            .unsigned_tx
+            .input
+            .iter()
+            .position(|inp| inp.previous_output.txid == checkpoint_txid)
+            .ok_or_else(|| {
+                Error::ad_hoc(format!(
+                    "checkpoint txid {checkpoint_txid} not found in ark tx inputs"
+                ))
+            })?;
+
+        let witness_script = signed_ark_tx
+            .inputs
+            .get(ark_input_idx)
+            .and_then(|input| input.witness_script.clone())
+            .ok_or_else(|| {
+                Error::ad_hoc(format!(
+                    "missing witness script on ark tx input {ark_input_idx}"
+                ))
+            })?;
+
+        checkpoint_psbt
+            .inputs
+            .first_mut()
+            .ok_or_else(|| Error::ad_hoc("checkpoint PSBT has no inputs"))?
+            .witness_script = Some(witness_script);
+        Ok(())
+    }
+}
+
+/// Internal info about an active VHTLC, used during pending tx recovery.
+struct VhtlcInfo {
+    swap_id: String,
+    address: ArkAddress,
+    script_pubkey: ScriptBuf,
+    vhtlc: VhtlcScript,
+    /// The spend path and control block used to prove ownership in the GetPendingTx intent.
+    intent_spend_info: (ScriptBuf, bitcoin::taproot::ControlBlock),
+    preimage: Option<[u8; 32]>,
+}
+
+/// Collect all tapscripts from a [`VhtlcScript`].
+fn vhtlc_tapscripts(vhtlc: &VhtlcScript) -> Vec<ScriptBuf> {
+    vec![
+        vhtlc.claim_script(),
+        vhtlc.refund_script(),
+        vhtlc.refund_without_receiver_script(),
+        vhtlc.unilateral_claim_script(),
+        vhtlc.unilateral_refund_script(),
+        vhtlc.unilateral_refund_without_receiver_script(),
+    ]
+}
+
+/// Extract the preimage from a PSBT's `VTXO_CONDITION_KEY` unknown field.
+///
+/// The condition data is encoded as: `[num_elements] [varint_length] [preimage_bytes]`.
+/// For VHTLC claims, there is exactly one element: the 32-byte preimage.
+fn extract_preimage_from_psbt(psbt: &Psbt) -> Result<[u8; 32], Error> {
+    let condition_key = psbt::raw::Key {
+        type_value: 222,
+        key: VTXO_CONDITION_KEY.to_vec(),
+    };
+
+    for input in &psbt.inputs {
+        if let Some(condition_data) = input.unknown.get(&condition_key) {
+            if condition_data.is_empty() {
+                continue;
+            }
+
+            // First byte is the number of witness elements.
+            let num_elements = condition_data[0] as usize;
+            if num_elements == 0 {
+                continue;
+            }
+
+            // Parse the first element: varint length followed by the preimage bytes.
+            let mut cursor = std::io::Cursor::new(&condition_data[1..]);
+            let length = bitcoin::consensus::Decodable::consensus_decode(&mut cursor)
+                .map_err(|e| Error::ad_hoc(format!("failed to decode varint length: {e}")))?;
+            let length: VarInt = length;
+            let offset = cursor.position() as usize;
+            let remaining = &condition_data[1 + offset..];
+
+            if remaining.len() < length.0 as usize {
+                return Err(Error::ad_hoc(format!(
+                    "condition data too short: expected {} bytes, got {}",
+                    length.0,
+                    remaining.len()
+                )));
+            }
+
+            let preimage_bytes = &remaining[..length.0 as usize];
+
+            let preimage: [u8; 32] = preimage_bytes.try_into().map_err(|_| {
+                Error::ad_hoc(format!(
+                    "preimage has unexpected length: {} (expected 32)",
+                    preimage_bytes.len()
+                ))
+            })?;
+
+            return Ok(preimage);
+        }
+    }
+
+    Err(Error::ad_hoc(
+        "no VTXO_CONDITION_KEY found in any PSBT input",
+    ))
 }
 
 /// The amount to be shared with Boltz when creating a reverse submarine swap.
@@ -1743,6 +2709,8 @@ impl SwapAmount {
 pub struct SubmarineSwapData {
     /// Unique swap identifier.
     pub id: String,
+    /// Preimage for the swap (learned when Boltz claims the VHTLC).
+    pub preimage: Option<[u8; 32]>,
     /// The preimage hash of the BOLT11 invoice.
     pub preimage_hash: ripemd160::Hash,
     /// Public key of the receiving party.
@@ -1762,6 +2730,11 @@ pub struct SubmarineSwapData {
     pub status: SwapStatus,
     /// UNIX timestamp when swap was created.
     pub created_at: u64,
+    /// BIP32 derivation index of the refund key (sender).
+    ///
+    /// `None` for legacy swap data created before this field was added.
+    #[serde(default)]
+    pub key_derivation_index: Option<u32>,
 }
 
 /// Data related to a reverse submarine swap.
@@ -1789,6 +2762,11 @@ pub struct ReverseSwapData {
     pub status: SwapStatus,
     /// UNIX timestamp when swap was created.
     pub created_at: u64,
+    /// BIP32 derivation index of the claim key (receiver).
+    ///
+    /// `None` for legacy swap data created before this field was added.
+    #[serde(default)]
+    pub key_derivation_index: Option<u32>,
 }
 
 /// All possible states of a Boltz swap.
@@ -1835,6 +2813,23 @@ pub enum SwapStatus {
     /// Swap failed with error.
     #[serde(rename = "error")]
     Error { error: String },
+}
+
+impl SwapStatus {
+    /// Whether this status represents a terminal state (swap is done, no further action needed).
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::TransactionRefunded
+                | Self::TransactionFailed
+                | Self::TransactionClaimed
+                | Self::InvoicePaid
+                | Self::InvoiceFailedToPay
+                | Self::InvoiceExpired
+                | Self::SwapExpired
+                | Self::Error { .. }
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Copy)]

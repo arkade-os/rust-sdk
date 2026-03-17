@@ -83,6 +83,14 @@ pub trait KeyProvider: Send + Sync {
         false
     }
 
+    /// Get the derivation index for a cached public key.
+    ///
+    /// Returns `None` if the provider doesn't support index-based derivation
+    /// or if the key is not in the cache.
+    fn get_derivation_index_for_pk(&self, _pk: &bitcoin::XOnlyPublicKey) -> Option<u32> {
+        None
+    }
+
     /// Derive a keypair at a specific index without caching
     ///
     /// This is used during discovery to check keys without affecting the provider's state.
@@ -413,6 +421,11 @@ impl KeyProvider for Bip32KeyProvider {
         true
     }
 
+    fn get_derivation_index_for_pk(&self, pk: &bitcoin::XOnlyPublicKey) -> Option<u32> {
+        let cache = self.key_cache.read().ok()?;
+        cache.get(pk).map(|v| v.path_index)
+    }
+
     fn derive_at_discovery_index(&self, index: u32) -> Result<Option<Keypair>, Error> {
         self.derive_at_index(index).map(Some)
     }
@@ -553,6 +566,10 @@ impl<T: KeyProvider> KeyProvider for Arc<T> {
 
     fn supports_discovery(&self) -> bool {
         (**self).supports_discovery()
+    }
+
+    fn get_derivation_index_for_pk(&self, pk: &bitcoin::XOnlyPublicKey) -> Option<u32> {
+        (**self).get_derivation_index_for_pk(pk)
     }
 
     fn derive_at_discovery_index(&self, index: u32) -> Result<Option<Keypair>, Error> {

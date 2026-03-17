@@ -26,7 +26,7 @@
           extensions = [ "rust-src" ];
         };
 
-        rustBinNightly = (pkgs.rust-bin.selectLatestNightlyWith (toolchain: toolchain.minimal)).override {
+        rustBinNightly = (pkgs.rust-bin.nightly."2026-03-07".minimal).override {
           extensions = [ "rustfmt" "rust-analyzer" ];
         };
 
@@ -53,6 +53,7 @@
               # Must appear _before_ `rustToolchainWithWasm`.
               rustfmt
               rustToolchainWithWasm
+              sqlite
               wabt
               wasm-bindgen-cli
               wasm-pack

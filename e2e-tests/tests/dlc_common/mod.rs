@@ -1240,10 +1240,17 @@ async fn settle(
 
     let mut vtxo_graph_chunks = Vec::new();
 
-    let batch_started_event = match event_stream.next().await {
-        Some(Ok(StreamEvent::BatchStarted(e))) => e,
-        other => bail!("Did not get batch signing event: {other:?}"),
-    };
+    let batch_started_event;
+    loop {
+        match event_stream.next().await {
+            Some(Ok(StreamEvent::StreamStarted(_))) => {}
+            Some(Ok(StreamEvent::BatchStarted(e))) => {
+                batch_started_event = e;
+                break;
+            }
+            other => bail!("Did not get batch signing event: {other:?}"),
+        };
+    }
 
     let hash = sha256::Hash::hash(intent_id.as_bytes());
     let hash = hash.as_byte_array().to_vec().to_lower_hex_string();

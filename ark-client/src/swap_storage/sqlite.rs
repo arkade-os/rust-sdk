@@ -231,8 +231,30 @@ impl SwapStorage for SqliteSwapStorage {
         Ok(())
     }
 
+    async fn update_submarine(&self, id: &str, data: SubmarineSwapData) -> Result<(), Error> {
+        let data_json = serde_json::to_string(&data).map_err(|e| {
+            Error::consumer(format!("Failed to serialize submarine swap data: {e}"))
+        })?;
+
+        let now = Self::current_timestamp();
+
+        let result =
+            sqlx::query("UPDATE submarine_swaps SET data = ?, updated_at = ? WHERE id = ?")
+                .bind(&data_json)
+                .bind(now)
+                .bind(id)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| Error::consumer(format!("Failed to update submarine swap: {e}")))?;
+
+        if result.rows_affected() == 0 {
+            return Err(Error::consumer(format!("Submarine swap not found: {id}")));
+        }
+
+        Ok(())
+    }
+
     async fn update_reverse(&self, id: &str, data: ReverseSwapData) -> Result<(), Error> {
-        // Serialize and save back
         let data_json = serde_json::to_string(&data)
             .map_err(|e| Error::consumer(format!("Failed to serialize reverse swap data: {e}")))?;
 
@@ -346,6 +368,7 @@ mod tests {
         SubmarineSwapData {
             id: id.to_string(),
             status: SwapStatus::Created,
+            preimage: None,
             preimage_hash: ripemd160::Hash::from_slice(&[2u8; 20]).unwrap(),
             refund_public_key: PublicKey::from_str(
                 "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
@@ -365,6 +388,7 @@ mod tests {
             amount: Amount::from_sat(100_000),
             invoice: Bolt11Invoice::from_str("lnbcrt10u1p5d55pjpp56ms94rkev7tdrwqyus5a63lny2mqzq9vh2rq3u4ym3v4lxv6xl4qdql2djkuepqw3hjqs2jfvsxzerywfjhxuccqz95xqztfsp57x0nwf7nzsndjdrvsre570ehg0szw34l284hswdz6zpqvktq9mrs9qxpqysgqllgxhxeny0tvtnxuqgn4s0t2qamc6yqc4t3pe6p2x5lgs8v8r3vxzxp3a3ax9j7d2ta5cduddln8n9se7q0jgg7s0h8t2vhljlu3wkcps9k8xs").unwrap(),
             created_at: 1234567890,
+            key_derivation_index: None,
         }
     }
 
@@ -391,6 +415,7 @@ mod tests {
                 unilateral_refund_without_receiver: 288,
             },
             created_at: 1234567890,
+            key_derivation_index: None,
         }
     }
 
@@ -447,6 +472,22 @@ mod tests {
         let remaining = storage.list_all_submarine().await.unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id, "swap2");
+
+        // Test update_submarine with preimage persistence
+        let mut updated_swap2 = swap2.clone();
+        updated_swap2.preimage = Some([7u8; 32]);
+        updated_swap2.status = SwapStatus::InvoicePaid;
+        storage
+            .update_submarine("swap2", updated_swap2.clone())
+            .await
+            .unwrap();
+        let from_db = storage.get_submarine("swap2").await.unwrap().unwrap();
+        assert_eq!(from_db.preimage, Some([7u8; 32]));
+        assert_eq!(from_db.status, SwapStatus::InvoicePaid);
+
+        // Test update_submarine on non-existent swap returns error
+        let result = storage.update_submarine("nonexistent", updated_swap2).await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]

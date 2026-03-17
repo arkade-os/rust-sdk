@@ -81,7 +81,6 @@ jobs:
       fail-fast: false
       matrix:
         os: [ ubuntu-latest ]
-        arkd-version: [ 'v0.9.0' ]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -115,7 +114,6 @@ jobs:
       fail-fast: false
       matrix:
         os: [ macos-latest ]
-        arkd-version: [ 'v0.9.0' ]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

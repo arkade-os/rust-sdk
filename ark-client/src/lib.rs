@@ -54,6 +54,8 @@ mod send_vtxo;
 mod unilateral_exit;
 mod utils;
 
+pub use boltz::PendingVhtlcSpendTx;
+pub use boltz::PendingVhtlcSpendType;
 pub use boltz::ReverseSwapData;
 pub use boltz::SubmarineSwapData;
 pub use boltz::SwapAmount;
@@ -570,10 +572,6 @@ where
             tracing::warn!(?error, "Failed during key discovery");
         };
 
-        if let Err(error) = client.continue_pending_offchain_txs().await {
-            tracing::warn!(?error, "Failed to recover pending transactions");
-        };
-
         Ok(client)
     }
 }
@@ -1026,6 +1024,10 @@ where
     }
     fn keypair_by_pk(&self, pk: &XOnlyPublicKey) -> Result<Keypair, Error> {
         self.inner.key_provider.get_keypair_for_pk(pk)
+    }
+
+    fn derivation_index_for_pk(&self, pk: &XOnlyPublicKey) -> Option<u32> {
+        self.inner.key_provider.get_derivation_index_for_pk(pk)
     }
 
     fn secp(&self) -> &Secp256k1<All> {

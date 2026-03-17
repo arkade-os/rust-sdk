@@ -15,7 +15,7 @@
   "exec": {
     "commands": [
       {
-        "command": "rustup run nightly-2026-03-07 rustfmt",
+        "command": "./scripts/rustfmt-nightly.sh --config-path rustfmt.toml",
         "exts": [
           "rs"
         ]

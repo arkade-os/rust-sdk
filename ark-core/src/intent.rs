@@ -241,7 +241,7 @@ where
 
         let msg = secp256k1::Message::from_digest(tap_sighash.to_raw_hash().to_byte_array());
 
-        // Check if this input has extra witness (e.g., preimage for ArkNotes)
+        // Add extra witness data (e.g., preimage for ArkNotes / VHTLCs) if present.
         if let Some(extra_witness) = input.extra_witness() {
             // Encode the witness elements and add to PSBT unknown field.
             // Format: [num_elements] [len1] [elem1] [len2] [elem2] ...
@@ -253,20 +253,22 @@ where
                 },
                 encoded,
             );
-        } else {
-            // Normal signing flow
-            let sigs = match input.is_onchain {
-                true => vec![sign_for_onchain_fn(proof_input, msg)?],
-                false => sign_for_vtxo_fn(proof_input, msg)?,
-            };
+        }
 
-            for (sig, pk) in sigs {
-                let sig = taproot::Signature {
-                    signature: sig,
-                    sighash_type: TapSighashType::Default,
-                };
-                proof_input.tap_script_sigs.insert((pk, leaf_hash), sig);
-            }
+        // Sign for any keys we own in the spend script.
+        // For scripts that only need extra witness (e.g., ArkNotes with just a preimage hash
+        // check), sign_for_vtxo_fn will return an empty vec since there are no checksig pubkeys.
+        let sigs = match input.is_onchain {
+            true => vec![sign_for_onchain_fn(proof_input, msg)?],
+            false => sign_for_vtxo_fn(proof_input, msg)?,
+        };
+
+        for (sig, pk) in sigs {
+            let sig = taproot::Signature {
+                signature: sig,
+                sighash_type: TapSighashType::Default,
+            };
+            proof_input.tap_script_sigs.insert((pk, leaf_hash), sig);
         }
     }
 
