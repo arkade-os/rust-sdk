@@ -340,14 +340,27 @@ where
                     tracing::debug!(swap_id, current = ?status, "Swap status");
                     match status {
                         SwapStatus::InvoicePaid => {
-                            let preimage = self
-                                .extract_submarine_swap_preimage(swap_id)
-                                .await
-                                .context(
-                                    "invoice paid but failed to extract preimage from claim tx",
-                                )?;
+                            let deadline = tokio::time::Instant::now() + self.inner.timeout;
 
-                            return Ok(preimage);
+                            loop {
+                                match self.extract_submarine_swap_preimage(swap_id).await {
+                                    Ok(preimage) => return Ok(preimage),
+                                    Err(e) => {
+                                        if tokio::time::Instant::now() >= deadline {
+                                            return Err(e.context(
+                                                "invoice paid but failed to extract preimage from claim tx",
+                                            ));
+                                        }
+
+                                        tracing::debug!(
+                                            swap_id,
+                                            "Preimage not available yet, retrying: {e}"
+                                        );
+                                    }
+                                }
+
+                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            }
                         }
                         SwapStatus::InvoiceExpired => {
                             return Err(Error::ad_hoc(format!(
