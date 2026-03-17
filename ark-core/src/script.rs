@@ -29,6 +29,25 @@ pub fn multisig_script(pk_0: XOnlyPublicKey, pk_1: XOnlyPublicKey) -> ScriptBuf 
         .into_script()
 }
 
+/// A 3-of-3 multisignature [`ScriptBuf`].
+///
+/// All three parties must sign to spend: `<pk_0> CHECKSIGVERIFY <pk_1> CHECKSIGVERIFY <pk_2>
+/// CHECKSIG`.
+pub fn multisig_3of3_script(
+    pk_0: XOnlyPublicKey,
+    pk_1: XOnlyPublicKey,
+    pk_2: XOnlyPublicKey,
+) -> ScriptBuf {
+    ScriptBuf::builder()
+        .push_x_only_key(&pk_0)
+        .push_opcode(OP_CHECKSIGVERIFY)
+        .push_x_only_key(&pk_1)
+        .push_opcode(OP_CHECKSIGVERIFY)
+        .push_x_only_key(&pk_2)
+        .push_opcode(OP_CHECKSIG)
+        .into_script()
+}
+
 /// A [`ScriptBuf`] allowing the owner of `pk` to spend after `locktime_seconds` have passed from
 /// the time the corresponding output was included in a block.
 // TODO: Should support multisig.
@@ -161,6 +180,30 @@ mod tests {
             parsed,
             locktime::relative::LockTime::from_512_second_intervals(2).into()
         );
+    }
+
+    #[test]
+    fn test_multisig_3of3_script() {
+        let pk_0 = XOnlyPublicKey::from_str(
+            "18845781f631c48f1c9709e23092067d06837f30aa0cd0544ac887fe91ddd166",
+        )
+        .unwrap();
+        let pk_1 = XOnlyPublicKey::from_str(
+            "28845781f631c48f1c9709e23092067d06837f30aa0cd0544ac887fe91ddd166",
+        )
+        .unwrap();
+        let pk_2 = XOnlyPublicKey::from_str(
+            "38845781f631c48f1c9709e23092067d06837f30aa0cd0544ac887fe91ddd166",
+        )
+        .unwrap();
+
+        let script = multisig_3of3_script(pk_0, pk_1, pk_2);
+        let pubkeys = extract_checksig_pubkeys(&script);
+
+        assert_eq!(pubkeys.len(), 3);
+        assert_eq!(pubkeys[0], pk_0);
+        assert_eq!(pubkeys[1], pk_1);
+        assert_eq!(pubkeys[2], pk_2);
     }
 
     #[test]
