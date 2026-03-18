@@ -175,6 +175,15 @@ impl TryFrom<&generated::ark::v1::IndexerVtxo> for server::VirtualTxOutPoint {
             false => Some(value.ark_txid.parse().map_err(Error::conversion)?),
         };
 
+        let assets = value
+            .assets
+            .iter()
+            .map(|a| server::Asset {
+                asset_id: a.asset_id.clone(),
+                amount: a.amount,
+            })
+            .collect();
+
         Ok(Self {
             outpoint,
             created_at: value.created_at,
@@ -189,6 +198,7 @@ impl TryFrom<&generated::ark::v1::IndexerVtxo> for server::VirtualTxOutPoint {
             commitment_txids,
             settled_by,
             ark_txid,
+            assets,
         })
     }
 }
@@ -226,6 +236,15 @@ impl TryFrom<&generated::ark::v1::Vtxo> for server::VirtualTxOutPoint {
             false => Some(value.ark_txid.parse().map_err(Error::conversion)?),
         };
 
+        let assets = value
+            .assets
+            .iter()
+            .map(|a| server::Asset {
+                asset_id: a.asset_id.clone(),
+                amount: a.amount,
+            })
+            .collect();
+
         Ok(Self {
             outpoint,
             created_at: value.created_at,
@@ -240,6 +259,7 @@ impl TryFrom<&generated::ark::v1::Vtxo> for server::VirtualTxOutPoint {
             commitment_txids,
             settled_by,
             ark_txid,
+            assets,
         })
     }
 }

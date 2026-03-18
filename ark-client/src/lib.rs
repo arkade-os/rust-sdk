@@ -46,6 +46,7 @@ pub mod key_provider;
 pub mod swap_storage;
 pub mod wallet;
 
+mod asset;
 mod batch;
 mod boltz;
 mod coin_select;
@@ -54,6 +55,7 @@ mod send_vtxo;
 mod unilateral_exit;
 mod utils;
 
+pub use asset::IssueAssetResult;
 pub use boltz::ChainSwapAmount;
 pub use boltz::ChainSwapData;
 pub use boltz::ChainSwapDirection;
@@ -71,6 +73,7 @@ pub use key_provider::Bip32KeyProvider;
 pub use key_provider::KeyProvider;
 pub use key_provider::StaticKeyProvider;
 pub use lightning_invoice;
+pub use send_vtxo::Receiver;
 pub use swap_storage::InMemorySwapStorage;
 #[cfg(feature = "sqlite")]
 pub use swap_storage::SqliteSwapStorage;
@@ -313,11 +316,13 @@ pub struct AddressVtxos {
     pub spent: Vec<VirtualTxOutPoint>,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct OffChainBalance {
     pre_confirmed: Amount,
     confirmed: Amount,
     recoverable: Amount,
+    /// Asset balances keyed by asset ID.
+    asset_balances: HashMap<String, u64>,
 }
 
 impl OffChainBalance {
@@ -336,6 +341,11 @@ impl OffChainBalance {
 
     pub fn total(&self) -> Amount {
         self.pre_confirmed + self.confirmed + self.recoverable
+    }
+
+    /// Asset balances keyed by asset ID.
+    pub fn asset_balances(&self) -> &HashMap<String, u64> {
+        &self.asset_balances
     }
 }
 
@@ -820,11 +830,31 @@ where
             .recoverable()
             .fold(Amount::ZERO, |acc, x| acc + x.amount);
 
+        // Aggregate asset balances from all spendable VTXOs.
+        let mut asset_balances: HashMap<String, u64> = HashMap::new();
+        for vtxo in vtxo_list.spendable_offchain() {
+            for asset in &vtxo.assets {
+                *asset_balances.entry(asset.asset_id.clone()).or_insert(0) += asset.amount;
+            }
+        }
+
         Ok(OffChainBalance {
             pre_confirmed,
             confirmed,
             recoverable,
+            asset_balances,
         })
+    }
+
+    /// Get information about an asset by its ID.
+    pub async fn get_asset(&self, asset_id: &str) -> Result<server::AssetInfo, Error> {
+        timeout_op(
+            self.inner.timeout,
+            self.network_client().get_asset(asset_id),
+        )
+        .await
+        .context("Failed to get asset info")?
+        .map_err(Error::ark_server)
     }
 
     pub async fn transaction_history(&self) -> Result<Vec<history::Transaction>, Error> {
@@ -983,6 +1013,11 @@ where
             bitcoin::relative::LockTime::Time(time) => time.value() as u64 * 512,
             bitcoin::relative::LockTime::Blocks(_) => unreachable!(),
         }
+    }
+
+    /// The server's dust threshold amount.
+    pub fn dust(&self) -> Amount {
+        self.server_info.dust
     }
 
     pub fn network_client(&self) -> ark_grpc::Client {

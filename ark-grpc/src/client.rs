@@ -22,6 +22,7 @@ use crate::Error;
 use ark_core::history;
 use ark_core::server::parse_sequence_number;
 use ark_core::server::ArkTransaction;
+use ark_core::server::AssetInfo;
 use ark_core::server::BatchFailed;
 use ark_core::server::BatchFinalizationEvent;
 use ark_core::server::BatchFinalizedEvent;
@@ -600,6 +601,28 @@ impl Client {
         let response = response.into_inner();
 
         Ok(SignedAmount::from_sat(response.fee))
+    }
+
+    pub async fn get_asset(&self, asset_id: &str) -> Result<AssetInfo, Error> {
+        let mut client = self.indexer_client()?;
+
+        let response = client
+            .get_asset(generated::ark::v1::GetAssetRequest {
+                asset_id: asset_id.to_string(),
+            })
+            .await
+            .map_err(Error::request)?;
+
+        let inner = response.into_inner();
+
+        let supply = inner.supply.parse::<u64>().unwrap_or(0);
+
+        Ok(AssetInfo {
+            asset_id: inner.asset_id,
+            control_asset_id: inner.control_asset,
+            supply,
+            metadata: inner.metadata,
+        })
     }
 
     fn ark_client(&self) -> Result<ArkServiceClient<tonic::transport::Channel>, Error> {

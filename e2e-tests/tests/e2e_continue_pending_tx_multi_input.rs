@@ -99,6 +99,7 @@ pub async fn e2e_continue_pending_tx_multi_input() {
             script_pubkey: vtxo.script.clone(),
             expire_at: vtxo.expires_at,
             amount: vtxo.amount,
+            assets: Vec::new(),
         })
         .collect::<Vec<_>>();
 

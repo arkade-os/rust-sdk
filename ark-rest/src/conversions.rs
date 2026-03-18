@@ -414,6 +414,18 @@ impl TryFrom<IndexerVtxo> for ark_core::server::VirtualTxOutPoint {
             .transpose()
             .map_err(|e| ConversionError(format!("Invalid ark_txid: {e}")))?;
 
+        let assets = value
+            .assets
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|a| {
+                Some(ark_core::server::Asset {
+                    asset_id: a.asset_id?,
+                    amount: a.amount.unwrap_or(0) as u64,
+                })
+            })
+            .collect();
+
         Ok(ark_core::server::VirtualTxOutPoint {
             outpoint,
             created_at,
@@ -428,6 +440,7 @@ impl TryFrom<IndexerVtxo> for ark_core::server::VirtualTxOutPoint {
             commitment_txids,
             settled_by,
             ark_txid,
+            assets,
         })
     }
 }

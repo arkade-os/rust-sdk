@@ -137,6 +137,26 @@ continue-pending-txs actor:
 submit-only actor address amount:
     cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic submit-only {{ address }} {{ amount }}
 
+# Issue a new asset for a given actor, e.g. just issue-asset alice 1000 --control-amount 1
+issue-asset actor amount *args:
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic issue-asset {{ amount }} {{ args }}
+
+# Send an asset to an Ark address, e.g. just send-assets alice tark... assetid 10
+send-assets actor address asset_id amount:
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic send-assets {{ address }} {{ asset_id }} {{ amount }}
+
+# Reissue additional units of an existing asset, e.g. just reissue-asset alice assetid 500
+reissue-asset actor asset_id amount:
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic reissue-asset {{ asset_id }} {{ amount }}
+
+# Burn a specific amount of an asset, e.g. just burn-asset alice assetid 10
+burn-asset actor asset_id amount:
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic burn-asset {{ asset_id }} {{ amount }}
+
+# Get information about an asset by ID
+get-asset actor asset_id:
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic get-asset {{ asset_id }}
+
 # Create ArkNotes via the admin API (regtest only), e.g. just create-note 100000
 create-note amount quantity="1":
     cargo run -p ark-client-sample -- create-note {{ amount }} --quantity {{ quantity }}

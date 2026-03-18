@@ -133,7 +133,7 @@ pub fn build_offchain_transactions(
     let mut outputs = outputs
         .iter()
         .map(|(address, amount)| {
-            if *amount > server_info.dust {
+            if *amount >= server_info.dust {
                 TxOut {
                     value: *amount,
                     script_pubkey: address.to_p2tr_script_pubkey(),
@@ -158,7 +158,7 @@ pub fn build_offchain_transactions(
 
     if let Some(change_address) = change_address {
         if change_amount > Amount::ZERO {
-            if change_amount > server_info.dust {
+            if change_amount >= server_info.dust {
                 outputs.push(TxOut {
                     value: change_amount,
                     script_pubkey: change_address.to_p2tr_script_pubkey(),

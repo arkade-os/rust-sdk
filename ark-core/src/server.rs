@@ -19,6 +19,31 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::str::FromStr;
 
+/// An asset carried by a VTXO.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Asset {
+    pub asset_id: String,
+    pub amount: u64,
+}
+
+/// Metadata about an issued asset, including its control asset reference.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AssetInfo {
+    pub asset_id: String,
+    pub control_asset_id: String,
+    pub supply: u64,
+    pub metadata: String,
+}
+
+/// Configuration for control assets when issuing new assets.
+#[derive(Clone, Debug)]
+pub enum ControlAsset {
+    /// Create a new control asset with the specified amount.
+    New { amount: u64 },
+    /// Reference an existing control asset by its ID.
+    Existing { id: String },
+}
+
 /// An aggregate public nonce per shared internal (non-leaf) node in the VTXO tree.
 #[derive(Debug, Clone)]
 pub struct NoncePks(HashMap<Txid, musig::PublicNonce>);
@@ -386,6 +411,8 @@ pub struct VirtualTxOutPoint {
     pub settled_by: Option<Txid>,
     /// The Ark transaction that _spends_ this VTXO (if we omit the checkpoint transaction).
     pub ark_txid: Option<Txid>,
+    /// Assets carried by this VTXO.
+    pub assets: Vec<Asset>,
 }
 
 impl VirtualTxOutPoint {

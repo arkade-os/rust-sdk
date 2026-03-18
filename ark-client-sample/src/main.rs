@@ -223,6 +223,48 @@ enum Commands {
         #[arg(long, default_value = "http://localhost:7071")]
         admin_url: String,
     },
+    /// Get information about an asset by its ID.
+    GetAsset {
+        /// The asset ID to look up.
+        asset_id: String,
+    },
+    /// Send an asset to an Ark address (BTC amount is automatically set to dust).
+    SendAssets {
+        /// Destination Ark address.
+        address: ArkAddressCli,
+        /// The asset ID to send.
+        asset_id: String,
+        /// The amount of the asset to send.
+        amount: u64,
+    },
+    /// Burn a specific amount of an asset.
+    BurnAsset {
+        /// The asset ID to burn.
+        asset_id: String,
+        /// The amount of the asset to burn.
+        amount: u64,
+    },
+    /// Reissue additional units of an existing asset (requires control asset).
+    ReissueAsset {
+        /// The asset ID to reissue.
+        asset_id: String,
+        /// The amount of additional asset units to mint.
+        amount: u64,
+    },
+    /// Issue a new asset.
+    IssueAsset {
+        /// Number of asset units to issue.
+        amount: u64,
+        /// Create a new control asset with this amount (enables reissuance).
+        #[arg(long)]
+        control_amount: Option<u64>,
+        /// Use an existing control asset ID (format: txid:gidx).
+        #[arg(long)]
+        control_asset_id: Option<String>,
+        /// Metadata key-value pairs (format: key=value, comma-separated).
+        #[arg(long)]
+        metadata: Option<String>,
+    },
 }
 
 #[derive(Clone)]
@@ -455,15 +497,18 @@ async fn run_command<K: KeyProvider>(
                 unspent.iter().map(|u| u.amount).sum::<Amount>()
             };
 
-            println!(
-                "{}",
-                serde_json::json!({
-                    "offchain_confirmed": offchain_balance.confirmed(),
-                    "offchain_pre_confirmed": offchain_balance.pre_confirmed(),
-                    "recoverable": offchain_balance.recoverable(),
-                    "boarding": boarding,
-                })
-            );
+            let mut balance_json = serde_json::json!({
+                "offchain_confirmed": offchain_balance.confirmed(),
+                "offchain_pre_confirmed": offchain_balance.pre_confirmed(),
+                "recoverable": offchain_balance.recoverable(),
+                "boarding": boarding,
+            });
+
+            if !offchain_balance.asset_balances().is_empty() {
+                balance_json["assets"] = serde_json::to_value(offchain_balance.asset_balances())?;
+            }
+
+            println!("{}", balance_json);
         }
         Commands::TransactionHistory => {
             let tx_history = client.transaction_history().await.map_err(|e| anyhow!(e))?;
@@ -1131,6 +1176,7 @@ async fn run_command<K: KeyProvider>(
                     script_pubkey: vtxo.script.clone(),
                     expire_at: vtxo.expires_at,
                     amount: vtxo.amount,
+                    assets: Vec::new(),
                 })
                 .collect::<Vec<_>>();
 
@@ -1259,6 +1305,116 @@ async fn run_command<K: KeyProvider>(
         Commands::CreateNote { .. } => {
             // Handled in main() before client setup
             unreachable!("CreateNote is handled before client initialization");
+        }
+        Commands::SendAssets {
+            address,
+            asset_id,
+            amount,
+        } => {
+            let receiver = ark_client::Receiver {
+                address: address.0,
+                amount: client.dust(),
+                assets: vec![ark_core::server::Asset {
+                    asset_id: asset_id.clone(),
+                    amount: *amount,
+                }],
+            };
+
+            let txid = client
+                .send_assets(vec![receiver])
+                .await
+                .map_err(|e| anyhow!(e))?;
+
+            println!(
+                "{}",
+                serde_json::json!({
+                    "ark_txid": txid.to_string(),
+                })
+            );
+        }
+        Commands::BurnAsset { asset_id, amount } => {
+            let txid = client
+                .burn_asset(asset_id, *amount)
+                .await
+                .map_err(|e| anyhow!(e))?;
+
+            println!(
+                "{}",
+                serde_json::json!({
+                    "ark_txid": txid.to_string(),
+                })
+            );
+        }
+        Commands::ReissueAsset { asset_id, amount } => {
+            let txid = client
+                .reissue_asset(asset_id, *amount)
+                .await
+                .map_err(|e| anyhow!(e))?;
+
+            println!(
+                "{}",
+                serde_json::json!({
+                    "ark_txid": txid.to_string(),
+                })
+            );
+        }
+        Commands::GetAsset { asset_id } => {
+            let asset_info = client.get_asset(asset_id).await.map_err(|e| anyhow!(e))?;
+
+            println!(
+                "{}",
+                serde_json::json!({
+                    "asset_id": asset_info.asset_id,
+                    "control_asset_id": asset_info.control_asset_id,
+                    "supply": asset_info.supply,
+                    "metadata": asset_info.metadata,
+                })
+            );
+        }
+        Commands::IssueAsset {
+            amount,
+            control_amount,
+            control_asset_id,
+            metadata,
+        } => {
+            let control_asset = match (control_amount, control_asset_id) {
+                (Some(_), Some(_)) => {
+                    bail!("specify either --control-amount or --control-asset-id, not both")
+                }
+                (Some(amt), None) => Some(ark_core::ControlAsset::New { amount: *amt }),
+                (None, Some(id)) => Some(ark_core::ControlAsset::Existing { id: id.clone() }),
+                (None, None) => None,
+            };
+
+            let metadata = metadata.clone().map(|m| {
+                m.split(',')
+                    .filter_map(|pair| {
+                        let mut parts = pair.splitn(2, '=');
+                        let key = parts.next()?.trim().to_string();
+                        let value = parts.next()?.trim().to_string();
+                        Some((key, value))
+                    })
+                    .collect::<Vec<_>>()
+            });
+
+            let result = client
+                .issue_asset(*amount, control_asset, metadata)
+                .await
+                .map_err(|e| anyhow!(e))?;
+
+            let asset_ids: Vec<String> = result
+                .asset_ids
+                .iter()
+                .map(|id| format!("{}:{}", id.txid, id.group_index))
+                .collect();
+
+            println!(
+                "{}",
+                serde_json::json!({
+                    "ark_txid": result.ark_txid.to_string(),
+                    "asset_ids": asset_ids,
+                })
+            );
         }
     }
 

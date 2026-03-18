@@ -600,6 +600,7 @@ mod tests {
             ],
             settled_by: None,
             ark_txid: None,
+            assets: Vec::new(),
         }];
 
         let inc_txs = generate_incoming_vtxo_transaction_history(
@@ -648,6 +649,7 @@ mod tests {
             ],
             settled_by: None,
             ark_txid: None,
+            assets: Vec::new(),
         }];
 
         let spent_vtxos = [VirtualTxOutPoint {
@@ -681,6 +683,7 @@ mod tests {
                     .parse()
                     .unwrap(),
             ),
+            assets: Vec::new(),
         }];
 
         let inc_txs = generate_incoming_vtxo_transaction_history(
@@ -742,6 +745,7 @@ mod tests {
                 ],
                 settled_by: None,
                 ark_txid: None,
+                assets: Vec::new(),
             },
             VirtualTxOutPoint {
                 outpoint: OutPoint {
@@ -766,6 +770,7 @@ mod tests {
                 ],
                 settled_by: None,
                 ark_txid: None,
+                assets: Vec::new(),
             },
         ];
 
@@ -831,6 +836,7 @@ mod tests {
             ],
             settled_by: None,
             ark_txid: None,
+            assets: Vec::new(),
         }];
 
         let spent_vtxos = [
@@ -865,6 +871,7 @@ mod tests {
                         .unwrap(),
                 ),
                 ark_txid: None,
+                assets: Vec::new(),
             },
             VirtualTxOutPoint {
                 outpoint: OutPoint {
@@ -897,6 +904,7 @@ mod tests {
                         .unwrap(),
                 ),
                 ark_txid: None,
+                assets: Vec::new(),
             },
         ];
 
@@ -960,6 +968,7 @@ mod tests {
             ],
             settled_by: None,
             ark_txid: None,
+            assets: Vec::new(),
         }];
 
         let spent_vtxos = [
@@ -994,6 +1003,7 @@ mod tests {
                         .unwrap(),
                 ),
                 ark_txid: None,
+                assets: Vec::new(),
             },
             VirtualTxOutPoint {
                 outpoint: OutPoint {
@@ -1026,6 +1036,7 @@ mod tests {
                         .unwrap(),
                 ),
                 ark_txid: None,
+                assets: Vec::new(),
             },
             VirtualTxOutPoint {
                 outpoint: OutPoint {
@@ -1058,6 +1069,7 @@ mod tests {
                         .parse()
                         .unwrap(),
                 ),
+                assets: Vec::new(),
             },
         ];
 

@@ -1,3 +1,4 @@
+use crate::server::Asset;
 use crate::Error;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
@@ -9,6 +10,7 @@ pub struct VirtualTxOutPoint {
     pub script_pubkey: ScriptBuf,
     pub expire_at: i64,
     pub amount: Amount,
+    pub assets: Vec<Asset>,
 }
 
 /// Select VTXOs to be used as inputs in Ark transactions.
@@ -54,6 +56,50 @@ pub fn select_vtxos(
     Ok(selected)
 }
 
+/// Select VTXOs that hold a specific asset, accumulating until `amount` is reached.
+///
+/// Returns the selected VTXOs and the asset change amount.
+pub fn select_vtxos_for_asset(
+    mut virtual_tx_outpoints: Vec<VirtualTxOutPoint>,
+    amount: u64,
+    asset_id: &str,
+) -> Result<(Vec<VirtualTxOutPoint>, u64), Error> {
+    // Filter to only VTXOs containing this asset.
+    let mut candidates: Vec<VirtualTxOutPoint> = virtual_tx_outpoints
+        .drain(..)
+        .filter(|v| v.assets.iter().any(|a| a.asset_id == asset_id))
+        .collect();
+
+    // Sort by expiration (older first).
+    candidates.sort_by(|a, b| a.expire_at.cmp(&b.expire_at));
+
+    let mut selected = Vec::new();
+    let mut selected_amount: u64 = 0;
+
+    for vtxo in candidates {
+        if selected_amount >= amount {
+            break;
+        }
+        let asset_amt = vtxo
+            .assets
+            .iter()
+            .find(|a| a.asset_id == asset_id)
+            .map(|a| a.amount)
+            .unwrap_or(0);
+        selected_amount += asset_amt;
+        selected.push(vtxo);
+    }
+
+    if selected_amount < amount {
+        return Err(Error::coin_select(format!(
+            "insufficient asset funds for {asset_id}: selected = {selected_amount}, needed = {amount}"
+        )));
+    }
+
+    let change = selected_amount - amount;
+    Ok((selected, change))
+}
+
 // Tests for the coin selection function
 #[cfg(test)]
 mod tests {
@@ -65,6 +111,7 @@ mod tests {
             script_pubkey: ScriptBuf::new(),
             expire_at,
             amount,
+            assets: Vec::new(),
         }
     }
 

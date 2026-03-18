@@ -6,7 +6,9 @@ use crate::wallet::OnchainWallet;
 use crate::Blockchain;
 use crate::Client;
 use crate::Error;
+use ark_core::asset_packet;
 use ark_core::coin_select::select_vtxos;
+use ark_core::coin_select::select_vtxos_for_asset;
 use ark_core::intent;
 use ark_core::script::extract_checksig_pubkeys;
 use ark_core::send;
@@ -14,6 +16,7 @@ use ark_core::send::build_offchain_transactions;
 use ark_core::send::sign_ark_transaction;
 use ark_core::send::sign_checkpoint_transaction;
 use ark_core::send::OffchainTransactions;
+use ark_core::server::Asset;
 use ark_core::server::PendingTx;
 use ark_core::ArkAddress;
 use ark_core::ErrorContext as _;
@@ -26,6 +29,17 @@ use bitcoin::OutPoint;
 use bitcoin::TxOut;
 use bitcoin::Txid;
 use bitcoin::XOnlyPublicKey;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::time::Duration;
+
+/// A receiver for an offchain transaction, with optional assets.
+#[derive(Clone, Debug)]
+pub struct Receiver {
+    pub address: ArkAddress,
+    pub amount: Amount,
+    pub assets: Vec<Asset>,
+}
 
 impl<B, W, S, K> Client<B, W, S, K>
 where
@@ -44,17 +58,51 @@ where
     ///
     /// Coin selection is performed automatically to choose which VTXOs to spend.
     ///
+    /// If the selected coins carry assets, an asset packet is built to route those assets to the
+    /// change output so they are not lost.
+    ///
     /// # Returns
     ///
     /// The [`Txid`] of the generated Ark transaction.
     pub async fn send_vtxo(&self, address: ArkAddress, amount: Amount) -> Result<Txid, Error> {
-        let vtxo_inputs = self.coin_select_vtxo_inputs(amount).await?;
-        let pending_tx = self
-            .submit_offchain_send(vtxo_inputs, address, amount)
-            .await?;
-        let ark_txid = pending_tx.ark_txid;
-        self.sign_and_finalize_pending_tx(pending_tx).await?;
-        Ok(ark_txid)
+        let (vtxo_list, script_pubkey_to_vtxo_map) = self
+            .list_vtxos()
+            .await
+            .context("failed to get spendable VTXOs")?;
+
+        let spendable = vtxo_list
+            .spendable_offchain()
+            .map(|vtxo| ark_core::coin_select::VirtualTxOutPoint {
+                outpoint: vtxo.outpoint,
+                script_pubkey: vtxo.script.clone(),
+                expire_at: vtxo.expires_at,
+                amount: vtxo.amount,
+                assets: vtxo.assets.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        let selected_coins = select_vtxos(spendable, amount, self.server_info.dust, true)
+            .map_err(Error::from)
+            .context("failed to select coins")?;
+
+        let has_assets = selected_coins.iter().any(|c| !c.assets.is_empty());
+
+        let vtxo_inputs =
+            self.build_vtxo_inputs(selected_coins.clone(), &script_pubkey_to_vtxo_map)?;
+
+        if !has_assets {
+            // Simple path: no assets involved.
+            let pending_tx = self
+                .submit_offchain_send(vtxo_inputs, address, amount)
+                .await?;
+            let ark_txid = pending_tx.ark_txid;
+            self.sign_and_finalize_pending_tx(pending_tx).await?;
+            return Ok(ark_txid);
+        }
+
+        // Asset-aware path: build an asset packet to preserve assets on the change output.
+        self.build_and_sign_offchain_tx_with_assets(selected_coins, vtxo_inputs, address, amount)
+            .await
     }
 
     /// Spend specific VTXOs in an Ark transaction sending the given `amount` to the given
@@ -81,7 +129,7 @@ where
         address: ArkAddress,
         amount: Amount,
     ) -> Result<Txid, Error> {
-        let (vtxo_inputs, total_amount) =
+        let (selected_coins, vtxo_inputs, total_amount) =
             self.select_vtxo_inputs_with_total(vtxo_outpoints).await?;
 
         if total_amount < amount {
@@ -91,11 +139,464 @@ where
             )));
         }
 
+        if selected_coins.iter().any(|coin| !coin.assets.is_empty()) {
+            return self
+                .build_and_sign_offchain_tx_with_assets(
+                    selected_coins,
+                    vtxo_inputs,
+                    address,
+                    amount,
+                )
+                .await;
+        }
+
         let pending_tx = self
             .submit_offchain_send(vtxo_inputs, address, amount)
             .await?;
         let ark_txid = pending_tx.ark_txid;
         self.sign_and_finalize_pending_tx(pending_tx).await?;
+        Ok(ark_txid)
+    }
+
+    /// Send assets offchain to one or more receivers.
+    ///
+    /// Each receiver specifies a BTC amount (at least dust) and a list of assets.
+    /// Coin selection handles both BTC and asset VTXOs. An asset packet is built
+    /// and attached to the PSBT.
+    ///
+    /// # Returns
+    ///
+    /// The [`Txid`] of the generated Ark transaction.
+    pub async fn send_assets(&self, receivers: Vec<Receiver>) -> Result<Txid, Error> {
+        let (vtxo_list, script_pubkey_to_vtxo_map) = self
+            .list_vtxos()
+            .await
+            .context("failed to get spendable VTXOs")?;
+
+        let spendable = vtxo_list
+            .spendable_offchain()
+            .map(|vtxo| ark_core::coin_select::VirtualTxOutPoint {
+                outpoint: vtxo.outpoint,
+                script_pubkey: vtxo.script.clone(),
+                expire_at: vtxo.expires_at,
+                amount: vtxo.amount,
+                assets: vtxo.assets.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        // Track which VTXOs are already selected (by outpoint) to avoid double-spending.
+        let mut selected_outpoints = HashSet::new();
+        let mut all_selected: Vec<ark_core::coin_select::VirtualTxOutPoint> = Vec::new();
+
+        // Per-asset change amounts that may satisfy later receivers.
+        let mut asset_changes: HashMap<String, u64> = HashMap::new();
+
+        // Track BTC needed and BTC already provided by asset-selected VTXOs.
+        let mut btc_needed = Amount::ZERO;
+        let mut btc_provided = Amount::ZERO;
+
+        // 1. Asset coin selection: for each receiver's assets, select VTXOs holding them.
+        for receiver in &receivers {
+            btc_needed += receiver.amount;
+
+            for asset in &receiver.assets {
+                let mut amount_to_select = asset.amount;
+
+                // Use existing asset change if available.
+                if let Some(existing_change) = asset_changes.get_mut(&asset.asset_id) {
+                    if amount_to_select <= *existing_change {
+                        *existing_change -= amount_to_select;
+                        if *existing_change == 0 {
+                            asset_changes.remove(&asset.asset_id);
+                        }
+                        continue;
+                    }
+                    amount_to_select -= *existing_change;
+                    asset_changes.remove(&asset.asset_id);
+                }
+
+                // Filter to not-yet-selected VTXOs.
+                let available: Vec<_> = spendable
+                    .iter()
+                    .filter(|v| !selected_outpoints.contains(&v.outpoint))
+                    .cloned()
+                    .collect();
+
+                let (asset_coins, asset_change) =
+                    select_vtxos_for_asset(available, amount_to_select, &asset.asset_id)
+                        .map_err(Error::from)
+                        .context("failed to select coins for asset transfer")?;
+
+                for coin in &asset_coins {
+                    if selected_outpoints.insert(coin.outpoint) {
+                        // Track BTC provided by this asset VTXO.
+                        btc_provided += coin.amount;
+
+                        // Collect change for other assets in this coin.
+                        for a in &coin.assets {
+                            if a.asset_id != asset.asset_id {
+                                *asset_changes.entry(a.asset_id.clone()).or_insert(0) += a.amount;
+                            }
+                        }
+
+                        all_selected.push(coin.clone());
+                    }
+                }
+
+                if asset_change > 0 {
+                    *asset_changes.entry(asset.asset_id.clone()).or_insert(0) += asset_change;
+                }
+            }
+        }
+
+        // 2. BTC coin selection for any remaining BTC needed.
+        // If there are asset changes, we need a change output to carry them,
+        // which requires at least dust sats.
+        if !asset_changes.is_empty() {
+            btc_needed += self.server_info.dust;
+        }
+
+        // Only select more BTC if asset-selected VTXOs don't already cover the need.
+        let btc_shortfall = btc_needed.checked_sub(btc_provided).unwrap_or(Amount::ZERO);
+
+        if btc_shortfall > Amount::ZERO {
+            let available: Vec<_> = spendable
+                .iter()
+                .filter(|v| !selected_outpoints.contains(&v.outpoint))
+                .cloned()
+                .collect();
+
+            let btc_coins = select_vtxos(available, btc_shortfall, self.server_info.dust, true)
+                .map_err(Error::from)
+                .context("failed to select BTC coins for asset transfer")?;
+
+            for coin in &btc_coins {
+                if selected_outpoints.insert(coin.outpoint) {
+                    // Collect asset change from BTC-selected coins.
+                    for a in &coin.assets {
+                        *asset_changes.entry(a.asset_id.clone()).or_insert(0) += a.amount;
+                    }
+                    all_selected.push(coin.clone());
+                }
+            }
+        }
+
+        // 3. Build VTXO inputs from all selected coins.
+        let vtxo_inputs = all_selected
+            .iter()
+            .map(|vto| {
+                let vtxo = script_pubkey_to_vtxo_map
+                    .get(&vto.script_pubkey)
+                    .ok_or_else(|| {
+                        ark_core::Error::ad_hoc(format!(
+                            "missing VTXO for script pubkey: {}",
+                            vto.script_pubkey
+                        ))
+                    })?;
+                let (forfeit_script, control_block) = vtxo
+                    .forfeit_spend_info()
+                    .context("failed to get forfeit spend info")?;
+                Ok(send::VtxoInput::new(
+                    forfeit_script,
+                    None,
+                    control_block,
+                    vtxo.tapscripts(),
+                    vtxo.script_pubkey(),
+                    vto.amount,
+                    vto.outpoint,
+                ))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+
+        // 4. Build the offchain transaction outputs.
+        let (change_address, change_address_vtxo) = self.get_offchain_address()?;
+
+        let outputs: Vec<(&ArkAddress, Amount)> =
+            receivers.iter().map(|r| (&r.address, r.amount)).collect();
+
+        let OffchainTransactions {
+            mut ark_tx,
+            checkpoint_txs,
+        } = build_offchain_transactions(
+            &outputs,
+            Some(&change_address),
+            &vtxo_inputs,
+            &self.server_info,
+        )
+        .map_err(Error::from)
+        .context("failed to build offchain transactions")?;
+
+        // 5. Build the asset packet.
+        let mut asset_inputs: HashMap<u16, Vec<Asset>> = HashMap::new();
+        for (idx, coin) in all_selected.iter().enumerate() {
+            if !coin.assets.is_empty() {
+                asset_inputs.insert(idx as u16, coin.assets.clone());
+            }
+        }
+
+        let num_psbt_outputs = ark_tx.unsigned_tx.output.len();
+        let has_change_output = num_psbt_outputs > receivers.len() + 1; // +1 for anchor
+        let change_assets: Vec<Asset> = if has_change_output {
+            asset_changes
+                .into_iter()
+                .map(|(asset_id, amount)| Asset { asset_id, amount })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let change_output_index = if has_change_output {
+            num_psbt_outputs - 2 // before anchor
+        } else {
+            0 // unused, no change assets
+        };
+
+        let packet = create_asset_packet(
+            &asset_inputs,
+            &receivers,
+            &change_assets,
+            change_output_index,
+        )?;
+
+        if let Some(packet) = packet {
+            asset_packet::add_asset_packet_to_psbt(&mut ark_tx, &packet);
+        }
+
+        // 6. Sign, submit, finalize.
+        for i in 0..checkpoint_txs.len() {
+            sign_ark_transaction(self.make_sign_fn(), &mut ark_tx, i)?;
+        }
+
+        let ark_txid = ark_tx.unsigned_tx.compute_txid();
+
+        let res = self
+            .network_client()
+            .submit_offchain_transaction_request(ark_tx, checkpoint_txs)
+            .await
+            .map_err(Error::ark_server)
+            .context("failed to submit offchain transaction request")?;
+
+        let pending_tx = PendingTx {
+            ark_txid: res.signed_ark_tx.unsigned_tx.compute_txid(),
+            signed_ark_tx: res.signed_ark_tx,
+            signed_checkpoint_txs: res.signed_checkpoint_txs,
+        };
+
+        self.sign_and_finalize_pending_tx(pending_tx).await?;
+
+        let used_pk = change_address_vtxo.owner_pk();
+        if let Err(err) = self.inner.key_provider.mark_as_used(&used_pk) {
+            tracing::warn!(
+                "Failed updating keypair cache for used change address: {:?}",
+                err
+            );
+        }
+
+        Ok(ark_txid)
+    }
+
+    /// Burn a specific amount of an asset.
+    ///
+    /// The burned asset amount is represented in the asset packet as inputs with
+    /// no corresponding outputs. Any remaining asset change is routed to a change
+    /// output.
+    ///
+    /// # Returns
+    ///
+    /// The [`Txid`] of the generated Ark transaction.
+    pub async fn burn_asset(&self, asset_id: &str, amount: u64) -> Result<Txid, Error> {
+        let (vtxo_list, script_pubkey_to_vtxo_map) = self
+            .list_vtxos()
+            .await
+            .context("failed to get spendable VTXOs")?;
+
+        let spendable = vtxo_list
+            .spendable_offchain()
+            .map(|vtxo| ark_core::coin_select::VirtualTxOutPoint {
+                outpoint: vtxo.outpoint,
+                script_pubkey: vtxo.script.clone(),
+                expire_at: vtxo.expires_at,
+                amount: vtxo.amount,
+                assets: vtxo.assets.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        // 1. Select VTXOs holding the asset to burn.
+        let (asset_coins, asset_change) =
+            select_vtxos_for_asset(spendable.clone(), amount, asset_id)
+                .map_err(Error::from)
+                .context("failed to select coins for asset burn")?;
+
+        let mut selected_outpoints: HashSet<OutPoint> =
+            asset_coins.iter().map(|c| c.outpoint).collect();
+        let mut all_selected = asset_coins.clone();
+
+        // Collect asset changes from selected coins (other assets on same VTXOs).
+        let mut asset_changes: HashMap<String, u64> = HashMap::new();
+        if asset_change > 0 {
+            asset_changes.insert(asset_id.to_string(), asset_change);
+        }
+        for coin in &asset_coins {
+            for a in &coin.assets {
+                if a.asset_id != asset_id {
+                    *asset_changes.entry(a.asset_id.clone()).or_insert(0) += a.amount;
+                }
+            }
+        }
+
+        // 2. We send dust to our own address as the receiver output.
+        let (self_address, _) = self
+            .get_offchain_addresses()?
+            .into_iter()
+            .next()
+            .ok_or_else(|| ark_core::Error::ad_hoc("no offchain address available"))?;
+
+        let btc_provided: Amount = all_selected.iter().map(|c| c.amount).sum();
+        let mut btc_needed = self.server_info.dust; // receiver output
+
+        // If there are asset changes, we need a change output to carry them.
+        if !asset_changes.is_empty() {
+            btc_needed += self.server_info.dust;
+        }
+
+        let btc_shortfall = btc_needed.checked_sub(btc_provided).unwrap_or(Amount::ZERO);
+        if btc_shortfall > Amount::ZERO {
+            let available: Vec<_> = spendable
+                .iter()
+                .filter(|v| !selected_outpoints.contains(&v.outpoint))
+                .cloned()
+                .collect();
+
+            let btc_coins = select_vtxos(available, btc_shortfall, self.server_info.dust, true)
+                .map_err(Error::from)
+                .context("failed to select BTC coins for asset burn")?;
+
+            for coin in &btc_coins {
+                if selected_outpoints.insert(coin.outpoint) {
+                    for a in &coin.assets {
+                        *asset_changes.entry(a.asset_id.clone()).or_insert(0) += a.amount;
+                    }
+                    all_selected.push(coin.clone());
+                }
+            }
+        }
+
+        // 3. Build VTXO inputs.
+        let vtxo_inputs = all_selected
+            .iter()
+            .map(|vto| {
+                let vtxo = script_pubkey_to_vtxo_map
+                    .get(&vto.script_pubkey)
+                    .ok_or_else(|| {
+                        ark_core::Error::ad_hoc(format!(
+                            "missing VTXO for script pubkey: {}",
+                            vto.script_pubkey
+                        ))
+                    })?;
+                let (forfeit_script, control_block) = vtxo
+                    .forfeit_spend_info()
+                    .context("failed to get forfeit spend info")?;
+                Ok(send::VtxoInput::new(
+                    forfeit_script,
+                    None,
+                    control_block,
+                    vtxo.tapscripts(),
+                    vtxo.script_pubkey(),
+                    vto.amount,
+                    vto.outpoint,
+                ))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+
+        // 4. Build offchain transaction. The receiver is self with dust amount.
+        let (change_address, change_address_vtxo) = self.get_offchain_address()?;
+
+        let OffchainTransactions {
+            mut ark_tx,
+            checkpoint_txs,
+        } = build_offchain_transactions(
+            &[(&self_address, self.server_info.dust)],
+            Some(&change_address),
+            &vtxo_inputs,
+            &self.server_info,
+        )
+        .map_err(Error::from)
+        .context("failed to build offchain transactions")?;
+
+        // 5. Build the asset packet.
+        // Inputs: all assets from selected coins.
+        // Outputs: only asset *changes* on the change output -- the burned amount has NO output.
+        let mut asset_inputs: HashMap<u16, Vec<Asset>> = HashMap::new();
+        for (idx, coin) in all_selected.iter().enumerate() {
+            if !coin.assets.is_empty() {
+                asset_inputs.insert(idx as u16, coin.assets.clone());
+            }
+        }
+
+        let num_psbt_outputs = ark_tx.unsigned_tx.output.len();
+        let has_change_output = num_psbt_outputs > 2; // more than [receiver, anchor]
+        let change_output_index = if has_change_output {
+            num_psbt_outputs - 2
+        } else {
+            0
+        };
+
+        // The receiver gets NO assets (they're burned).
+        // Only asset changes go to the change output.
+        let change_assets: Vec<Asset> = if has_change_output {
+            asset_changes
+                .into_iter()
+                .map(|(asset_id, amount)| Asset { asset_id, amount })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let empty_receivers = vec![Receiver {
+            address: self_address,
+            amount: self.server_info.dust,
+            assets: Vec::new(), // no assets to receiver = burn
+        }];
+        let packet = create_asset_packet(
+            &asset_inputs,
+            &empty_receivers,
+            &change_assets,
+            change_output_index,
+        )?;
+
+        if let Some(packet) = packet {
+            asset_packet::add_asset_packet_to_psbt(&mut ark_tx, &packet);
+        }
+
+        // 6. Sign, submit, finalize.
+        for i in 0..checkpoint_txs.len() {
+            sign_ark_transaction(self.make_sign_fn(), &mut ark_tx, i)?;
+        }
+
+        let ark_txid = ark_tx.unsigned_tx.compute_txid();
+
+        let res = self
+            .network_client()
+            .submit_offchain_transaction_request(ark_tx, checkpoint_txs)
+            .await
+            .map_err(Error::ark_server)
+            .context("failed to submit offchain transaction request")?;
+
+        let pending_tx = PendingTx {
+            ark_txid: res.signed_ark_tx.unsigned_tx.compute_txid(),
+            signed_ark_tx: res.signed_ark_tx,
+            signed_checkpoint_txs: res.signed_checkpoint_txs,
+        };
+
+        self.sign_and_finalize_pending_tx(pending_tx).await?;
+
+        let used_pk = change_address_vtxo.owner_pk();
+        if let Err(err) = self.inner.key_provider.mark_as_used(&used_pk) {
+            tracing::warn!(
+                "Failed updating keypair cache for used change address: {:?}",
+                err
+            );
+        }
+
         Ok(ark_txid)
     }
 
@@ -254,6 +755,7 @@ where
                 script_pubkey: vtxo.script.clone(),
                 expire_at: vtxo.expires_at,
                 amount: vtxo.amount,
+                assets: vtxo.assets.clone(),
             })
             .collect::<Vec<_>>();
 
@@ -264,11 +766,19 @@ where
         self.build_vtxo_inputs(selected, &script_pubkey_to_vtxo_map)
     }
 
-    /// Filter VTXOs by outpoints and build [`send::VtxoInput`]s, returning the total amount.
+    /// Filter VTXOs by outpoints and build [`send::VtxoInput`]s, returning the selected coins
+    /// and total amount.
     async fn select_vtxo_inputs_with_total(
         &self,
         vtxo_outpoints: &[OutPoint],
-    ) -> Result<(Vec<send::VtxoInput>, Amount), Error> {
+    ) -> Result<
+        (
+            Vec<ark_core::coin_select::VirtualTxOutPoint>,
+            Vec<send::VtxoInput>,
+            Amount,
+        ),
+        Error,
+    > {
         let (vtxo_list, script_pubkey_to_vtxo_map) =
             self.list_vtxos().await.context("failed to get VTXO list")?;
 
@@ -280,6 +790,7 @@ where
                 script_pubkey: vtxo.script.clone(),
                 expire_at: vtxo.expires_at,
                 amount: vtxo.amount,
+                assets: vtxo.assets.clone(),
             })
             .collect();
 
@@ -288,15 +799,15 @@ where
         }
 
         let total = selected.iter().fold(Amount::ZERO, |acc, v| acc + v.amount);
-        let inputs = self.build_vtxo_inputs(selected, &script_pubkey_to_vtxo_map)?;
-        Ok((inputs, total))
+        let inputs = self.build_vtxo_inputs(selected.clone(), &script_pubkey_to_vtxo_map)?;
+        Ok((selected, inputs, total))
     }
 
     /// Convert selected [`VirtualTxOutPoint`]s into [`send::VtxoInput`]s.
     fn build_vtxo_inputs(
         &self,
         selected: Vec<ark_core::coin_select::VirtualTxOutPoint>,
-        script_pubkey_to_vtxo_map: &std::collections::HashMap<bitcoin::ScriptBuf, ark_core::Vtxo>,
+        script_pubkey_to_vtxo_map: &HashMap<bitcoin::ScriptBuf, ark_core::Vtxo>,
     ) -> Result<Vec<send::VtxoInput>, Error> {
         selected
             .into_iter()
@@ -386,9 +897,9 @@ where
         let ark_txid = pending_tx.ark_txid;
         let mut signed_checkpoint_txs = pending_tx.signed_checkpoint_txs;
 
-        // Build a map from checkpoint txid → ark tx input index so we can
+        // Build a map from checkpoint txid -> ark tx input index so we can
         // restore witness scripts that the server may have stripped.
-        let ark_input_idx_by_cp_txid: std::collections::HashMap<_, _> = pending_tx
+        let ark_input_idx_by_cp_txid: HashMap<_, _> = pending_tx
             .signed_ark_tx
             .unsigned_tx
             .input
@@ -431,6 +942,103 @@ where
             .await
     }
 
+    /// Build and sign an Ark transaction while preserving any assets carried by the selected
+    /// inputs on the BTC change output.
+    async fn build_and_sign_offchain_tx_with_assets(
+        &self,
+        selected_coins: Vec<ark_core::coin_select::VirtualTxOutPoint>,
+        vtxo_inputs: Vec<send::VtxoInput>,
+        address: ArkAddress,
+        amount: Amount,
+    ) -> Result<Txid, Error> {
+        let (change_address, change_address_vtxo) = self.get_offchain_address()?;
+
+        let OffchainTransactions {
+            mut ark_tx,
+            checkpoint_txs,
+        } = build_offchain_transactions(
+            &[(&address, amount)],
+            Some(&change_address),
+            &vtxo_inputs,
+            &self.server_info,
+        )
+        .map_err(Error::from)
+        .context("failed to build offchain transactions")?;
+
+        let mut asset_inputs: HashMap<u16, Vec<Asset>> = HashMap::new();
+        let mut all_change_assets: HashMap<String, u64> = HashMap::new();
+        for (idx, coin) in selected_coins.iter().enumerate() {
+            if !coin.assets.is_empty() {
+                asset_inputs.insert(idx as u16, coin.assets.clone());
+                for asset in &coin.assets {
+                    *all_change_assets.entry(asset.asset_id.clone()).or_insert(0) += asset.amount;
+                }
+            }
+        }
+
+        let num_psbt_outputs = ark_tx.unsigned_tx.output.len();
+        let has_change_output = num_psbt_outputs > 2; // receiver + optional change + anchor
+        let change_assets: Vec<Asset> = if has_change_output {
+            all_change_assets
+                .into_iter()
+                .map(|(asset_id, amount)| Asset { asset_id, amount })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let change_output_index = if has_change_output {
+            num_psbt_outputs - 2
+        } else {
+            0
+        };
+
+        let empty_receivers = vec![Receiver {
+            address,
+            amount,
+            assets: Vec::new(),
+        }];
+        if let Some(packet) = create_asset_packet(
+            &asset_inputs,
+            &empty_receivers,
+            &change_assets,
+            change_output_index,
+        )? {
+            asset_packet::add_asset_packet_to_psbt(&mut ark_tx, &packet);
+        }
+
+        // Sign, submit, finalize.
+        for i in 0..checkpoint_txs.len() {
+            sign_ark_transaction(self.make_sign_fn(), &mut ark_tx, i)?;
+        }
+
+        let ark_txid = ark_tx.unsigned_tx.compute_txid();
+
+        let res = self
+            .network_client()
+            .submit_offchain_transaction_request(ark_tx, checkpoint_txs)
+            .await
+            .map_err(Error::ark_server)
+            .context("failed to submit offchain transaction request")?;
+
+        let pending_tx = PendingTx {
+            ark_txid: res.signed_ark_tx.unsigned_tx.compute_txid(),
+            signed_ark_tx: res.signed_ark_tx,
+            signed_checkpoint_txs: res.signed_checkpoint_txs,
+        };
+
+        self.sign_and_finalize_pending_tx(pending_tx).await?;
+
+        let used_pk = change_address_vtxo.owner_pk();
+        if let Err(err) = self.inner.key_provider.mark_as_used(&used_pk) {
+            tracing::warn!(
+                "Failed updating keypair cache for used change address: {:?}",
+                err
+            );
+        }
+
+        Ok(ark_txid)
+    }
+
     /// Finalize an offchain transaction.
     async fn finalize_offchain_tx(
         &self,
@@ -448,13 +1056,61 @@ where
         .map(|_| ())
     }
 
+    /// Finalize an offchain transaction, retrying on transient failures.
+    ///
+    /// After submit succeeds but before finalize completes, a network error
+    /// would leave the transaction in a pending state. Retrying here avoids
+    /// that without needing full recovery via [`Self::continue_pending_offchain_txs`].
+    pub(crate) async fn finalize_with_retry(
+        &self,
+        ark_txid: Txid,
+        signed_checkpoint_txs: Vec<bitcoin::Psbt>,
+    ) -> Result<(), Error> {
+        const MAX_RETRIES: usize = 3;
+
+        let mut last_err = None;
+
+        for attempt in 0..=MAX_RETRIES {
+            if attempt > 0 {
+                let delay = Duration::from_millis(500 * (1 << (attempt - 1)));
+                tracing::warn!(
+                    %ark_txid,
+                    attempt,
+                    ?delay,
+                    "Retrying finalize after transient failure"
+                );
+                crate::utils::sleep(delay).await;
+            }
+
+            match timeout_op(
+                self.inner.timeout,
+                self.network_client()
+                    .finalize_offchain_transaction(ark_txid, signed_checkpoint_txs.clone()),
+            )
+            .await
+            {
+                Ok(Ok(_)) => return Ok(()),
+                Ok(Err(e)) => {
+                    last_err = Some(Error::ark_server(e));
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                }
+            }
+        }
+
+        Err(last_err
+            .expect("at least one attempt was made")
+            .context("failed to finalize offchain transaction after retries"))
+    }
+
     /// Fetch pending offchain transactions from the server.
     async fn fetch_pending_offchain_txs(&self) -> Result<Vec<PendingTx>, Error> {
         const MAX_INPUTS_PER_INTENT: usize = 20;
 
         let ark_addresses = self.get_offchain_addresses()?;
 
-        let script_pubkey_to_vtxo_map: std::collections::HashMap<_, _> = ark_addresses
+        let script_pubkey_to_vtxo_map: HashMap<_, _> = ark_addresses
             .iter()
             .map(|(a, v)| (a.to_p2tr_script_pubkey(), v.clone()))
             .collect();
@@ -480,7 +1136,7 @@ where
 
         let secp = Secp256k1::new();
         let mut all_pending_txs = Vec::new();
-        let mut seen_ark_txids = std::collections::HashSet::new();
+        let mut seen_ark_txids = HashSet::new();
 
         // Batch inputs to avoid oversized intents.
         for (batch_idx, batch) in vtxos.chunks(MAX_INPUTS_PER_INTENT).enumerate() {
@@ -601,4 +1257,125 @@ where
 
         Ok(all_pending_txs)
     }
+}
+
+/// Build an asset packet for a transfer (not issuance).
+///
+/// Groups transfers by asset ID, mapping input indices to their asset amounts
+/// and output/receiver indices to the requested asset amounts. Returns `None`
+/// if there are no assets to transfer.
+pub fn create_asset_packet(
+    asset_inputs: &HashMap<u16, Vec<Asset>>,
+    receivers: &[Receiver],
+    change_assets: &[Asset],
+    change_output_index: usize,
+) -> Result<Option<asset_packet::Packet>, Error> {
+    // Collect all transfers grouped by asset ID.
+    struct AssetTransfer {
+        inputs: Vec<asset_packet::AssetInput>,
+        outputs: Vec<asset_packet::AssetOutput>,
+    }
+
+    let mut transfers: HashMap<String, AssetTransfer> = HashMap::new();
+
+    // Map inputs.
+    for (input_index, assets) in asset_inputs {
+        for asset in assets {
+            let transfer =
+                transfers
+                    .entry(asset.asset_id.clone())
+                    .or_insert_with(|| AssetTransfer {
+                        inputs: Vec::new(),
+                        outputs: Vec::new(),
+                    });
+            transfer.inputs.push(asset_packet::AssetInput {
+                input_index: *input_index,
+                amount: asset.amount,
+            });
+        }
+    }
+
+    // Map receiver outputs.
+    for (receiver_index, receiver) in receivers.iter().enumerate() {
+        for asset in &receiver.assets {
+            let transfer = transfers.get_mut(&asset.asset_id).ok_or_else(|| {
+                Error::ad_hoc(format!(
+                    "receiver references asset {} that is not present in selected inputs",
+                    asset.asset_id
+                ))
+            })?;
+            transfer.outputs.push(asset_packet::AssetOutput {
+                output_index: receiver_index as u16,
+                amount: asset.amount,
+            });
+        }
+    }
+
+    // Map change outputs.
+    for asset in change_assets {
+        if let Some(transfer) = transfers.get_mut(&asset.asset_id) {
+            transfer.outputs.push(asset_packet::AssetOutput {
+                output_index: change_output_index as u16,
+                amount: asset.amount,
+            });
+        }
+    }
+
+    if transfers.is_empty() {
+        return Ok(None);
+    }
+
+    let groups: Vec<asset_packet::AssetGroup> = transfers
+        .into_iter()
+        .map(|(asset_id_str, transfer)| {
+            let asset_id = parse_asset_id_hex(&asset_id_str)?;
+            Ok(asset_packet::AssetGroup {
+                asset_id: Some(asset_id),
+                control_asset: None,
+                metadata: None,
+                inputs: transfer.inputs,
+                outputs: transfer.outputs,
+            })
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+
+    Ok(Some(asset_packet::Packet { groups }))
+}
+
+/// Parse an asset ID from its hex string format (txid bytes + group_index LE bytes).
+pub fn parse_asset_id_hex(s: &str) -> Result<asset_packet::AssetId, Error> {
+    use bitcoin::hashes::Hash;
+    use bitcoin::hex::FromHex;
+
+    if let Ok(bytes) = Vec::<u8>::from_hex(s) {
+        if bytes.len() != 34 {
+            return Err(Error::ad_hoc(format!(
+                "invalid asset ID hex length {}, expected 34 bytes",
+                bytes.len()
+            )));
+        }
+
+        let txid_bytes: [u8; 32] = bytes[..32]
+            .try_into()
+            .map_err(|_| Error::ad_hoc("invalid txid bytes in asset ID"))?;
+        let group_index = u16::from_le_bytes([bytes[32], bytes[33]]);
+        return Ok(asset_packet::AssetId {
+            txid: Txid::from_byte_array(txid_bytes),
+            group_index,
+        });
+    }
+
+    if let Some((txid_str, gidx_str)) = s.split_once(':') {
+        let txid = txid_str
+            .parse()
+            .map_err(|e| Error::ad_hoc(format!("invalid txid in asset ID: {e}")))?;
+        let group_index = gidx_str
+            .parse()
+            .map_err(|e| Error::ad_hoc(format!("invalid group index in asset ID: {e}")))?;
+        return Ok(asset_packet::AssetId { txid, group_index });
+    }
+
+    Err(Error::ad_hoc(format!(
+        "invalid asset ID format '{s}', expected 34-byte hex or 'txid:gidx'"
+    )))
 }
