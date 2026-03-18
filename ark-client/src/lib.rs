@@ -53,6 +53,7 @@ mod fee_estimation;
 mod send_vtxo;
 mod unilateral_exit;
 mod utils;
+pub mod vtxo_watcher;
 
 pub use boltz::PendingVhtlcSpendTx;
 pub use boltz::PendingVhtlcSpendType;
