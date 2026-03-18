@@ -28,12 +28,11 @@
 
 mod error;
 
-pub use error::Error;
-
 use ark_core::intent::Intent;
 use bitcoin::base64;
 use bitcoin::base64::Engine;
 use bitcoin::Psbt;
+pub use error::Error;
 use serde::Deserialize;
 use serde::Serialize;
 

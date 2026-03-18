@@ -622,6 +622,30 @@ pub fn prepare_delegate_psbts(
     server_forfeit_address: &Address,
     dust: Amount,
 ) -> Result<Delegate, Error> {
+    prepare_delegate_psbts_at(
+        intent_inputs,
+        outputs,
+        delegate_cosigner_pk,
+        server_forfeit_address,
+        dust,
+        None,
+    )
+}
+
+/// Like [`prepare_delegate_psbts`], but with an explicit `valid_at` timestamp.
+///
+/// When delegating to a third-party service, `valid_at` is set to the time at which the delegator
+/// should execute the renewal (e.g. 90% through the VTXO's lifetime).
+///
+/// If `valid_at` is `None`, the current time is used (same as [`prepare_delegate_psbts`]).
+pub fn prepare_delegate_psbts_at(
+    intent_inputs: Vec<intent::Input>,
+    outputs: Vec<intent::Output>,
+    delegate_cosigner_pk: PublicKey,
+    server_forfeit_address: &Address,
+    dust: Amount,
+    valid_at: Option<u64>,
+) -> Result<Delegate, Error> {
     // Create intent message
     let now = std::time::SystemTime::now();
     let now = now
@@ -629,11 +653,12 @@ pub fn prepare_delegate_psbts(
         .map_err(Error::ad_hoc)
         .context("failed to compute now timestamp")?;
     let now = now.as_secs();
+    let valid_at = valid_at.unwrap_or(now);
     let expire_at = now + (2 * 60);
 
     let intent_message = intent::IntentMessage::Register {
         onchain_output_indexes: Vec::new(),
-        valid_at: now,
+        valid_at,
         expire_at,
         own_cosigner_pks: vec![delegate_cosigner_pk],
     };

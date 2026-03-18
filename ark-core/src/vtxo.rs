@@ -332,9 +332,15 @@ mod tests {
         let (server, owner, delegator) = test_keys();
         let exit_delay = bitcoin::Sequence::from_seconds_ceil(86400).unwrap();
 
-        let vtxo =
-            Vtxo::new_with_delegator(&secp, server, owner, delegator, exit_delay, Network::Regtest)
-                .unwrap();
+        let vtxo = Vtxo::new_with_delegator(
+            &secp,
+            server,
+            owner,
+            delegator,
+            exit_delay,
+            Network::Regtest,
+        )
+        .unwrap();
 
         assert_eq!(vtxo.tapscripts().len(), 3);
         assert_eq!(vtxo.delegator_pk(), Some(delegator));
@@ -346,9 +352,15 @@ mod tests {
         let (server, owner, delegator) = test_keys();
         let exit_delay = bitcoin::Sequence::from_seconds_ceil(86400).unwrap();
 
-        let vtxo =
-            Vtxo::new_with_delegator(&secp, server, owner, delegator, exit_delay, Network::Regtest)
-                .unwrap();
+        let vtxo = Vtxo::new_with_delegator(
+            &secp,
+            server,
+            owner,
+            delegator,
+            exit_delay,
+            Network::Regtest,
+        )
+        .unwrap();
 
         // All three spend paths should produce valid spend info.
         let (forfeit_script, _cb) = vtxo.forfeit_spend_info().unwrap();
@@ -381,9 +393,15 @@ mod tests {
 
         let default =
             Vtxo::new_default(&secp, server, owner, exit_delay, Network::Regtest).unwrap();
-        let with_delegator =
-            Vtxo::new_with_delegator(&secp, server, owner, delegator, exit_delay, Network::Regtest)
-                .unwrap();
+        let with_delegator = Vtxo::new_with_delegator(
+            &secp,
+            server,
+            owner,
+            delegator,
+            exit_delay,
+            Network::Regtest,
+        )
+        .unwrap();
 
         // Different taproot trees should produce different addresses.
         assert_ne!(default.address(), with_delegator.address());
