@@ -39,7 +39,9 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::time::Duration;
+use std::time::Instant;
 
 pub mod error;
 pub mod key_provider;
@@ -69,6 +71,30 @@ pub use swap_storage::InMemorySwapStorage;
 #[cfg(feature = "sqlite")]
 pub use swap_storage::SqliteSwapStorage;
 pub use swap_storage::SwapStorage;
+
+/// Default duration for caching server info (30 minutes).
+pub const DEFAULT_SERVER_INFO_CACHE_DURATION: Duration = Duration::from_secs(30 * 60);
+
+/// Cached server info with a timestamp for TTL-based invalidation.
+struct CachedServerInfo {
+    info: Arc<server::Info>,
+    fetched_at: Instant,
+    cache_duration: Duration,
+}
+
+impl CachedServerInfo {
+    fn new(info: server::Info, cache_duration: Duration) -> Self {
+        Self {
+            info: Arc::new(info),
+            fetched_at: Instant::now(),
+            cache_duration,
+        }
+    }
+
+    fn is_stale(&self) -> bool {
+        self.fetched_at.elapsed() > self.cache_duration
+    }
+}
 
 /// Default gap limit for BIP44-style key discovery
 ///
@@ -281,6 +307,8 @@ pub struct OfflineClient<B, W, S, K> {
     swap_storage: Arc<S>,
     boltz_url: String,
     timeout: Duration,
+    server_info_cache: Arc<RwLock<Option<CachedServerInfo>>>,
+    server_info_cache_duration: Duration,
 }
 
 /// A client to interact with Ark server
@@ -288,7 +316,6 @@ pub struct OfflineClient<B, W, S, K> {
 /// See [`OfflineClient`] docs for details.
 pub struct Client<B, W, S, K> {
     inner: OfflineClient<B, W, S, K>,
-    pub server_info: server::Info,
     fee_estimator: ark_fees::Estimator,
 }
 
@@ -407,7 +434,18 @@ where
             swap_storage,
             boltz_url,
             timeout,
+            server_info_cache: Arc::new(RwLock::new(None)),
+            server_info_cache_duration: DEFAULT_SERVER_INFO_CACHE_DURATION,
         }
+    }
+
+    /// Set the cache duration for server info.
+    ///
+    /// By default, server info is cached for [`DEFAULT_SERVER_INFO_CACHE_DURATION`] (30 minutes).
+    /// Use [`Client::refresh_server_info`] to re-fetch when stale.
+    pub fn server_info_cache_duration(mut self, duration: Duration) -> Self {
+        self.server_info_cache_duration = duration;
+        self
     }
 
     /// Create a new offline client with a static keypair (backward compatible)
@@ -538,15 +576,44 @@ where
     }
 
     async fn finish_connect(mut self) -> Result<Client<B, W, S, K>, Error> {
-        let server_info = timeout_op(self.timeout, self.network_client.get_info())
-            .await
-            .context("Failed to get Ark server info")??;
+        let cache_duration = self.server_info_cache_duration;
 
-        tracing::debug!(
-            name = self.name,
-            ark_server_url = ?self.network_client,
-            "Connected to Ark server"
-        );
+        // Reuse cached server info if it's still fresh, otherwise fetch.
+        let cached = self
+            .server_info_cache
+            .read()
+            .expect("server info cache lock poisoned")
+            .as_ref()
+            .filter(|c| !c.is_stale())
+            .map(|c| c.info.clone());
+
+        let server_info = match cached {
+            Some(info) => {
+                tracing::debug!(name = self.name, "Reusing cached server info");
+                info
+            }
+            None => {
+                let info = timeout_op(self.timeout, self.network_client.get_info())
+                    .await
+                    .context("Failed to get Ark server info")??;
+
+                tracing::debug!(
+                    name = self.name,
+                    ark_server_url = ?self.network_client,
+                    "Fetched fresh server info"
+                );
+
+                let cached = CachedServerInfo::new(info, cache_duration);
+                let info = cached.info.clone();
+
+                *self
+                    .server_info_cache
+                    .write()
+                    .expect("server info cache lock poisoned") = Some(cached);
+
+                info
+            }
+        };
 
         let fee_estimator_config = server_info
             .fees
@@ -564,7 +631,6 @@ where
 
         let client = Client {
             inner: self,
-            server_info,
             fee_estimator,
         };
 
@@ -583,12 +649,82 @@ where
     S: SwapStorage + 'static,
     K: KeyProvider,
 {
+    /// Get the cached server info.
+    ///
+    /// This returns a cheap [`Arc`] clone of the cached server info. The cache is shared with
+    /// the [`OfflineClient`] that created this client, so reconnects reuse it while fresh.
+    /// Use [`Self::refresh_server_info`] to re-fetch when stale.
+    pub fn server_info(&self) -> Arc<server::Info> {
+        self.inner
+            .server_info_cache
+            .read()
+            .expect("server info cache lock poisoned")
+            .as_ref()
+            .expect("server info must be populated after connect")
+            .info
+            .clone()
+    }
+
+    /// Returns `true` if the cached server info is older than the configured cache duration.
+    pub fn is_server_info_stale(&self) -> bool {
+        self.inner
+            .server_info_cache
+            .read()
+            .expect("server info cache lock poisoned")
+            .as_ref()
+            .is_none_or(|c| c.is_stale())
+    }
+
+    /// How long ago the server info was fetched.
+    pub fn server_info_age(&self) -> Duration {
+        self.inner
+            .server_info_cache
+            .read()
+            .expect("server info cache lock poisoned")
+            .as_ref()
+            .expect("server info must be populated after connect")
+            .fetched_at
+            .elapsed()
+    }
+
+    /// Re-fetch server info from the Ark server if the cache is stale.
+    ///
+    /// Returns the (possibly refreshed) server info. If the cache is still fresh,
+    /// no network call is made.
+    pub async fn refresh_server_info(&self) -> Result<Arc<server::Info>, Error> {
+        if !self.is_server_info_stale() {
+            return Ok(self.server_info());
+        }
+
+        self.force_refresh_server_info().await
+    }
+
+    /// Unconditionally re-fetch server info from the Ark server, ignoring the cache TTL.
+    pub async fn force_refresh_server_info(&self) -> Result<Arc<server::Info>, Error> {
+        let mut network_client = self.inner.network_client.clone();
+        let info = timeout_op(self.inner.timeout, network_client.get_info())
+            .await
+            .context("Failed to refresh Ark server info")??;
+
+        let cache_duration = self.inner.server_info_cache_duration;
+        let cached = CachedServerInfo::new(info, cache_duration);
+        let info = cached.info.clone();
+
+        *self
+            .inner
+            .server_info_cache
+            .write()
+            .expect("server info cache lock poisoned") = Some(cached);
+
+        Ok(info)
+    }
+
     /// Get a new offchain receiving address
     ///
     /// For HD wallets, this will derive a new address each time it's called.
     /// For static key providers, this will always return the same address.
     pub fn get_offchain_address(&self) -> Result<(ArkAddress, Vtxo), Error> {
-        let server_info = &self.server_info;
+        let server_info = self.server_info();
 
         let server_signer = server_info.signer_pk.into();
         let owner = self
@@ -610,7 +746,7 @@ where
     }
 
     pub fn get_offchain_addresses(&self) -> Result<Vec<(ArkAddress, Vtxo)>, Error> {
-        let server_info = &self.server_info;
+        let server_info = self.server_info();
         let server_signer = server_info.signer_pk.into();
 
         let pks = self.inner.key_provider.get_cached_pks()?;
@@ -648,7 +784,7 @@ where
             return Ok(0);
         }
 
-        let server_info = &self.server_info;
+        let server_info = self.server_info();
         let server_signer: XOnlyPublicKey = server_info.signer_pk.into();
 
         let mut start_index = 0u32;
@@ -724,7 +860,7 @@ where
 
     // At the moment we are always generating the same address.
     pub fn get_boarding_address(&self) -> Result<Address, Error> {
-        let server_info = &self.server_info;
+        let server_info = self.server_info();
 
         let boarding_output = self.inner.wallet.new_boarding_output(
             server_info.signer_pk.into(),
@@ -777,7 +913,7 @@ where
             .await
             .context("failed to get VTXOs for addresses")?;
 
-        let vtxo_list = VtxoList::new(self.server_info.dust, virtual_tx_outpoints);
+        let vtxo_list = VtxoList::new(self.server_info().dust, virtual_tx_outpoints);
 
         Ok(vtxo_list)
     }
@@ -948,7 +1084,7 @@ where
     /// locktime.
     pub fn boarding_exit_delay_seconds(&self) -> u64 {
         match self
-            .server_info
+            .server_info()
             .boarding_exit_delay
             .to_relative_lock_time()
             .expect("relative locktime")
@@ -969,7 +1105,7 @@ where
     /// locktime.
     pub fn unilateral_vtxo_exit_delay_seconds(&self) -> u64 {
         match self
-            .server_info
+            .server_info()
             .unilateral_exit_delay
             .to_relative_lock_time()
             .expect("relative locktime")

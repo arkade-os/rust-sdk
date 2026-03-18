@@ -257,7 +257,7 @@ where
             })
             .collect::<Vec<_>>();
 
-        let selected = select_vtxos(spendable, amount, self.server_info.dust, true)
+        let selected = select_vtxos(spendable, amount, self.server_info().dust, true)
             .map_err(Error::from)
             .context("failed to select coins")?;
 
@@ -346,7 +346,7 @@ where
             &[(&address, amount)],
             Some(&change_address),
             &vtxo_inputs,
-            &self.server_info,
+            &self.server_info(),
         )
         .map_err(Error::from)
         .context("failed to build offchain transactions")?;

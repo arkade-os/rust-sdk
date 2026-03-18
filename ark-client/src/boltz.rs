@@ -488,7 +488,7 @@ where
             VhtlcOptions {
                 sender: swap_data.refund_public_key.into(),
                 receiver: swap_data.claim_public_key.into(),
-                server: self.server_info.signer_pk.into(),
+                server: self.server_info().signer_pk.into(),
                 preimage_hash: swap_data.preimage_hash,
                 refund_locktime: timeout_block_heights.refund,
                 unilateral_claim_delay: parse_sequence_number(
@@ -506,7 +506,7 @@ where
                     Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
                 })?,
             },
-            self.server_info.network,
+            self.server_info().network,
         )
         .map_err(Error::ad_hoc)?;
 
@@ -523,7 +523,7 @@ where
                 .get_virtual_tx_outpoints(std::iter::once(vhtlc_address))
                 .await?;
 
-            let vtxo_list = VtxoList::new(self.server_info.dust, virtual_tx_outpoints);
+            let vtxo_list = VtxoList::new(self.server_info().dust, virtual_tx_outpoints);
 
             // We expect a single outpoint.
             let mut unspent = vtxo_list.all_unspent();
@@ -569,7 +569,7 @@ where
             &outputs,
             None,
             std::slice::from_ref(&vhtlc_input),
-            &self.server_info,
+            &self.server_info(),
         )?;
 
         let kp = self.keypair_by_pk(&refunder_pk)?;
@@ -648,7 +648,7 @@ where
             VhtlcOptions {
                 sender: swap_data.refund_public_key.into(),
                 receiver: swap_data.claim_public_key.into(),
-                server: self.server_info.signer_pk.into(),
+                server: self.server_info().signer_pk.into(),
                 preimage_hash: swap_data.preimage_hash,
                 refund_locktime: timeout_block_heights.refund,
                 unilateral_claim_delay: parse_sequence_number(
@@ -666,7 +666,7 @@ where
                     Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
                 })?,
             },
-            self.server_info.network,
+            self.server_info().network,
         )
         .map_err(Error::ad_hoc)?;
 
@@ -683,7 +683,7 @@ where
                 .get_virtual_tx_outpoints(std::iter::once(vhtlc_address))
                 .await?;
 
-            let vtxo_list = VtxoList::new(self.server_info.dust, virtual_tx_outpoints);
+            let vtxo_list = VtxoList::new(self.server_info().dust, virtual_tx_outpoints);
 
             // We expect a single outpoint.
             let mut recoverable = vtxo_list.recoverable();
@@ -762,7 +762,7 @@ where
             VhtlcOptions {
                 sender: swap_data.refund_public_key.into(),
                 receiver: swap_data.claim_public_key.into(),
-                server: self.server_info.signer_pk.into(),
+                server: self.server_info().signer_pk.into(),
                 preimage_hash: swap_data.preimage_hash,
                 refund_locktime: timeout_block_heights.refund,
                 unilateral_claim_delay: parse_sequence_number(
@@ -780,7 +780,7 @@ where
                     Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
                 })?,
             },
-            self.server_info.network,
+            self.server_info().network,
         )
         .map_err(Error::ad_hoc)?;
 
@@ -797,7 +797,7 @@ where
                 .get_virtual_tx_outpoints(std::iter::once(vhtlc_address))
                 .await?;
 
-            let vtxo_list = VtxoList::new(self.server_info.dust, virtual_tx_outpoints);
+            let vtxo_list = VtxoList::new(self.server_info().dust, virtual_tx_outpoints);
 
             // We expect a single outpoint.
             let mut unspent = vtxo_list.all_unspent();
@@ -842,7 +842,7 @@ where
             &outputs,
             None,
             std::slice::from_ref(&vhtlc_input),
-            &self.server_info,
+            &self.server_info(),
         )?;
 
         // Sign the ark transaction with the sender's (user's) key.
@@ -1292,7 +1292,7 @@ where
             VhtlcOptions {
                 sender: swap.refund_public_key.into(),
                 receiver: swap.claim_public_key.into(),
-                server: self.server_info.signer_pk.into(),
+                server: self.server_info().signer_pk.into(),
                 preimage_hash: swap.preimage_hash,
                 refund_locktime: timeout_block_heights.refund,
                 unilateral_claim_delay: parse_sequence_number(
@@ -1310,7 +1310,7 @@ where
                     Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
                 })?,
             },
-            self.server_info.network,
+            self.server_info().network,
         )
         .map_err(Error::ad_hoc)
         .context("failed to build VHTLC script")?;
@@ -1329,7 +1329,7 @@ where
                 .get_virtual_tx_outpoints(std::iter::once(vhtlc_address))
                 .await?;
 
-            let vtxo_list = VtxoList::new(self.server_info.dust, virtual_tx_outpoints);
+            let vtxo_list = VtxoList::new(self.server_info().dust, virtual_tx_outpoints);
 
             // We expect a single outpoint.
             let mut unspent = vtxo_list.all_unspent();
@@ -1373,7 +1373,7 @@ where
             &outputs,
             None,
             std::slice::from_ref(&vhtlc_input),
-            &self.server_info,
+            &self.server_info(),
         )
         .map_err(Error::from)
         .context("failed to build offchain TXs")?;
@@ -1532,7 +1532,7 @@ where
             VhtlcOptions {
                 sender: swap.refund_public_key.into(),
                 receiver: swap.claim_public_key.into(),
-                server: self.server_info.signer_pk.into(),
+                server: self.server_info().signer_pk.into(),
                 preimage_hash: swap.preimage_hash,
                 refund_locktime: timeout_block_heights.refund,
                 unilateral_claim_delay: parse_sequence_number(
@@ -1550,7 +1550,7 @@ where
                     Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
                 })?,
             },
-            self.server_info.network,
+            self.server_info().network,
         )
         .map_err(Error::ad_hoc)
         .context("failed to build VHTLC script")?;
@@ -1569,7 +1569,7 @@ where
                 .get_virtual_tx_outpoints(std::iter::once(vhtlc_address))
                 .await?;
 
-            let vtxo_list = VtxoList::new(self.server_info.dust, virtual_tx_outpoints);
+            let vtxo_list = VtxoList::new(self.server_info().dust, virtual_tx_outpoints);
 
             // We expect a single outpoint.
             let mut unspent = vtxo_list.all_unspent();
@@ -1613,7 +1613,7 @@ where
             &outputs,
             None,
             std::slice::from_ref(&vhtlc_input),
-            &self.server_info,
+            &self.server_info(),
         )
         .map_err(Error::from)
         .context("failed to build offchain TXs")?;
@@ -2265,7 +2265,7 @@ where
             VhtlcOptions {
                 sender: refund_public_key.inner.x_only_public_key().0,
                 receiver: claim_public_key.inner.x_only_public_key().0,
-                server: self.server_info.signer_pk.into(),
+                server: self.server_info().signer_pk.into(),
                 preimage_hash,
                 refund_locktime: timeout_block_heights.refund,
                 unilateral_claim_delay: parse_sequence_number(
@@ -2283,7 +2283,7 @@ where
                     Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
                 })?,
             },
-            self.server_info.network,
+            self.server_info().network,
         )
         .map_err(Error::ad_hoc)
     }

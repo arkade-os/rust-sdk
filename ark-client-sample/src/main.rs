@@ -585,7 +585,7 @@ async fn run_command<K: KeyProvider>(
             println!("Subscription stream ended");
         }
         Commands::SendOnchain { address, amount } => {
-            let network = client.server_info.network;
+            let network = client.server_info().network;
             let checked_address = address.clone().require_network(network)?;
 
             let mut rng = thread_rng();
@@ -614,7 +614,7 @@ async fn run_command<K: KeyProvider>(
                 })
                 .collect::<Result<Vec<_>>>()?;
 
-            let network = client.server_info.network;
+            let network = client.server_info().network;
             let checked_address = address.clone().require_network(network)?;
 
             let mut rng = thread_rng();
@@ -832,7 +832,7 @@ async fn run_command<K: KeyProvider>(
             println!("{}", serde_json::to_string_pretty(&output)?);
         }
         Commands::EstimateFees { address, amount } => {
-            let network = client.server_info.network;
+            let network = client.server_info().network;
             let mut rng = thread_rng();
 
             // Try parsing as ArkAddress first, then as Bitcoin address
@@ -923,7 +923,7 @@ async fn run_command<K: KeyProvider>(
             let selected = ark_core::coin_select::select_vtxos(
                 spendable,
                 amount,
-                client.server_info.dust,
+                client.server_info().dust,
                 true,
             )
             .map_err(|e| anyhow!(e))?;

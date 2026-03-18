@@ -79,10 +79,10 @@ pub async fn e2e_multisig_delegate() {
         MsigOutputTaprootOptions {
             alice_pk: alice_msig_output_pk.into(),
             bob_pk: bob_msig_output_pk.into(),
-            server_pk: alice.server_info.signer_pk.into(),
-            unilateral_exit_delay: alice.server_info.unilateral_exit_delay,
+            server_pk: alice.server_info().signer_pk.into(),
+            unilateral_exit_delay: alice.server_info().unilateral_exit_delay,
         },
-        alice.server_info.network,
+        alice.server_info().network,
     )
     .unwrap();
 
@@ -113,7 +113,7 @@ pub async fn e2e_multisig_delegate() {
         OutPoint { txid, vout: 0 },
         // TODO: This should be modelled in the output type. I think it's supposed to be the
         // highest sequence number of all leaves, but I'm not sure.
-        alice.server_info.unilateral_exit_delay,
+        alice.server_info().unilateral_exit_delay,
         None,
         TxOut {
             value: msig_output_amount,
@@ -133,8 +133,8 @@ pub async fn e2e_multisig_delegate() {
             script_pubkey: msig_output.script_pubkey(),
         })],
         bob_delegate_cosigner_pk,
-        &alice.server_info.forfeit_address,
-        alice.server_info.dust,
+        &alice.server_info().forfeit_address,
+        alice.server_info().dust,
     )
     .unwrap();
 
@@ -192,7 +192,7 @@ pub async fn e2e_multisig_delegate() {
         .await
         .unwrap();
 
-    let vtxo_list = VtxoList::new(alice.server_info.dust, virtual_tx_outpoints);
+    let vtxo_list = VtxoList::new(alice.server_info().dust, virtual_tx_outpoints);
 
     assert_eq!(vtxo_list.all_unspent().count(), 1);
     assert_eq!(vtxo_list.spent().count(), 1);
@@ -203,7 +203,7 @@ pub async fn e2e_multisig_delegate() {
     assert!(settled_msig_outpoint.is_preconfirmed);
     assert!(!settled_msig_outpoint.is_swept);
     assert!(!settled_msig_outpoint.is_unrolled);
-    assert!(!settled_msig_outpoint.is_recoverable(alice.server_info.dust));
+    assert!(!settled_msig_outpoint.is_recoverable(alice.server_info().dust));
     assert_eq!(settled_msig_outpoint.settled_by, Some(commitment_txid));
 
     let new_msig_outpoint = &vtxo_list.all_unspent().next().unwrap();
@@ -212,7 +212,7 @@ pub async fn e2e_multisig_delegate() {
     assert!(!new_msig_outpoint.is_preconfirmed);
     assert!(!new_msig_outpoint.is_swept);
     assert!(!new_msig_outpoint.is_unrolled);
-    assert!(!new_msig_outpoint.is_recoverable(alice.server_info.dust));
+    assert!(!new_msig_outpoint.is_recoverable(alice.server_info().dust));
     assert!(new_msig_outpoint
         .commitment_txids
         .contains(&commitment_txid));

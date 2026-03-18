@@ -103,7 +103,7 @@ pub async fn e2e_continue_pending_tx_multi_input() {
         .collect::<Vec<_>>();
 
     let selected =
-        select_vtxos(spendable_coins, send_amount, alice.server_info.dust, true).unwrap();
+        select_vtxos(spendable_coins, send_amount, alice.server_info().dust, true).unwrap();
     assert_eq!(
         selected.len(),
         2,
