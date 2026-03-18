@@ -45,6 +45,7 @@ use std::time::Duration;
 pub mod error;
 pub mod key_provider;
 pub mod swap_storage;
+pub mod vtxo_watcher;
 pub mod wallet;
 
 mod asset;
@@ -55,7 +56,6 @@ mod fee_estimation;
 mod send_vtxo;
 mod unilateral_exit;
 mod utils;
-pub mod vtxo_watcher;
 
 pub use asset::IssueAssetResult;
 pub use boltz::ChainSwapAmount;
@@ -300,6 +300,11 @@ pub struct Client<B, W, S, K> {
     inner: OfflineClient<B, W, S, K>,
     pub server_info: server::Info,
     fee_estimator: ark_fees::Estimator,
+    /// If set, [`get_offchain_address`](Self::get_offchain_address) uses 3-leaf delegate VTXOs.
+    delegator_pk: Option<XOnlyPublicKey>,
+    /// All delegator pubkeys (current + historical). Used by [`get_offchain_addresses`] to
+    /// ensure VTXOs from previous delegators remain visible.
+    historical_delegator_pks: Vec<XOnlyPublicKey>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -582,6 +587,8 @@ where
             inner: self,
             server_info,
             fee_estimator,
+            delegator_pk: None,
+            historical_delegator_pks: Vec::new(),
         };
 
         if let Err(error) = client.discover_keys(DEFAULT_GAP_LIMIT).await {
@@ -599,7 +606,40 @@ where
     S: SwapStorage + 'static,
     K: KeyProvider,
 {
-    /// Get a new offchain receiving address
+    // Not convinced by these methods. Why not just set on OfflineClient::new()?
+
+    /// Set the delegator public key.
+    ///
+    /// When set, [`get_offchain_address`](Self::get_offchain_address) returns a 3-leaf delegate
+    /// address (forfeit + exit + delegate), and
+    /// [`get_offchain_addresses`](Self::get_offchain_addresses) returns both default and
+    /// delegate addresses for each key.
+    pub fn set_delegator_pk(&mut self, pk: XOnlyPublicKey) {
+        self.delegator_pk = Some(pk);
+    }
+
+    /// Set the delegator public keys (current + any historical).
+    ///
+    /// All delegator public keys are used by [`get_offchain_addresses`] to generate delegate
+    /// addresses so that VTXOs created with previous delegators remain visible.
+    ///
+    /// The **first** key is treated as the current delegator and is used by
+    /// [`get_offchain_address`](Self::get_offchain_address) for new receiving addresses.
+    pub fn set_delegator_pks(&mut self, pks: Vec<XOnlyPublicKey>) {
+        // I hate heuristics like this. Why can't we be explicit?
+        self.delegator_pk = pks.first().copied();
+        self.historical_delegator_pks = pks;
+    }
+
+    /// Get the current delegator public key, if configured.
+    pub fn delegator_pk(&self) -> Option<XOnlyPublicKey> {
+        self.delegator_pk
+    }
+
+    /// Get a new offchain receiving address.
+    ///
+    /// When a delegator is configured (via [`set_delegator_pk`](Self::set_delegator_pk)),
+    /// returns a 3-leaf delegate address. Otherwise returns a standard 2-leaf address.
     ///
     /// For HD wallets, this will derive a new address each time it's called.
     /// For static key providers, this will always return the same address.
@@ -612,40 +652,86 @@ where
             .public_key()
             .into();
 
-        let vtxo = Vtxo::new_default(
-            self.secp(),
-            server_signer,
-            owner,
-            server_info.unilateral_exit_delay,
-            server_info.network,
-        )?;
+        let vtxo = self.make_vtxo(server_signer, owner)?;
 
         let ark_address = vtxo.to_ark_address();
 
         Ok((ark_address, vtxo))
     }
 
+    /// Get all known offchain addresses for this wallet.
+    ///
+    /// When a delegator is configured, this returns **both** the default (2-leaf) and delegate
+    /// (3-leaf) addresses for each key, so that VTXOs at either address are visible. If
+    /// historical delegator keys are set via [`set_delegator_pks`](Self::set_delegator_pks),
+    /// addresses for those are included too.
     pub fn get_offchain_addresses(&self) -> Result<Vec<(ArkAddress, Vtxo)>, Error> {
         let server_info = &self.server_info;
         let server_signer = server_info.signer_pk.into();
 
         let pks = self.inner.key_provider.get_cached_pks()?;
 
-        pks.into_iter()
-            .map(|owner_pk| {
-                let vtxo = Vtxo::new_default(
+        let mut results = Vec::new();
+
+        for owner_pk in &pks {
+            // Always include the default (2-leaf) address.
+            let default_vtxo = Vtxo::new_default(
+                self.secp(),
+                server_signer,
+                *owner_pk,
+                server_info.unilateral_exit_delay,
+                server_info.network,
+            )?;
+            results.push((default_vtxo.to_ark_address(), default_vtxo));
+
+            // Include delegate addresses for all known delegator keys.
+            let mut seen = HashSet::new();
+            for dpk in &self.historical_delegator_pks {
+                if !seen.insert(dpk) {
+                    continue;
+                }
+                let delegate_vtxo = Vtxo::new_with_delegator(
                     self.secp(),
                     server_signer,
-                    owner_pk,
+                    *owner_pk,
+                    *dpk,
                     server_info.unilateral_exit_delay,
                     server_info.network,
                 )?;
+                results.push((delegate_vtxo.to_ark_address(), delegate_vtxo));
+            }
+        }
 
-                let ark_address = vtxo.to_ark_address();
+        Ok(results)
+    }
 
-                Ok((ark_address, vtxo))
-            })
-            .collect::<Result<Vec<_>, _>>()
+    /// Build a [`Vtxo`] for the given owner key, using a 3-leaf delegate VTXO if a delegator is
+    /// configured, otherwise a standard 2-leaf default VTXO.
+    fn make_vtxo(
+        &self,
+        server_signer: XOnlyPublicKey,
+        owner: XOnlyPublicKey,
+    ) -> Result<Vtxo, Error> {
+        let server_info = &self.server_info;
+        match self.delegator_pk {
+            Some(delegator) => Vtxo::new_with_delegator(
+                self.secp(),
+                server_signer,
+                owner,
+                delegator,
+                server_info.unilateral_exit_delay,
+                server_info.network,
+            )
+            .map_err(Into::into),
+            None => Vtxo::new_default(
+                self.secp(),
+                server_signer,
+                owner,
+                server_info.unilateral_exit_delay,
+                server_info.network,
+            )
+            .map_err(Into::into),
+        }
     }
 
     /// Discover and cache used keys using BIP44-style gap limit
@@ -686,6 +772,8 @@ where
                     None => break,
                 };
 
+                // key discovery probably needs to take into account the fact that vtxos can be
+                // 3-of-3 now (+ multiple different delegators!)
                 let vtxo = Vtxo::new_default(
                     self.secp(),
                     server_signer,

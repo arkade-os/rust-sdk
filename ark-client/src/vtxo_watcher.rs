@@ -1,8 +1,9 @@
 //! Background VTXO watcher that auto-delegates and auto-renews VTXOs.
 //!
-//! This mirrors the ts-sdk wallet's behavior:
+//! Full behavior:
 //! - On new VTXOs received: submit them to the delegator service for future renewal
-//! - Periodically: self-renew VTXOs that are close to expiry (safety net if delegator is slow)
+//! - On new VTXOs received: self-renew VTXOs that are close to expiry (safety net)
+//! - On stream error: reconnect with exponential backoff
 
 use crate::key_provider::KeyProvider;
 use crate::swap_storage::SwapStorage;
@@ -13,13 +14,18 @@ use crate::Client;
 use ark_core::intent;
 use ark_core::server::SubscriptionResponse;
 use ark_core::server::VirtualTxOutPoint;
+use ark_core::Vtxo;
 use ark_delegator::DelegatorClient;
+use bitcoin::secp256k1::PublicKey;
 use bitcoin::Amount;
+use bitcoin::ScriptBuf;
 use bitcoin::TxOut;
-use futures::Stream;
 use futures::StreamExt;
 use rand::rngs::OsRng;
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::watch;
 
 /// Handle to stop the background VTXO watcher.
@@ -42,6 +48,10 @@ impl Drop for VtxoWatcherHandle {
     }
 }
 
+/// Backoff parameters for reconnection.
+const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+const MAX_BACKOFF: Duration = Duration::from_secs(30);
+
 impl<B, W, S, K> Client<B, W, S, K>
 where
     B: Blockchain + Send + Sync + 'static,
@@ -54,37 +64,32 @@ where
     /// 1. **Delegates** them to the configured delegator service for future auto-renewal
     /// 2. **Self-renews** VTXOs that are close to expiry (safety net)
     ///
+    /// Reconnects automatically with exponential backoff (1s → 2s → … → 30s) on stream errors.
+    ///
     /// Requires the client to be wrapped in an `Arc` for shared ownership with the background
     /// task.
     ///
     /// Returns a [`VtxoWatcherHandle`] that stops the watcher when dropped.
-    pub async fn start_vtxo_watcher(
+    pub fn start_vtxo_watcher(
         self: &Arc<Self>,
         delegator: Arc<DelegatorClient>,
-    ) -> Result<VtxoWatcherHandle, crate::Error> {
-        let addresses = self.get_offchain_addresses()?;
-        let ark_addresses: Vec<_> = addresses.iter().map(|(addr, _)| *addr).collect();
-
-        let subscription_id = self.subscribe_to_scripts(ark_addresses, None).await?;
-
-        let stream = self.get_subscription(subscription_id.clone()).await?;
-
+    ) -> VtxoWatcherHandle {
         let (stop_tx, stop_rx) = watch::channel(false);
 
         let client = Arc::clone(self);
         tokio::spawn(async move {
-            run_watcher(client, delegator, stream, stop_rx).await;
+            run_watcher_loop(client, delegator, stop_rx).await;
             tracing::debug!("VTXO watcher stopped");
         });
 
-        Ok(VtxoWatcherHandle { stop_tx })
+        VtxoWatcherHandle { stop_tx }
     }
 }
 
-async fn run_watcher<B, W, S, K>(
+/// Outer loop that reconnects on stream errors with exponential backoff.
+async fn run_watcher_loop<B, W, S, K>(
     client: Arc<Client<B, W, S, K>>,
     delegator: Arc<DelegatorClient>,
-    mut stream: impl Stream<Item = Result<SubscriptionResponse, ark_grpc::Error>> + Unpin,
     mut stop_rx: watch::Receiver<bool>,
 ) where
     B: Blockchain + Send + Sync + 'static,
@@ -92,62 +97,165 @@ async fn run_watcher<B, W, S, K>(
     S: SwapStorage + 'static,
     K: KeyProvider + Send + Sync + 'static,
 {
+    let mut backoff = INITIAL_BACKOFF;
+
     loop {
-        tokio::select! {
-            _ = stop_rx.changed() => {
-                break;
+        if *stop_rx.borrow() {
+            return;
+        }
+
+        let addresses = match client.get_offchain_addresses() {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::error!("Failed to get offchain addresses: {e}");
+                return;
             }
-            event = stream.next() => {
-                match event {
-                    Some(Ok(SubscriptionResponse::Event(event))) => {
-                        if !event.new_vtxos.is_empty() {
-                            // Fire-and-forget: delegate new VTXOs to the delegator service.
-                            let client = Arc::clone(&client);
-                            let delegator = Arc::clone(&delegator);
-                            let new_vtxos = event.new_vtxos;
-                            tokio::spawn(async move {
-                                delegate_vtxos(&client, &delegator, &new_vtxos).await;
-                                renew_expiring_vtxos(&client).await;
-                            });
+        };
+        let ark_addresses: Vec<_> = addresses.iter().map(|(addr, _)| *addr).collect();
+
+        let subscription_id = match client.subscribe_to_scripts(ark_addresses, None).await {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!("Failed to subscribe: {e}, retrying in {backoff:?}");
+                if wait_or_stop(&mut stop_rx, backoff).await {
+                    return;
+                }
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+                continue;
+            }
+        };
+
+        let mut stream = match client.get_subscription(subscription_id.clone()).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("Failed to get subscription stream: {e}, retrying in {backoff:?}");
+                if wait_or_stop(&mut stop_rx, backoff).await {
+                    return;
+                }
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+                continue;
+            }
+        };
+
+        tracing::info!("VTXO watcher connected");
+        backoff = INITIAL_BACKOFF; // Reset on successful connection.
+
+        loop {
+            tokio::select! {
+                _ = stop_rx.changed() => {
+                    return;
+                }
+                event = stream.next() => {
+                    match event {
+                        Some(Ok(SubscriptionResponse::Event(event))) => {
+                            if !event.new_vtxos.is_empty() {
+                                let client = Arc::clone(&client);
+                                let delegator = Arc::clone(&delegator);
+                                let new_vtxos = event.new_vtxos;
+                                tokio::spawn(async move {
+                                    delegate_vtxos(&client, &delegator, &new_vtxos).await;
+                                    renew_expiring_vtxos(&client).await;
+                                });
+                            }
                         }
-                    }
-                    Some(Ok(SubscriptionResponse::Heartbeat)) => {}
-                    Some(Err(e)) => {
-                        tracing::warn!("VTXO subscription error: {e}");
-                        break;
-                    }
-                    None => {
-                        tracing::debug!("VTXO subscription stream ended");
-                        break;
+                        Some(Ok(SubscriptionResponse::Heartbeat)) => {}
+                        Some(Err(e)) => {
+                            tracing::warn!("VTXO subscription error: {e}, reconnecting in {backoff:?}");
+                            break; // Break inner loop to reconnect.
+                        }
+                        None => {
+                            tracing::debug!("VTXO subscription stream ended, reconnecting in {backoff:?}");
+                            break;
+                        }
                     }
                 }
             }
         }
+
+        // Wait before reconnecting.
+        if wait_or_stop(&mut stop_rx, backoff).await {
+            return;
+        }
+        backoff = (backoff * 2).min(MAX_BACKOFF);
     }
 }
 
-/// Submit newly received VTXOs to the delegator service for future auto-renewal.
-async fn delegate_vtxos<B, W, S, K>(
-    client: &Client<B, W, S, K>,
-    delegator: &DelegatorClient,
-    new_vtxos: &[VirtualTxOutPoint],
-) where
-    B: Blockchain + Send + Sync + 'static,
-    W: BoardingWallet + OnchainWallet + Send + Sync + 'static,
-    S: SwapStorage + 'static,
-    K: KeyProvider + Send + Sync + 'static,
-{
-    let (_, script_pubkey_to_vtxo) = match client.list_vtxos().await {
-        Ok(v) => v,
+/// Wait for the given duration or until stop is signalled. Returns `true` if stopped.
+async fn wait_or_stop(stop_rx: &mut watch::Receiver<bool>, duration: Duration) -> bool {
+    tokio::select! {
+        _ = stop_rx.changed() => true,
+        _ = tokio::time::sleep(duration) => false,
+    }
+}
+
+/// Delegator info cached per delegation batch.
+struct DelegatorState {
+    cosigner_pk: PublicKey,
+    fee: Amount,
+    fee_address_script: ScriptBuf,
+}
+
+/// Fetch and parse delegator info into a usable form.
+async fn fetch_delegator_state(delegator: &DelegatorClient) -> Option<DelegatorState> {
+    let info = match delegator.info().await {
+        Ok(info) => info,
         Err(e) => {
-            tracing::error!("Failed to list VTXOs for delegation: {e}");
-            return;
+            tracing::error!("Failed to get delegator info: {e}");
+            return None;
         }
     };
 
-    // Build intent inputs from the newly received VTXOs.
-    let mut vtxo_inputs = Vec::new();
-    let mut total_amount = Amount::ZERO;
+    let cosigner_pk: PublicKey = match info.pubkey.parse() {
+        Ok(pk) => pk,
+        Err(e) => {
+            tracing::error!("Failed to parse delegator pubkey: {e}");
+            return None;
+        }
+    };
+
+    let fee = match info.fee.parse::<u64>() {
+        Ok(f) => Amount::from_sat(f),
+        Err(e) => {
+            tracing::error!("Failed to parse delegator fee: {e}");
+            return None;
+        }
+    };
+
+    let fee_address: bitcoin::Address<bitcoin::address::NetworkUnchecked> =
+        match info.delegator_address.parse() {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::error!("Failed to parse delegator address: {e}");
+                return None;
+            }
+        };
+    let fee_address_script = fee_address.assume_checked().script_pubkey();
+
+    Some(DelegatorState {
+        cosigner_pk,
+        fee,
+        fee_address_script,
+    })
+}
+
+/// Normalize a unix timestamp (seconds) to UTC midnight of that day.
+fn day_timestamp(ts: i64) -> i64 {
+    // 86400 seconds per day. Integer division floors toward zero, which is correct for positive
+    // timestamps (anything after 1970).
+    (ts / 86400) * 86400
+}
+
+/// Group VTXOs by their expiry day (UTC midnight), returning groups sorted by expiry.
+///
+/// Recoverable VTXOs (expired or sub-dust) are collected separately and merged into the earliest
+/// group, matching the ts-sdk behaviour.
+fn group_by_expiry_day<'a>(
+    new_vtxos: &'a [VirtualTxOutPoint],
+    script_pubkey_to_vtxo: &'a HashMap<ScriptBuf, Vtxo>,
+    dust: Amount,
+) -> Vec<(i64, Vec<(&'a VirtualTxOutPoint, &'a Vtxo)>)> {
+    let mut groups: BTreeMap<i64, Vec<(&'a VirtualTxOutPoint, &'a Vtxo)>> = BTreeMap::new();
+    let mut recoverable: Vec<(&'a VirtualTxOutPoint, &'a Vtxo)> = Vec::new();
 
     for vtp in new_vtxos {
         if vtp.is_spent {
@@ -156,10 +264,7 @@ async fn delegate_vtxos<B, W, S, K>(
 
         let vtxo = match script_pubkey_to_vtxo.get(&vtp.script) {
             Some(v) => v,
-            None => {
-                tracing::warn!(outpoint = %vtp.outpoint, "Unknown script for VTXO, skipping");
-                continue;
-            }
+            None => continue,
         };
 
         // Only delegate VTXOs that have a delegate spending path.
@@ -167,54 +272,90 @@ async fn delegate_vtxos<B, W, S, K>(
             continue;
         }
 
-        let spend_info = match vtxo.delegate_spend_info() {
-            Ok(info) => info,
-            Err(e) => {
-                tracing::warn!(outpoint = %vtp.outpoint, "Cannot get delegate spend info: {e}");
-                continue;
-            }
-        };
-
-        vtxo_inputs.push(intent::Input::new(
-            vtp.outpoint,
-            vtxo.exit_delay(),
-            None,
-            TxOut {
-                value: vtp.amount,
-                script_pubkey: vtp.script.clone(),
-            },
-            vtxo.tapscripts(),
-            spend_info,
-            vtp.is_spent,
-            false,
-            vtp.assets.clone(),
-        ));
-
-        total_amount += vtp.amount;
+        if vtp.is_recoverable(dust) {
+            recoverable.push((vtp, vtxo));
+        } else if vtp.expires_at > 0 {
+            let day = day_timestamp(vtp.expires_at);
+            groups.entry(day).or_default().push((vtp, vtxo));
+        }
     }
 
-    if vtxo_inputs.is_empty() {
+    // Merge recoverable VTXOs into the earliest group.
+    if !recoverable.is_empty() {
+        if let Some((&earliest_day, _)) = groups.iter().next() {
+            groups.entry(earliest_day).or_default().extend(recoverable);
+        } else {
+            // No normal groups — create a standalone group for recoverables.
+            groups.insert(0, recoverable);
+        }
+    }
+
+    groups.into_iter().collect()
+}
+
+/// Calculate the `valid_at` timestamp for a delegation group.
+///
+/// `valid_at` is set to 90% through the VTXO lifetime (10% before expiry), matching the ts-sdk.
+/// For recoverable/expired VTXOs (group day = 0 or expiry in the past), returns `now + 60s`.
+fn calculate_valid_at(group_vtxos: &[(&VirtualTxOutPoint, &Vtxo)]) -> u64 {
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    // Find the earliest expiry in the group.
+    let earliest_expiry = group_vtxos
+        .iter()
+        .filter(|(vtp, _)| !vtp.is_recoverable(Amount::ZERO) && vtp.expires_at > 0)
+        .map(|(vtp, _)| vtp.expires_at as u64)
+        .min();
+
+    match earliest_expiry {
+        Some(expiry) if expiry > now_secs => {
+            let remaining = expiry - now_secs;
+            // Delegate at 90% through the remaining lifetime (10% before expiry).
+            expiry - remaining / 10
+        }
+        _ => {
+            // Recoverable or already expired: delegate 1 minute from now.
+            now_secs + 60
+        }
+    }
+}
+
+/// Submit newly received VTXOs to the delegator service for future auto-renewal.
+///
+/// VTXOs are grouped by expiry day and each group is delegated in parallel with the appropriate
+/// `valid_at` timestamp, matching the ts-sdk behaviour.
+async fn delegate_vtxos<B, W, S, K>(
+    client: &Arc<Client<B, W, S, K>>,
+    delegator: &DelegatorClient,
+    new_vtxos: &[VirtualTxOutPoint],
+) where
+    B: Blockchain + Send + Sync + 'static,
+    W: BoardingWallet + OnchainWallet + Send + Sync + 'static,
+    S: SwapStorage + 'static,
+    K: KeyProvider + Send + Sync + 'static,
+{
+    // Pretty rough to fetch the stuff for every VTXO, when we know the outpoints we
+    let (_, script_pubkey_to_vtxo) = match client.list_vtxos().await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("Failed to list VTXOs for delegation: {e}");
+            return;
+        }
+    };
+
+    let groups = group_by_expiry_day(new_vtxos, &script_pubkey_to_vtxo, client.server_info.dust);
+    if groups.is_empty() {
         return;
     }
 
-    // Get the delegator info to use as the cosigner.
-    let delegator_info = match delegator.info().await {
-        Ok(info) => info,
-        Err(e) => {
-            tracing::error!("Failed to get delegator info: {e}");
-            return;
-        }
+    let delegator_state = match fetch_delegator_state(delegator).await {
+        Some(s) => Arc::new(s),
+        None => return,
     };
 
-    let delegator_cosigner_pk = match delegator_info.pubkey.parse() {
-        Ok(pk) => pk,
-        Err(e) => {
-            tracing::error!("Failed to parse delegator pubkey: {e}");
-            return;
-        }
-    };
-
-    // Build the destination (send back to own address).
     let (to_address, _) = match client.get_offchain_address() {
         Ok(v) => v,
         Err(e) => {
@@ -222,21 +363,132 @@ async fn delegate_vtxos<B, W, S, K>(
             return;
         }
     };
+    let dest_script = to_address.to_p2tr_script_pubkey();
 
-    let outputs = vec![intent::Output::Offchain(TxOut {
-        value: total_amount,
-        script_pubkey: to_address.to_p2tr_script_pubkey(),
-    })];
+    let mut handles = Vec::new();
 
-    let server_info = &client.server_info;
+    for (_day, group_vtxos) in groups {
+        let valid_at = calculate_valid_at(&group_vtxos);
 
-    // Prepare and sign the delegate PSBTs.
-    let mut delegate = match ark_core::batch::prepare_delegate_psbts(
+        // Build inputs for this group.
+        let mut vtxo_inputs = Vec::new();
+        let mut total_amount = Amount::ZERO;
+
+        for (vtp, vtxo) in &group_vtxos {
+            let spend_info = match vtxo.delegate_spend_info() {
+                Ok(info) => info,
+                Err(e) => {
+                    tracing::warn!(outpoint = %vtp.outpoint, "Cannot get delegate spend info: {e}");
+                    continue;
+                }
+            };
+
+            vtxo_inputs.push(intent::Input::new(
+                vtp.outpoint,
+                vtxo.exit_delay(),
+                None,
+                TxOut {
+                    value: vtp.amount,
+                    script_pubkey: vtp.script.clone(),
+                },
+                vtxo.tapscripts(),
+                spend_info,
+                vtp.is_spent,
+                false,
+                vtp.assets.clone(),
+            ));
+
+            total_amount += vtp.amount;
+        }
+
+        if vtxo_inputs.is_empty() {
+            continue;
+        }
+
+        // Deduct delegator fee.
+        let fee = delegator_state.fee;
+        if fee >= total_amount {
+            tracing::warn!(
+                %total_amount, %fee,
+                "Delegator fee exceeds VTXO group value, skipping"
+            );
+            continue;
+        }
+        let net_amount = total_amount - fee;
+
+        if net_amount < client.server_info.dust {
+            tracing::warn!(
+                %net_amount,
+                "Net amount after fee is below dust, skipping"
+            );
+            continue;
+        }
+
+        // Build outputs: fee to delegator (if non-zero), remainder to self.
+        let mut outputs = Vec::new();
+        if fee > Amount::ZERO {
+            outputs.push(intent::Output::Offchain(TxOut {
+                value: fee,
+                script_pubkey: delegator_state.fee_address_script.clone(),
+            }));
+        }
+        outputs.push(intent::Output::Offchain(TxOut {
+            value: net_amount,
+            script_pubkey: dest_script.clone(),
+        }));
+
+        let server_info_forfeit_addr = client.server_info.forfeit_address.clone();
+        let dust = client.server_info.dust;
+        let ds = Arc::clone(&delegator_state);
+
+        // Spawn each group's delegation in parallel.
+        let delegator = delegator.clone();
+        let client = Arc::clone(client);
+        handles.push(tokio::spawn(async move {
+            delegate_group(
+                &client,
+                &delegator,
+                vtxo_inputs,
+                outputs,
+                ds.cosigner_pk,
+                &server_info_forfeit_addr,
+                dust,
+                valid_at,
+            )
+            .await;
+        }));
+    }
+
+    for handle in handles {
+        let _ = handle.await;
+    }
+}
+
+/// Prepare, sign, and submit a single delegation group.
+async fn delegate_group<B, W, S, K>(
+    client: &Client<B, W, S, K>,
+    delegator: &DelegatorClient,
+    vtxo_inputs: Vec<intent::Input>,
+    outputs: Vec<intent::Output>,
+    cosigner_pk: PublicKey,
+    forfeit_address: &bitcoin::Address,
+    dust: Amount,
+    valid_at: u64,
+) where
+    B: Blockchain + Send + Sync + 'static,
+    W: BoardingWallet + OnchainWallet + Send + Sync + 'static,
+    S: SwapStorage + 'static,
+    K: KeyProvider + Send + Sync + 'static,
+{
+    let input_count = vtxo_inputs.len();
+
+    let mut delegate = match ark_core::batch::prepare_delegate_psbts_at(
         vtxo_inputs,
         outputs,
-        delegator_cosigner_pk,
-        &server_info.forfeit_address,
-        server_info.dust,
+        cosigner_pk,
+        forfeit_address,
+        dust,
+        Some(valid_at),
     ) {
         Ok(d) => d,
         Err(e) => {
@@ -252,7 +504,6 @@ async fn delegate_vtxos<B, W, S, K>(
         return;
     }
 
-    // Submit to the delegator service.
     if let Err(e) = delegator
         .delegate(&delegate.intent, &delegate.forfeit_psbts, None)
         .await
@@ -262,16 +513,16 @@ async fn delegate_vtxos<B, W, S, K>(
     }
 
     tracing::info!(
-        vtxo_count = new_vtxos.len(),
-        %total_amount,
-        "Delegated VTXOs to delegator service"
+        vtxo_count = input_count,
+        valid_at,
+        "Delegated VTXO group to delegator service"
     );
 }
 
 /// Fraction of VTXO lifetime remaining at which we self-renew as a safety net.
 ///
-/// The ts-sdk uses 10% (i.e. delegate at 90% elapsed). We self-renew at 5% remaining, giving the
-/// delegator most of the window while still catching stragglers.
+/// The ts-sdk delegates at 10% remaining. We self-renew at 5% remaining, giving the delegator
+/// most of the window while still catching stragglers.
 const SELF_RENEW_REMAINING_FRACTION: f64 = 0.05;
 
 /// Self-renew VTXOs that are close to expiry. Acts as a safety net in case the delegator service
@@ -314,6 +565,7 @@ where
         return;
     }
 
+    // We should only settle the VTXOs that meet the condition, not all.
     let mut rng = OsRng;
     match client.settle(&mut rng).await {
         Ok(Some(txid)) => {
@@ -326,5 +578,26 @@ where
                 tracing::warn!("Failed to self-renew VTXOs: {e}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn day_timestamp_normalizes_to_midnight() {
+        // 2024-01-15 13:45:00 UTC → 2024-01-15 00:00:00 UTC
+        let ts = 1705322700;
+        let day = day_timestamp(ts);
+        assert_eq!(day % 86400, 0);
+        assert!(day <= ts);
+        assert!(ts - day < 86400);
+    }
+
+    #[test]
+    fn day_timestamp_already_midnight() {
+        let ts = 86400 * 19738; // exact midnight
+        assert_eq!(day_timestamp(ts), ts);
     }
 }
