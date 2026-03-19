@@ -4,23 +4,28 @@ use crate::utils::sleep;
 use crate::utils::timeout_op;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
-use ark_core::ArkAddress;
-use ark_core::DEFAULT_DERIVATION_PATH;
-use ark_core::ExplorerUtxo;
-use ark_core::UtxoCoinSelection;
-use ark_core::Vtxo;
-use ark_core::VtxoList;
 use ark_core::build_anchor_tx;
 use ark_core::history;
-use ark_core::history::OutgoingTransaction;
 use ark_core::history::generate_incoming_vtxo_transaction_history;
 use ark_core::history::generate_outgoing_vtxo_transaction_history;
 use ark_core::history::sort_transactions_by_created_at;
+use ark_core::history::OutgoingTransaction;
 use ark_core::server;
 use ark_core::server::GetVtxosRequest;
 use ark_core::server::SubscriptionResponse;
 use ark_core::server::VirtualTxOutPoint;
+use ark_core::ArkAddress;
+use ark_core::ExplorerUtxo;
+use ark_core::UtxoCoinSelection;
+use ark_core::Vtxo;
+use ark_core::VtxoList;
+use ark_core::DEFAULT_DERIVATION_PATH;
 use ark_grpc::VtxoChainResponse;
+use bitcoin::bip32::DerivationPath;
+use bitcoin::bip32::Xpriv;
+use bitcoin::key::Keypair;
+use bitcoin::key::Secp256k1;
+use bitcoin::secp256k1::All;
 use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
@@ -28,11 +33,6 @@ use bitcoin::ScriptBuf;
 use bitcoin::Transaction;
 use bitcoin::Txid;
 use bitcoin::XOnlyPublicKey;
-use bitcoin::bip32::DerivationPath;
-use bitcoin::bip32::Xpriv;
-use bitcoin::key::Keypair;
-use bitcoin::key::Secp256k1;
-use bitcoin::secp256k1::All;
 use futures::Future;
 use futures::Stream;
 use std::collections::HashMap;
@@ -229,7 +229,9 @@ pub const DEFAULT_GAP_LIMIT: u32 = 20;
 ///         "https://ark-server.example.com".to_string(),
 ///         Arc::new(InMemorySwapStorage::default()),
 ///         "http://boltz.example.com".to_string(),
-///         timeout
+///         timeout,
+///         None,
+///         vec![],
 ///     );
 ///
 ///     // Connect to the Ark server and get server info
@@ -261,7 +263,9 @@ pub const DEFAULT_GAP_LIMIT: u32 = 20;
 ///         "https://ark-server.example.com".to_string(),
 ///         Arc::new(InMemorySwapStorage::default()),
 ///         "http://boltz.example.com".to_string(),
-///         timeout
+///         timeout,
+///         None,
+///         vec![],
 ///     );
 ///
 ///     // Connect to the Ark server and get server info
@@ -282,6 +286,8 @@ pub struct OfflineClient<B, W, S, K> {
     swap_storage: Arc<S>,
     boltz_url: String,
     timeout: Duration,
+    delegator_pk: Option<XOnlyPublicKey>,
+    historical_delegator_pks: Vec<XOnlyPublicKey>,
 }
 
 /// A client to interact with Ark server
@@ -291,11 +297,6 @@ pub struct Client<B, W, S, K> {
     inner: OfflineClient<B, W, S, K>,
     pub server_info: server::Info,
     fee_estimator: ark_fees::Estimator,
-    /// If set, [`get_offchain_address`](Self::get_offchain_address) uses 3-leaf delegate VTXOs.
-    delegator_pk: Option<XOnlyPublicKey>,
-    /// All delegator pubkeys (current + historical). Used by [`get_offchain_addresses`] to
-    /// ensure VTXOs from previous delegators remain visible.
-    historical_delegator_pks: Vec<XOnlyPublicKey>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -398,6 +399,8 @@ where
         swap_storage: Arc<S>,
         boltz_url: String,
         timeout: Duration,
+        delegator_pk: Option<XOnlyPublicKey>,
+        historical_delegator_pks: Vec<XOnlyPublicKey>,
     ) -> Self {
         let secp = Secp256k1::new();
 
@@ -413,6 +416,8 @@ where
             swap_storage,
             boltz_url,
             timeout,
+            delegator_pk,
+            historical_delegator_pks,
         }
     }
 
@@ -440,6 +445,8 @@ where
         swap_storage: Arc<S>,
         boltz_url: String,
         timeout: Duration,
+        delegator_pk: Option<XOnlyPublicKey>,
+        historical_delegator_pks: Vec<XOnlyPublicKey>,
     ) -> OfflineClient<B, W, S, StaticKeyProvider> {
         let key_provider = Arc::new(StaticKeyProvider::new(kp));
 
@@ -452,6 +459,8 @@ where
             swap_storage,
             boltz_url,
             timeout,
+            delegator_pk,
+            historical_delegator_pks,
         )
     }
 
@@ -478,6 +487,8 @@ where
         swap_storage: Arc<S>,
         boltz_url: String,
         timeout: Duration,
+        delegator_pk: Option<XOnlyPublicKey>,
+        historical_delegator_pks: Vec<XOnlyPublicKey>,
     ) -> OfflineClient<B, W, S, Bip32KeyProvider> {
         let path = path.unwrap_or(
             DerivationPath::from_str(DEFAULT_DERIVATION_PATH).expect("valid derivation path"),
@@ -493,6 +504,8 @@ where
             swap_storage,
             boltz_url,
             timeout,
+            delegator_pk,
+            historical_delegator_pks,
         )
     }
 
@@ -572,8 +585,6 @@ where
             inner: self,
             server_info,
             fee_estimator,
-            delegator_pk: None,
-            historical_delegator_pks: Vec::new(),
         };
 
         if let Err(error) = client.discover_keys(DEFAULT_GAP_LIMIT).await {
@@ -591,39 +602,9 @@ where
     S: SwapStorage + 'static,
     K: KeyProvider,
 {
-    // Not convinced by these methods. Why not just set on OfflineClient::new()?
-
-    /// Set the delegator public key.
-    ///
-    /// When set, [`get_offchain_address`](Self::get_offchain_address) returns a 3-leaf delegate
-    /// address (forfeit + exit + delegate), and
-    /// [`get_offchain_addresses`](Self::get_offchain_addresses) returns both default and
-    /// delegate addresses for each key.
-    pub fn set_delegator_pk(&mut self, pk: XOnlyPublicKey) {
-        self.delegator_pk = Some(pk);
-    }
-
-    /// Set the delegator public keys (current + any historical).
-    ///
-    /// All delegator public keys are used by [`get_offchain_addresses`] to generate delegate
-    /// addresses so that VTXOs created with previous delegators remain visible.
-    ///
-    /// The **first** key is treated as the current delegator and is used by
-    /// [`get_offchain_address`](Self::get_offchain_address) for new receiving addresses.
-    pub fn set_delegator_pks(&mut self, pks: Vec<XOnlyPublicKey>) {
-        // I hate heuristics like this. Why can't we be explicit?
-        self.delegator_pk = pks.first().copied();
-        self.historical_delegator_pks = pks;
-    }
-
-    /// Get the current delegator public key, if configured.
-    pub fn delegator_pk(&self) -> Option<XOnlyPublicKey> {
-        self.delegator_pk
-    }
-
     /// Get a new offchain receiving address.
     ///
-    /// When a delegator is configured (via [`set_delegator_pk`](Self::set_delegator_pk)),
+    /// When a delegator is configured (via `delegator_pk` passed to [`OfflineClient::new`]),
     /// returns a 3-leaf delegate address. Otherwise returns a standard 2-leaf address.
     ///
     /// For HD wallets, this will derive a new address each time it's called.
@@ -648,8 +629,8 @@ where
     ///
     /// When a delegator is configured, this returns **both** the default (2-leaf) and delegate
     /// (3-leaf) addresses for each key, so that VTXOs at either address are visible. If
-    /// historical delegator keys are set via [`set_delegator_pks`](Self::set_delegator_pks),
-    /// addresses for those are included too.
+    /// historical delegator keys are set via `historical_delegator_pks` passed to
+    /// [`OfflineClient::new`], addresses for those are included too.
     pub fn get_offchain_addresses(&self) -> Result<Vec<(ArkAddress, Vtxo)>, Error> {
         let server_info = &self.server_info;
         let server_signer = server_info.signer_pk.into();
@@ -671,7 +652,7 @@ where
 
             // Include delegate addresses for all known delegator keys.
             let mut seen = HashSet::new();
-            for dpk in &self.historical_delegator_pks {
+            for dpk in &self.inner.historical_delegator_pks {
                 if !seen.insert(dpk) {
                     continue;
                 }
@@ -698,7 +679,7 @@ where
         owner: XOnlyPublicKey,
     ) -> Result<Vtxo, Error> {
         let server_info = &self.server_info;
-        match self.delegator_pk {
+        match self.inner.delegator_pk {
             Some(delegator) => Vtxo::new_with_delegator(
                 self.secp(),
                 server_signer,

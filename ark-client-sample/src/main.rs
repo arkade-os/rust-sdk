@@ -352,6 +352,8 @@ async fn main() -> Result<()> {
                 storage,
                 config.boltz_url,
                 Duration::from_secs(30),
+                None,
+                vec![],
             )
             .connect()
             .await
@@ -377,6 +379,8 @@ async fn main() -> Result<()> {
                 storage,
                 config.boltz_url,
                 Duration::from_secs(30),
+                None,
+                vec![],
             )
             .connect()
             .await

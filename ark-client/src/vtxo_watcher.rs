@@ -5,21 +5,21 @@
 //! - On new VTXOs received: self-renew VTXOs that are close to expiry (safety net)
 //! - On stream error: reconnect with exponential backoff
 
-use crate::Blockchain;
-use crate::Client;
 use crate::key_provider::KeyProvider;
 use crate::swap_storage::SwapStorage;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
-use ark_core::Vtxo;
+use crate::Blockchain;
+use crate::Client;
 use ark_core::intent;
 use ark_core::server::SubscriptionResponse;
 use ark_core::server::VirtualTxOutPoint;
+use ark_core::Vtxo;
 use ark_delegator::DelegatorClient;
+use bitcoin::secp256k1::PublicKey;
 use bitcoin::Amount;
 use bitcoin::ScriptBuf;
 use bitcoin::TxOut;
-use bitcoin::secp256k1::PublicKey;
 use futures::StreamExt;
 use rand::rngs::OsRng;
 use std::collections::BTreeMap;
