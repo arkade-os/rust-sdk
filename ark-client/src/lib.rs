@@ -421,6 +421,14 @@ where
 
         let network_client = ark_grpc::Client::new(ark_server_url);
 
+        // Ensure the current delegator pk is always in the historical list.
+        let mut historical_delegator_pks = historical_delegator_pks;
+        if let Some(pk) = delegator_pk {
+            if !historical_delegator_pks.contains(&pk) {
+                historical_delegator_pks.insert(0, pk);
+            }
+        }
+
         Self {
             network_client,
             name,
