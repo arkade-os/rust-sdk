@@ -1,6 +1,7 @@
 use crate::error::ErrorContext;
 use crate::send_vtxo::parse_asset_id_hex;
 use crate::swap_storage::SwapStorage;
+use crate::utils::timeout_op;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use crate::Blockchain;
@@ -253,12 +254,14 @@ where
         let ark_txid = ark_tx.unsigned_tx.compute_txid();
 
         // Submit to server.
-        let mut res = self
-            .network_client()
-            .submit_offchain_transaction_request(ark_tx.clone(), checkpoint_txs.clone())
-            .await
-            .map_err(Error::ark_server)
-            .context("failed to submit asset issuance transaction")?;
+        let mut res = timeout_op(
+            self.inner.timeout,
+            self.network_client()
+                .submit_offchain_transaction_request(ark_tx.clone(), checkpoint_txs.clone()),
+        )
+        .await?
+        .map_err(Error::ark_server)
+        .context("failed to submit asset issuance transaction")?;
 
         // Sign server-returned checkpoint transactions.
         let client_checkpoint_ws: HashMap<_, _> = checkpoint_txs
@@ -604,12 +607,14 @@ where
 
         let ark_txid = ark_tx.unsigned_tx.compute_txid();
 
-        let mut res = self
-            .network_client()
-            .submit_offchain_transaction_request(ark_tx, checkpoint_txs.clone())
-            .await
-            .map_err(Error::ark_server)
-            .context("failed to submit reissuance transaction")?;
+        let mut res = timeout_op(
+            self.inner.timeout,
+            self.network_client()
+                .submit_offchain_transaction_request(ark_tx, checkpoint_txs.clone()),
+        )
+        .await?
+        .map_err(Error::ark_server)
+        .context("failed to submit reissuance transaction")?;
 
         let client_checkpoint_ws: HashMap<_, _> = checkpoint_txs
             .iter()
