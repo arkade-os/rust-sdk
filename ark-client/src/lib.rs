@@ -726,7 +726,8 @@ where
 
         loop {
             // Generate a batch of gap_limit keys
-            let mut batch: Vec<(u32, Keypair, ArkAddress)> = Vec::with_capacity(gap_limit as usize);
+            let mut batch: Vec<(u32, Keypair, Vec<ArkAddress>)> =
+                Vec::with_capacity(gap_limit as usize);
 
             for i in 0..gap_limit {
                 let index = start_index
@@ -738,17 +739,35 @@ where
                     None => break,
                 };
 
-                // key discovery probably needs to take into account the fact that vtxos can be
-                // 3-of-3 now (+ multiple different delegators!)
-                let vtxo = Vtxo::new_default(
+                let owner_pk = kp.x_only_public_key().0;
+
+                let mut addresses =
+                    Vec::with_capacity(1 + self.inner.historical_delegator_pks.len());
+
+                // Default (2-leaf) address.
+                let default_vtxo = Vtxo::new_default(
                     self.secp(),
                     server_signer,
-                    kp.x_only_public_key().0,
+                    owner_pk,
                     server_info.unilateral_exit_delay,
                     server_info.network,
                 )?;
+                addresses.push(default_vtxo.to_ark_address());
 
-                batch.push((index, kp, vtxo.to_ark_address()));
+                // Delegate (3-leaf) addresses for each known delegator.
+                for dpk in &self.inner.historical_delegator_pks {
+                    let delegate_vtxo = Vtxo::new_with_delegator(
+                        self.secp(),
+                        server_signer,
+                        owner_pk,
+                        *dpk,
+                        server_info.unilateral_exit_delay,
+                        server_info.network,
+                    )?;
+                    addresses.push(delegate_vtxo.to_ark_address());
+                }
+
+                batch.push((index, kp, addresses));
             }
 
             if batch.is_empty() {
@@ -756,7 +775,7 @@ where
             }
 
             // Query all addresses in batch at once
-            let addresses = batch.iter().map(|(_, _, a)| *a);
+            let addresses = batch.iter().flat_map(|(_, _, addrs)| addrs.iter().copied());
 
             let vtxo_list = self.list_vtxos_for_addresses(addresses).await?;
 
@@ -765,10 +784,13 @@ where
 
             // Cache keypairs for used addresses (match by script)
             let mut found_any = false;
-            for (index, kp, addr) in batch {
-                let script = addr.to_p2tr_script_pubkey();
-                if used_scripts.contains(&script) {
-                    tracing::debug!(index, %addr, "Found used address");
+            for (index, kp, addrs) in batch {
+                let is_used = addrs.iter().any(|addr| {
+                    let script = addr.to_p2tr_script_pubkey();
+                    used_scripts.contains(&script)
+                });
+                if is_used {
+                    tracing::debug!(index, addr = %addrs[0], "Found used address");
                     self.inner
                         .key_provider
                         .cache_discovered_keypair(index, kp)?;
