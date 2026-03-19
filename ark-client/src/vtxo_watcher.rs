@@ -183,6 +183,8 @@ async fn run_watcher_loop<B, W, S, K>(
 
         tracing::info!("VTXO watcher connected");
         backoff = INITIAL_BACKOFF;
+        let mut known_key_count = addresses.len();
+        let mut script_map = script_map;
 
         loop {
             tokio::select! {
@@ -191,6 +193,34 @@ async fn run_watcher_loop<B, W, S, K>(
                 }
                 event = stream.next() => {
                     match event {
+                        Some(Ok(SubscriptionResponse::Heartbeat)) => {
+                            // Check if new keys have been derived since we subscribed.
+                            if let Ok(addrs) = client.get_offchain_addresses() {
+                                if addrs.len() > known_key_count {
+                                    let new_addrs: Vec<_> = addrs[known_key_count..]
+                                        .iter()
+                                        .map(|(addr, _)| *addr)
+                                        .collect();
+                                    tracing::debug!(
+                                        count = new_addrs.len(),
+                                        "Adding newly derived addresses to subscription"
+                                    );
+                                    if let Err(e) = client
+                                        .subscribe_to_scripts(
+                                            new_addrs,
+                                            Some(subscription_id.clone()),
+                                        )
+                                        .await
+                                    {
+                                        tracing::warn!(
+                                            "Failed to add scripts to subscription: {e}"
+                                        );
+                                    }
+                                    script_map = Arc::new(ScriptMap::from_addresses(&addrs));
+                                    known_key_count = addrs.len();
+                                }
+                            }
+                        }
                         Some(Ok(SubscriptionResponse::Event(event))) => {
                             if !event.new_vtxos.is_empty() {
                                 let client = Arc::clone(&client);
@@ -203,7 +233,6 @@ async fn run_watcher_loop<B, W, S, K>(
                                 });
                             }
                         }
-                        Some(Ok(SubscriptionResponse::Heartbeat)) => {}
                         Some(Err(e)) => {
                             tracing::warn!("VTXO subscription error: {e}, reconnecting in {backoff:?}");
                             break;
