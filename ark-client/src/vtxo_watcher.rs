@@ -240,7 +240,10 @@ struct DelegatorState {
 }
 
 /// Fetch and parse delegator info into a usable form.
-async fn fetch_delegator_state(delegator: &DelegatorClient) -> Option<DelegatorState> {
+async fn fetch_delegator_state(
+    delegator: &DelegatorClient,
+    network: bitcoin::Network,
+) -> Option<DelegatorState> {
     let info = match delegator.info().await {
         Ok(info) => info,
         Err(e) => {
@@ -273,7 +276,14 @@ async fn fetch_delegator_state(delegator: &DelegatorClient) -> Option<DelegatorS
                 return None;
             }
         };
-    let fee_address_script = fee_address.assume_checked().script_pubkey();
+    let fee_address = match fee_address.require_network(network) {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::error!("Delegator fee address network mismatch: {e}");
+            return None;
+        }
+    };
+    let fee_address_script = fee_address.script_pubkey();
 
     Some(DelegatorState {
         cosigner_pk,
@@ -403,7 +413,7 @@ async fn delegate_vtxos<B, W, S, K>(
         return;
     }
 
-    let delegator_state = match fetch_delegator_state(delegator).await {
+    let delegator_state = match fetch_delegator_state(delegator, client.server_info.network).await {
         Some(s) => Arc::new(s),
         None => return,
     };
