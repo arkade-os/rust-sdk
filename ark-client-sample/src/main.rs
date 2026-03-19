@@ -1402,11 +1402,8 @@ async fn run_command<K: KeyProvider>(
                 .await
                 .map_err(|e| anyhow!(e))?;
 
-            let asset_ids: Vec<String> = result
-                .asset_ids
-                .iter()
-                .map(|id| format!("{}:{}", id.txid, id.group_index))
-                .collect();
+            let asset_ids: Vec<String> =
+                result.asset_ids.iter().map(|id| id.id()).collect();
 
             println!(
                 "{}",
