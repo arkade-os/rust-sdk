@@ -421,7 +421,7 @@ impl TryFrom<IndexerVtxo> for ark_core::server::VirtualTxOutPoint {
             .filter_map(|a| {
                 Some(ark_core::server::Asset {
                     asset_id: a.asset_id?,
-                    amount: a.amount.unwrap_or(0) as u64,
+                    amount: a.amount? as u64,
                 })
             })
             .collect();
