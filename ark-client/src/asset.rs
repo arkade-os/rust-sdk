@@ -68,6 +68,9 @@ where
         if amount == 0 {
             return Err(Error::ad_hoc("asset amount must be > 0"));
         }
+        if matches!(control_asset, Some(ControlAsset::New { amount: 0 })) {
+            return Err(Error::ad_hoc("control asset amount must be > 0"));
+        }
 
         let (own_address, change_address_vtxo) = self.get_offchain_address()?;
 
