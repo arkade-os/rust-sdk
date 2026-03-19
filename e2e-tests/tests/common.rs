@@ -410,6 +410,8 @@ pub async fn set_up_client(
         Arc::new(InMemorySwapStorage::default()),
         "http://localhost:9001".to_string(),
         Duration::from_secs(30),
+        None,
+        vec![],
     )
     .connect_with_retries(5)
     .await
@@ -516,6 +518,8 @@ pub async fn set_up_client_with_seed(
         Arc::new(InMemorySwapStorage::default()),
         "http://localhost:9001".to_string(),
         Duration::from_secs(30),
+        None,
+        vec![],
     )
     .connect_with_retries(5)
     .await
