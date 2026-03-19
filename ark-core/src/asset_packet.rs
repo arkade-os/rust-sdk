@@ -3,6 +3,7 @@
 //! Implements the binary encoding format as specified in the Arkade Asset V1 specification.
 //! The packet is embedded in a Bitcoin transaction via an OP_RETURN output.
 
+use bitcoin::hex::DisplayHex;
 use bitcoin::ScriptBuf;
 use bitcoin::TxOut;
 use bitcoin::Txid;
@@ -159,6 +160,14 @@ impl AssetId {
         // txid as 32 bytes (internal byte order, not display order)
         buf.extend_from_slice(self.txid.as_ref());
         buf.extend_from_slice(&self.group_index.to_le_bytes());
+    }
+
+    pub fn id(&self) -> String {
+        format!(
+            "{}{}",
+            self.txid,
+            self.group_index.to_le_bytes().to_lower_hex_string()
+        )
     }
 }
 
