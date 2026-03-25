@@ -69,20 +69,38 @@ pub struct ReverseSwapResult {
 /// A Lightning invoice, either BOLT11 or BOLT12.
 ///
 /// This enum allows the Ark client to work with both invoice types seamlessly.
-/// Serialization is untagged for backward-compatible JSON storage: existing BOLT11
-/// invoice strings deserialize as [`LnInvoice::Bolt11`], while BOLT12 strings
-/// (which fail BOLT11 parsing) fall through to [`LnInvoice::Bolt12`].
+/// Deserialization attempts BOLT11 parsing first; if that fails, validates the string as a
+/// well-formed BOLT12 invoice (bech32-encoded with `lni` HRP and a valid payment hash TLV).
+/// This ensures corrupted data fails fast at deserialization rather than later at use.
 // TODO: Replace `Bolt12(String)` with LDK's `Bolt12Invoice` and `Offer` types from the
 // `lightning` crate for proper type safety and local invoice signing-key verification against
 // the offer. This would also allow removing the manual TLV payment-hash extraction in
 // `extract_bolt12_payment_hash`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum LnInvoice {
     /// A BOLT11 Lightning invoice.
     Bolt11(Bolt11Invoice),
     /// A BOLT12 Lightning invoice (encoded string, typically starts with `lni`).
     Bolt12(String),
+}
+
+impl<'de> Deserialize<'de> for LnInvoice {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+
+        // Try BOLT11 first.
+        if let Ok(invoice) = s.parse::<Bolt11Invoice>() {
+            return Ok(LnInvoice::Bolt11(invoice));
+        }
+
+        // Validate as BOLT12 by checking the payment hash is extractable.
+        extract_bolt12_payment_hash(&s).map_err(serde::de::Error::custom)?;
+        Ok(LnInvoice::Bolt12(s))
+    }
 }
 
 impl LnInvoice {
@@ -134,6 +152,10 @@ pub struct Bolt12InvoiceParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Bolt12InvoiceRequestPayload {
+    /// Unique request identifier. Present for WebSocket deliveries and required when replying
+    /// with the generated invoice.
+    #[serde(default)]
+    pub id: Option<String>,
     /// The offer for which an invoice was requested.
     pub offer: String,
     /// The invoice request, encoded as hex.
@@ -3799,9 +3821,17 @@ mod tests {
 
     #[test]
     fn test_ln_invoice_serde_roundtrip_bolt12() {
-        // A bolt12 invoice string should survive serialization as the Bolt12 variant.
-        let bolt12_str = "lni1somebolt12invoicedata";
-        let invoice = LnInvoice::Bolt12(bolt12_str.to_string());
+        // Build a valid bech32-encoded BOLT12 invoice with a payment hash TLV.
+        let mut tlv_data = Vec::new();
+        tlv_data.push(0xa8); // type 168 (payment_hash)
+        tlv_data.push(0x20); // length 32
+        tlv_data.extend_from_slice(&[42u8; 32]);
+
+        let bolt12_str =
+            bech32::encode::<bech32::Bech32>(bech32::Hrp::parse("lni").unwrap(), &tlv_data)
+                .expect("valid bech32 encoding");
+
+        let invoice = LnInvoice::Bolt12(bolt12_str.clone());
 
         let json = serde_json::to_string(&invoice).unwrap();
         let deserialized: LnInvoice = serde_json::from_str(&json).unwrap();
@@ -3820,5 +3850,13 @@ mod tests {
         let deserialized: LnInvoice = serde_json::from_str(bolt11_str).unwrap();
 
         assert!(matches!(deserialized, LnInvoice::Bolt11(_)));
+    }
+
+    #[test]
+    fn test_ln_invoice_deser_rejects_garbage() {
+        // Invalid strings that are neither valid BOLT11 nor BOLT12 should fail deserialization.
+        let garbage = r#""not-a-real-invoice""#;
+        let result: Result<LnInvoice, _> = serde_json::from_str(garbage);
+        assert!(result.is_err());
     }
 }
