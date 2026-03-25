@@ -2066,8 +2066,8 @@ where
     ///
     /// # Returns
     ///
-    /// - A [`Bolt12SubmarineSwapResult`], including an identifier for the swap and the TXID of
-    ///   the Ark transaction that funds the VHTLC.
+    /// - A [`Bolt12SubmarineSwapResult`], including an identifier for the swap and the TXID of the
+    ///   Ark transaction that funds the VHTLC.
     pub async fn pay_bolt12_offer(
         &self,
         offer: &str,
@@ -2168,8 +2168,8 @@ where
     /// # Arguments
     ///
     /// - `offer`: the BOLT12 offer string to register.
-    /// - `webhook_url`: optional webhook URL where invoice requests will be sent. If not
-    ///   provided, invoice requests can be received via WebSocket.
+    /// - `webhook_url`: optional webhook URL where invoice requests will be sent. If not provided,
+    ///   invoice requests can be received via WebSocket.
     pub async fn register_bolt12_offer(
         &self,
         offer: &str,
