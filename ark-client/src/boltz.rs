@@ -1984,6 +1984,8 @@ where
             .await
             .map_err(|e| Error::ad_hoc(e.to_string()))
             .context("failed to deserialize bolt12 fetch response")?;
+        extract_bolt12_payment_hash(&response.invoice)
+            .context("bolt12_fetch returned invalid BOLT12 invoice")?;
 
         tracing::info!("Fetched BOLT12 invoice from offer");
         Ok(response.invoice)
@@ -3085,6 +3087,7 @@ fn extract_bolt12_payment_hash(invoice: &str) -> Result<sha256::Hash, Error> {
 
     // Parse the TLV stream to find the payment_hash field (type 168).
     let mut cursor = 0;
+    let mut payment_hash = None;
     while cursor < data.len() {
         let (tlv_type, consumed) = read_bigsize(&data[cursor..]).map_err(|e| {
             Error::ad_hoc(format!("failed to read TLV type in bolt12 invoice: {e}"))
@@ -3117,15 +3120,14 @@ fn extract_bolt12_payment_hash(invoice: &str) -> Result<sha256::Hash, Error> {
             let hash_bytes: [u8; 32] = data[cursor..end]
                 .try_into()
                 .map_err(|_| Error::ad_hoc("failed to convert payment_hash bytes"))?;
-            return Ok(sha256::Hash::from_byte_array(hash_bytes));
+            payment_hash = Some(sha256::Hash::from_byte_array(hash_bytes));
         }
 
         cursor = end;
     }
 
-    Err(Error::ad_hoc(
-        "payment_hash (TLV type 168) not found in bolt12 invoice",
-    ))
+    payment_hash
+        .ok_or_else(|| Error::ad_hoc("payment_hash (TLV type 168) not found in bolt12 invoice"))
 }
 
 /// Read a BigSize integer from a byte slice, as defined in the Lightning specification.
@@ -3143,6 +3145,9 @@ fn read_bigsize(data: &[u8]) -> Result<(u64, usize), &'static str> {
                 return Err("unexpected end of data for 2-byte BigSize");
             }
             let val = u16::from_be_bytes([data[1], data[2]]) as u64;
+            if val < 0xfd {
+                return Err("non-canonical 2-byte BigSize");
+            }
             Ok((val, 3))
         }
         0xfe => {
@@ -3150,6 +3155,9 @@ fn read_bigsize(data: &[u8]) -> Result<(u64, usize), &'static str> {
                 return Err("unexpected end of data for 4-byte BigSize");
             }
             let val = u32::from_be_bytes([data[1], data[2], data[3], data[4]]) as u64;
+            if val < 0x1_0000 {
+                return Err("non-canonical 4-byte BigSize");
+            }
             Ok((val, 5))
         }
         0xff => {
@@ -3159,6 +3167,9 @@ fn read_bigsize(data: &[u8]) -> Result<(u64, usize), &'static str> {
             let val = u64::from_be_bytes([
                 data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8],
             ]);
+            if val < 0x1_0000_0000 {
+                return Err("non-canonical 8-byte BigSize");
+            }
             Ok((val, 9))
         }
     }
@@ -3676,6 +3687,11 @@ mod tests {
 
         // Truncated multi-byte.
         assert!(read_bigsize(&[0xfd, 0x00]).is_err());
+
+        // Non-canonical multi-byte encodings.
+        assert!(read_bigsize(&[0xfd, 0x00, 0xfc]).is_err());
+        assert!(read_bigsize(&[0xfe, 0x00, 0x00, 0xff, 0xff]).is_err());
+        assert!(read_bigsize(&[0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff]).is_err());
     }
 
     #[test]
@@ -3747,6 +3763,35 @@ mod tests {
 
         let err = extract_bolt12_payment_hash(&invoice).unwrap_err();
         assert!(err.to_string().contains("lni"));
+    }
+
+    #[test]
+    fn test_extract_bolt12_payment_hash_rejects_trailing_truncated_tlv() {
+        let mut tlv_data = vec![0xa8, 0x20];
+        tlv_data.extend_from_slice(&[7u8; 32]);
+        tlv_data.push(10);
+        tlv_data.push(4);
+        tlv_data.extend_from_slice(&[1, 2]);
+
+        let invoice =
+            bech32::encode::<bech32::Bech32>(bech32::Hrp::parse("lni").unwrap(), &tlv_data)
+                .expect("valid bech32 encoding");
+
+        assert!(extract_bolt12_payment_hash(&invoice).is_err());
+        assert!(serde_json::from_str::<LnInvoice>(&format!("\"{invoice}\"")).is_err());
+    }
+
+    #[test]
+    fn test_extract_bolt12_payment_hash_rejects_non_canonical_bigsize() {
+        let mut tlv_data = vec![0xfd, 0x00, 0xa8, 0x20];
+        tlv_data.extend_from_slice(&[9u8; 32]);
+
+        let invoice =
+            bech32::encode::<bech32::Bech32>(bech32::Hrp::parse("lni").unwrap(), &tlv_data)
+                .expect("valid bech32 encoding");
+
+        assert!(extract_bolt12_payment_hash(&invoice).is_err());
+        assert!(serde_json::from_str::<LnInvoice>(&format!("\"{invoice}\"")).is_err());
     }
 
     #[test]
