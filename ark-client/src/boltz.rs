@@ -233,7 +233,10 @@ where
         };
         let url = format!("{}/v2/swap/submarine", self.inner.boltz_url);
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(self.inner.timeout)
+            .build()
+            .map_err(|e| Error::ad_hoc(e.to_string()))?;
         let response = client
             .post(&url)
             .json(&request)
@@ -325,7 +328,10 @@ where
         };
         let url = format!("{}/v2/swap/submarine", self.inner.boltz_url);
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(self.inner.timeout)
+            .build()
+            .map_err(|e| Error::ad_hoc(e.to_string()))?;
         let response = client
             .post(&url)
             .json(&request)
@@ -1922,7 +1928,10 @@ where
             amount: amount_sats,
         };
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(self.inner.timeout)
+            .build()
+            .map_err(|e| Error::ad_hoc(e.to_string()))?;
         let response = client
             .post(&url)
             .json(&request)
@@ -1962,6 +1971,14 @@ where
     /// If you are looking for a function which pays the offer immediately, consider using
     /// [`Client::pay_bolt12_offer`] instead.
     ///
+    /// # Trust Model
+    ///
+    /// This method fetches the BOLT12 invoice via the Boltz API (`bolt12_fetch`). The invoice
+    /// is not locally verified against the offer's signing key because full BOLT12 invoice
+    /// verification requires a dedicated parsing library (e.g., LDK). This is the same trust
+    /// model as BOLT11 submarine swaps, where the VHTLC address and claim keys are provided by
+    /// Boltz.
+    ///
     /// # Arguments
     ///
     /// - `offer`: a BOLT12 offer string.
@@ -1994,7 +2011,10 @@ where
         };
         let url = format!("{}/v2/swap/submarine", self.inner.boltz_url);
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(self.inner.timeout)
+            .build()
+            .map_err(|e| Error::ad_hoc(e.to_string()))?;
         let response = client
             .post(&url)
             .json(&request)
@@ -2058,6 +2078,14 @@ where
     /// Pay a BOLT12 offer by performing a submarine swap via Boltz. This fetches the BOLT12
     /// invoice from the offer, creates a submarine swap, and funds the VHTLC.
     ///
+    /// # Trust Model
+    ///
+    /// This method fetches the BOLT12 invoice via the Boltz API (`bolt12_fetch`). The invoice
+    /// is not locally verified against the offer's signing key because full BOLT12 invoice
+    /// verification requires a dedicated parsing library (e.g., LDK). This is the same trust
+    /// model as BOLT11 submarine swaps, where the VHTLC address and claim keys are provided by
+    /// Boltz.
+    ///
     /// # Arguments
     ///
     /// - `offer`: a BOLT12 offer string.
@@ -2091,7 +2119,10 @@ where
         };
         let url = format!("{}/v2/swap/submarine", self.inner.boltz_url);
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(self.inner.timeout)
+            .build()
+            .map_err(|e| Error::ad_hoc(e.to_string()))?;
         let response = client
             .post(&url)
             .json(&request)
@@ -2182,7 +2213,10 @@ where
             webhook_url: webhook_url.map(String::from),
         };
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(self.inner.timeout)
+            .build()
+            .map_err(|e| Error::ad_hoc(e.to_string()))?;
         let response = client
             .post(&url)
             .json(&request)
@@ -2220,7 +2254,10 @@ where
             webhook_url: webhook_url.map(String::from),
         };
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(self.inner.timeout)
+            .build()
+            .map_err(|e| Error::ad_hoc(e.to_string()))?;
         let response = client
             .patch(&url)
             .json(&request)
@@ -3087,8 +3124,13 @@ fn extract_bolt12_payment_hash(invoice: &str) -> Result<sha256::Hash, Error> {
         })?;
         cursor += consumed;
 
-        let tlv_len = tlv_len as usize;
-        if cursor + tlv_len > data.len() {
+        let tlv_len: usize = tlv_len
+            .try_into()
+            .map_err(|_| Error::ad_hoc("bolt12 invoice TLV length exceeds platform limits"))?;
+        let end = cursor
+            .checked_add(tlv_len)
+            .ok_or_else(|| Error::ad_hoc("bolt12 invoice TLV length overflow"))?;
+        if end > data.len() {
             return Err(Error::ad_hoc(
                 "bolt12 invoice TLV data extends beyond payload",
             ));
@@ -3100,13 +3142,13 @@ fn extract_bolt12_payment_hash(invoice: &str) -> Result<sha256::Hash, Error> {
                     "unexpected bolt12 payment_hash length: expected 32, got {tlv_len}"
                 )));
             }
-            let hash_bytes: [u8; 32] = data[cursor..cursor + 32]
+            let hash_bytes: [u8; 32] = data[cursor..end]
                 .try_into()
                 .map_err(|_| Error::ad_hoc("failed to convert payment_hash bytes"))?;
             return Ok(sha256::Hash::from_byte_array(hash_bytes));
         }
 
-        cursor += tlv_len;
+        cursor = end;
     }
 
     Err(Error::ad_hoc(
