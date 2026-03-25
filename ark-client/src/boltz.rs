@@ -82,6 +82,7 @@ pub enum LnInvoice {
     /// A BOLT11 Lightning invoice.
     Bolt11(Bolt11Invoice),
     /// A BOLT12 Lightning invoice (encoded string, typically starts with `lni`).
+    // NOTE: Breaking change expected — this will be replaced with LDK's `Bolt12Invoice` type.
     Bolt12(String),
 }
 
@@ -2019,6 +2020,71 @@ where
         offer: &str,
         amount_sats: Option<u64>,
     ) -> Result<SubmarineSwapData, Error> {
+        let (data, _invoice_str) = self
+            .create_bolt12_submarine_swap(offer, amount_sats)
+            .await?;
+
+        tracing::info!(
+            swap_id = data.id,
+            vhtlc_address = %data.vhtlc_address,
+            expected_amount = %data.amount,
+            "Prepared BOLT12 offer payment"
+        );
+
+        Ok(data)
+    }
+
+    /// Pay a BOLT12 offer by performing a submarine swap via Boltz. This fetches the BOLT12
+    /// invoice from the offer, creates a submarine swap, and funds the VHTLC.
+    ///
+    /// # Trust Model
+    ///
+    /// This method fetches the BOLT12 invoice via the Boltz API (`bolt12_fetch`). The invoice
+    /// is not locally verified against the offer's signing key because full BOLT12 invoice
+    /// verification requires a dedicated parsing library (e.g., LDK). This is the same trust
+    /// model as BOLT11 submarine swaps, where the VHTLC address and claim keys are provided by
+    /// Boltz.
+    ///
+    /// # Arguments
+    ///
+    /// - `offer`: a BOLT12 offer string.
+    /// - `amount_sats`: optional amount in satoshis. Required if the offer does not specify an
+    ///   amount.
+    ///
+    /// # Returns
+    ///
+    /// - A [`Bolt12SubmarineSwapResult`], including an identifier for the swap and the TXID of the
+    ///   Ark transaction that funds the VHTLC.
+    pub async fn pay_bolt12_offer(
+        &self,
+        offer: &str,
+        amount_sats: Option<u64>,
+    ) -> Result<Bolt12SubmarineSwapResult, Error> {
+        let (data, invoice_str) = self
+            .create_bolt12_submarine_swap(offer, amount_sats)
+            .await?;
+
+        let vhtlc_address = data.vhtlc_address;
+        let amount = data.amount;
+        let swap_id = data.id;
+        let txid = self.send_vtxo(vhtlc_address, amount).await?;
+
+        tracing::info!(%swap_id, %amount, "Funded VHTLC for BOLT12 offer");
+
+        Ok(Bolt12SubmarineSwapResult {
+            swap_id,
+            txid,
+            amount,
+            invoice: invoice_str,
+        })
+    }
+
+    /// Shared setup for BOLT12 submarine swaps: fetch invoice, create swap, persist data.
+    async fn create_bolt12_submarine_swap(
+        &self,
+        offer: &str,
+        amount_sats: Option<u64>,
+    ) -> Result<(SubmarineSwapData, String), Error> {
         let invoice_str = self.fetch_bolt12_invoice(offer, amount_sats).await?;
 
         let payment_hash = extract_bolt12_payment_hash(&invoice_str)?;
@@ -2082,7 +2148,7 @@ where
             vhtlc_address: swap_response.address,
             timeout_block_heights: swap_response.timeout_block_heights,
             amount: swap_response.expected_amount,
-            invoice: LnInvoice::Bolt12(invoice_str),
+            invoice: LnInvoice::Bolt12(invoice_str.clone()),
             created_at: created_at.as_secs(),
             key_derivation_index,
         };
@@ -2091,127 +2157,7 @@ where
             .insert_submarine(swap_response.id.clone(), data.clone())
             .await?;
 
-        tracing::info!(
-            swap_id = swap_response.id,
-            vhtlc_address = %data.vhtlc_address,
-            expected_amount = %data.amount,
-            "Prepared BOLT12 offer payment"
-        );
-
-        Ok(data)
-    }
-
-    /// Pay a BOLT12 offer by performing a submarine swap via Boltz. This fetches the BOLT12
-    /// invoice from the offer, creates a submarine swap, and funds the VHTLC.
-    ///
-    /// # Trust Model
-    ///
-    /// This method fetches the BOLT12 invoice via the Boltz API (`bolt12_fetch`). The invoice
-    /// is not locally verified against the offer's signing key because full BOLT12 invoice
-    /// verification requires a dedicated parsing library (e.g., LDK). This is the same trust
-    /// model as BOLT11 submarine swaps, where the VHTLC address and claim keys are provided by
-    /// Boltz.
-    ///
-    /// # Arguments
-    ///
-    /// - `offer`: a BOLT12 offer string.
-    /// - `amount_sats`: optional amount in satoshis. Required if the offer does not specify an
-    ///   amount.
-    ///
-    /// # Returns
-    ///
-    /// - A [`Bolt12SubmarineSwapResult`], including an identifier for the swap and the TXID of the
-    ///   Ark transaction that funds the VHTLC.
-    pub async fn pay_bolt12_offer(
-        &self,
-        offer: &str,
-        amount_sats: Option<u64>,
-    ) -> Result<Bolt12SubmarineSwapResult, Error> {
-        let invoice_str = self.fetch_bolt12_invoice(offer, amount_sats).await?;
-
-        let payment_hash = extract_bolt12_payment_hash(&invoice_str)?;
-        let preimage_hash = ripemd160::Hash::hash(payment_hash.as_byte_array());
-
-        let refund_keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
-        let refund_public_key = refund_keypair.public_key();
-        let key_derivation_index =
-            self.derivation_index_for_pk(&refund_keypair.x_only_public_key().0);
-
-        let request = CreateStringInvoiceSubmarineSwapRequest {
-            from: Asset::Ark,
-            to: Asset::Btc,
-            invoice: invoice_str.clone(),
-            refund_public_key: refund_public_key.into(),
-        };
-        let url = format!("{}/v2/swap/submarine", self.inner.boltz_url);
-
-        let client = reqwest::Client::builder()
-            .timeout(self.inner.timeout)
-            .build()
-            .map_err(|e| Error::ad_hoc(e.to_string()))?;
-        let response = client
-            .post(&url)
-            .json(&request)
-            .send()
-            .await
-            .map_err(|e| Error::ad_hoc(e.to_string()))
-            .context("failed to send submarine swap request")?;
-
-        if !response.status().is_success() {
-            let error_text = response
-                .text()
-                .await
-                .map_err(|e| Error::ad_hoc(e.to_string()))
-                .context("failed to read error text")?;
-
-            return Err(Error::ad_hoc(format!(
-                "failed to create submarine swap: {error_text}"
-            )));
-        }
-
-        let swap_response: CreateSubmarineSwapResponse = response
-            .json()
-            .await
-            .map_err(|e| Error::ad_hoc(e.to_string()))
-            .context("failed to deserialize submarine swap response")?;
-
-        let created_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(Error::ad_hoc)
-            .context("failed to compute created_at")?;
-
-        self.swap_storage()
-            .insert_submarine(
-                swap_response.id.clone(),
-                SubmarineSwapData {
-                    id: swap_response.id.clone(),
-                    status: SwapStatus::Created,
-                    preimage: None,
-                    preimage_hash,
-                    refund_public_key: refund_public_key.into(),
-                    claim_public_key: swap_response.claim_public_key,
-                    vhtlc_address: swap_response.address,
-                    timeout_block_heights: swap_response.timeout_block_heights,
-                    amount: swap_response.expected_amount,
-                    invoice: LnInvoice::Bolt12(invoice_str.clone()),
-                    created_at: created_at.as_secs(),
-                    key_derivation_index,
-                },
-            )
-            .await?;
-
-        let vhtlc_address = swap_response.address;
-        let amount = swap_response.expected_amount;
-        let txid = self.send_vtxo(vhtlc_address, amount).await?;
-
-        tracing::info!(swap_id = swap_response.id, %amount, "Funded VHTLC for BOLT12 offer");
-
-        Ok(Bolt12SubmarineSwapResult {
-            swap_id: swap_response.id,
-            txid,
-            amount,
-            invoice: invoice_str,
-        })
+        Ok((data, invoice_str))
     }
 
     /// Register a BOLT12 offer with Boltz for reverse submarine swaps.
