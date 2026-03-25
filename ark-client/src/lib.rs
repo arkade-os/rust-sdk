@@ -54,6 +54,10 @@ mod send_vtxo;
 mod unilateral_exit;
 mod utils;
 
+pub use boltz::Bolt12InvoiceParams;
+pub use boltz::Bolt12InvoiceRequestPayload;
+pub use boltz::Bolt12SubmarineSwapResult;
+pub use boltz::LnInvoice;
 pub use boltz::PendingVhtlcSpendTx;
 pub use boltz::PendingVhtlcSpendType;
 pub use boltz::ReverseSwapData;

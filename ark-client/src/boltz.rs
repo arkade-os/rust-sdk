@@ -47,6 +47,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_with::serde_as;
 use serde_with::DisplayFromStr;
+use std::fmt;
 use std::str::FromStr;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
@@ -63,6 +64,76 @@ pub struct ReverseSwapResult {
     pub swap_id: String,
     pub amount: Amount,
     pub invoice: Bolt11Invoice,
+}
+
+/// A Lightning invoice, either BOLT11 or BOLT12.
+///
+/// This enum allows the Ark client to work with both invoice types seamlessly.
+/// Serialization is untagged for backward-compatible JSON storage: existing BOLT11
+/// invoice strings deserialize as [`LnInvoice::Bolt11`], while BOLT12 strings
+/// (which fail BOLT11 parsing) fall through to [`LnInvoice::Bolt12`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum LnInvoice {
+    /// A BOLT11 Lightning invoice.
+    Bolt11(Bolt11Invoice),
+    /// A BOLT12 Lightning invoice (encoded string, typically starts with `lni`).
+    Bolt12(String),
+}
+
+impl LnInvoice {
+    /// Extract the SHA256 payment hash from the invoice.
+    pub fn payment_hash(&self) -> Result<sha256::Hash, Error> {
+        match self {
+            LnInvoice::Bolt11(invoice) => Ok(*invoice.payment_hash()),
+            LnInvoice::Bolt12(invoice_str) => extract_bolt12_payment_hash(invoice_str),
+        }
+    }
+}
+
+impl fmt::Display for LnInvoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LnInvoice::Bolt11(invoice) => write!(f, "{invoice}"),
+            LnInvoice::Bolt12(s) => write!(f, "{s}"),
+        }
+    }
+}
+
+impl From<Bolt11Invoice> for LnInvoice {
+    fn from(invoice: Bolt11Invoice) -> Self {
+        LnInvoice::Bolt11(invoice)
+    }
+}
+
+/// Result of a Bolt12 offer payment preparation.
+#[derive(Clone, Debug)]
+pub struct Bolt12SubmarineSwapResult {
+    pub swap_id: String,
+    pub txid: Txid,
+    pub amount: Amount,
+    /// The BOLT12 invoice fetched from the offer and used for this swap.
+    pub invoice: String,
+}
+
+/// Parameters required by Boltz when creating an invoice for a registered BOLT12 offer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Bolt12InvoiceParams {
+    /// Description for the invoice.
+    pub description: Option<String>,
+    /// CLTV expiry delta.
+    pub cltv_expiry: Option<u32>,
+}
+
+/// An invoice request received via webhook or WebSocket for a registered BOLT12 offer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Bolt12InvoiceRequestPayload {
+    /// The offer for which an invoice was requested.
+    pub offer: String,
+    /// The invoice request, encoded as hex.
+    pub invoice_request: String,
 }
 
 #[derive(Clone, Debug)]
@@ -204,7 +275,7 @@ where
             vhtlc_address: swap_response.address,
             timeout_block_heights: swap_response.timeout_block_heights,
             amount: swap_response.expected_amount,
-            invoice: request.invoice.clone(),
+            invoice: LnInvoice::Bolt11(request.invoice.clone()),
             created_at: created_at.as_secs(),
             key_derivation_index,
         };
@@ -299,7 +370,7 @@ where
                     vhtlc_address: swap_response.address,
                     timeout_block_heights: swap_response.timeout_block_heights,
                     amount: swap_response.expected_amount,
-                    invoice: request.invoice.clone(),
+                    invoice: LnInvoice::Bolt11(request.invoice.clone()),
                     created_at: created_at.as_secs(),
                     key_derivation_index,
                 },
@@ -1817,6 +1888,363 @@ where
         })
     }
 
+    // BOLT12 swap methods.
+
+    /// Fetch a BOLT12 invoice from an offer using the Boltz API.
+    ///
+    /// This calls `POST /lightning/BTC/bolt12_fetch` to resolve a BOLT12 offer into an invoice
+    /// that can be used to create a submarine swap.
+    ///
+    /// # Security Note
+    ///
+    /// Callers that use the returned invoice outside of this SDK's submarine swap methods should
+    /// verify the invoice's signing key against the offer's signing key (or the public key of
+    /// the final hop in one of the offer's message paths).
+    ///
+    /// # Arguments
+    ///
+    /// - `offer`: a BOLT12 offer string (typically starts with `lno`).
+    /// - `amount_sats`: optional amount in satoshis. Required if the offer does not specify an
+    ///   amount.
+    ///
+    /// # Returns
+    ///
+    /// The BOLT12 invoice string (typically starts with `lni`).
+    pub async fn fetch_bolt12_invoice(
+        &self,
+        offer: &str,
+        amount_sats: Option<u64>,
+    ) -> Result<String, Error> {
+        let url = format!("{}/lightning/BTC/bolt12_fetch", self.inner.boltz_url);
+
+        let request = Bolt12FetchInvoiceRequest {
+            offer: offer.to_string(),
+            amount: amount_sats,
+        };
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| Error::ad_hoc(e.to_string()))
+            .context("failed to fetch bolt12 invoice")?;
+
+        if !response.status().is_success() {
+            let error_text = response
+                .text()
+                .await
+                .map_err(|e| Error::ad_hoc(e.to_string()))
+                .context("failed to read error text")?;
+
+            return Err(Error::ad_hoc(format!(
+                "failed to fetch bolt12 invoice from offer: {error_text}"
+            )));
+        }
+
+        let response: Bolt12FetchInvoiceResponse = response
+            .json()
+            .await
+            .map_err(|e| Error::ad_hoc(e.to_string()))
+            .context("failed to deserialize bolt12 fetch response")?;
+
+        tracing::info!("Fetched BOLT12 invoice from offer");
+        Ok(response.invoice)
+    }
+
+    /// Prepare the payment of a BOLT12 offer by fetching an invoice and setting up a submarine
+    /// swap via Boltz.
+    ///
+    /// This function does not execute the payment itself. Once you are ready for payment you
+    /// will have to send the required `amount` to the `vhtlc_address` in the returned swap data.
+    ///
+    /// If you are looking for a function which pays the offer immediately, consider using
+    /// [`Client::pay_bolt12_offer`] instead.
+    ///
+    /// # Arguments
+    ///
+    /// - `offer`: a BOLT12 offer string.
+    /// - `amount_sats`: optional amount in satoshis. Required if the offer does not specify an
+    ///   amount.
+    ///
+    /// # Returns
+    ///
+    /// - A [`SubmarineSwapData`] object, including an identifier for the swap.
+    pub async fn prepare_bolt12_offer_payment(
+        &self,
+        offer: &str,
+        amount_sats: Option<u64>,
+    ) -> Result<SubmarineSwapData, Error> {
+        let invoice_str = self.fetch_bolt12_invoice(offer, amount_sats).await?;
+
+        let payment_hash = extract_bolt12_payment_hash(&invoice_str)?;
+        let preimage_hash = ripemd160::Hash::hash(payment_hash.as_byte_array());
+
+        let refund_keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
+        let refund_public_key = refund_keypair.public_key();
+        let key_derivation_index =
+            self.derivation_index_for_pk(&refund_keypair.x_only_public_key().0);
+
+        let request = CreateStringInvoiceSubmarineSwapRequest {
+            from: Asset::Ark,
+            to: Asset::Btc,
+            invoice: invoice_str.clone(),
+            refund_public_key: refund_public_key.into(),
+        };
+        let url = format!("{}/v2/swap/submarine", self.inner.boltz_url);
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| Error::ad_hoc(e.to_string()))
+            .context("failed to send submarine swap request")?;
+
+        if !response.status().is_success() {
+            let error_text = response
+                .text()
+                .await
+                .map_err(|e| Error::ad_hoc(e.to_string()))
+                .context("failed to read error text")?;
+
+            return Err(Error::ad_hoc(format!(
+                "failed to create submarine swap: {error_text}"
+            )));
+        }
+
+        let swap_response: CreateSubmarineSwapResponse = response
+            .json()
+            .await
+            .map_err(|e| Error::ad_hoc(e.to_string()))
+            .context("failed to deserialize submarine swap response")?;
+
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(Error::ad_hoc)
+            .context("failed to compute created_at")?;
+
+        let data = SubmarineSwapData {
+            id: swap_response.id.clone(),
+            status: SwapStatus::Created,
+            preimage: None,
+            preimage_hash,
+            refund_public_key: refund_public_key.into(),
+            claim_public_key: swap_response.claim_public_key,
+            vhtlc_address: swap_response.address,
+            timeout_block_heights: swap_response.timeout_block_heights,
+            amount: swap_response.expected_amount,
+            invoice: LnInvoice::Bolt12(invoice_str),
+            created_at: created_at.as_secs(),
+            key_derivation_index,
+        };
+
+        self.swap_storage()
+            .insert_submarine(swap_response.id.clone(), data.clone())
+            .await?;
+
+        tracing::info!(
+            swap_id = swap_response.id,
+            vhtlc_address = %data.vhtlc_address,
+            expected_amount = %data.amount,
+            "Prepared BOLT12 offer payment"
+        );
+
+        Ok(data)
+    }
+
+    /// Pay a BOLT12 offer by performing a submarine swap via Boltz. This fetches the BOLT12
+    /// invoice from the offer, creates a submarine swap, and funds the VHTLC.
+    ///
+    /// # Arguments
+    ///
+    /// - `offer`: a BOLT12 offer string.
+    /// - `amount_sats`: optional amount in satoshis. Required if the offer does not specify an
+    ///   amount.
+    ///
+    /// # Returns
+    ///
+    /// - A [`Bolt12SubmarineSwapResult`], including an identifier for the swap and the TXID of
+    ///   the Ark transaction that funds the VHTLC.
+    pub async fn pay_bolt12_offer(
+        &self,
+        offer: &str,
+        amount_sats: Option<u64>,
+    ) -> Result<Bolt12SubmarineSwapResult, Error> {
+        let invoice_str = self.fetch_bolt12_invoice(offer, amount_sats).await?;
+
+        let payment_hash = extract_bolt12_payment_hash(&invoice_str)?;
+        let preimage_hash = ripemd160::Hash::hash(payment_hash.as_byte_array());
+
+        let refund_keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
+        let refund_public_key = refund_keypair.public_key();
+        let key_derivation_index =
+            self.derivation_index_for_pk(&refund_keypair.x_only_public_key().0);
+
+        let request = CreateStringInvoiceSubmarineSwapRequest {
+            from: Asset::Ark,
+            to: Asset::Btc,
+            invoice: invoice_str.clone(),
+            refund_public_key: refund_public_key.into(),
+        };
+        let url = format!("{}/v2/swap/submarine", self.inner.boltz_url);
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| Error::ad_hoc(e.to_string()))
+            .context("failed to send submarine swap request")?;
+
+        if !response.status().is_success() {
+            let error_text = response
+                .text()
+                .await
+                .map_err(|e| Error::ad_hoc(e.to_string()))
+                .context("failed to read error text")?;
+
+            return Err(Error::ad_hoc(format!(
+                "failed to create submarine swap: {error_text}"
+            )));
+        }
+
+        let swap_response: CreateSubmarineSwapResponse = response
+            .json()
+            .await
+            .map_err(|e| Error::ad_hoc(e.to_string()))
+            .context("failed to deserialize submarine swap response")?;
+
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(Error::ad_hoc)
+            .context("failed to compute created_at")?;
+
+        self.swap_storage()
+            .insert_submarine(
+                swap_response.id.clone(),
+                SubmarineSwapData {
+                    id: swap_response.id.clone(),
+                    status: SwapStatus::Created,
+                    preimage: None,
+                    preimage_hash,
+                    refund_public_key: refund_public_key.into(),
+                    claim_public_key: swap_response.claim_public_key,
+                    vhtlc_address: swap_response.address,
+                    timeout_block_heights: swap_response.timeout_block_heights,
+                    amount: swap_response.expected_amount,
+                    invoice: LnInvoice::Bolt12(invoice_str.clone()),
+                    created_at: created_at.as_secs(),
+                    key_derivation_index,
+                },
+            )
+            .await?;
+
+        let vhtlc_address = swap_response.address;
+        let amount = swap_response.expected_amount;
+        let txid = self.send_vtxo(vhtlc_address, amount).await?;
+
+        tracing::info!(swap_id = swap_response.id, %amount, "Funded VHTLC for BOLT12 offer");
+
+        Ok(Bolt12SubmarineSwapResult {
+            swap_id: swap_response.id,
+            txid,
+            amount,
+            invoice: invoice_str,
+        })
+    }
+
+    /// Register a BOLT12 offer with Boltz for reverse submarine swaps.
+    ///
+    /// The offer must include the Boltz CLN node as an entry point in the blinded message path.
+    /// Node information can be retrieved from the Boltz `/nodes` API endpoint.
+    ///
+    /// Once registered, Boltz will forward invoice requests to the specified webhook URL. The
+    /// client must respond with a valid BOLT12 invoice for each request.
+    ///
+    /// # Arguments
+    ///
+    /// - `offer`: the BOLT12 offer string to register.
+    /// - `webhook_url`: optional webhook URL where invoice requests will be sent. If not
+    ///   provided, invoice requests can be received via WebSocket.
+    pub async fn register_bolt12_offer(
+        &self,
+        offer: &str,
+        webhook_url: Option<&str>,
+    ) -> Result<(), Error> {
+        let url = format!("{}/lightning/BTC/bolt12", self.inner.boltz_url);
+
+        let request = RegisterBolt12OfferRequest {
+            offer: offer.to_string(),
+            webhook_url: webhook_url.map(String::from),
+        };
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| Error::ad_hoc(e.to_string()))
+            .context("failed to register bolt12 offer")?;
+
+        if !response.status().is_success() {
+            let error_text = response
+                .text()
+                .await
+                .map_err(|e| Error::ad_hoc(e.to_string()))
+                .context("failed to read error text")?;
+
+            return Err(Error::ad_hoc(format!(
+                "failed to register bolt12 offer: {error_text}"
+            )));
+        }
+
+        tracing::info!("Registered BOLT12 offer with Boltz");
+        Ok(())
+    }
+
+    /// Update the webhook URL for a previously registered BOLT12 offer.
+    ///
+    /// # Arguments
+    ///
+    /// - `webhook_url`: the new webhook URL. Pass `None` to clear the webhook and use WebSocket
+    ///   delivery instead.
+    pub async fn update_bolt12_webhook(&self, webhook_url: Option<&str>) -> Result<(), Error> {
+        let url = format!("{}/lightning/BTC/bolt12", self.inner.boltz_url);
+
+        let request = UpdateBolt12WebhookRequest {
+            webhook_url: webhook_url.map(String::from),
+        };
+
+        let client = reqwest::Client::new();
+        let response = client
+            .patch(&url)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| Error::ad_hoc(e.to_string()))
+            .context("failed to update bolt12 webhook")?;
+
+        if !response.status().is_success() {
+            let error_text = response
+                .text()
+                .await
+                .map_err(|e| Error::ad_hoc(e.to_string()))
+                .context("failed to read error text")?;
+
+            return Err(Error::ad_hoc(format!(
+                "failed to update bolt12 webhook: {error_text}"
+            )));
+        }
+
+        tracing::info!("Updated BOLT12 webhook URL");
+        Ok(())
+    }
+
     /// Use Boltz's API to learn about updates for a particular swap.
     // TODO: Make sure this is WASM-compatible.
     pub fn subscribe_to_swap_updates(
@@ -2629,6 +3057,99 @@ fn vhtlc_tapscripts(vhtlc: &VhtlcScript) -> Vec<ScriptBuf> {
     ]
 }
 
+/// BOLT12 invoice TLV type for the payment hash field.
+const BOLT12_PAYMENT_HASH_TLV_TYPE: u64 = 168;
+
+/// Extract the SHA256 payment hash from a BOLT12 invoice string.
+///
+/// BOLT12 invoices are bech32-encoded TLV streams with the `lni` HRP. The payment hash is
+/// stored in TLV type 168.
+fn extract_bolt12_payment_hash(invoice: &str) -> Result<sha256::Hash, Error> {
+    let (hrp, data) = bech32::decode(invoice)
+        .map_err(|e| Error::ad_hoc(format!("invalid bolt12 invoice encoding: {e}")))?;
+
+    if hrp.to_string() != "lni" {
+        return Err(Error::ad_hoc(format!(
+            "expected bolt12 invoice with 'lni' prefix, got '{hrp}'"
+        )));
+    }
+
+    // Parse the TLV stream to find the payment_hash field (type 168).
+    let mut cursor = 0;
+    while cursor < data.len() {
+        let (tlv_type, consumed) = read_bigsize(&data[cursor..]).map_err(|e| {
+            Error::ad_hoc(format!("failed to read TLV type in bolt12 invoice: {e}"))
+        })?;
+        cursor += consumed;
+
+        let (tlv_len, consumed) = read_bigsize(&data[cursor..]).map_err(|e| {
+            Error::ad_hoc(format!("failed to read TLV length in bolt12 invoice: {e}"))
+        })?;
+        cursor += consumed;
+
+        let tlv_len = tlv_len as usize;
+        if cursor + tlv_len > data.len() {
+            return Err(Error::ad_hoc(
+                "bolt12 invoice TLV data extends beyond payload",
+            ));
+        }
+
+        if tlv_type == BOLT12_PAYMENT_HASH_TLV_TYPE {
+            if tlv_len != 32 {
+                return Err(Error::ad_hoc(format!(
+                    "unexpected bolt12 payment_hash length: expected 32, got {tlv_len}"
+                )));
+            }
+            let hash_bytes: [u8; 32] = data[cursor..cursor + 32]
+                .try_into()
+                .map_err(|_| Error::ad_hoc("failed to convert payment_hash bytes"))?;
+            return Ok(sha256::Hash::from_byte_array(hash_bytes));
+        }
+
+        cursor += tlv_len;
+    }
+
+    Err(Error::ad_hoc(
+        "payment_hash (TLV type 168) not found in bolt12 invoice",
+    ))
+}
+
+/// Read a BigSize integer from a byte slice, as defined in the Lightning specification.
+///
+/// Returns the decoded value and the number of bytes consumed.
+fn read_bigsize(data: &[u8]) -> Result<(u64, usize), &'static str> {
+    if data.is_empty() {
+        return Err("unexpected end of data");
+    }
+
+    match data[0] {
+        0..=0xfc => Ok((data[0] as u64, 1)),
+        0xfd => {
+            if data.len() < 3 {
+                return Err("unexpected end of data for 2-byte BigSize");
+            }
+            let val = u16::from_be_bytes([data[1], data[2]]) as u64;
+            Ok((val, 3))
+        }
+        0xfe => {
+            if data.len() < 5 {
+                return Err("unexpected end of data for 4-byte BigSize");
+            }
+            let val = u32::from_be_bytes([data[1], data[2], data[3], data[4]]) as u64;
+            Ok((val, 5))
+        }
+        0xff => {
+            if data.len() < 9 {
+                return Err("unexpected end of data for 8-byte BigSize");
+            }
+            let val = u64::from_be_bytes([
+                data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8],
+            ]);
+            Ok((val, 9))
+        }
+    }
+}
+
 /// Extract the preimage from a PSBT's `VTXO_CONDITION_KEY` unknown field.
 ///
 /// The condition data is encoded as: `[num_elements] [varint_length] [preimage_bytes]`.
@@ -2724,8 +3245,8 @@ pub struct SubmarineSwapData {
     /// Address where funds are locked.
     #[serde_as(as = "DisplayFromStr")]
     pub vhtlc_address: ArkAddress,
-    /// BOLT11 invoice associated with the swap.
-    pub invoice: Bolt11Invoice,
+    /// Lightning invoice associated with the swap (BOLT11 or BOLT12).
+    pub invoice: LnInvoice,
     /// Current swap status.
     pub status: SwapStatus,
     /// UNIX timestamp when swap was created.
@@ -2919,6 +3440,45 @@ struct RefundSwapResponse {
     error: Option<String>,
 }
 
+// Bolt12-specific API types.
+
+/// Request to the Boltz API to create a submarine swap with a string invoice (BOLT11 or BOLT12).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CreateStringInvoiceSubmarineSwapRequest {
+    from: Asset,
+    to: Asset,
+    invoice: String,
+    #[serde(rename = "refundPublicKey")]
+    refund_public_key: PublicKey,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Bolt12FetchInvoiceRequest {
+    offer: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    amount: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Bolt12FetchInvoiceResponse {
+    invoice: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RegisterBolt12OfferRequest {
+    offer: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    webhook_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateBolt12WebhookRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    webhook_url: Option<String>,
+}
+
 /// Fee information for submarine swaps (Ark -> Lightning).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -3078,5 +3638,141 @@ mod tests {
                 .unilateral_refund_without_receiver,
             86528
         );
+    }
+
+    #[test]
+    fn test_read_bigsize() {
+        // Single-byte values.
+        assert_eq!(read_bigsize(&[0]).unwrap(), (0, 1));
+        assert_eq!(read_bigsize(&[1]).unwrap(), (1, 1));
+        assert_eq!(read_bigsize(&[0xfc]).unwrap(), (252, 1));
+
+        // Two-byte values.
+        assert_eq!(read_bigsize(&[0xfd, 0x00, 0xfd]).unwrap(), (253, 3));
+        assert_eq!(read_bigsize(&[0xfd, 0x01, 0x00]).unwrap(), (256, 3));
+
+        // Four-byte values.
+        assert_eq!(
+            read_bigsize(&[0xfe, 0x00, 0x01, 0x00, 0x00]).unwrap(),
+            (65536, 5)
+        );
+
+        // Empty input.
+        assert!(read_bigsize(&[]).is_err());
+
+        // Truncated multi-byte.
+        assert!(read_bigsize(&[0xfd, 0x00]).is_err());
+    }
+
+    #[test]
+    fn test_extract_bolt12_payment_hash_roundtrip() {
+        // Construct a minimal bolt12 invoice TLV with just a payment_hash field.
+        // TLV type 168 (0xa8) encoded as BigSize = [0xa8], length 32 = [0x20],
+        // then 32 bytes of hash.
+        let expected_hash = [42u8; 32];
+        let mut tlv_data = Vec::new();
+        tlv_data.push(0xa8); // type 168
+        tlv_data.push(0x20); // length 32
+        tlv_data.extend_from_slice(&expected_hash);
+
+        // Encode as bech32 with "lni" HRP.
+        let invoice =
+            bech32::encode::<bech32::Bech32>(bech32::Hrp::parse("lni").unwrap(), &tlv_data)
+                .expect("valid bech32 encoding");
+
+        let result = extract_bolt12_payment_hash(&invoice).unwrap();
+        assert_eq!(result.as_byte_array(), &expected_hash);
+    }
+
+    #[test]
+    fn test_extract_bolt12_payment_hash_with_preceding_tlvs() {
+        // Construct a TLV stream with other fields before the payment_hash.
+        let expected_hash = [0xab; 32];
+        let mut tlv_data = Vec::new();
+
+        // Some other TLV field (type 10, length 4, value [1,2,3,4]).
+        tlv_data.push(10);
+        tlv_data.push(4);
+        tlv_data.extend_from_slice(&[1, 2, 3, 4]);
+
+        // Payment hash field.
+        tlv_data.push(0xa8);
+        tlv_data.push(0x20);
+        tlv_data.extend_from_slice(&expected_hash);
+
+        let invoice =
+            bech32::encode::<bech32::Bech32>(bech32::Hrp::parse("lni").unwrap(), &tlv_data)
+                .expect("valid bech32 encoding");
+
+        let result = extract_bolt12_payment_hash(&invoice).unwrap();
+        assert_eq!(result.as_byte_array(), &expected_hash);
+    }
+
+    #[test]
+    fn test_extract_bolt12_payment_hash_missing() {
+        // TLV stream without payment_hash.
+        let mut tlv_data = Vec::new();
+        tlv_data.push(10);
+        tlv_data.push(2);
+        tlv_data.extend_from_slice(&[1, 2]);
+
+        let invoice =
+            bech32::encode::<bech32::Bech32>(bech32::Hrp::parse("lni").unwrap(), &tlv_data)
+                .expect("valid bech32 encoding");
+
+        assert!(extract_bolt12_payment_hash(&invoice).is_err());
+    }
+
+    #[test]
+    fn test_extract_bolt12_payment_hash_wrong_hrp() {
+        let mut tlv_data = vec![0xa8, 0x20];
+        tlv_data.extend_from_slice(&[0u8; 32]);
+        let invoice =
+            bech32::encode::<bech32::Bech32m>(bech32::Hrp::parse("lnbc").unwrap(), &tlv_data)
+                .expect("valid bech32 encoding");
+
+        let err = extract_bolt12_payment_hash(&invoice).unwrap_err();
+        assert!(err.to_string().contains("lni"));
+    }
+
+    #[test]
+    fn test_ln_invoice_serde_roundtrip_bolt11() {
+        // Verify that LnInvoice::Bolt11 serializes and deserializes correctly.
+        let bolt11_str = "lntbs10u1p5wmeeepp56ms94rkev7tdrwqyus5a63lny2mqzq9vh2rq3u4ym3v4lxv6xl4qdql2djkuepqw3hjqs2jfvsxzerywfjhxuccqz95xqztfsp5ckaskagag554na8d56tlrfdxasstqrmmpkvswqqqx6y386jcfq9s9qxpqysgqt7z0vkdwkqamydae7ctgkh7l8q75w7q9394ce3lda2mkfxrpfdtj5gmltuctav7jdgatkflhztrjjzutdla5e4xp0uhxxy7sluzll4qpkkh6wv";
+        let bolt11: Bolt11Invoice = bolt11_str.parse().unwrap();
+        let invoice = LnInvoice::Bolt11(bolt11);
+
+        let json = serde_json::to_string(&invoice).unwrap();
+        let deserialized: LnInvoice = serde_json::from_str(&json).unwrap();
+
+        match deserialized {
+            LnInvoice::Bolt11(inv) => assert_eq!(inv.to_string(), bolt11_str),
+            LnInvoice::Bolt12(_) => panic!("expected Bolt11 variant"),
+        }
+    }
+
+    #[test]
+    fn test_ln_invoice_serde_roundtrip_bolt12() {
+        // A bolt12 invoice string should survive serialization as the Bolt12 variant.
+        let bolt12_str = "lni1somebolt12invoicedata";
+        let invoice = LnInvoice::Bolt12(bolt12_str.to_string());
+
+        let json = serde_json::to_string(&invoice).unwrap();
+        let deserialized: LnInvoice = serde_json::from_str(&json).unwrap();
+
+        match deserialized {
+            LnInvoice::Bolt12(s) => assert_eq!(s, bolt12_str),
+            LnInvoice::Bolt11(_) => panic!("expected Bolt12 variant"),
+        }
+    }
+
+    #[test]
+    fn test_ln_invoice_backward_compat_deserialization() {
+        // Existing stored data has bare bolt11 invoice strings. They should deserialize
+        // as LnInvoice::Bolt11.
+        let bolt11_str = r#""lntbs10u1p5wmeeepp56ms94rkev7tdrwqyus5a63lny2mqzq9vh2rq3u4ym3v4lxv6xl4qdql2djkuepqw3hjqs2jfvsxzerywfjhxuccqz95xqztfsp5ckaskagag554na8d56tlrfdxasstqrmmpkvswqqqx6y386jcfq9s9qxpqysgqt7z0vkdwkqamydae7ctgkh7l8q75w7q9394ce3lda2mkfxrpfdtj5gmltuctav7jdgatkflhztrjjzutdla5e4xp0uhxxy7sluzll4qpkkh6wv""#;
+        let deserialized: LnInvoice = serde_json::from_str(bolt11_str).unwrap();
+
+        assert!(matches!(deserialized, LnInvoice::Bolt11(_)));
     }
 }
