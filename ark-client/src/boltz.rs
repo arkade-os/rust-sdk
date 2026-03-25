@@ -72,6 +72,10 @@ pub struct ReverseSwapResult {
 /// Serialization is untagged for backward-compatible JSON storage: existing BOLT11
 /// invoice strings deserialize as [`LnInvoice::Bolt11`], while BOLT12 strings
 /// (which fail BOLT11 parsing) fall through to [`LnInvoice::Bolt12`].
+// TODO: Replace `Bolt12(String)` with LDK's `Bolt12Invoice` and `Offer` types from the
+// `lightning` crate for proper type safety and local invoice signing-key verification against
+// the offer. This would also allow removing the manual TLV payment-hash extraction in
+// `extract_bolt12_payment_hash`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum LnInvoice {
