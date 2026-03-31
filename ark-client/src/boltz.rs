@@ -1821,6 +1821,11 @@ where
             .bip21
             .or(swap_response.claim_details.bip21.clone());
 
+        let swap_tree = swap_response
+            .lockup_details
+            .swap_tree
+            .or(swap_response.claim_details.swap_tree.clone());
+
         let data = ChainSwapData {
             id: swap_response.id.clone(),
             status: SwapStatus::Created,
@@ -1840,6 +1845,7 @@ where
             user_timeout_block_heights: swap_response.lockup_details.timeouts,
             server_timeout_block_heights: swap_response.claim_details.timeouts,
             bip21,
+            swap_tree,
             created_at: created_at.as_secs(),
             claim_key_derivation_index,
             refund_key_derivation_index,
@@ -1871,7 +1877,12 @@ where
     ///
     /// Returns when the server's lockup transaction is detected in the mempool or confirmed.
     /// After this returns, use [`Self::claim_chain_swap`] to claim the funds.
-    pub async fn wait_for_chain_swap_server_lockup(&self, swap_id: &str) -> Result<(), Error> {
+    ///
+    /// Returns the server's lockup transaction ID if available.
+    pub async fn wait_for_chain_swap_server_lockup(
+        &self,
+        swap_id: &str,
+    ) -> Result<Option<String>, Error> {
         use futures::StreamExt;
 
         let stream = self.subscribe_to_swap_updates(swap_id.to_string());
@@ -1884,8 +1895,28 @@ where
                     match status {
                         SwapStatus::TransactionServerMempool
                         | SwapStatus::TransactionServerConfirmed => {
-                            tracing::debug!(swap_id, "Server lockup detected");
-                            return Ok(());
+                            // Fetch the full status to get the server's lockup txid.
+                            let url = format!("{}/v2/swap/{swap_id}", self.inner.boltz_url);
+                            let txid = async {
+                                reqwest::Client::new()
+                                    .get(&url)
+                                    .send()
+                                    .await
+                                    .ok()?
+                                    .json::<GetSwapStatusResponse>()
+                                    .await
+                                    .ok()?
+                                    .transaction
+                                    .map(|t| t.id)
+                            }
+                            .await;
+
+                            tracing::info!(
+                                swap_id,
+                                server_lockup_txid = txid.as_deref().unwrap_or("unknown"),
+                                "Server lockup detected"
+                            );
+                            return Ok(txid);
                         }
                         SwapStatus::SwapExpired => {
                             return Err(Error::ad_hoc(format!("chain swap expired: {swap_id}")));
@@ -2109,6 +2140,195 @@ where
             .context("failed to update chain swap data")?;
 
         Ok(ark_txid)
+    }
+
+    /// Claim on-chain BTC from a chain swap after Boltz has locked funds.
+    ///
+    /// This claims the server's on-chain BTC HTLC using the stored preimage. It is intended
+    /// for [`ChainSwapDirection::ArkToBtc`] swaps where the server locks on-chain BTC.
+    ///
+    /// Call this after [`Self::wait_for_chain_swap_server_lockup`] returns.
+    pub async fn claim_chain_swap_btc(
+        &self,
+        swap_id: &str,
+        destination_address: bitcoin::Address,
+        fee_rate_sat_vb: f64,
+    ) -> Result<Txid, Error> {
+        let swap = self
+            .swap_storage()
+            .get_chain(swap_id)
+            .await
+            .context("failed to get chain swap data")?
+            .ok_or_else(|| Error::ad_hoc(format!("chain swap data not found: {swap_id}")))?;
+
+        let preimage = swap
+            .preimage
+            .ok_or_else(|| Error::ad_hoc(format!("preimage not found for chain swap {swap_id}")))?;
+
+        let swap_tree = swap.swap_tree.clone().ok_or_else(|| {
+            Error::ad_hoc("no swap tree found (this swap has no on-chain BTC HTLC)")
+        })?;
+
+        // The BTC lockup is server-side for ArkToBtc
+        let btc_address_str = &swap.server_lockup_address;
+
+        // Parse the claim and refund leaf scripts from hex
+        let claim_script_bytes: Vec<u8> =
+            bitcoin::hex::FromHex::from_hex(&swap_tree.claim_leaf.output)
+                .map_err(|e| Error::ad_hoc(format!("invalid claim leaf hex: {e}")))?;
+        let claim_script = ScriptBuf::from_bytes(claim_script_bytes);
+
+        let refund_script_bytes: Vec<u8> =
+            bitcoin::hex::FromHex::from_hex(&swap_tree.refund_leaf.output)
+                .map_err(|e| Error::ad_hoc(format!("invalid refund leaf hex: {e}")))?;
+        let refund_script = ScriptBuf::from_bytes(refund_script_bytes);
+
+        // Boltz uses MuSig2(claimKey, refundKey) as the internal key for the
+        // BTC HTLC, enabling cooperative key-path spending.
+        let claim_pk_bytes = swap.claim_public_key.to_bytes();
+        let refund_pk_bytes = swap.server_refund_public_key.to_bytes();
+
+        let musig_claim_pk = musig::PublicKey::from_slice(&claim_pk_bytes)
+            .map_err(|e| Error::ad_hoc(format!("invalid claim key for musig: {e}")))?;
+        let musig_refund_pk = musig::PublicKey::from_slice(&refund_pk_bytes)
+            .map_err(|e| Error::ad_hoc(format!("invalid refund key for musig: {e}")))?;
+
+        // Boltz uses MuSig2(serverRefundKey, userClaimKey) as the internal key
+        // for the BTC HTLC, enabling cooperative key-path spending.
+        let key_agg = musig::musig::KeyAggCache::new(&[&musig_refund_pk, &musig_claim_pk]);
+        let internal_key = XOnlyPublicKey::from_slice(&key_agg.agg_pk().serialize())
+            .map_err(|e| Error::ad_hoc(format!("invalid aggregated key: {e}")))?;
+
+        let secp = Secp256k1::new();
+
+        let taproot_spend_info = bitcoin::taproot::TaprootBuilder::new()
+            .add_leaf(1, claim_script.clone())
+            .map_err(|e| Error::ad_hoc(format!("failed to add claim leaf: {e}")))?
+            .add_leaf(1, refund_script)
+            .map_err(|e| Error::ad_hoc(format!("failed to add refund leaf: {e}")))?
+            .finalize(&secp, internal_key)
+            .map_err(|_| Error::ad_hoc("failed to finalize taproot tree"))?;
+
+        // Verify the reconstructed address matches the lockup address.
+        let expected_spk = ScriptBuf::new_p2tr(
+            &secp,
+            taproot_spend_info.internal_key(),
+            taproot_spend_info.merkle_root(),
+        );
+
+        let parsed_address: bitcoin::Address<bitcoin::address::NetworkUnchecked> = btc_address_str
+            .parse()
+            .map_err(|e| Error::ad_hoc(format!("invalid BTC lockup address: {e}")))?;
+        let parsed_address = parsed_address.assume_checked();
+        let target_spk = parsed_address.script_pubkey();
+
+        if expected_spk != target_spk {
+            return Err(Error::ad_hoc(format!(
+                "taproot address mismatch for BTC lockup {btc_address_str}"
+            )));
+        }
+
+        let claim_ver = (claim_script.clone(), LeafVersion::TapScript);
+
+        // Find the unspent UTXO at the BTC lockup address
+        let utxos = self
+            .inner
+            .blockchain
+            .find_outpoints(&parsed_address)
+            .await
+            .context("failed to find UTXOs at BTC lockup address")?;
+
+        let utxo = utxos.iter().find(|u| !u.is_spent).ok_or_else(|| {
+            Error::ad_hoc(format!(
+                "no unspent UTXO found at BTC lockup address {btc_address_str}"
+            ))
+        })?;
+
+        // Get the control block for the claim leaf
+        let control_block = taproot_spend_info
+            .control_block(&claim_ver)
+            .ok_or(Error::ad_hoc("control block not found for claim leaf"))?;
+
+        let cb_bytes = control_block.serialize();
+        // Weight: 4 * (overhead 10.5 + input ~41 + output ~43) + witness items
+        let witness_weight = 1 + 1 + 64 + 1 + 32 + 1 + claim_script.len() + 1 + cb_bytes.len() + 1;
+        let weight = 4 * (11 + 41 + 43) + witness_weight;
+        let vsize = (weight + 3) / 4;
+        let fee = Amount::from_sat((vsize as f64 * fee_rate_sat_vb).ceil() as u64);
+
+        let claim_amount = utxo.amount.checked_sub(fee).ok_or_else(|| {
+            Error::ad_hoc(format!(
+                "UTXO amount {} is less than estimated fee {}",
+                utxo.amount, fee
+            ))
+        })?;
+
+        // Build the unsigned transaction
+        let mut tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: utxo.outpoint,
+                script_sig: ScriptBuf::new(),
+                sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: bitcoin::Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: claim_amount,
+                script_pubkey: destination_address.script_pubkey(),
+            }],
+        };
+
+        // Compute the taproot script-path sighash
+        let leaf_hash =
+            bitcoin::taproot::TapLeafHash::from_script(&claim_script, LeafVersion::TapScript);
+
+        let prevouts = [TxOut {
+            value: utxo.amount,
+            script_pubkey: target_spk.clone(),
+        }];
+
+        let sighash = bitcoin::sighash::SighashCache::new(&tx)
+            .taproot_script_spend_signature_hash(
+                0,
+                &bitcoin::sighash::Prevouts::All(&prevouts),
+                leaf_hash,
+                bitcoin::TapSighashType::Default,
+            )
+            .map_err(|e| Error::ad_hoc(format!("failed to compute sighash: {e}")))?;
+
+        let msg = secp256k1::Message::from_digest(sighash.to_byte_array());
+        let claim_kp = self.keypair_by_pk(&swap.claim_public_key.inner.x_only_public_key().0)?;
+        let signature = secp.sign_schnorr_no_aux_rand(&msg, &claim_kp);
+
+        // Build witness: <signature> <preimage> <claim_script> <control_block>
+        let mut witness = bitcoin::Witness::new();
+        witness.push(signature.serialize());
+        witness.push(preimage);
+        witness.push(claim_script.as_bytes());
+        witness.push(cb_bytes);
+
+        tx.input[0].witness = witness;
+
+        // Broadcast
+        self.inner
+            .blockchain
+            .broadcast(&tx)
+            .await
+            .context("failed to broadcast BTC claim transaction")?;
+
+        let txid = tx.compute_txid();
+
+        tracing::info!(swap_id, %txid, %claim_amount, "Claimed on-chain BTC from chain swap");
+
+        let mut updated_swap = swap.clone();
+        updated_swap.status = SwapStatus::TransactionClaimed;
+        self.swap_storage()
+            .update_chain(swap_id, updated_swap)
+            .await
+            .context("failed to update chain swap data")?;
+
+        Ok(txid)
     }
 
     /// Query the current status of any Boltz swap by ID.
@@ -3383,6 +3603,13 @@ struct CreateSubmarineSwapResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct GetSwapStatusResponse {
     status: SwapStatus,
+    #[serde(default)]
+    transaction: Option<SwapStatusTransaction>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SwapStatusTransaction {
+    id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3566,6 +3793,9 @@ pub struct ChainSwapData {
     /// BIP21 payment URI for funding (present for on-chain BTC lockup).
     #[serde(default)]
     pub bip21: Option<String>,
+    /// Swap tree for the on-chain BTC HTLC (present for the BTC side of chain swaps).
+    #[serde(default)]
+    pub swap_tree: Option<SwapTree>,
     /// UNIX timestamp when swap was created.
     pub created_at: u64,
     /// BIP32 derivation index for the claim key.
@@ -3592,6 +3822,25 @@ pub struct ChainSwapResult {
 }
 
 // ── Chain swap Boltz API types ───────────────────────────────────────
+
+/// Tapscript tree for an on-chain BTC HTLC used in chain swaps.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwapTree {
+    /// Leaf used to claim (requires preimage + claim key signature).
+    pub claim_leaf: SwapTreeLeaf,
+    /// Leaf used to refund (requires timelock + refund key signature).
+    pub refund_leaf: SwapTreeLeaf,
+}
+
+/// A single leaf in a [`SwapTree`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwapTreeLeaf {
+    /// Tapscript leaf version (192 = TapScript).
+    pub version: u8,
+    /// Hex-encoded Bitcoin script.
+    pub output: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -3627,7 +3876,7 @@ struct ChainSwapSideDetails {
     timeouts: Option<TimeoutBlockHeights>,
     amount: Amount,
     #[serde(default)]
-    swap_tree: Option<serde_json::Value>,
+    swap_tree: Option<SwapTree>,
     #[serde(default)]
     bip21: Option<String>,
 }

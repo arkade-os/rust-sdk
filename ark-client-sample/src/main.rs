@@ -143,6 +143,12 @@ enum Commands {
         direction: String,
         /// Amount in sats.
         amount: u64,
+        /// Target BTC address (required for ark-to-btc).
+        #[arg(long)]
+        address: Option<String>,
+        /// Fee rate in sat/vB for the on-chain claim (default: 1.0).
+        #[arg(long, default_value = "1.0")]
+        fee_rate: f64,
     },
     /// Claim a chain swap after the server has locked funds.
     ClaimChainSwap {
@@ -693,7 +699,12 @@ async fn run_command<K: KeyProvider>(
 
             tracing::info!(swap_id, "Payment made");
         }
-        Commands::ChainSwap { direction, amount } => {
+        Commands::ChainSwap {
+            direction,
+            amount,
+            address,
+            fee_rate,
+        } => {
             let direction = match direction.as_str() {
                 "ark-to-btc" => ChainSwapDirection::ArkToBtc,
                 "btc-to-ark" => ChainSwapDirection::BtcToArk,
@@ -705,7 +716,7 @@ async fn run_command<K: KeyProvider>(
             let amount = ChainSwapAmount::UserLock(Amount::from_sat(*amount));
 
             let result = client
-                .create_chain_swap(direction, amount)
+                .create_chain_swap(direction.clone(), amount)
                 .await
                 .map_err(|e| anyhow!(e))?;
 
@@ -718,25 +729,71 @@ async fn run_command<K: KeyProvider>(
                 "Chain swap created — fund the user_lockup_address to proceed"
             );
 
-            tracing::info!(swap_id = result.swap_id, "Waiting for server lockup...");
+            match direction {
+                ChainSwapDirection::BtcToArk => {
+                    // BtcToArk: user funds BTC on-chain, then claims Ark VHTLC
+                    tracing::info!(swap_id = result.swap_id, "Waiting for server lockup...");
 
-            client
-                .wait_for_chain_swap_server_lockup(&result.swap_id)
-                .await
-                .map_err(|e| anyhow!(e))?;
+                    client
+                        .wait_for_chain_swap_server_lockup(&result.swap_id)
+                        .await
+                        .map_err(|e| anyhow!(e))?;
 
-            tracing::info!(swap_id = result.swap_id, "Server locked funds, claiming...");
+                    tracing::info!(
+                        swap_id = result.swap_id,
+                        "Server locked ARK VHTLC, claiming..."
+                    );
 
-            let txid = client
-                .claim_chain_swap(&result.swap_id)
-                .await
-                .map_err(|e| anyhow!(e))?;
+                    let txid = client
+                        .claim_chain_swap(&result.swap_id)
+                        .await
+                        .map_err(|e| anyhow!(e))?;
 
-            tracing::info!(
-                swap_id = result.swap_id,
-                %txid,
-                "Chain swap claimed"
-            );
+                    tracing::info!(swap_id = result.swap_id, %txid, "Chain swap claimed (ARK)");
+                }
+                ChainSwapDirection::ArkToBtc => {
+                    // ArkToBtc: fund Ark VHTLC, wait for server BTC lockup, claim BTC
+                    let destination: bitcoin::Address = address
+                        .as_deref()
+                        .ok_or_else(|| anyhow!("--address is required for ark-to-btc"))?
+                        .parse::<bitcoin::Address<NetworkUnchecked>>()
+                        .map_err(|e| anyhow!("invalid BTC address: {e}"))?
+                        .assume_checked();
+
+                    let lockup_address = ArkAddress::decode(&result.user_lockup_address)
+                        .map_err(|e| anyhow!("failed to parse ARK lockup address: {e}"))?;
+
+                    tracing::info!(swap_id = result.swap_id, "Funding ARK VHTLC...");
+
+                    let fund_txid = client
+                        .send_vtxo(lockup_address, result.user_lockup_amount)
+                        .await
+                        .map_err(|e| anyhow!(e))?;
+
+                    tracing::info!(
+                        swap_id = result.swap_id,
+                        %fund_txid,
+                        "Funded ARK VHTLC, waiting for server BTC lockup..."
+                    );
+
+                    client
+                        .wait_for_chain_swap_server_lockup(&result.swap_id)
+                        .await
+                        .map_err(|e| anyhow!(e))?;
+
+                    tracing::info!(
+                        swap_id = result.swap_id,
+                        "Server locked BTC, claiming on-chain..."
+                    );
+
+                    let txid = client
+                        .claim_chain_swap_btc(&result.swap_id, destination, *fee_rate)
+                        .await
+                        .map_err(|e| anyhow!(e))?;
+
+                    tracing::info!(swap_id = result.swap_id, %txid, "Chain swap claimed (BTC)");
+                }
+            }
         }
         Commands::ClaimChainSwap { swap_id } => {
             let txid = client

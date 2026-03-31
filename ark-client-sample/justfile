@@ -64,9 +64,12 @@ lightning-invoice actor amount:
 pay-invoice actor invoice:
     cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic pay-invoice {{ invoice }}
 
-# Create a chain swap (ARK <-> BTC) via Boltz, e.g. just chain-swap alice btc-to-ark 100000
-chain-swap actor direction amount:
-    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic chain-swap {{ direction }} {{ amount }}
+# Create a chain swap (ARK <-> BTC) via Boltz
+# e.g. just chain-swap alice btc-to-ark 100000
+
+# e.g. just chain-swap alice ark-to-btc 100000 --address tb1q... --fee-rate 1.5
+chain-swap actor direction amount *args:
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic chain-swap {{ direction }} {{ amount }} {{ args }}
 
 # Claim a chain swap after the server has locked funds
 claim-chain-swap actor swap_id:
@@ -114,7 +117,6 @@ settle-recoverable actor:
 # Estimate fees for sending on-chain (collaborative redeem), e.g. just estimate-fees alice bc1... 50000
 estimate-fees actor address amount:
     cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic estimate-fees {{ address }} {{ amount }}
-
 
 # List pending (submitted but not finalized) offchain transactions for a given actor
 list-pending-txs actor:
