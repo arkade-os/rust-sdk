@@ -2179,42 +2179,15 @@ where
         // The BTC lockup is server-side for ArkToBtc
         let btc_address_str = &swap.server_lockup_address;
 
-        // Parse the claim and refund leaf scripts from hex
-        let claim_script_bytes: Vec<u8> =
-            bitcoin::hex::FromHex::from_hex(&swap_tree.claim_leaf.output)
-                .map_err(|e| Error::ad_hoc(format!("invalid claim leaf hex: {e}")))?;
-        let claim_script = ScriptBuf::from_bytes(claim_script_bytes);
-
-        let refund_script_bytes: Vec<u8> =
-            bitcoin::hex::FromHex::from_hex(&swap_tree.refund_leaf.output)
-                .map_err(|e| Error::ad_hoc(format!("invalid refund leaf hex: {e}")))?;
-        let refund_script = ScriptBuf::from_bytes(refund_script_bytes);
-
-        // Boltz uses MuSig2(claimKey, refundKey) as the internal key for the
-        // BTC HTLC, enabling cooperative key-path spending.
-        let claim_pk_bytes = swap.claim_public_key.to_bytes();
-        let refund_pk_bytes = swap.server_refund_public_key.to_bytes();
-
-        let musig_claim_pk = musig::PublicKey::from_slice(&claim_pk_bytes)
-            .map_err(|e| Error::ad_hoc(format!("invalid claim key for musig: {e}")))?;
-        let musig_refund_pk = musig::PublicKey::from_slice(&refund_pk_bytes)
-            .map_err(|e| Error::ad_hoc(format!("invalid refund key for musig: {e}")))?;
-
-        // Boltz uses MuSig2(serverRefundKey, userClaimKey) as the internal key
-        // for the BTC HTLC, enabling cooperative key-path spending.
-        let key_agg = musig::musig::KeyAggCache::new(&[&musig_refund_pk, &musig_claim_pk]);
-        let internal_key = XOnlyPublicKey::from_slice(&key_agg.agg_pk().serialize())
-            .map_err(|e| Error::ad_hoc(format!("invalid aggregated key: {e}")))?;
+        // Reconstruct the taproot tree. For ArkToBtc, the server's key on the BTC
+        // side is server_refund_public_key and the user's key is claim_public_key.
+        let taproot_spend_info = reconstruct_btc_htlc(
+            swap.server_refund_public_key,
+            swap.claim_public_key,
+            &swap_tree,
+        )?;
 
         let secp = Secp256k1::new();
-
-        let taproot_spend_info = bitcoin::taproot::TaprootBuilder::new()
-            .add_leaf(1, claim_script.clone())
-            .map_err(|e| Error::ad_hoc(format!("failed to add claim leaf: {e}")))?
-            .add_leaf(1, refund_script)
-            .map_err(|e| Error::ad_hoc(format!("failed to add refund leaf: {e}")))?
-            .finalize(&secp, internal_key)
-            .map_err(|_| Error::ad_hoc("failed to finalize taproot tree"))?;
 
         // Verify the reconstructed address matches the lockup address.
         let expected_spk = ScriptBuf::new_p2tr(
@@ -2235,6 +2208,10 @@ where
             )));
         }
 
+        let claim_script_bytes: Vec<u8> =
+            bitcoin::hex::FromHex::from_hex(&swap_tree.claim_leaf.output)
+                .map_err(|e| Error::ad_hoc(format!("invalid claim leaf hex: {e}")))?;
+        let claim_script = ScriptBuf::from_bytes(claim_script_bytes);
         let claim_ver = (claim_script.clone(), LeafVersion::TapScript);
 
         // Find the unspent UTXO at the BTC lockup address
@@ -2533,41 +2510,21 @@ where
         // The user's BTC lockup address
         let btc_address_str = &swap.user_lockup_address;
 
-        // Parse the claim and refund leaf scripts from hex
-        let claim_script_bytes: Vec<u8> =
-            bitcoin::hex::FromHex::from_hex(&swap_tree.claim_leaf.output)
-                .map_err(|e| Error::ad_hoc(format!("invalid claim leaf hex: {e}")))?;
-        let claim_script = ScriptBuf::from_bytes(claim_script_bytes);
+        // Reconstruct the taproot tree. For BtcToArk, the server's key on the BTC
+        // side is server_claim_public_key and the user's key is refund_public_key.
+        let taproot_spend_info = reconstruct_btc_htlc(
+            swap.server_claim_public_key,
+            swap.refund_public_key,
+            &swap_tree,
+        )?;
+
+        let secp = Secp256k1::new();
 
         let refund_script_bytes: Vec<u8> =
             bitcoin::hex::FromHex::from_hex(&swap_tree.refund_leaf.output)
                 .map_err(|e| Error::ad_hoc(format!("invalid refund leaf hex: {e}")))?;
         let refund_script = ScriptBuf::from_bytes(refund_script_bytes);
-
-        // Reconstruct the taproot tree with MuSig2(serverClaimKey, userRefundKey)
-        let claim_pk_bytes = swap.server_claim_public_key.to_bytes();
-        let refund_pk_bytes = swap.refund_public_key.to_bytes();
-
-        let musig_claim_pk = musig::PublicKey::from_slice(&claim_pk_bytes)
-            .map_err(|e| Error::ad_hoc(format!("invalid claim key for musig: {e}")))?;
-        let musig_refund_pk = musig::PublicKey::from_slice(&refund_pk_bytes)
-            .map_err(|e| Error::ad_hoc(format!("invalid refund key for musig: {e}")))?;
-
-        // Boltz uses MuSig2(serverKey, userKey) order (server first)
-        let key_agg = musig::musig::KeyAggCache::new(&[&musig_claim_pk, &musig_refund_pk]);
-        let internal_key = XOnlyPublicKey::from_slice(&key_agg.agg_pk().serialize())
-            .map_err(|e| Error::ad_hoc(format!("invalid aggregated key: {e}")))?;
-
-        let secp = Secp256k1::new();
         let refund_ver = (refund_script.clone(), LeafVersion::TapScript);
-
-        let taproot_spend_info = bitcoin::taproot::TaprootBuilder::new()
-            .add_leaf(1, claim_script)
-            .map_err(|e| Error::ad_hoc(format!("failed to add claim leaf: {e}")))?
-            .add_leaf(1, refund_script.clone())
-            .map_err(|e| Error::ad_hoc(format!("failed to add refund leaf: {e}")))?
-            .finalize(&secp, internal_key)
-            .map_err(|_| Error::ad_hoc("failed to finalize taproot tree"))?;
 
         // Verify address
         let expected_spk = ScriptBuf::new_p2tr(
@@ -3659,6 +3616,43 @@ struct VhtlcInfo {
     preimage: Option<[u8; 32]>,
 }
 
+/// Reconstruct the taproot spend info for a Boltz on-chain BTC HTLC.
+///
+/// Boltz uses `MuSig2(serverKey, userKey)` as the internal key.
+/// The tree has two leaves: claim and refund, from the [`SwapTree`].
+fn reconstruct_btc_htlc(
+    server_pk: PublicKey,
+    user_pk: PublicKey,
+    swap_tree: &SwapTree,
+) -> Result<bitcoin::taproot::TaprootSpendInfo, Error> {
+    let claim_script_bytes: Vec<u8> = bitcoin::hex::FromHex::from_hex(&swap_tree.claim_leaf.output)
+        .map_err(|e| Error::ad_hoc(format!("invalid claim leaf hex: {e}")))?;
+    let claim_script = ScriptBuf::from_bytes(claim_script_bytes);
+
+    let refund_script_bytes: Vec<u8> =
+        bitcoin::hex::FromHex::from_hex(&swap_tree.refund_leaf.output)
+            .map_err(|e| Error::ad_hoc(format!("invalid refund leaf hex: {e}")))?;
+    let refund_script = ScriptBuf::from_bytes(refund_script_bytes);
+
+    let musig_server_pk = musig::PublicKey::from_slice(&server_pk.to_bytes())
+        .map_err(|e| Error::ad_hoc(format!("invalid server key for musig: {e}")))?;
+    let musig_user_pk = musig::PublicKey::from_slice(&user_pk.to_bytes())
+        .map_err(|e| Error::ad_hoc(format!("invalid user key for musig: {e}")))?;
+
+    let key_agg = musig::musig::KeyAggCache::new(&[&musig_server_pk, &musig_user_pk]);
+    let internal_key = XOnlyPublicKey::from_slice(&key_agg.agg_pk().serialize())
+        .map_err(|e| Error::ad_hoc(format!("invalid aggregated key: {e}")))?;
+
+    let secp = Secp256k1::new();
+    bitcoin::taproot::TaprootBuilder::new()
+        .add_leaf(1, claim_script)
+        .map_err(|e| Error::ad_hoc(format!("failed to add claim leaf: {e}")))?
+        .add_leaf(1, refund_script)
+        .map_err(|e| Error::ad_hoc(format!("failed to add refund leaf: {e}")))?
+        .finalize(&secp, internal_key)
+        .map_err(|_| Error::ad_hoc("failed to finalize taproot tree"))
+}
+
 /// Collect all tapscripts from a [`VhtlcScript`].
 fn vhtlc_tapscripts(vhtlc: &VhtlcScript) -> Vec<ScriptBuf> {
     vec![
@@ -4289,6 +4283,78 @@ mod tests {
                 .timeout_block_heights
                 .unilateral_refund_without_receiver,
             86528
+        );
+    }
+
+    #[test]
+    fn test_btc_htlc_address_reconstruction_btc_to_ark() {
+        // Real BtcToArk chain swap response from Boltz mutinynet.
+        // lockupDetails = BTC side (user locks): serverPublicKey = server's claim key.
+        // User's key is refundPublicKey from the request.
+        let server_pk = PublicKey::from_str(
+            "03ce9f5a57218103d5fe07b9d7ecf4b28ad60a960f0fbfd86dd090013020617389",
+        )
+        .unwrap();
+        let user_pk = PublicKey::from_str(
+            "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+        )
+        .unwrap();
+        let swap_tree = SwapTree {
+            claim_leaf: SwapTreeLeaf {
+                version: 192,
+                output: "82012088a914b472a266d0bd89c13706a4132ccfb16f7c3b9fcb8820ce9f5a57218103d5fe07b9d7ecf4b28ad60a960f0fbfd86dd090013020617389ac".into(),
+            },
+            refund_leaf: SwapTreeLeaf {
+                version: 192,
+                output: "20c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5ad03f9832db1".into(),
+            },
+        };
+
+        let spend_info = reconstruct_btc_htlc(server_pk, user_pk, &swap_tree).unwrap();
+
+        let secp = Secp256k1::new();
+        let spk = ScriptBuf::new_p2tr(&secp, spend_info.internal_key(), spend_info.merkle_root());
+        let addr = bitcoin::Address::from_script(&spk, bitcoin::Network::Testnet).unwrap();
+
+        assert_eq!(
+            addr.to_string(),
+            "tb1ptf632fkczflsjn4356ra4x2s6qp6vvk8e7pplprpwnkvcsd8tpwqkw92c7"
+        );
+    }
+
+    #[test]
+    fn test_btc_htlc_address_reconstruction_ark_to_btc() {
+        // Real ArkToBtc chain swap response from Boltz mutinynet.
+        // claimDetails = BTC side (user claims): serverPublicKey = server's refund key.
+        // User's key is claimPublicKey from the request.
+        let server_pk = PublicKey::from_str(
+            "0207364dc5853e630be83439fde62b531e3c11db34ce8c4f454a56782555c58ed6",
+        )
+        .unwrap();
+        let user_pk = PublicKey::from_str(
+            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        )
+        .unwrap();
+        let swap_tree = SwapTree {
+            claim_leaf: SwapTreeLeaf {
+                version: 192,
+                output: "82012088a914cf7ff51392e9a37bc72c7284841db669c82e2c14882079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ac".into(),
+            },
+            refund_leaf: SwapTreeLeaf {
+                version: 192,
+                output: "2007364dc5853e630be83439fde62b531e3c11db34ce8c4f454a56782555c58ed6ad036b832db1".into(),
+            },
+        };
+
+        let spend_info = reconstruct_btc_htlc(server_pk, user_pk, &swap_tree).unwrap();
+
+        let secp = Secp256k1::new();
+        let spk = ScriptBuf::new_p2tr(&secp, spend_info.internal_key(), spend_info.merkle_root());
+        let addr = bitcoin::Address::from_script(&spk, bitcoin::Network::Testnet).unwrap();
+
+        assert_eq!(
+            addr.to_string(),
+            "tb1pxa78pf55g0aaurrd8c76fyax4df9e8y38fzps8sw2vkrecf9k3ss36a78m"
         );
     }
 }
