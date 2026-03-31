@@ -51,6 +51,35 @@ use std::str::FromStr;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+/// The type of a Boltz swap.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum SwapType {
+    Submarine,
+    Reverse,
+    Chain,
+    /// Swap ID not found in local storage.
+    Unknown,
+}
+
+impl std::fmt::Display for SwapType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Submarine => write!(f, "submarine"),
+            Self::Reverse => write!(f, "reverse"),
+            Self::Chain => write!(f, "chain"),
+            Self::Unknown => write!(f, "unknown"),
+        }
+    }
+}
+
+/// Status information for a Boltz swap.
+#[derive(Clone, Debug)]
+pub struct SwapStatusInfo {
+    pub swap_id: String,
+    pub swap_type: SwapType,
+    pub status: SwapStatus,
+}
+
 #[derive(Clone, Debug)]
 pub struct SubmarineSwapResult {
     pub swap_id: String,
@@ -379,6 +408,8 @@ where
                         | SwapStatus::Created
                         | SwapStatus::TransactionMempool
                         | SwapStatus::TransactionConfirmed
+                        | SwapStatus::TransactionServerMempool
+                        | SwapStatus::TransactionServerConfirmed
                         | SwapStatus::TransactionRefunded
                         | SwapStatus::TransactionFailed
                         | SwapStatus::TransactionClaimed
@@ -1235,6 +1266,8 @@ where
                         | SwapStatus::TransactionRefunded
                         | SwapStatus::TransactionFailed
                         | SwapStatus::TransactionClaimed
+                        | SwapStatus::TransactionServerMempool
+                        | SwapStatus::TransactionServerConfirmed
                         | SwapStatus::InvoiceSet
                         | SwapStatus::InvoicePending
                         | SwapStatus::InvoicePaid
@@ -1513,6 +1546,8 @@ where
                         | SwapStatus::TransactionRefunded
                         | SwapStatus::TransactionFailed
                         | SwapStatus::TransactionClaimed
+                        | SwapStatus::TransactionServerMempool
+                        | SwapStatus::TransactionServerConfirmed
                         | SwapStatus::InvoiceSet
                         | SwapStatus::InvoicePending
                         | SwapStatus::InvoicePaid
@@ -1691,6 +1726,437 @@ where
             claim_txid: ark_txid,
             claim_amount,
             preimage,
+        })
+    }
+
+    // Chain swap.
+
+    /// Create a chain swap via Boltz for swapping between ARK and on-chain BTC.
+    ///
+    /// Returns a [`ChainSwapResult`] containing the swap ID and the address the user must
+    /// fund to initiate the swap. For [`ChainSwapDirection::ArkToBtc`], the user should send
+    /// Ark VTXOs to the `user_lockup_address` using [`Client::send_vtxo`]. For
+    /// [`ChainSwapDirection::BtcToArk`], the user should send BTC to the `user_lockup_address`.
+    ///
+    /// After funding, use [`Self::wait_for_chain_swap_server_lockup`] to wait for Boltz to
+    /// lock their side, then [`Self::claim_chain_swap`] to claim.
+    pub async fn create_chain_swap(
+        &self,
+        direction: ChainSwapDirection,
+        amount: ChainSwapAmount,
+    ) -> Result<ChainSwapResult, Error> {
+        let preimage: [u8; 32] = rand::random();
+        let preimage_hash = sha256::Hash::hash(&preimage);
+
+        let claim_keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
+        let claim_public_key = claim_keypair.public_key();
+        let claim_key_derivation_index =
+            self.derivation_index_for_pk(&claim_keypair.x_only_public_key().0);
+
+        let refund_keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
+        let refund_public_key = refund_keypair.public_key();
+        let refund_key_derivation_index =
+            self.derivation_index_for_pk(&refund_keypair.x_only_public_key().0);
+
+        let (from, to) = match &direction {
+            ChainSwapDirection::ArkToBtc => (Asset::Ark, Asset::Btc),
+            ChainSwapDirection::BtcToArk => (Asset::Btc, Asset::Ark),
+        };
+
+        let (user_lock_amount, server_lock_amount) = match &amount {
+            ChainSwapAmount::UserLock(a) => (Some(*a), None),
+            ChainSwapAmount::ServerLock(a) => (None, Some(*a)),
+        };
+
+        let request = CreateChainSwapRequest {
+            from,
+            to,
+            user_lock_amount,
+            server_lock_amount,
+            claim_public_key: claim_public_key.into(),
+            refund_public_key: refund_public_key.into(),
+            preimage_hash,
+        };
+
+        let url = format!("{}/v2/swap/chain", self.inner.boltz_url);
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| Error::ad_hoc(e.to_string()))
+            .context("failed to send chain swap request")?;
+
+        if !response.status().is_success() {
+            let error_text = response
+                .text()
+                .await
+                .map_err(|e| Error::ad_hoc(e.to_string()))
+                .context("failed to read error text")?;
+
+            return Err(Error::ad_hoc(format!(
+                "failed to create chain swap: {error_text}"
+            )));
+        }
+
+        let swap_response: CreateChainSwapResponse = response
+            .json()
+            .await
+            .map_err(|e| Error::ad_hoc(e.to_string()))
+            .context("failed to deserialize chain swap response")?;
+
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(Error::ad_hoc)
+            .context("failed to compute created_at")?;
+
+        // lockup_details = user's side (where user locks funds)
+        // claim_details  = server's side (where user claims funds)
+        // The ARK side carries `timeouts` (full VHTLC timelocks).
+        // The BTC side carries `swap_tree` and optionally `bip21`.
+        let bip21 = swap_response
+            .lockup_details
+            .bip21
+            .or(swap_response.claim_details.bip21.clone());
+
+        let data = ChainSwapData {
+            id: swap_response.id.clone(),
+            status: SwapStatus::Created,
+            direction,
+            preimage: Some(preimage),
+            preimage_hash,
+            claim_public_key: claim_public_key.into(),
+            refund_public_key: refund_public_key.into(),
+            server_claim_public_key: swap_response.lockup_details.server_public_key,
+            server_refund_public_key: swap_response.claim_details.server_public_key,
+            user_lockup_address: swap_response.lockup_details.lockup_address,
+            server_lockup_address: swap_response.claim_details.lockup_address,
+            user_lockup_amount: swap_response.lockup_details.amount,
+            server_lockup_amount: swap_response.claim_details.amount,
+            user_timeout_block_height: swap_response.lockup_details.timeout_block_height,
+            server_timeout_block_height: swap_response.claim_details.timeout_block_height,
+            user_timeout_block_heights: swap_response.lockup_details.timeouts,
+            server_timeout_block_heights: swap_response.claim_details.timeouts,
+            bip21,
+            created_at: created_at.as_secs(),
+            claim_key_derivation_index,
+            refund_key_derivation_index,
+        };
+
+        self.swap_storage()
+            .insert_chain(swap_response.id.clone(), data.clone())
+            .await?;
+
+        tracing::info!(
+            swap_id = swap_response.id,
+            direction = ?data.direction,
+            user_lockup_address = %data.user_lockup_address,
+            user_lockup_amount = %data.user_lockup_amount,
+            server_lockup_amount = %data.server_lockup_amount,
+            "Created chain swap"
+        );
+
+        Ok(ChainSwapResult {
+            swap_id: swap_response.id,
+            user_lockup_address: data.user_lockup_address,
+            user_lockup_amount: data.user_lockup_amount,
+            server_lockup_amount: data.server_lockup_amount,
+            bip21: data.bip21,
+        })
+    }
+
+    /// Wait for Boltz to lock funds on their side of the chain swap.
+    ///
+    /// Returns when the server's lockup transaction is detected in the mempool or confirmed.
+    /// After this returns, use [`Self::claim_chain_swap`] to claim the funds.
+    pub async fn wait_for_chain_swap_server_lockup(&self, swap_id: &str) -> Result<(), Error> {
+        use futures::StreamExt;
+
+        let stream = self.subscribe_to_swap_updates(swap_id.to_string());
+        tokio::pin!(stream);
+
+        while let Some(status_result) = stream.next().await {
+            match status_result {
+                Ok(status) => {
+                    tracing::debug!(swap_id, current = ?status, "Chain swap status");
+                    match status {
+                        SwapStatus::TransactionServerMempool
+                        | SwapStatus::TransactionServerConfirmed => {
+                            tracing::debug!(swap_id, "Server lockup detected");
+                            return Ok(());
+                        }
+                        SwapStatus::SwapExpired => {
+                            return Err(Error::ad_hoc(format!("chain swap expired: {swap_id}")));
+                        }
+                        SwapStatus::TransactionRefunded | SwapStatus::TransactionFailed => {
+                            return Err(Error::ad_hoc(format!(
+                                "chain swap failed or refunded: {swap_id}"
+                            )));
+                        }
+                        SwapStatus::Error { error } => {
+                            tracing::error!(swap_id, "Got error from chain swap updates: {error}");
+                        }
+                        // User lockup detected — still waiting for server side.
+                        SwapStatus::Created
+                        | SwapStatus::TransactionMempool
+                        | SwapStatus::TransactionConfirmed
+                        | SwapStatus::TransactionClaimed
+                        | SwapStatus::InvoiceSet
+                        | SwapStatus::InvoicePending
+                        | SwapStatus::InvoicePaid
+                        | SwapStatus::InvoiceFailedToPay
+                        | SwapStatus::InvoiceExpired => {}
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Err(Error::ad_hoc("Chain swap status stream ended unexpectedly"))
+    }
+
+    /// Claim the Ark VHTLC from a chain swap after Boltz has locked funds.
+    ///
+    /// This claims the server's Ark VHTLC lockup using the stored preimage. It is intended
+    /// for [`ChainSwapDirection::BtcToArk`] swaps where the server locks an Ark VHTLC.
+    ///
+    /// Call this after [`Self::wait_for_chain_swap_server_lockup`] returns.
+    pub async fn claim_chain_swap(&self, swap_id: &str) -> Result<Txid, Error> {
+        let swap = self
+            .swap_storage()
+            .get_chain(swap_id)
+            .await
+            .context("failed to get chain swap data")?
+            .ok_or_else(|| Error::ad_hoc(format!("chain swap data not found: {swap_id}")))?;
+
+        let preimage = swap
+            .preimage
+            .ok_or_else(|| Error::ad_hoc(format!("preimage not found for chain swap {swap_id}")))?;
+
+        let preimage_hash = ripemd160::Hash::hash(swap.preimage_hash.as_byte_array());
+
+        let timeout_block_heights = swap.server_timeout_block_heights.ok_or_else(|| {
+            Error::ad_hoc(format!(
+                "chain swap {swap_id} has no ARK-side VHTLC timeouts on server lockup \
+                 (this swap's server lockup is on-chain BTC, not an Ark VHTLC)"
+            ))
+        })?;
+
+        let vhtlc = VhtlcScript::new(
+            VhtlcOptions {
+                sender: swap.server_refund_public_key.into(),
+                receiver: swap.claim_public_key.into(),
+                server: self.server_info.signer_pk.into(),
+                preimage_hash,
+                refund_locktime: timeout_block_heights.refund,
+                unilateral_claim_delay: parse_sequence_number(
+                    timeout_block_heights.unilateral_claim as i64,
+                )
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
+                unilateral_refund_delay: parse_sequence_number(
+                    timeout_block_heights.unilateral_refund as i64,
+                )
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral refund timeout: {e}")))?,
+                unilateral_refund_without_receiver_delay: parse_sequence_number(
+                    timeout_block_heights.unilateral_refund_without_receiver as i64,
+                )
+                .map_err(|e| {
+                    Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
+                })?,
+            },
+            self.server_info.network,
+        )
+        .map_err(Error::ad_hoc)
+        .context("failed to build VHTLC script")?;
+
+        let vhtlc_address = vhtlc.address();
+        let expected_address = ArkAddress::decode(&swap.server_lockup_address)
+            .map_err(|e| Error::ad_hoc(format!("invalid server lockup address: {e}")))?;
+
+        if vhtlc_address != expected_address {
+            return Err(Error::ad_hoc(format!(
+                "VHTLC address ({vhtlc_address}) does not match server lockup address ({expected_address})"
+            )));
+        }
+
+        let vhtlc_outpoint = {
+            let virtual_tx_outpoints = self
+                .get_virtual_tx_outpoints(std::iter::once(vhtlc_address))
+                .await?;
+
+            let vtxo_list = VtxoList::new(self.server_info.dust, virtual_tx_outpoints);
+
+            let mut unspent = vtxo_list.all_unspent();
+            let vhtlc_outpoint = unspent.next().ok_or_else(|| {
+                Error::ad_hoc(format!("no outpoint found for address {vhtlc_address}"))
+            })?;
+
+            vhtlc_outpoint.clone()
+        };
+
+        let (claim_address, _) = self
+            .get_offchain_address()
+            .context("failed to get offchain address")?;
+        let claim_amount = swap.server_lockup_amount;
+
+        let outputs = vec![(&claim_address, claim_amount)];
+
+        let spend_info = vhtlc.taproot_spend_info();
+        let script_ver = (vhtlc.claim_script(), LeafVersion::TapScript);
+        let control_block = spend_info
+            .control_block(&script_ver)
+            .ok_or(Error::ad_hoc("control block not found for claim script"))?;
+
+        let script_pubkey = vhtlc.script_pubkey();
+
+        let claimer_pk = swap.claim_public_key.inner.x_only_public_key().0;
+        let vhtlc_input = VtxoInput::new(
+            script_ver.0,
+            None,
+            control_block,
+            vhtlc.tapscripts(),
+            script_pubkey,
+            claim_amount,
+            vhtlc_outpoint.outpoint,
+        );
+
+        let OffchainTransactions {
+            mut ark_tx,
+            checkpoint_txs,
+        } = build_offchain_transactions(
+            &outputs,
+            None,
+            std::slice::from_ref(&vhtlc_input),
+            &self.server_info,
+        )
+        .map_err(Error::from)
+        .context("failed to build offchain TXs")?;
+
+        let kp = self.keypair_by_pk(&claimer_pk)?;
+        let sign_fn =
+            |input: &mut psbt::Input,
+             msg: secp256k1::Message|
+             -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
+                // Add preimage to PSBT input.
+                {
+                    let mut bytes = vec![1];
+
+                    let length = VarInt::from(preimage.len() as u64);
+
+                    length
+                        .consensus_encode(&mut bytes)
+                        .expect("valid length encoding");
+
+                    bytes.write_all(&preimage).expect("valid preimage encoding");
+
+                    input.unknown.insert(
+                        psbt::raw::Key {
+                            type_value: 222,
+                            key: VTXO_CONDITION_KEY.to_vec(),
+                        },
+                        bytes,
+                    );
+                }
+
+                let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &kp);
+                let pk = kp.x_only_public_key().0;
+
+                Ok(vec![(sig, pk)])
+            };
+
+        sign_ark_transaction(sign_fn, &mut ark_tx, 0)
+            .map_err(Error::from)
+            .context("failed to sign Ark TX")?;
+
+        let ark_txid = ark_tx.unsigned_tx.compute_txid();
+
+        let res = self
+            .network_client()
+            .submit_offchain_transaction_request(ark_tx, checkpoint_txs)
+            .await
+            .map_err(Error::from)
+            .context("failed to submit offchain TXs")?;
+
+        let mut checkpoint_psbt = res
+            .signed_checkpoint_txs
+            .first()
+            .ok_or_else(|| Error::ad_hoc("no checkpoint PSBTs found"))?
+            .clone();
+
+        sign_checkpoint_transaction(sign_fn, &mut checkpoint_psbt)
+            .map_err(Error::from)
+            .context("failed to sign checkpoint TX")?;
+
+        timeout_op(
+            self.inner.timeout,
+            self.network_client()
+                .finalize_offchain_transaction(ark_txid, vec![checkpoint_psbt]),
+        )
+        .await
+        .context("failed to finalize offchain transaction")?
+        .map_err(Error::ark_server)
+        .context("failed to finalize offchain transaction")?;
+
+        tracing::info!(swap_id, txid = %ark_txid, "Claimed chain swap VHTLC");
+
+        let mut updated_swap = swap.clone();
+        updated_swap.status = SwapStatus::TransactionClaimed;
+        self.swap_storage()
+            .update_chain(swap_id, updated_swap)
+            .await
+            .context("failed to update chain swap data")?;
+
+        Ok(ark_txid)
+    }
+
+    /// Query the current status of any Boltz swap by ID.
+    ///
+    /// Checks local swap storage to determine the swap type, then queries the Boltz API
+    /// for the live status.
+    pub async fn get_swap_status(&self, swap_id: &str) -> Result<SwapStatusInfo, Error> {
+        // Determine swap type from local storage.
+        let swap_type = if self.swap_storage().get_submarine(swap_id).await?.is_some() {
+            SwapType::Submarine
+        } else if self.swap_storage().get_reverse(swap_id).await?.is_some() {
+            SwapType::Reverse
+        } else if self.swap_storage().get_chain(swap_id).await?.is_some() {
+            SwapType::Chain
+        } else {
+            SwapType::Unknown
+        };
+
+        // Query the Boltz API for live status.
+        let url = format!("{}/v2/swap/{swap_id}", self.inner.boltz_url);
+        let client = reqwest::Client::new();
+        let response = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| Error::ad_hoc(e.to_string()))
+            .context("failed to query swap status")?;
+
+        if !response.status().is_success() {
+            let error_text = response
+                .text()
+                .await
+                .map_err(|e| Error::ad_hoc(e.to_string()))?;
+            return Err(Error::ad_hoc(format!(
+                "failed to get swap status: {error_text}"
+            )));
+        }
+
+        let status_response: GetSwapStatusResponse = response
+            .json()
+            .await
+            .map_err(|e| Error::ad_hoc(e.to_string()))
+            .context("failed to deserialize swap status response")?;
+
+        Ok(SwapStatusInfo {
+            swap_id: swap_id.to_string(),
+            swap_type,
+            status: status_response.status,
         })
     }
 
@@ -2703,6 +3169,14 @@ impl SwapAmount {
     }
 }
 
+/// The amount specification for a chain swap.
+pub enum ChainSwapAmount {
+    /// The amount the user will lock up.
+    UserLock(Amount),
+    /// The amount the user wants to receive (server lock amount).
+    ServerLock(Amount),
+}
+
 /// Data related to a submarine swap.
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2792,6 +3266,12 @@ pub enum SwapStatus {
     /// Transaction claimed.
     #[serde(rename = "transaction.claimed")]
     TransactionClaimed,
+    /// Server lockup transaction detected in mempool (chain swaps).
+    #[serde(rename = "transaction.server.mempool")]
+    TransactionServerMempool,
+    /// Server lockup transaction confirmed (chain swaps).
+    #[serde(rename = "transaction.server.confirmed")]
+    TransactionServerConfirmed,
     /// Lightning invoice has been set.
     #[serde(rename = "invoice.set")]
     InvoiceSet,
@@ -3030,6 +3510,192 @@ struct ReverseBtcPairs {
 #[serde(rename_all = "UPPERCASE")]
 struct ReversePairsResponse {
     btc: ReverseBtcPairs,
+}
+
+// ── Chain swap types ──────────────────────────────────────────────────
+
+/// Direction of a chain swap.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum ChainSwapDirection {
+    /// User locks Ark VHTLC, claims on-chain BTC.
+    ArkToBtc,
+    /// User sends on-chain BTC, claims Ark VHTLC.
+    BtcToArk,
+}
+
+/// Data for a pending chain swap (ARK ↔ BTC).
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChainSwapData {
+    /// Unique swap identifier.
+    pub id: String,
+    /// Current swap status.
+    pub status: SwapStatus,
+    /// Direction of the swap.
+    pub direction: ChainSwapDirection,
+    /// Preimage for the swap.
+    pub preimage: Option<[u8; 32]>,
+    /// The preimage hash.
+    pub preimage_hash: sha256::Hash,
+    /// User's claim public key (for claiming Boltz's VHTLC).
+    pub claim_public_key: PublicKey,
+    /// User's refund public key (for refunding user's VHTLC).
+    pub refund_public_key: PublicKey,
+    /// Boltz's claim public key (on user's VHTLC).
+    pub server_claim_public_key: PublicKey,
+    /// Boltz's refund public key (on Boltz's VHTLC).
+    pub server_refund_public_key: PublicKey,
+    /// Address where user locks funds.
+    pub user_lockup_address: String,
+    /// Address where Boltz locks funds.
+    pub server_lockup_address: String,
+    /// Amount user locks up.
+    pub user_lockup_amount: Amount,
+    /// Amount Boltz locks up (what user receives).
+    pub server_lockup_amount: Amount,
+    /// Timeout block height for user's lockup.
+    pub user_timeout_block_height: u32,
+    /// Timeout block height for Boltz's lockup.
+    pub server_timeout_block_height: u32,
+    /// Full VHTLC timelocks for user's lockup (present when user locks on ARK side).
+    #[serde(default)]
+    pub user_timeout_block_heights: Option<TimeoutBlockHeights>,
+    /// Full VHTLC timelocks for Boltz's lockup (present when server locks on ARK side).
+    #[serde(default)]
+    pub server_timeout_block_heights: Option<TimeoutBlockHeights>,
+    /// BIP21 payment URI for funding (present for on-chain BTC lockup).
+    #[serde(default)]
+    pub bip21: Option<String>,
+    /// UNIX timestamp when swap was created.
+    pub created_at: u64,
+    /// BIP32 derivation index for the claim key.
+    #[serde(default)]
+    pub claim_key_derivation_index: Option<u32>,
+    /// BIP32 derivation index for the refund key.
+    #[serde(default)]
+    pub refund_key_derivation_index: Option<u32>,
+}
+
+/// Result of creating a chain swap.
+#[derive(Clone, Debug)]
+pub struct ChainSwapResult {
+    /// Unique swap identifier.
+    pub swap_id: String,
+    /// Address the user must fund to initiate the swap.
+    pub user_lockup_address: String,
+    /// Amount the user must send.
+    pub user_lockup_amount: Amount,
+    /// Amount the user will receive after fees.
+    pub server_lockup_amount: Amount,
+    /// BIP21 payment URI for on-chain BTC funding (when the user lockup is BTC).
+    pub bip21: Option<String>,
+}
+
+// ── Chain swap Boltz API types ───────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateChainSwapRequest {
+    from: Asset,
+    to: Asset,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user_lock_amount: Option<Amount>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    server_lock_amount: Option<Amount>,
+    claim_public_key: PublicKey,
+    refund_public_key: PublicKey,
+    preimage_hash: sha256::Hash,
+}
+
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateChainSwapResponse {
+    id: String,
+    claim_details: ChainSwapSideDetails,
+    lockup_details: ChainSwapSideDetails,
+}
+
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChainSwapSideDetails {
+    lockup_address: String,
+    server_public_key: PublicKey,
+    timeout_block_height: u32,
+    #[serde(default)]
+    timeouts: Option<TimeoutBlockHeights>,
+    amount: Amount,
+    #[serde(default)]
+    swap_tree: Option<serde_json::Value>,
+    #[serde(default)]
+    bip21: Option<String>,
+}
+
+/// Miner fees for chain swaps, broken down by user and server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChainMinerFees {
+    /// Miner fee for user's transaction.
+    pub user: u64,
+    /// Miner fee for server's transaction.
+    pub server: u64,
+}
+
+/// Fee information for chain swaps (ARK ↔ BTC).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChainSwapFees {
+    /// Percentage fee charged by Boltz.
+    pub percentage: f64,
+    /// Miner fees broken down by party.
+    pub miner_fees: ChainMinerFees,
+}
+
+// Internal structs for deserializing chain swap pairs response.
+
+#[derive(Debug, Clone, Deserialize)]
+struct ChainPairFees {
+    percentage: f64,
+    #[serde(rename = "minerFees")]
+    miner_fees: ChainMinerFeesResponse,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ChainMinerFeesResponse {
+    user: u64,
+    server: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ChainPairInfo {
+    fees: ChainPairFees,
+    limits: PairLimits,
+}
+
+// ARK -> BTC: { "ARK": { "BTC": { ... } } }
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+struct ChainArkPairs {
+    btc: ChainPairInfo,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+struct ChainArkToBtcPairsResponse {
+    ark: ChainArkPairs,
+}
+
+// BTC -> ARK: { "BTC": { "ARK": { ... } } }
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+struct ChainBtcPairs {
+    ark: ChainPairInfo,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+struct ChainBtcToArkPairsResponse {
+    btc: ChainBtcPairs,
 }
 
 #[cfg(test)]

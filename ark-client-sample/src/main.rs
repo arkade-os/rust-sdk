@@ -12,6 +12,8 @@ use ark_bdk_wallet::Wallet;
 use ark_client::lightning_invoice::Bolt11Invoice;
 use ark_client::Bip32KeyProvider;
 use ark_client::Blockchain;
+use ark_client::ChainSwapAmount;
+use ark_client::ChainSwapDirection;
 use ark_client::Error;
 use ark_client::KeyProvider;
 use ark_client::OfflineClient;
@@ -134,6 +136,23 @@ enum Commands {
     PayInvoice {
         /// A BOLT11 invoice.
         invoice: String,
+    },
+    /// Create a chain swap (ARK <-> BTC) via Boltz.
+    ChainSwap {
+        /// Direction: "ark-to-btc" or "btc-to-ark".
+        direction: String,
+        /// Amount in sats.
+        amount: u64,
+    },
+    /// Claim a chain swap after the server has locked funds.
+    ClaimChainSwap {
+        /// The Boltz swap ID.
+        swap_id: String,
+    },
+    /// Check the status of a Boltz swap.
+    SwapStatus {
+        /// The Boltz swap ID.
+        swap_id: String,
     },
     /// Attempt to refund a past swap collaboratively.
     RefundSwap { swap_id: String },
@@ -673,6 +692,72 @@ async fn run_command<K: KeyProvider>(
                 .map_err(|e| anyhow!(e))?;
 
             tracing::info!(swap_id, "Payment made");
+        }
+        Commands::ChainSwap { direction, amount } => {
+            let direction = match direction.as_str() {
+                "ark-to-btc" => ChainSwapDirection::ArkToBtc,
+                "btc-to-ark" => ChainSwapDirection::BtcToArk,
+                other => {
+                    bail!("invalid direction '{other}', expected 'ark-to-btc' or 'btc-to-ark'")
+                }
+            };
+
+            let amount = ChainSwapAmount::UserLock(Amount::from_sat(*amount));
+
+            let result = client
+                .create_chain_swap(direction, amount)
+                .await
+                .map_err(|e| anyhow!(e))?;
+
+            tracing::info!(
+                swap_id = result.swap_id,
+                user_lockup_address = %result.user_lockup_address,
+                user_lockup_amount = %result.user_lockup_amount,
+                server_lockup_amount = %result.server_lockup_amount,
+                bip21 = result.bip21.as_deref().unwrap_or("n/a"),
+                "Chain swap created — fund the user_lockup_address to proceed"
+            );
+
+            tracing::info!(swap_id = result.swap_id, "Waiting for server lockup...");
+
+            client
+                .wait_for_chain_swap_server_lockup(&result.swap_id)
+                .await
+                .map_err(|e| anyhow!(e))?;
+
+            tracing::info!(swap_id = result.swap_id, "Server locked funds, claiming...");
+
+            let txid = client
+                .claim_chain_swap(&result.swap_id)
+                .await
+                .map_err(|e| anyhow!(e))?;
+
+            tracing::info!(
+                swap_id = result.swap_id,
+                %txid,
+                "Chain swap claimed"
+            );
+        }
+        Commands::ClaimChainSwap { swap_id } => {
+            let txid = client
+                .claim_chain_swap(swap_id.as_str())
+                .await
+                .map_err(|e| anyhow!(e))?;
+
+            tracing::info!(%txid, swap_id, "Chain swap claimed");
+        }
+        Commands::SwapStatus { swap_id } => {
+            let info = client
+                .get_swap_status(swap_id.as_str())
+                .await
+                .map_err(|e| anyhow!(e))?;
+
+            tracing::info!(
+                swap_id,
+                swap_type = %info.swap_type,
+                status = ?info.status,
+                "Swap status"
+            );
         }
         Commands::RefundSwap { swap_id } => {
             let txid = client

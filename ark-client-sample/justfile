@@ -64,6 +64,18 @@ lightning-invoice actor amount:
 pay-invoice actor invoice:
     cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic pay-invoice {{ invoice }}
 
+# Create a chain swap (ARK <-> BTC) via Boltz, e.g. just chain-swap alice btc-to-ark 100000
+chain-swap actor direction amount:
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic chain-swap {{ direction }} {{ amount }}
+
+# Claim a chain swap after the server has locked funds
+claim-chain-swap actor swap_id:
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic claim-chain-swap {{ swap_id }}
+
+# Check the status of a Boltz swap
+swap-status actor swap_id:
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic swap-status {{ swap_id }}
+
 # Refund a submarine swap collaboratively
 refund-swap-collab actor swap_id:
     cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic refund-swap {{ swap_id }}

@@ -1,4 +1,5 @@
 use super::SwapStorage;
+use crate::boltz::ChainSwapData;
 use crate::boltz::ReverseSwapData;
 use crate::boltz::SubmarineSwapData;
 use crate::boltz::SwapStatus;
@@ -16,6 +17,7 @@ use std::sync::Mutex;
 pub struct InMemorySwapStorage {
     submarine_swaps: Arc<Mutex<HashMap<String, SubmarineSwapData>>>,
     reverse_swaps: Arc<Mutex<HashMap<String, ReverseSwapData>>>,
+    chain_swaps: Arc<Mutex<HashMap<String, ChainSwapData>>>,
 }
 
 impl InMemorySwapStorage {
@@ -32,6 +34,7 @@ impl InMemorySwapStorage {
         Self {
             submarine_swaps: Arc::new(Mutex::new(HashMap::new())),
             reverse_swaps: Arc::new(Mutex::new(HashMap::new())),
+            chain_swaps: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -126,6 +129,48 @@ impl SwapStorage for InMemorySwapStorage {
 
     async fn remove_reverse(&self, id: &str) -> Result<Option<ReverseSwapData>, Error> {
         let mut swaps = self.reverse_swaps.lock().expect("lock");
+        Ok(swaps.remove(id))
+    }
+
+    async fn insert_chain(&self, id: String, data: ChainSwapData) -> Result<(), Error> {
+        let mut swaps = self.chain_swaps.lock().expect("lock");
+        swaps.insert(id, data);
+        Ok(())
+    }
+
+    async fn get_chain(&self, id: &str) -> Result<Option<ChainSwapData>, Error> {
+        let swaps = self.chain_swaps.lock().expect("lock");
+        Ok(swaps.get(id).cloned())
+    }
+
+    async fn update_status_chain(&self, id: &str, status: SwapStatus) -> Result<(), Error> {
+        let mut swaps = self.chain_swaps.lock().expect("lock");
+        if let Some(swap) = swaps.get_mut(id) {
+            swap.status = status;
+            Ok(())
+        } else {
+            Err(Error::consumer(format!("chain swap not found: {id}")))
+        }
+    }
+
+    async fn update_chain(&self, id: &str, data: ChainSwapData) -> Result<(), Error> {
+        let mut swaps = self.chain_swaps.lock().expect("lock");
+        match swaps.get_mut(id) {
+            Some(entry) => {
+                *entry = data;
+                Ok(())
+            }
+            None => Err(Error::consumer(format!("chain swap not found: {id}"))),
+        }
+    }
+
+    async fn list_all_chain(&self) -> Result<Vec<ChainSwapData>, Error> {
+        let swaps = self.chain_swaps.lock().expect("lock");
+        Ok(swaps.values().cloned().collect())
+    }
+
+    async fn remove_chain(&self, id: &str) -> Result<Option<ChainSwapData>, Error> {
+        let mut swaps = self.chain_swaps.lock().expect("lock");
         Ok(swaps.remove(id))
     }
 }

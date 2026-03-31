@@ -54,11 +54,17 @@ mod send_vtxo;
 mod unilateral_exit;
 mod utils;
 
+pub use boltz::ChainSwapAmount;
+pub use boltz::ChainSwapData;
+pub use boltz::ChainSwapDirection;
+pub use boltz::ChainSwapResult;
 pub use boltz::PendingVhtlcSpendTx;
 pub use boltz::PendingVhtlcSpendType;
 pub use boltz::ReverseSwapData;
 pub use boltz::SubmarineSwapData;
 pub use boltz::SwapAmount;
+pub use boltz::SwapStatusInfo;
+pub use boltz::SwapType;
 pub use boltz::TimeoutBlockHeights;
 pub use error::Error;
 pub use key_provider::Bip32KeyProvider;
