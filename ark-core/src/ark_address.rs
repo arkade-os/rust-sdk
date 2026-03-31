@@ -7,7 +7,7 @@ use bitcoin::ScriptBuf;
 use bitcoin::XOnlyPublicKey;
 use std::str::FromStr;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ArkAddress {
     version: u8,
     hrp: Hrp,
@@ -130,5 +130,33 @@ mod tests {
         let encoded = decoded.encode();
 
         assert_eq!(encoded, address);
+    }
+
+    #[test]
+    fn hash_and_eq() {
+        use std::collections::HashSet;
+
+        let addr_str = "tark1qqellv77udfmr20tun8dvju5vgudpf9vxe8jwhthrkn26fz96pawqfdy8nk05rsmrf8h94j26905e7n6sng8y059z8ykn2j5xcuw4xt846qj6x";
+        let a = ArkAddress::decode(addr_str).unwrap();
+        let b = ArkAddress::decode(addr_str).unwrap();
+
+        // Eq: identical addresses are equal
+        assert_eq!(a, b);
+
+        // Hash: identical addresses hash to the same bucket
+        let mut set = HashSet::new();
+        set.insert(a);
+        assert!(!set.insert(b), "duplicate address should not be inserted");
+        assert_eq!(set.len(), 1);
+
+        // Different address is distinct
+        let other = ArkAddress::new(
+            Network::Regtest,
+            a.server,
+            TweakedPublicKey::dangerous_assume_tweaked(a.server),
+        );
+        assert_ne!(a, other);
+        assert!(set.insert(other));
+        assert_eq!(set.len(), 2);
     }
 }
