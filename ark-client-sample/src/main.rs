@@ -154,11 +154,28 @@ enum Commands {
     ClaimChainSwap {
         /// The Boltz swap ID.
         swap_id: String,
+        /// Target BTC address (required for ark-to-btc claims).
+        #[arg(long)]
+        address: Option<String>,
+        /// Fee rate in sat/vB for the on-chain claim (default: 1.0).
+        #[arg(long, default_value = "1.0")]
+        fee_rate: f64,
     },
     /// Check the status of a Boltz swap.
     SwapStatus {
         /// The Boltz swap ID.
         swap_id: String,
+    },
+    /// Refund a chain swap (reclaim locked funds after expiry).
+    RefundChainSwap {
+        /// The Boltz swap ID.
+        swap_id: String,
+        /// Target BTC address (required for btc-to-ark refunds).
+        #[arg(long)]
+        address: Option<String>,
+        /// Fee rate in sat/vB for the on-chain refund (default: 1.0).
+        #[arg(long, default_value = "1.0")]
+        fee_rate: f64,
     },
     /// Attempt to refund a past swap collaboratively.
     RefundSwap { swap_id: String },
@@ -753,10 +770,10 @@ async fn run_command<K: KeyProvider>(
                 }
                 ChainSwapDirection::ArkToBtc => {
                     // ArkToBtc: fund Ark VHTLC, wait for server BTC lockup, claim BTC
-                    let destination: bitcoin::Address = address
+                    let destination: Address = address
                         .as_deref()
                         .ok_or_else(|| anyhow!("--address is required for ark-to-btc"))?
-                        .parse::<bitcoin::Address<NetworkUnchecked>>()
+                        .parse::<Address<NetworkUnchecked>>()
                         .map_err(|e| anyhow!("invalid BTC address: {e}"))?
                         .assume_checked();
 
@@ -795,13 +812,32 @@ async fn run_command<K: KeyProvider>(
                 }
             }
         }
-        Commands::ClaimChainSwap { swap_id } => {
-            let txid = client
-                .claim_chain_swap(swap_id.as_str())
-                .await
-                .map_err(|e| anyhow!(e))?;
+        Commands::ClaimChainSwap {
+            swap_id,
+            address,
+            fee_rate,
+        } => {
+            // Try Ark VHTLC claim first; if it fails (wrong direction), try BTC claim.
+            match client.claim_chain_swap(swap_id).await {
+                Ok(txid) => {
+                    tracing::info!(%txid, swap_id, "Chain swap claimed (ARK VHTLC)");
+                }
+                Err(_) => {
+                    let destination: Address = address
+                        .as_deref()
+                        .ok_or_else(|| anyhow!("--address is required for ark-to-btc claims"))?
+                        .parse::<Address<NetworkUnchecked>>()
+                        .map_err(|e| anyhow!("invalid BTC address: {e}"))?
+                        .assume_checked();
 
-            tracing::info!(%txid, swap_id, "Chain swap claimed");
+                    let txid = client
+                        .claim_chain_swap_btc(swap_id, destination, *fee_rate)
+                        .await
+                        .map_err(|e| anyhow!(e))?;
+
+                    tracing::info!(%txid, swap_id, "Chain swap claimed (on-chain BTC)");
+                }
+            }
         }
         Commands::SwapStatus { swap_id } => {
             let info = client
@@ -815,6 +851,42 @@ async fn run_command<K: KeyProvider>(
                 status = ?info.status,
                 "Swap status"
             );
+        }
+        Commands::RefundChainSwap {
+            swap_id,
+            address,
+            fee_rate,
+        } => {
+            // Try the Ark VHTLC refund first (ArkToBtc direction).
+            match client.refund_chain_swap(swap_id).await {
+                Ok(txid) => {
+                    tracing::info!(%txid, swap_id, "Chain swap refunded (ARK VHTLC)");
+                }
+                Err(ark_err) => {
+                    // If no --address provided, it's an Ark refund that failed — report the error.
+                    let Some(addr_str) = address.as_deref() else {
+                        return Err(anyhow!(ark_err).context(
+                            "Ark VHTLC refund failed (pass --address for on-chain BTC refund)",
+                        ));
+                    };
+
+                    tracing::debug!(
+                        "Ark VHTLC refund failed ({ark_err}), trying on-chain BTC refund"
+                    );
+
+                    let destination: Address = addr_str
+                        .parse::<Address<NetworkUnchecked>>()
+                        .map_err(|e| anyhow!("invalid BTC address: {e}"))?
+                        .assume_checked();
+
+                    let txid = client
+                        .refund_chain_swap_btc(swap_id, destination, *fee_rate)
+                        .await
+                        .map_err(|e| anyhow!(e))?;
+
+                    tracing::info!(%txid, swap_id, "Chain swap refunded (on-chain BTC)");
+                }
+            }
         }
         Commands::RefundSwap { swap_id } => {
             let txid = client

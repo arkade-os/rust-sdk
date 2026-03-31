@@ -72,12 +72,19 @@ chain-swap actor direction amount *args:
     cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic chain-swap {{ direction }} {{ amount }} {{ args }}
 
 # Claim a chain swap after the server has locked funds
-claim-chain-swap actor swap_id:
-    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic claim-chain-swap {{ swap_id }}
+# e.g. just claim-chain-swap alice <swap_id> --address tb1q... --fee-rate 1.5
+claim-chain-swap actor swap_id *args:
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic claim-chain-swap {{ swap_id }} {{ args }}
 
 # Check the status of a Boltz swap
 swap-status actor swap_id:
     cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic swap-status {{ swap_id }}
+
+# Refund a chain swap (reclaim locked funds after expiry)
+# e.g. just refund-chain-swap alice <swap_id>
+# e.g. just refund-chain-swap alice <swap_id> --address tb1q... --fee-rate 1.5
+refund-chain-swap actor swap_id *args:
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic refund-chain-swap {{ swap_id }} {{ args }}
 
 # Refund a submarine swap collaboratively
 refund-swap-collab actor swap_id:

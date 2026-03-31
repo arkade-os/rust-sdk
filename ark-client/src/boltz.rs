@@ -402,7 +402,6 @@ where
                                 "Got error from swap updates subscription: {error}"
                             );
                         }
-                        // TODO: We may still need to handle some of these explicitly.
                         SwapStatus::InvoiceSet
                         | SwapStatus::InvoicePending
                         | SwapStatus::Created
@@ -413,8 +412,10 @@ where
                         | SwapStatus::TransactionRefunded
                         | SwapStatus::TransactionFailed
                         | SwapStatus::TransactionClaimed
+                        | SwapStatus::TransactionLockupFailed
                         | SwapStatus::InvoiceFailedToPay
-                        | SwapStatus::SwapExpired => {}
+                        | SwapStatus::SwapExpired
+                        | SwapStatus::Other(_) => {}
                     }
                 }
                 Err(e) => return Err(e),
@@ -1266,13 +1267,15 @@ where
                         | SwapStatus::TransactionRefunded
                         | SwapStatus::TransactionFailed
                         | SwapStatus::TransactionClaimed
+                        | SwapStatus::TransactionLockupFailed
                         | SwapStatus::TransactionServerMempool
                         | SwapStatus::TransactionServerConfirmed
                         | SwapStatus::InvoiceSet
                         | SwapStatus::InvoicePending
                         | SwapStatus::InvoicePaid
                         | SwapStatus::InvoiceFailedToPay
-                        | SwapStatus::SwapExpired => {}
+                        | SwapStatus::SwapExpired
+                        | SwapStatus::Other(_) => {}
                     }
                 }
                 Err(e) => return Err(e),
@@ -1546,13 +1549,15 @@ where
                         | SwapStatus::TransactionRefunded
                         | SwapStatus::TransactionFailed
                         | SwapStatus::TransactionClaimed
+                        | SwapStatus::TransactionLockupFailed
                         | SwapStatus::TransactionServerMempool
                         | SwapStatus::TransactionServerConfirmed
                         | SwapStatus::InvoiceSet
                         | SwapStatus::InvoicePending
                         | SwapStatus::InvoicePaid
                         | SwapStatus::InvoiceFailedToPay
-                        | SwapStatus::SwapExpired => {}
+                        | SwapStatus::SwapExpired
+                        | SwapStatus::Other(_) => {}
                     }
                 }
                 Err(e) => return Err(e),
@@ -1934,11 +1939,13 @@ where
                         | SwapStatus::TransactionMempool
                         | SwapStatus::TransactionConfirmed
                         | SwapStatus::TransactionClaimed
+                        | SwapStatus::TransactionLockupFailed
                         | SwapStatus::InvoiceSet
                         | SwapStatus::InvoicePending
                         | SwapStatus::InvoicePaid
                         | SwapStatus::InvoiceFailedToPay
-                        | SwapStatus::InvoiceExpired => {}
+                        | SwapStatus::InvoiceExpired
+                        | SwapStatus::Other(_) => {}
                     }
                 }
                 Err(e) => return Err(e),
@@ -2253,7 +2260,7 @@ where
         // Weight: 4 * (overhead 10.5 + input ~41 + output ~43) + witness items
         let witness_weight = 1 + 1 + 64 + 1 + 32 + 1 + claim_script.len() + 1 + cb_bytes.len() + 1;
         let weight = 4 * (11 + 41 + 43) + witness_weight;
-        let vsize = (weight + 3) / 4;
+        let vsize = weight.div_ceil(4);
         let fee = Amount::from_sat((vsize as f64 * fee_rate_sat_vb).ceil() as u64);
 
         let claim_amount = utxo.amount.checked_sub(fee).ok_or_else(|| {
@@ -2266,7 +2273,7 @@ where
         // Build the unsigned transaction
         let mut tx = bitcoin::Transaction {
             version: bitcoin::transaction::Version::TWO,
-            lock_time: bitcoin::absolute::LockTime::ZERO,
+            lock_time: absolute::LockTime::ZERO,
             input: vec![bitcoin::TxIn {
                 previous_output: utxo.outpoint,
                 script_sig: ScriptBuf::new(),
@@ -2323,6 +2330,355 @@ where
 
         let mut updated_swap = swap.clone();
         updated_swap.status = SwapStatus::TransactionClaimed;
+        self.swap_storage()
+            .update_chain(swap_id, updated_swap)
+            .await
+            .context("failed to update chain swap data")?;
+
+        Ok(txid)
+    }
+
+    /// Refund the Ark VHTLC from a chain swap after the timelock has expired.
+    ///
+    /// This is for [`ChainSwapDirection::ArkToBtc`] swaps where the user locked an Ark VHTLC
+    /// and needs to reclaim it (e.g. if Boltz never locked BTC or the swap expired).
+    ///
+    /// This path does not require a signature from Boltz.
+    pub async fn refund_chain_swap(&self, swap_id: &str) -> Result<Txid, Error> {
+        let swap = self
+            .swap_storage()
+            .get_chain(swap_id)
+            .await
+            .context("failed to get chain swap data")?
+            .ok_or_else(|| Error::ad_hoc(format!("chain swap data not found: {swap_id}")))?;
+
+        let timeout_block_heights = swap.user_timeout_block_heights.ok_or_else(|| {
+            Error::ad_hoc(
+                "chain swap has no ARK-side VHTLC timeouts on user lockup \
+                 (user lockup is on-chain BTC, use refund_chain_swap_btc instead)",
+            )
+        })?;
+
+        let preimage_hash = ripemd160::Hash::hash(swap.preimage_hash.as_byte_array());
+
+        // User's lockup VHTLC: sender=user(refund), receiver=server(claim)
+        let vhtlc = VhtlcScript::new(
+            VhtlcOptions {
+                sender: swap.refund_public_key.into(),
+                receiver: swap.server_claim_public_key.into(),
+                server: self.server_info.signer_pk.into(),
+                preimage_hash,
+                refund_locktime: timeout_block_heights.refund,
+                unilateral_claim_delay: parse_sequence_number(
+                    timeout_block_heights.unilateral_claim as i64,
+                )
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
+                unilateral_refund_delay: parse_sequence_number(
+                    timeout_block_heights.unilateral_refund as i64,
+                )
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral refund timeout: {e}")))?,
+                unilateral_refund_without_receiver_delay: parse_sequence_number(
+                    timeout_block_heights.unilateral_refund_without_receiver as i64,
+                )
+                .map_err(|e| {
+                    Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
+                })?,
+            },
+            self.server_info.network,
+        )
+        .map_err(Error::ad_hoc)?;
+
+        let vhtlc_address = vhtlc.address();
+        let expected_address = ArkAddress::decode(&swap.user_lockup_address)
+            .map_err(|e| Error::ad_hoc(format!("invalid user lockup address: {e}")))?;
+
+        if vhtlc_address != expected_address {
+            return Err(Error::ad_hoc(format!(
+                "VHTLC address ({vhtlc_address}) does not match user lockup address ({expected_address})"
+            )));
+        }
+
+        let vhtlc_outpoint = {
+            let virtual_tx_outpoints = self
+                .get_virtual_tx_outpoints(std::iter::once(vhtlc_address))
+                .await?;
+
+            let vtxo_list = VtxoList::new(self.server_info.dust, virtual_tx_outpoints);
+
+            let mut unspent = vtxo_list.all_unspent();
+            unspent
+                .next()
+                .ok_or_else(|| {
+                    Error::ad_hoc(format!("no outpoint found for address {vhtlc_address}"))
+                })?
+                .clone()
+        };
+
+        let (refund_address, _) = self.get_offchain_address()?;
+        let refund_amount = swap.user_lockup_amount;
+
+        let outputs = vec![(&refund_address, refund_amount)];
+
+        let refund_script = vhtlc.refund_without_receiver_script();
+        let spend_info = vhtlc.taproot_spend_info();
+        let script_ver = (refund_script, LeafVersion::TapScript);
+        let control_block = spend_info
+            .control_block(&script_ver)
+            .ok_or(Error::ad_hoc("control block not found for refund script"))?;
+
+        let script_pubkey = vhtlc.script_pubkey();
+        let refunder_pk = swap.refund_public_key.inner.x_only_public_key().0;
+
+        let vhtlc_input = VtxoInput::new(
+            script_ver.0,
+            Some(absolute::LockTime::from_consensus(
+                timeout_block_heights.refund,
+            )),
+            control_block,
+            vhtlc.tapscripts(),
+            script_pubkey,
+            refund_amount,
+            vhtlc_outpoint.outpoint,
+        );
+
+        let OffchainTransactions {
+            mut ark_tx,
+            checkpoint_txs,
+        } = build_offchain_transactions(
+            &outputs,
+            None,
+            std::slice::from_ref(&vhtlc_input),
+            &self.server_info,
+        )?;
+
+        let kp = self.keypair_by_pk(&refunder_pk)?;
+        let sign_fn =
+            |_: &mut psbt::Input,
+             msg: secp256k1::Message|
+             -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
+                let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &kp);
+                let pk = kp.x_only_public_key().0;
+                Ok(vec![(sig, pk)])
+            };
+
+        sign_ark_transaction(sign_fn, &mut ark_tx, 0)?;
+
+        let ark_txid = ark_tx.unsigned_tx.compute_txid();
+
+        let res = self
+            .network_client()
+            .submit_offchain_transaction_request(ark_tx, checkpoint_txs)
+            .await?;
+
+        let mut checkpoint_psbt = res
+            .signed_checkpoint_txs
+            .first()
+            .ok_or_else(|| Error::ad_hoc("no checkpoint PSBTs found"))?
+            .clone();
+
+        let kp = self.keypair_by_pk(&refunder_pk)?;
+        let sign_fn =
+            |_: &mut psbt::Input,
+             msg: secp256k1::Message|
+             -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
+                let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &kp);
+                let pk = kp.x_only_public_key().0;
+                Ok(vec![(sig, pk)])
+            };
+
+        sign_checkpoint_transaction(sign_fn, &mut checkpoint_psbt)?;
+
+        timeout_op(
+            self.inner.timeout,
+            self.network_client()
+                .finalize_offchain_transaction(ark_txid, vec![checkpoint_psbt]),
+        )
+        .await?
+        .map_err(Error::ark_server)
+        .context("failed to finalize offchain transaction")?;
+
+        tracing::info!(swap_id, txid = %ark_txid, "Refunded chain swap Ark VHTLC");
+
+        let mut updated_swap = swap.clone();
+        updated_swap.status = SwapStatus::TransactionRefunded;
+        self.swap_storage()
+            .update_chain(swap_id, updated_swap)
+            .await
+            .context("failed to update chain swap data")?;
+
+        Ok(ark_txid)
+    }
+
+    /// Refund on-chain BTC from a chain swap after the timelock has expired.
+    ///
+    /// This is for [`ChainSwapDirection::BtcToArk`] swaps where the user locked on-chain BTC
+    /// and needs to reclaim it (e.g. if Boltz never locked the Ark VHTLC or the swap expired).
+    pub async fn refund_chain_swap_btc(
+        &self,
+        swap_id: &str,
+        destination_address: bitcoin::Address,
+        fee_rate_sat_vb: f64,
+    ) -> Result<Txid, Error> {
+        let swap = self
+            .swap_storage()
+            .get_chain(swap_id)
+            .await
+            .context("failed to get chain swap data")?
+            .ok_or_else(|| Error::ad_hoc(format!("chain swap data not found: {swap_id}")))?;
+
+        let swap_tree = swap.swap_tree.clone().ok_or_else(|| {
+            Error::ad_hoc("no swap tree found (this swap has no on-chain BTC lockup)")
+        })?;
+
+        // The user's BTC lockup address
+        let btc_address_str = &swap.user_lockup_address;
+
+        // Parse the claim and refund leaf scripts from hex
+        let claim_script_bytes: Vec<u8> =
+            bitcoin::hex::FromHex::from_hex(&swap_tree.claim_leaf.output)
+                .map_err(|e| Error::ad_hoc(format!("invalid claim leaf hex: {e}")))?;
+        let claim_script = ScriptBuf::from_bytes(claim_script_bytes);
+
+        let refund_script_bytes: Vec<u8> =
+            bitcoin::hex::FromHex::from_hex(&swap_tree.refund_leaf.output)
+                .map_err(|e| Error::ad_hoc(format!("invalid refund leaf hex: {e}")))?;
+        let refund_script = ScriptBuf::from_bytes(refund_script_bytes);
+
+        // Reconstruct the taproot tree with MuSig2(serverClaimKey, userRefundKey)
+        let claim_pk_bytes = swap.server_claim_public_key.to_bytes();
+        let refund_pk_bytes = swap.refund_public_key.to_bytes();
+
+        let musig_claim_pk = musig::PublicKey::from_slice(&claim_pk_bytes)
+            .map_err(|e| Error::ad_hoc(format!("invalid claim key for musig: {e}")))?;
+        let musig_refund_pk = musig::PublicKey::from_slice(&refund_pk_bytes)
+            .map_err(|e| Error::ad_hoc(format!("invalid refund key for musig: {e}")))?;
+
+        // Boltz uses MuSig2(serverKey, userKey) order (server first)
+        let key_agg = musig::musig::KeyAggCache::new(&[&musig_claim_pk, &musig_refund_pk]);
+        let internal_key = XOnlyPublicKey::from_slice(&key_agg.agg_pk().serialize())
+            .map_err(|e| Error::ad_hoc(format!("invalid aggregated key: {e}")))?;
+
+        let secp = Secp256k1::new();
+        let refund_ver = (refund_script.clone(), LeafVersion::TapScript);
+
+        let taproot_spend_info = bitcoin::taproot::TaprootBuilder::new()
+            .add_leaf(1, claim_script)
+            .map_err(|e| Error::ad_hoc(format!("failed to add claim leaf: {e}")))?
+            .add_leaf(1, refund_script.clone())
+            .map_err(|e| Error::ad_hoc(format!("failed to add refund leaf: {e}")))?
+            .finalize(&secp, internal_key)
+            .map_err(|_| Error::ad_hoc("failed to finalize taproot tree"))?;
+
+        // Verify address
+        let expected_spk = ScriptBuf::new_p2tr(
+            &secp,
+            taproot_spend_info.internal_key(),
+            taproot_spend_info.merkle_root(),
+        );
+
+        let parsed_address: bitcoin::Address<bitcoin::address::NetworkUnchecked> = btc_address_str
+            .parse()
+            .map_err(|e| Error::ad_hoc(format!("invalid BTC lockup address: {e}")))?;
+        let parsed_address = parsed_address.assume_checked();
+        let target_spk = parsed_address.script_pubkey();
+
+        if expected_spk != target_spk {
+            return Err(Error::ad_hoc(format!(
+                "taproot address mismatch for BTC lockup {btc_address_str}"
+            )));
+        }
+
+        // Find the unspent UTXO
+        let utxos = self
+            .inner
+            .blockchain
+            .find_outpoints(&parsed_address)
+            .await
+            .context("failed to find UTXOs at BTC lockup address")?;
+
+        let utxo = utxos.iter().find(|u| !u.is_spent).ok_or_else(|| {
+            Error::ad_hoc(format!(
+                "no unspent UTXO found at BTC lockup address {btc_address_str}"
+            ))
+        })?;
+
+        let control_block = taproot_spend_info
+            .control_block(&refund_ver)
+            .ok_or(Error::ad_hoc("control block not found for refund leaf"))?;
+
+        let cb_bytes = control_block.serialize();
+        let witness_weight = 1 + 1 + 64 + 1 + refund_script.len() + 1 + cb_bytes.len() + 1;
+        let weight = 4 * (11 + 41 + 43) + witness_weight;
+        let vsize = weight.div_ceil(4);
+        let fee = Amount::from_sat((vsize as f64 * fee_rate_sat_vb).ceil() as u64);
+
+        let refund_amount = utxo.amount.checked_sub(fee).ok_or_else(|| {
+            Error::ad_hoc(format!(
+                "UTXO amount {} is less than estimated fee {}",
+                utxo.amount, fee
+            ))
+        })?;
+
+        // Use the user's timeout block height as nLockTime
+        let lock_time = absolute::LockTime::from_consensus(swap.user_timeout_block_height);
+
+        let mut tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time,
+            input: vec![bitcoin::TxIn {
+                previous_output: utxo.outpoint,
+                script_sig: ScriptBuf::new(),
+                sequence: bitcoin::Sequence::ENABLE_LOCKTIME_NO_RBF,
+                witness: bitcoin::Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: refund_amount,
+                script_pubkey: destination_address.script_pubkey(),
+            }],
+        };
+
+        // Sign with the refund key
+        let leaf_hash =
+            bitcoin::taproot::TapLeafHash::from_script(&refund_script, LeafVersion::TapScript);
+
+        let prevouts = [TxOut {
+            value: utxo.amount,
+            script_pubkey: target_spk,
+        }];
+
+        let sighash = bitcoin::sighash::SighashCache::new(&tx)
+            .taproot_script_spend_signature_hash(
+                0,
+                &bitcoin::sighash::Prevouts::All(&prevouts),
+                leaf_hash,
+                bitcoin::TapSighashType::Default,
+            )
+            .map_err(|e| Error::ad_hoc(format!("failed to compute sighash: {e}")))?;
+
+        let msg = secp256k1::Message::from_digest(sighash.to_byte_array());
+        let refund_kp = self.keypair_by_pk(&swap.refund_public_key.inner.x_only_public_key().0)?;
+        let signature = secp.sign_schnorr_no_aux_rand(&msg, &refund_kp);
+
+        // Witness for refund: <signature> <refund_script> <control_block>
+        let mut witness = bitcoin::Witness::new();
+        witness.push(signature.serialize());
+        witness.push(refund_script.as_bytes());
+        witness.push(cb_bytes);
+
+        tx.input[0].witness = witness;
+
+        self.inner
+            .blockchain
+            .broadcast(&tx)
+            .await
+            .context("failed to broadcast BTC refund transaction")?;
+
+        let txid = tx.compute_txid();
+
+        tracing::info!(swap_id, %txid, %refund_amount, "Refunded on-chain BTC from chain swap");
+
+        let mut updated_swap = swap.clone();
+        updated_swap.status = SwapStatus::TransactionRefunded;
         self.swap_storage()
             .update_chain(swap_id, updated_swap)
             .await
@@ -3507,12 +3863,18 @@ pub enum SwapStatus {
     /// Invoice expired.
     #[serde(rename = "invoice.expired")]
     InvoiceExpired,
+    /// Lockup amount was insufficient (chain swaps).
+    #[serde(rename = "transaction.lockupFailed")]
+    TransactionLockupFailed,
     /// Swap expired - can be refunded.
     #[serde(rename = "swap.expired")]
     SwapExpired,
     /// Swap failed with error.
     #[serde(rename = "error")]
     Error { error: String },
+    /// An unrecognized status from the Boltz API.
+    #[serde(untagged)]
+    Other(String),
 }
 
 impl SwapStatus {
@@ -3523,6 +3885,7 @@ impl SwapStatus {
             Self::TransactionRefunded
                 | Self::TransactionFailed
                 | Self::TransactionClaimed
+                | Self::TransactionLockupFailed
                 | Self::InvoicePaid
                 | Self::InvoiceFailedToPay
                 | Self::InvoiceExpired
@@ -3879,72 +4242,6 @@ struct ChainSwapSideDetails {
     swap_tree: Option<SwapTree>,
     #[serde(default)]
     bip21: Option<String>,
-}
-
-/// Miner fees for chain swaps, broken down by user and server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChainMinerFees {
-    /// Miner fee for user's transaction.
-    pub user: u64,
-    /// Miner fee for server's transaction.
-    pub server: u64,
-}
-
-/// Fee information for chain swaps (ARK ↔ BTC).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChainSwapFees {
-    /// Percentage fee charged by Boltz.
-    pub percentage: f64,
-    /// Miner fees broken down by party.
-    pub miner_fees: ChainMinerFees,
-}
-
-// Internal structs for deserializing chain swap pairs response.
-
-#[derive(Debug, Clone, Deserialize)]
-struct ChainPairFees {
-    percentage: f64,
-    #[serde(rename = "minerFees")]
-    miner_fees: ChainMinerFeesResponse,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ChainMinerFeesResponse {
-    user: u64,
-    server: u64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ChainPairInfo {
-    fees: ChainPairFees,
-    limits: PairLimits,
-}
-
-// ARK -> BTC: { "ARK": { "BTC": { ... } } }
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "UPPERCASE")]
-struct ChainArkPairs {
-    btc: ChainPairInfo,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "UPPERCASE")]
-struct ChainArkToBtcPairsResponse {
-    ark: ChainArkPairs,
-}
-
-// BTC -> ARK: { "BTC": { "ARK": { ... } } }
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "UPPERCASE")]
-struct ChainBtcPairs {
-    ark: ChainPairInfo,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "UPPERCASE")]
-struct ChainBtcToArkPairsResponse {
-    btc: ChainBtcPairs,
 }
 
 #[cfg(test)]
