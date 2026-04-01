@@ -8,6 +8,7 @@
 //! - [`InMemorySwapStorage`] - Default in-memory implementation for development and testing
 //! - [`SqliteSwapStorage`] - SQLite-based persistent implementation for production use (requires
 //!   the `sqlite` feature)
+use crate::boltz::ChainSwapData;
 use crate::boltz::ReverseSwapData;
 use crate::boltz::SubmarineSwapData;
 use crate::boltz::SwapStatus;
@@ -155,4 +156,22 @@ pub trait SwapStorage: Send + Sync {
     /// * `Ok(None)` if the swap did not exist
     /// * `Err(error)` if there was an error accessing storage
     async fn remove_reverse(&self, id: &str) -> Result<Option<ReverseSwapData>, Error>;
+
+    /// Store chain swap data.
+    async fn insert_chain(&self, id: String, data: ChainSwapData) -> Result<(), Error>;
+
+    /// Retrieve chain swap data by ID.
+    async fn get_chain(&self, id: &str) -> Result<Option<ChainSwapData>, Error>;
+
+    /// Update the status of an existing chain swap.
+    async fn update_status_chain(&self, id: &str, status: SwapStatus) -> Result<(), Error>;
+
+    /// Update an existing chain swap.
+    async fn update_chain(&self, id: &str, data: ChainSwapData) -> Result<(), Error>;
+
+    /// List all stored chain swaps.
+    async fn list_all_chain(&self) -> Result<Vec<ChainSwapData>, Error>;
+
+    /// Remove chain swap data by ID.
+    async fn remove_chain(&self, id: &str) -> Result<Option<ChainSwapData>, Error>;
 }

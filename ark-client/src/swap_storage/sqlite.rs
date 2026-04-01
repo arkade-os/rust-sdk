@@ -1,4 +1,5 @@
 use super::SwapStorage;
+use crate::boltz::ChainSwapData;
 use crate::boltz::ReverseSwapData;
 use crate::boltz::SubmarineSwapData;
 use crate::boltz::SwapStatus;
@@ -342,6 +343,127 @@ impl SwapStorage for SqliteSwapStorage {
                 .execute(&self.pool)
                 .await
                 .map_err(|e| Error::consumer(format!("Failed to delete reverse swap: {e}")))?;
+
+            if result.rows_affected() == 0 {
+                return Ok(None);
+            }
+        }
+
+        Ok(swap_data)
+    }
+
+    async fn insert_chain(&self, id: String, data: ChainSwapData) -> Result<(), Error> {
+        let data_json = serde_json::to_string(&data)
+            .map_err(|e| Error::consumer(format!("Failed to serialize chain swap data: {e}")))?;
+
+        let now = Self::current_timestamp();
+
+        sqlx::query(
+            "INSERT INTO chain_swaps (id, data, created_at, updated_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(&data_json)
+        .bind(now)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Error::consumer(format!("Failed to insert chain swap: {e}")))?;
+
+        Ok(())
+    }
+
+    async fn get_chain(&self, id: &str) -> Result<Option<ChainSwapData>, Error> {
+        let row: Option<SqliteRow> = sqlx::query("SELECT data FROM chain_swaps WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| Error::consumer(format!("Failed to query chain swap: {e}")))?;
+
+        match row {
+            Some(row) => {
+                let data: String = row.get("data");
+                let swap_data: ChainSwapData = serde_json::from_str(&data).map_err(|e| {
+                    Error::consumer(format!("Failed to deserialize chain swap data: {e}"))
+                })?;
+                Ok(Some(swap_data))
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn update_status_chain(&self, id: &str, status: SwapStatus) -> Result<(), Error> {
+        let mut swap_data = self
+            .get_chain(id)
+            .await?
+            .ok_or_else(|| Error::consumer(format!("chain swap not found: {id}")))?;
+
+        swap_data.status = status;
+
+        let data_json = serde_json::to_string(&swap_data)
+            .map_err(|e| Error::consumer(format!("Failed to serialize chain swap data: {e}")))?;
+
+        let now = Self::current_timestamp();
+
+        sqlx::query("UPDATE chain_swaps SET data = ?, updated_at = ? WHERE id = ?")
+            .bind(&data_json)
+            .bind(now)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| Error::consumer(format!("Failed to update chain swap status: {e}")))?;
+
+        Ok(())
+    }
+
+    async fn update_chain(&self, id: &str, data: ChainSwapData) -> Result<(), Error> {
+        let data_json = serde_json::to_string(&data)
+            .map_err(|e| Error::consumer(format!("Failed to serialize chain swap data: {e}")))?;
+
+        let now = Self::current_timestamp();
+
+        let result = sqlx::query("UPDATE chain_swaps SET data = ?, updated_at = ? WHERE id = ?")
+            .bind(&data_json)
+            .bind(now)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| Error::consumer(format!("Failed to update chain swap: {e}")))?;
+
+        if result.rows_affected() == 0 {
+            return Err(Error::consumer(format!("chain swap not found: {id}")));
+        }
+
+        Ok(())
+    }
+
+    async fn list_all_chain(&self) -> Result<Vec<ChainSwapData>, Error> {
+        let rows: Vec<SqliteRow> =
+            sqlx::query("SELECT data FROM chain_swaps ORDER BY created_at ASC")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| Error::consumer(format!("Failed to list chain swaps: {e}")))?;
+
+        let mut swaps = Vec::new();
+        for row in rows {
+            let data: String = row.get("data");
+            let swap_data: ChainSwapData = serde_json::from_str(&data).map_err(|e| {
+                Error::consumer(format!("Failed to deserialize chain swap data: {e}"))
+            })?;
+            swaps.push(swap_data);
+        }
+
+        Ok(swaps)
+    }
+
+    async fn remove_chain(&self, id: &str) -> Result<Option<ChainSwapData>, Error> {
+        let swap_data = self.get_chain(id).await?;
+
+        if swap_data.is_some() {
+            let result = sqlx::query("DELETE FROM chain_swaps WHERE id = ?")
+                .bind(id)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| Error::consumer(format!("Failed to delete chain swap: {e}")))?;
 
             if result.rows_affected() == 0 {
                 return Ok(None);
