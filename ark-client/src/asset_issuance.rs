@@ -71,8 +71,7 @@ where
             return Err(Error::ad_hoc("asset amount must be > 0"));
         }
 
-        // FIXME: Bug here. Should mark the actual change address VTXO as used!
-        let (own_address, change_address_vtxo) = self.get_offchain_address()?;
+        let (own_address, _) = self.get_offchain_address()?;
 
         // We need a dust-amount VTXO to carry the issued asset.
         let send_amount = self.server_info.dust;
@@ -127,7 +126,7 @@ where
             })
             .collect::<Result<Vec<_>, Error>>()?;
 
-        let (change_address, _) = self.get_offchain_address()?;
+        let (change_address, change_address_vtxo) = self.get_offchain_address()?;
 
         let SelfAssetIssuanceTransactions {
             mut ark_tx,
