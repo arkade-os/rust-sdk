@@ -22,6 +22,7 @@ use ark_client::SqliteSwapStorage;
 use ark_client::StaticKeyProvider;
 use ark_client::SwapAmount;
 use ark_client::TxStatus;
+use ark_core::asset::ControlAssetConfig;
 use ark_core::history;
 use ark_core::server::SubscriptionResponse;
 use ark_core::ArkAddress;
@@ -1311,11 +1312,13 @@ async fn run_command<K: KeyProvider>(
             asset_id,
             amount,
         } => {
+            let asset_id = asset_id.parse()?;
+
             let receiver = ark_client::Receiver {
                 address: address.0,
                 amount: client.dust(),
                 assets: vec![ark_core::server::Asset {
-                    asset_id: asset_id.clone(),
+                    asset_id,
                     amount: *amount,
                 }],
             };
@@ -1333,6 +1336,8 @@ async fn run_command<K: KeyProvider>(
             );
         }
         Commands::BurnAsset { asset_id, amount } => {
+            let asset_id = asset_id.parse()?;
+
             let txid = client
                 .burn_asset(asset_id, *amount)
                 .await
@@ -1346,6 +1351,8 @@ async fn run_command<K: KeyProvider>(
             );
         }
         Commands::ReissueAsset { asset_id, amount } => {
+            let asset_id = asset_id.parse()?;
+
             let txid = client
                 .reissue_asset(asset_id, *amount)
                 .await
@@ -1359,6 +1366,8 @@ async fn run_command<K: KeyProvider>(
             );
         }
         Commands::GetAsset { asset_id } => {
+            let asset_id = asset_id.parse()?;
+
             let asset_info = client.get_asset(asset_id).await.map_err(|e| anyhow!(e))?;
 
             println!(
@@ -1381,8 +1390,17 @@ async fn run_command<K: KeyProvider>(
                 (Some(_), Some(_)) => {
                     bail!("specify either --control-amount or --control-asset-id, not both")
                 }
-                (Some(amt), None) => Some(ark_core::ControlAsset::New { amount: *amt }),
-                (None, Some(id)) => Some(ark_core::ControlAsset::Existing { id: id.clone() }),
+                (Some(amt), None) => {
+                    let config = ControlAssetConfig::new(*amt)
+                        .context("control asset amount must be non-zero")?;
+
+                    Some(config)
+                }
+                (None, Some(id)) => {
+                    let control_asset_id = id.parse().context("invalid control asset ID")?;
+
+                    Some(ControlAssetConfig::existing(control_asset_id))
+                }
                 (None, None) => None,
             };
 
@@ -1402,13 +1420,11 @@ async fn run_command<K: KeyProvider>(
                 .await
                 .map_err(|e| anyhow!(e))?;
 
-            let asset_ids: Vec<String> = result.asset_ids.iter().map(|id| id.id()).collect();
-
             println!(
                 "{}",
                 serde_json::json!({
                     "ark_txid": result.ark_txid.to_string(),
-                    "asset_ids": asset_ids,
+                    "asset_ids": result.asset_ids,
                 })
             );
         }

@@ -1,5 +1,4 @@
 use crate::error::ErrorContext;
-use crate::send_vtxo::parse_asset_id_hex;
 use crate::swap_storage::SwapStorage;
 use crate::utils::timeout_op;
 use crate::wallet::BoardingWallet;
@@ -7,18 +6,22 @@ use crate::wallet::OnchainWallet;
 use crate::Blockchain;
 use crate::Client;
 use crate::Error;
-use ark_core::asset_packet;
-use ark_core::asset_packet::add_asset_packet_to_psbt;
+use ark_core::asset;
+use ark_core::asset::packet::add_asset_packet_to_psbt;
+use ark_core::asset::AssetId;
+use ark_core::asset::ControlAssetConfig;
 use ark_core::coin_select::select_vtxos;
 use ark_core::coin_select::select_vtxos_for_asset;
 use ark_core::script::extract_checksig_pubkeys;
 use ark_core::send;
 use ark_core::send::build_offchain_transactions;
+use ark_core::send::build_self_asset_issuance_transactions;
 use ark_core::send::sign_ark_transaction;
 use ark_core::send::sign_checkpoint_transaction;
+use ark_core::send::AssetBearingVtxoInput;
 use ark_core::send::OffchainTransactions;
+use ark_core::send::SelfAssetIssuanceTransactions;
 use ark_core::server::Asset;
-use ark_core::server::ControlAsset;
 use ark_core::ErrorContext as _;
 use bitcoin::key::Secp256k1;
 use bitcoin::psbt;
@@ -35,7 +38,7 @@ pub struct IssueAssetResult {
     /// The Ark transaction ID.
     pub ark_txid: Txid,
     /// The issued asset IDs. If a new control asset was created, it is first.
-    pub asset_ids: Vec<asset_packet::AssetId>,
+    pub asset_ids: Vec<AssetId>,
 }
 
 impl<B, W, S, K> Client<B, W, S, K>
@@ -62,14 +65,11 @@ where
     pub async fn issue_asset(
         &self,
         amount: u64,
-        control_asset: Option<ControlAsset>,
+        control_asset_config: Option<ControlAssetConfig>,
         metadata: Option<Vec<(String, String)>>,
     ) -> Result<IssueAssetResult, Error> {
         if amount == 0 {
             return Err(Error::ad_hoc("asset amount must be > 0"));
-        }
-        if matches!(control_asset, Some(ControlAsset::New { amount: 0 })) {
-            return Err(Error::ad_hoc("control asset amount must be > 0"));
         }
 
         let (own_address, change_address_vtxo) = self.get_offchain_address()?;
@@ -96,7 +96,7 @@ where
             .map_err(Error::from)
             .context("failed to select coins for asset issuance")?;
 
-        let vtxo_inputs = selected_coins
+        let issuance_inputs = selected_coins
             .iter()
             .map(|vto| {
                 let vtxo = script_pubkey_to_vtxo_map
@@ -112,117 +112,38 @@ where
                     .forfeit_spend_info()
                     .context("failed to get forfeit spend info")?;
 
-                Ok(send::VtxoInput::new(
-                    forfeit_script,
-                    None,
-                    control_block,
-                    vtxo.tapscripts(),
-                    vtxo.script_pubkey(),
-                    vto.amount,
-                    vto.outpoint,
-                ))
+                Ok(AssetBearingVtxoInput {
+                    input: send::VtxoInput::new(
+                        forfeit_script,
+                        None,
+                        control_block,
+                        vtxo.tapscripts(),
+                        vtxo.script_pubkey(),
+                        vto.amount,
+                        vto.outpoint,
+                    ),
+                    assets: vto.assets.clone(),
+                })
             })
             .collect::<Result<Vec<_>, Error>>()?;
 
-        // Build the base offchain transaction: send dust to self.
         let (change_address, _) = self.get_offchain_address()?;
 
-        let OffchainTransactions {
+        let SelfAssetIssuanceTransactions {
             mut ark_tx,
             checkpoint_txs,
-        } = build_offchain_transactions(
-            &[(&own_address, send_amount)],
-            Some(&change_address),
-            &vtxo_inputs,
+            asset_ids,
+        } = build_self_asset_issuance_transactions(
+            &own_address,
+            &change_address,
+            &issuance_inputs,
             &self.server_info,
+            amount,
+            control_asset_config.clone(),
+            metadata.clone(),
         )
         .map_err(Error::from)
-        .context("failed to build offchain transactions")?;
-
-        // Build the asset packet.
-        let mut groups = Vec::new();
-
-        // Preserve any assets carried by the funding VTXOs.
-        let num_psbt_outputs = ark_tx.unsigned_tx.output.len();
-        let has_change_output = num_psbt_outputs > 2; // receiver + optional change + anchor
-        let existing_asset_output_index = if has_change_output {
-            (num_psbt_outputs - 2) as u16
-        } else {
-            0
-        };
-        let mut existing_asset_groups: HashMap<String, asset_packet::AssetGroup> = HashMap::new();
-        for (input_index, coin) in selected_coins.iter().enumerate() {
-            for asset in &coin.assets {
-                let group = existing_asset_groups
-                    .entry(asset.asset_id.clone())
-                    .or_insert_with(|| asset_packet::AssetGroup {
-                        asset_id: None,
-                        control_asset: None,
-                        metadata: None,
-                        inputs: Vec::new(),
-                        outputs: vec![asset_packet::AssetOutput {
-                            output_index: existing_asset_output_index,
-                            amount: 0,
-                        }],
-                    });
-
-                if group.asset_id.is_none() {
-                    group.asset_id = Some(parse_asset_id_hex(&asset.asset_id)?);
-                }
-
-                group.inputs.push(asset_packet::AssetInput {
-                    input_index: input_index as u16,
-                    amount: asset.amount,
-                });
-                group.outputs[0].amount += asset.amount;
-            }
-        }
-        // If creating a new control asset, it goes first.
-        if let Some(ControlAsset::New { amount: ctrl_amt }) = &control_asset {
-            groups.push(asset_packet::AssetGroup {
-                asset_id: None, // Fresh mint
-                control_asset: None,
-                metadata: metadata.clone(),
-                inputs: vec![],
-                outputs: vec![asset_packet::AssetOutput {
-                    output_index: 0,
-                    amount: *ctrl_amt,
-                }],
-            });
-        }
-
-        // Build the control asset reference for the issued asset group.
-        let control_ref = match &control_asset {
-            Some(ControlAsset::New { .. }) => {
-                // Reference the control asset group we just created (index 0).
-                Some(asset_packet::AssetRef::ByGroup(0))
-            }
-            Some(ControlAsset::Existing { id }) => {
-                // Parse the existing asset ID.
-                let asset_id = parse_asset_id_string(id)?;
-                Some(asset_packet::AssetRef::ById(asset_id))
-            }
-            None => None,
-        };
-
-        // The issued asset group.
-        groups.push(asset_packet::AssetGroup {
-            asset_id: None, // Fresh mint
-            control_asset: control_ref,
-            metadata,
-            inputs: vec![],
-            outputs: vec![asset_packet::AssetOutput {
-                output_index: 0,
-                amount,
-            }],
-        });
-
-        groups.extend(existing_asset_groups.into_values());
-
-        let packet = asset_packet::Packet { groups };
-
-        // Add the asset packet OP_RETURN to the PSBT (before the anchor output).
-        add_asset_packet_to_psbt(&mut ark_tx, &packet);
+        .context("failed to build asset issuance transactions")?;
 
         // Sign the ark transaction inputs.
         for i in 0..checkpoint_txs.len() {
@@ -322,29 +243,12 @@ where
             );
         }
 
-        // Derive asset IDs from the PSBT txid.
-        let psbt_txid = ark_tx.unsigned_tx.compute_txid();
-        let mut asset_ids = Vec::new();
-        let mut gidx: u16 = 0;
-
-        if matches!(control_asset, Some(ControlAsset::New { .. })) {
-            asset_ids.push(asset_packet::AssetId {
-                txid: psbt_txid,
-                group_index: gidx,
-            });
-            gidx += 1;
-        }
-
-        asset_ids.push(asset_packet::AssetId {
-            txid: psbt_txid,
-            group_index: gidx,
-        });
-
         Ok(IssueAssetResult {
             ark_txid,
             asset_ids,
         })
     }
+
     /// Reissue additional units of an existing asset.
     ///
     /// The asset must have been created with a control asset. The control asset
@@ -353,13 +257,13 @@ where
     ///
     /// # Arguments
     ///
-    /// * `asset_id` - The hex-encoded asset ID to reissue
+    /// * `asset_id` - The ID of the asset to reissue
     /// * `amount` - The number of additional asset units to mint
     ///
     /// # Returns
     ///
     /// The [`Txid`] of the generated Ark transaction.
-    pub async fn reissue_asset(&self, asset_id: &str, amount: u64) -> Result<Txid, Error> {
+    pub async fn reissue_asset(&self, asset_id: AssetId, amount: u64) -> Result<Txid, Error> {
         if amount == 0 {
             return Err(Error::ad_hoc("reissue amount must be > 0"));
         }
@@ -370,14 +274,15 @@ where
             .await
             .context("failed to get asset info")?;
 
-        if asset_info.control_asset_id.is_empty() {
-            return Err(Error::ad_hoc(format!(
-                "{} can't be reissued, no control asset",
-                asset_id
-            )));
-        }
-
-        let control_asset_id = &asset_info.control_asset_id;
+        let control_asset_id = match asset_info.control_asset_id {
+            Some(control_asset_id) => control_asset_id,
+            None => {
+                return Err(Error::ad_hoc(format!(
+                    "Asset {} can't be reissued, no control asset",
+                    asset_id
+                )));
+            }
+        };
 
         // 2. Select VTXOs holding the control asset.
         let (vtxo_list, script_pubkey_to_vtxo_map) =
@@ -397,7 +302,7 @@ where
         let mut selected_outpoints: std::collections::HashSet<bitcoin::OutPoint> =
             std::collections::HashSet::new();
         let mut all_selected = Vec::new();
-        let mut asset_changes: HashMap<String, u64> = HashMap::new();
+        let mut asset_changes: HashMap<AssetId, u64> = HashMap::new();
 
         // Select the control asset VTXO (amount = 1).
         let (control_coins, control_change) =
@@ -410,15 +315,15 @@ where
             if selected_outpoints.insert(coin.outpoint) {
                 btc_provided += coin.amount;
                 for a in &coin.assets {
-                    if a.asset_id != *control_asset_id {
-                        *asset_changes.entry(a.asset_id.clone()).or_insert(0) += a.amount;
+                    if a.asset_id != control_asset_id {
+                        *asset_changes.entry(a.asset_id).or_insert(0) += a.amount;
                     }
                 }
                 all_selected.push(coin.clone());
             }
         }
         if control_change > 0 {
-            asset_changes.insert(control_asset_id.to_string(), control_change);
+            asset_changes.insert(control_asset_id, control_change);
         }
 
         // 3. We need dust for the receiver output (reissued asset) + dust for the control asset
@@ -451,7 +356,7 @@ where
             for coin in &btc_coins {
                 if selected_outpoints.insert(coin.outpoint) {
                     for a in &coin.assets {
-                        *asset_changes.entry(a.asset_id.clone()).or_insert(0) += a.amount;
+                        *asset_changes.entry(a.asset_id).or_insert(0) += a.amount;
                     }
                     all_selected.push(coin.clone());
                 }
@@ -493,7 +398,7 @@ where
             address: self_address,
             amount: self.server_info.dust,
             assets: vec![Asset {
-                asset_id: control_asset_id.to_string(),
+                asset_id: control_asset_id,
                 amount: 1,
             }],
         }];
@@ -546,29 +451,29 @@ where
         )?;
 
         // Now add the reissue output: find or create a group for the reissued asset.
-        let mut packet = packet.unwrap_or_else(|| asset_packet::Packet { groups: Vec::new() });
+        let mut packet = packet.unwrap_or_else(|| asset::packet::Packet { groups: Vec::new() });
 
-        let reissue_asset_id = parse_asset_id_hex(asset_id)?;
-        let reissue_output = asset_packet::AssetOutput {
+        let reissue_output = asset::packet::AssetOutput {
             output_index: 0, // reissued asset goes to the first receiver output
             amount,
         };
 
-        // Check if a group for this asset already exists (e.g. from existing balance on the VTXO).
+        // Check if a group for the reissued asset already exists (e.g. from existing balance on
+        // the selected VTXO). This must target the issued asset, not the control asset.
         let existing_group = packet.groups.iter_mut().find(|g| {
             g.asset_id
                 .as_ref()
-                .map(|id| *id == reissue_asset_id)
+                .map(|id| *id == asset_id)
                 .unwrap_or(false)
         });
 
         if let Some(group) = existing_group {
-            // Append reissue output to the existing group.
+            // Append reissue output to the existing asset group.
             group.outputs.push(reissue_output);
         } else {
-            // Create a new group for the reissued asset (no inputs, no control_asset ref).
-            packet.groups.push(asset_packet::AssetGroup {
-                asset_id: Some(reissue_asset_id),
+            // Create a new group for the reissued asset.
+            packet.groups.push(asset::packet::AssetGroup {
+                asset_id: Some(asset_id),
                 control_asset: None,
                 metadata: None,
                 inputs: vec![],
@@ -675,24 +580,4 @@ where
 
         Ok(ark_txid)
     }
-}
-
-/// Parse an asset ID string in the format "txid:gidx" into an [`asset_packet::AssetId`].
-fn parse_asset_id_string(s: &str) -> Result<asset_packet::AssetId, Error> {
-    let parts: Vec<&str> = s.split(':').collect();
-    if parts.len() != 2 {
-        return Err(Error::ad_hoc(format!(
-            "invalid asset ID format '{}', expected 'txid:gidx'",
-            s
-        )));
-    }
-
-    let txid: Txid = parts[0]
-        .parse()
-        .map_err(|e| Error::ad_hoc(format!("invalid txid in asset ID: {}", e)))?;
-    let group_index: u16 = parts[1]
-        .parse()
-        .map_err(|e| Error::ad_hoc(format!("invalid group index in asset ID: {}", e)))?;
-
-    Ok(asset_packet::AssetId { txid, group_index })
 }

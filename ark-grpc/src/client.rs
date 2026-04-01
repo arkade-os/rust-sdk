@@ -19,6 +19,7 @@ use crate::generated::ark::v1::SubmitTreeSignaturesRequest;
 use crate::generated::ark::v1::SubscribeForScriptsRequest;
 use crate::generated::ark::v1::UnsubscribeForScriptsRequest;
 use crate::Error;
+use ark_core::asset::AssetId;
 use ark_core::history;
 use ark_core::server::parse_sequence_number;
 use ark_core::server::ArkTransaction;
@@ -603,7 +604,7 @@ impl Client {
         Ok(SignedAmount::from_sat(response.fee))
     }
 
-    pub async fn get_asset(&self, asset_id: &str) -> Result<AssetInfo, Error> {
+    pub async fn get_asset(&self, asset_id: AssetId) -> Result<AssetInfo, Error> {
         let mut client = self.indexer_client()?;
 
         let response = client
@@ -617,9 +618,16 @@ impl Client {
 
         let supply = inner.supply.parse::<u64>().unwrap_or(0);
 
+        let asset_id = inner.asset_id.parse().map_err(Error::conversion)?;
+        let control_asset_id = if inner.control_asset.is_empty() {
+            None
+        } else {
+            Some(inner.control_asset.parse().map_err(Error::conversion)?)
+        };
+
         Ok(AssetInfo {
-            asset_id: inner.asset_id,
-            control_asset_id: inner.control_asset,
+            asset_id,
+            control_asset_id,
             supply,
             metadata: inner.metadata,
         })

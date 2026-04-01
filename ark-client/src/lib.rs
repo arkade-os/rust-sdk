@@ -4,6 +4,7 @@ use crate::utils::sleep;
 use crate::utils::timeout_op;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
+use ark_core::asset::AssetId;
 use ark_core::build_anchor_tx;
 use ark_core::history;
 use ark_core::history::generate_incoming_vtxo_transaction_history;
@@ -46,7 +47,7 @@ pub mod key_provider;
 pub mod swap_storage;
 pub mod wallet;
 
-mod asset;
+mod asset_issuance;
 mod batch;
 mod boltz;
 mod coin_select;
@@ -55,7 +56,7 @@ mod send_vtxo;
 mod unilateral_exit;
 mod utils;
 
-pub use asset::IssueAssetResult;
+pub use asset_issuance::IssueAssetResult;
 pub use boltz::ChainSwapAmount;
 pub use boltz::ChainSwapData;
 pub use boltz::ChainSwapDirection;
@@ -321,8 +322,7 @@ pub struct OffChainBalance {
     pre_confirmed: Amount,
     confirmed: Amount,
     recoverable: Amount,
-    /// Asset balances keyed by asset ID.
-    asset_balances: HashMap<String, u64>,
+    asset_balances: HashMap<AssetId, u64>,
 }
 
 impl OffChainBalance {
@@ -344,7 +344,7 @@ impl OffChainBalance {
     }
 
     /// Asset balances keyed by asset ID.
-    pub fn asset_balances(&self) -> &HashMap<String, u64> {
+    pub fn asset_balances(&self) -> &HashMap<AssetId, u64> {
         &self.asset_balances
     }
 }
@@ -831,10 +831,10 @@ where
             .fold(Amount::ZERO, |acc, x| acc + x.amount);
 
         // Aggregate asset balances from all spendable VTXOs.
-        let mut asset_balances: HashMap<String, u64> = HashMap::new();
+        let mut asset_balances: HashMap<AssetId, u64> = HashMap::new();
         for vtxo in vtxo_list.spendable_offchain() {
             for asset in &vtxo.assets {
-                *asset_balances.entry(asset.asset_id.clone()).or_insert(0) += asset.amount;
+                *asset_balances.entry(asset.asset_id).or_insert(0) += asset.amount;
             }
         }
 
@@ -847,7 +847,7 @@ where
     }
 
     /// Get information about an asset by its ID.
-    pub async fn get_asset(&self, asset_id: &str) -> Result<server::AssetInfo, Error> {
+    pub async fn get_asset(&self, asset_id: AssetId) -> Result<server::AssetInfo, Error> {
         timeout_op(
             self.inner.timeout,
             self.network_client().get_asset(asset_id),

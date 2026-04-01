@@ -2,6 +2,7 @@
 
 use crate::models::GetInfoResponse;
 use crate::models::GetSubscriptionResponse;
+use crate::models::IndexerAsset;
 use crate::models::IndexerVtxo;
 use bitcoin::base64;
 use bitcoin::base64::Engine;
@@ -418,13 +419,26 @@ impl TryFrom<IndexerVtxo> for ark_core::server::VirtualTxOutPoint {
             .assets
             .unwrap_or_default()
             .into_iter()
-            .filter_map(|a| {
-                Some(ark_core::server::Asset {
-                    asset_id: a.asset_id?,
-                    amount: a.amount? as u64,
-                })
+            .filter_map(|a| match a {
+                IndexerAsset {
+                    amount: Some(amount),
+                    asset_id: Some(asset_id),
+                } => {
+                    let asset_id = match asset_id.parse() {
+                        Ok(asset_id) => asset_id,
+                        Err(e) => {
+                            return Some(Err(ConversionError(format!("Invalid asset ID: {e}"))));
+                        }
+                    };
+
+                    Some(Ok(ark_core::server::Asset {
+                        asset_id,
+                        amount: amount as u64,
+                    }))
+                }
+                _ => None,
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(ark_core::server::VirtualTxOutPoint {
             outpoint,

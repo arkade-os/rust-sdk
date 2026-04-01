@@ -1,5 +1,6 @@
 //! Messages exchanged between the client and the Ark server.
 
+use crate::asset::AssetId;
 use crate::tx_graph::TxGraphChunk;
 use crate::ArkAddress;
 use crate::Error;
@@ -18,31 +19,6 @@ use musig::musig;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::str::FromStr;
-
-/// An asset carried by a VTXO.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Asset {
-    pub asset_id: String,
-    pub amount: u64,
-}
-
-/// Metadata about an issued asset, including its control asset reference.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AssetInfo {
-    pub asset_id: String,
-    pub control_asset_id: String,
-    pub supply: u64,
-    pub metadata: String,
-}
-
-/// Configuration for control assets when issuing new assets.
-#[derive(Clone, Debug)]
-pub enum ControlAsset {
-    /// Create a new control asset with the specified amount.
-    New { amount: u64 },
-    /// Reference an existing control asset by its ID.
-    Existing { id: String },
-}
 
 /// An aggregate public nonce per shared internal (non-leaf) node in the VTXO tree.
 #[derive(Debug, Clone)]
@@ -712,6 +688,28 @@ pub enum Network {
     Signet,
     Regtest,
     Mutinynet,
+}
+
+/// An asset carried by a VTXO.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Asset {
+    pub asset_id: AssetId,
+    pub amount: u64,
+}
+
+/// Metadata about an issued asset, including its control asset reference.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AssetInfo {
+    pub asset_id: AssetId,
+    pub control_asset_id: Option<AssetId>,
+    pub supply: u64,
+    pub metadata: String,
+}
+
+impl AssetInfo {
+    pub fn can_be_reissued(&self) -> bool {
+        self.control_asset_id.is_some()
+    }
 }
 
 impl From<Network> for bitcoin::Network {

@@ -1,3 +1,4 @@
+use crate::asset::AssetId;
 use crate::server::Asset;
 use crate::Error;
 use bitcoin::Amount;
@@ -62,7 +63,7 @@ pub fn select_vtxos(
 pub fn select_vtxos_for_asset(
     mut virtual_tx_outpoints: Vec<VirtualTxOutPoint>,
     amount: u64,
-    asset_id: &str,
+    asset_id: AssetId,
 ) -> Result<(Vec<VirtualTxOutPoint>, u64), Error> {
     // Filter to only VTXOs containing this asset.
     let mut candidates: Vec<VirtualTxOutPoint> = virtual_tx_outpoints

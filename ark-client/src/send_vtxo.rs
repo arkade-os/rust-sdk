@@ -6,7 +6,8 @@ use crate::wallet::OnchainWallet;
 use crate::Blockchain;
 use crate::Client;
 use crate::Error;
-use ark_core::asset_packet;
+use ark_core::asset;
+use ark_core::asset::AssetId;
 use ark_core::coin_select::select_vtxos;
 use ark_core::coin_select::select_vtxos_for_asset;
 use ark_core::intent;
@@ -189,7 +190,7 @@ where
         let mut all_selected: Vec<ark_core::coin_select::VirtualTxOutPoint> = Vec::new();
 
         // Per-asset change amounts that may satisfy later receivers.
-        let mut asset_changes: HashMap<String, u64> = HashMap::new();
+        let mut asset_changes: HashMap<AssetId, u64> = HashMap::new();
 
         // Track BTC needed and BTC already provided by asset-selected VTXOs.
         let mut btc_needed = Amount::ZERO;
@@ -223,7 +224,7 @@ where
                     .collect();
 
                 let (asset_coins, asset_change) =
-                    select_vtxos_for_asset(available, amount_to_select, &asset.asset_id)
+                    select_vtxos_for_asset(available, amount_to_select, asset.asset_id)
                         .map_err(Error::from)
                         .context("failed to select coins for asset transfer")?;
 
@@ -235,7 +236,7 @@ where
                         // Collect change for other assets in this coin.
                         for a in &coin.assets {
                             if a.asset_id != asset.asset_id {
-                                *asset_changes.entry(a.asset_id.clone()).or_insert(0) += a.amount;
+                                *asset_changes.entry(a.asset_id).or_insert(0) += a.amount;
                             }
                         }
 
@@ -244,7 +245,7 @@ where
                 }
 
                 if asset_change > 0 {
-                    *asset_changes.entry(asset.asset_id.clone()).or_insert(0) += asset_change;
+                    *asset_changes.entry(asset.asset_id).or_insert(0) += asset_change;
                 }
             }
         }
@@ -274,7 +275,7 @@ where
                 if selected_outpoints.insert(coin.outpoint) {
                     // Collect asset change from BTC-selected coins.
                     for a in &coin.assets {
-                        *asset_changes.entry(a.asset_id.clone()).or_insert(0) += a.amount;
+                        *asset_changes.entry(a.asset_id).or_insert(0) += a.amount;
                     }
                     all_selected.push(coin.clone());
                 }
@@ -358,7 +359,7 @@ where
         )?;
 
         if let Some(packet) = packet {
-            asset_packet::add_asset_packet_to_psbt(&mut ark_tx, &packet);
+            asset::packet::add_asset_packet_to_psbt(&mut ark_tx, &packet);
         }
 
         // 6. Sign, submit, finalize.
@@ -403,7 +404,7 @@ where
     /// # Returns
     ///
     /// The [`Txid`] of the generated Ark transaction.
-    pub async fn burn_asset(&self, asset_id: &str, amount: u64) -> Result<Txid, Error> {
+    pub async fn burn_asset(&self, asset_id: AssetId, amount: u64) -> Result<Txid, Error> {
         let (vtxo_list, script_pubkey_to_vtxo_map) = self
             .list_vtxos()
             .await
@@ -431,14 +432,14 @@ where
         let mut all_selected = asset_coins.clone();
 
         // Collect asset changes from selected coins (other assets on same VTXOs).
-        let mut asset_changes: HashMap<String, u64> = HashMap::new();
+        let mut asset_changes: HashMap<AssetId, u64> = HashMap::new();
         if asset_change > 0 {
-            asset_changes.insert(asset_id.to_string(), asset_change);
+            asset_changes.insert(asset_id, asset_change);
         }
         for coin in &asset_coins {
             for a in &coin.assets {
                 if a.asset_id != asset_id {
-                    *asset_changes.entry(a.asset_id.clone()).or_insert(0) += a.amount;
+                    *asset_changes.entry(a.asset_id).or_insert(0) += a.amount;
                 }
             }
         }
@@ -473,7 +474,7 @@ where
             for coin in &btc_coins {
                 if selected_outpoints.insert(coin.outpoint) {
                     for a in &coin.assets {
-                        *asset_changes.entry(a.asset_id.clone()).or_insert(0) += a.amount;
+                        *asset_changes.entry(a.asset_id).or_insert(0) += a.amount;
                     }
                     all_selected.push(coin.clone());
                 }
@@ -564,7 +565,7 @@ where
         )?;
 
         if let Some(packet) = packet {
-            asset_packet::add_asset_packet_to_psbt(&mut ark_tx, &packet);
+            asset::packet::add_asset_packet_to_psbt(&mut ark_tx, &packet);
         }
 
         // 6. Sign, submit, finalize.
@@ -966,12 +967,12 @@ where
         .context("failed to build offchain transactions")?;
 
         let mut asset_inputs: HashMap<u16, Vec<Asset>> = HashMap::new();
-        let mut all_change_assets: HashMap<String, u64> = HashMap::new();
+        let mut all_change_assets: HashMap<AssetId, u64> = HashMap::new();
         for (idx, coin) in selected_coins.iter().enumerate() {
             if !coin.assets.is_empty() {
                 asset_inputs.insert(idx as u16, coin.assets.clone());
                 for asset in &coin.assets {
-                    *all_change_assets.entry(asset.asset_id.clone()).or_insert(0) += asset.amount;
+                    *all_change_assets.entry(asset.asset_id).or_insert(0) += asset.amount;
                 }
             }
         }
@@ -1003,7 +1004,7 @@ where
             &change_assets,
             change_output_index,
         )? {
-            asset_packet::add_asset_packet_to_psbt(&mut ark_tx, &packet);
+            asset::packet::add_asset_packet_to_psbt(&mut ark_tx, &packet);
         }
 
         // Sign, submit, finalize.
@@ -1269,26 +1270,25 @@ pub fn create_asset_packet(
     receivers: &[Receiver],
     change_assets: &[Asset],
     change_output_index: usize,
-) -> Result<Option<asset_packet::Packet>, Error> {
+) -> Result<Option<asset::packet::Packet>, Error> {
     // Collect all transfers grouped by asset ID.
     struct AssetTransfer {
-        inputs: Vec<asset_packet::AssetInput>,
-        outputs: Vec<asset_packet::AssetOutput>,
+        inputs: Vec<asset::packet::AssetInput>,
+        outputs: Vec<asset::packet::AssetOutput>,
     }
 
-    let mut transfers: HashMap<String, AssetTransfer> = HashMap::new();
+    let mut transfers: HashMap<AssetId, AssetTransfer> = HashMap::new();
 
     // Map inputs.
     for (input_index, assets) in asset_inputs {
         for asset in assets {
-            let transfer =
-                transfers
-                    .entry(asset.asset_id.clone())
-                    .or_insert_with(|| AssetTransfer {
-                        inputs: Vec::new(),
-                        outputs: Vec::new(),
-                    });
-            transfer.inputs.push(asset_packet::AssetInput {
+            let transfer = transfers
+                .entry(asset.asset_id)
+                .or_insert_with(|| AssetTransfer {
+                    inputs: Vec::new(),
+                    outputs: Vec::new(),
+                });
+            transfer.inputs.push(asset::packet::AssetInput {
                 input_index: *input_index,
                 amount: asset.amount,
             });
@@ -1304,7 +1304,7 @@ pub fn create_asset_packet(
                     asset.asset_id
                 ))
             })?;
-            transfer.outputs.push(asset_packet::AssetOutput {
+            transfer.outputs.push(asset::packet::AssetOutput {
                 output_index: receiver_index as u16,
                 amount: asset.amount,
             });
@@ -1314,7 +1314,7 @@ pub fn create_asset_packet(
     // Map change outputs.
     for asset in change_assets {
         if let Some(transfer) = transfers.get_mut(&asset.asset_id) {
-            transfer.outputs.push(asset_packet::AssetOutput {
+            transfer.outputs.push(asset::packet::AssetOutput {
                 output_index: change_output_index as u16,
                 amount: asset.amount,
             });
@@ -1325,11 +1325,10 @@ pub fn create_asset_packet(
         return Ok(None);
     }
 
-    let groups: Vec<asset_packet::AssetGroup> = transfers
+    let groups: Vec<asset::packet::AssetGroup> = transfers
         .into_iter()
-        .map(|(asset_id_str, transfer)| {
-            let asset_id = parse_asset_id_hex(&asset_id_str)?;
-            Ok(asset_packet::AssetGroup {
+        .map(|(asset_id, transfer)| {
+            Ok(asset::packet::AssetGroup {
                 asset_id: Some(asset_id),
                 control_asset: None,
                 metadata: None,
@@ -1339,43 +1338,5 @@ pub fn create_asset_packet(
         })
         .collect::<Result<Vec<_>, Error>>()?;
 
-    Ok(Some(asset_packet::Packet { groups }))
-}
-
-/// Parse an asset ID from its hex string format (txid bytes + group_index LE bytes).
-pub fn parse_asset_id_hex(s: &str) -> Result<asset_packet::AssetId, Error> {
-    use bitcoin::hashes::Hash;
-    use bitcoin::hex::FromHex;
-
-    if let Ok(bytes) = Vec::<u8>::from_hex(s) {
-        if bytes.len() != 34 {
-            return Err(Error::ad_hoc(format!(
-                "invalid asset ID hex length {}, expected 34 bytes",
-                bytes.len()
-            )));
-        }
-
-        let txid_bytes: [u8; 32] = bytes[..32]
-            .try_into()
-            .map_err(|_| Error::ad_hoc("invalid txid bytes in asset ID"))?;
-        let group_index = u16::from_le_bytes([bytes[32], bytes[33]]);
-        return Ok(asset_packet::AssetId {
-            txid: Txid::from_byte_array(txid_bytes),
-            group_index,
-        });
-    }
-
-    if let Some((txid_str, gidx_str)) = s.split_once(':') {
-        let txid = txid_str
-            .parse()
-            .map_err(|e| Error::ad_hoc(format!("invalid txid in asset ID: {e}")))?;
-        let group_index = gidx_str
-            .parse()
-            .map_err(|e| Error::ad_hoc(format!("invalid group index in asset ID: {e}")))?;
-        return Ok(asset_packet::AssetId { txid, group_index });
-    }
-
-    Err(Error::ad_hoc(format!(
-        "invalid asset ID format '{s}', expected 34-byte hex or 'txid:gidx'"
-    )))
+    Ok(Some(asset::packet::Packet { groups }))
 }

@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
+use ark_core::asset::ControlAssetConfig;
 use bitcoin::key::Secp256k1;
 use bitcoin::Amount;
 use common::init_tracing;
@@ -41,9 +42,7 @@ pub async fn e2e_assets() {
     let issue_result = alice
         .issue_asset(
             issue_amount,
-            Some(ark_core::server::ControlAsset::New {
-                amount: control_amount,
-            }),
+            Some(ControlAssetConfig::new(control_amount).unwrap()),
             Some(vec![("name".to_string(), "TestToken".to_string())]),
         )
         .await
@@ -57,8 +56,8 @@ pub async fn e2e_assets() {
 
     assert_eq!(issue_result.asset_ids.len(), 2); // control asset + issued asset
 
-    let control_asset_hex = issue_result.asset_ids[0].id();
-    let issued_asset_hex = &issue_result.asset_ids[1].id();
+    let control_asset_id = issue_result.asset_ids[0];
+    let issued_asset_id = issue_result.asset_ids[1];
 
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     let balance = alice.offchain_balance().await.unwrap();
@@ -66,15 +65,12 @@ pub async fn e2e_assets() {
     tracing::info!(?balance, "Balance after issuance");
 
     assert_eq!(
-        balance.asset_balances().get(&control_asset_hex).copied(),
+        balance.asset_balances().get(&control_asset_id).copied(),
         Some(control_amount),
         "control asset balance"
     );
     assert_eq!(
-        balance
-            .asset_balances()
-            .get(issued_asset_hex.as_str())
-            .copied(),
+        balance.asset_balances().get(&issued_asset_id).copied(),
         Some(issue_amount),
         "issued asset balance"
     );
@@ -89,7 +85,7 @@ pub async fn e2e_assets() {
             address: bob_address,
             amount: alice.dust(),
             assets: vec![ark_core::server::Asset {
-                asset_id: issued_asset_hex.clone(),
+                asset_id: issued_asset_id,
                 amount: send_amount,
             }],
         }])
@@ -108,16 +104,13 @@ pub async fn e2e_assets() {
     assert_eq!(
         alice_balance
             .asset_balances()
-            .get(issued_asset_hex.as_str())
+            .get(&issued_asset_id)
             .copied(),
         Some(issue_amount - send_amount),
         "alice asset balance after send"
     );
     assert_eq!(
-        bob_balance
-            .asset_balances()
-            .get(issued_asset_hex.as_str())
-            .copied(),
+        bob_balance.asset_balances().get(&issued_asset_id).copied(),
         Some(send_amount),
         "bob asset balance after send"
     );
@@ -127,7 +120,7 @@ pub async fn e2e_assets() {
     let reissue_amount: u64 = 500;
 
     let reissue_txid = alice
-        .reissue_asset(issued_asset_hex.as_str(), reissue_amount)
+        .reissue_asset(issued_asset_id, reissue_amount)
         .await
         .unwrap();
 
@@ -142,7 +135,7 @@ pub async fn e2e_assets() {
     assert_eq!(
         alice_balance
             .asset_balances()
-            .get(issued_asset_hex.as_str())
+            .get(&issued_asset_id)
             .copied(),
         Some(issue_amount - send_amount + reissue_amount),
         "alice asset balance after reissue"
@@ -151,7 +144,7 @@ pub async fn e2e_assets() {
     assert_eq!(
         alice_balance
             .asset_balances()
-            .get(&control_asset_hex)
+            .get(&control_asset_id)
             .copied(),
         Some(control_amount),
         "control asset preserved after reissue"
@@ -162,7 +155,7 @@ pub async fn e2e_assets() {
     let burn_amount: u64 = 300;
 
     let burn_txid = alice
-        .burn_asset(issued_asset_hex.as_str(), burn_amount)
+        .burn_asset(issued_asset_id, burn_amount)
         .await
         .unwrap();
 
@@ -178,7 +171,7 @@ pub async fn e2e_assets() {
     assert_eq!(
         alice_balance
             .asset_balances()
-            .get(issued_asset_hex.as_str())
+            .get(&issued_asset_id)
             .copied(),
         Some(expected_after_burn),
         "alice asset balance after burn: expected {expected_after_burn}"
@@ -187,10 +180,7 @@ pub async fn e2e_assets() {
     // Bob's balance should be unchanged.
     let bob_balance = bob.offchain_balance().await.unwrap();
     assert_eq!(
-        bob_balance
-            .asset_balances()
-            .get(issued_asset_hex.as_str())
-            .copied(),
+        bob_balance.asset_balances().get(&issued_asset_id).copied(),
         Some(send_amount),
         "bob asset balance unchanged"
     );

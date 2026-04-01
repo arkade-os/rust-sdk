@@ -178,11 +178,14 @@ impl TryFrom<&generated::ark::v1::IndexerVtxo> for server::VirtualTxOutPoint {
         let assets = value
             .assets
             .iter()
-            .map(|a| server::Asset {
-                asset_id: a.asset_id.clone(),
-                amount: a.amount,
+            .map(|a| {
+                let asset_id = a.asset_id.parse().map_err(Error::conversion)?;
+                Ok(server::Asset {
+                    asset_id,
+                    amount: a.amount,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Self {
             outpoint,
@@ -239,11 +242,14 @@ impl TryFrom<&generated::ark::v1::Vtxo> for server::VirtualTxOutPoint {
         let assets = value
             .assets
             .iter()
-            .map(|a| server::Asset {
-                asset_id: a.asset_id.clone(),
-                amount: a.amount,
+            .map(|a| {
+                let asset_id = a.asset_id.parse().map_err(Error::conversion)?;
+                Ok(server::Asset {
+                    asset_id,
+                    amount: a.amount,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, Error>>()?;
 
         Ok(Self {
             outpoint,

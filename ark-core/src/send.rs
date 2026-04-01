@@ -35,6 +35,12 @@ use std::collections::BTreeMap;
 use std::io;
 use std::io::Write;
 
+pub mod issue_asset;
+
+pub use issue_asset::build_self_asset_issuance_transactions;
+pub use issue_asset::AssetBearingVtxoInput;
+pub use issue_asset::SelfAssetIssuanceTransactions;
+
 /// A VTXO to be spent into an unconfirmed VTXO.
 #[derive(Debug, Clone)]
 pub struct VtxoInput {
@@ -98,6 +104,7 @@ pub struct OffchainTransactions {
 /// Build a transaction to send VTXOs to another [`ArkAddress`].
 pub fn build_offchain_transactions(
     outputs: &[(&ArkAddress, Amount)],
+    // FIXME: Handle None + leftover sats as error. Clearly explain in docs.
     change_address: Option<&ArkAddress>,
     vtxo_inputs: &[VtxoInput],
     server_info: &server::Info,

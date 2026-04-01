@@ -4,7 +4,7 @@ use bitcoin::ScriptBuf;
 use bitcoin::TxOut;
 
 pub mod arknote;
-pub mod asset_packet;
+pub mod asset;
 pub mod batch;
 pub mod boarding_output;
 pub mod coin_select;
@@ -32,7 +32,6 @@ pub use error::ErrorContext;
 pub use script::extract_sequence_from_csv_sig_script;
 pub use server::Asset;
 pub use server::AssetInfo;
-pub use server::ControlAsset;
 pub use tx_graph::TxGraph;
 pub use tx_graph::TxGraphChunk;
 pub use unilateral_exit::build_anchor_tx;

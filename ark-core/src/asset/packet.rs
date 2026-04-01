@@ -3,10 +3,9 @@
 //! Implements the binary encoding format as specified in the Arkade Asset V1 specification.
 //! The packet is embedded in a Bitcoin transaction via an OP_RETURN output.
 
-use bitcoin::hex::DisplayHex;
+use crate::asset::AssetId;
 use bitcoin::ScriptBuf;
 use bitcoin::TxOut;
-use bitcoin::Txid;
 
 /// Magic bytes prefix: "ARK" (0x41524b).
 const MAGIC_BYTES: [u8; 3] = [0x41, 0x52, 0x4b];
@@ -19,60 +18,9 @@ const PRESENCE_ASSET_ID: u8 = 0x01;
 const PRESENCE_CONTROL_ASSET: u8 = 0x02;
 const PRESENCE_METADATA: u8 = 0x04;
 
-/// An asset identifier: (genesis_txid, group_index).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct AssetId {
-    pub txid: Txid,
-    pub group_index: u16,
-}
-
-/// Reference to a control asset.
-#[derive(Clone, Debug)]
-pub enum AssetRef {
-    /// Reference an existing asset by its full ID.
-    ById(AssetId),
-    /// Reference a group in the same transaction by index.
-    ByGroup(u16),
-}
-
-/// Key-value metadata map.
-pub type Metadata = Vec<(String, String)>;
-
-/// A local asset input referencing a transaction input by index.
-#[derive(Clone, Debug)]
-pub struct AssetInput {
-    /// Index into the transaction's inputs.
-    pub input_index: u16,
-    /// Amount of asset from this input.
-    pub amount: u64,
-}
-
-/// A local asset output referencing a transaction output by index.
-#[derive(Clone, Debug)]
-pub struct AssetOutput {
-    /// Index into the transaction's outputs.
-    pub output_index: u16,
-    /// Amount of asset to this output.
-    pub amount: u64,
-}
-
-/// A single asset group within a packet.
-#[derive(Clone, Debug)]
-pub struct AssetGroup {
-    /// If `None`, this is a fresh asset issuance. The asset ID will be derived from
-    /// `(this_txid, group_index)`.
-    pub asset_id: Option<AssetId>,
-    /// Control asset reference. Only valid for issuances (when `asset_id` is `None`).
-    pub control_asset: Option<AssetRef>,
-    /// Metadata key-value pairs attached to the asset group.
-    pub metadata: Option<Metadata>,
-    /// Asset inputs consumed by this group.
-    pub inputs: Vec<AssetInput>,
-    /// Asset outputs produced by this group.
-    pub outputs: Vec<AssetOutput>,
-}
-
 /// A complete asset packet containing one or more asset groups.
+///
+/// This is a transaction output with an `OP_RETURN` script.
 #[derive(Clone, Debug)]
 pub struct Packet {
     pub groups: Vec<AssetGroup>,
@@ -115,6 +63,46 @@ impl Packet {
     }
 }
 
+/// Reference to a control asset.
+#[derive(Clone, Debug)]
+pub enum AssetRef {
+    /// Reference an existing asset by its full ID.
+    ById(AssetId),
+    /// Reference a group in the same transaction by index.
+    ByGroup(u16),
+}
+
+impl AssetRef {
+    fn encode(&self, buf: &mut Vec<u8>) {
+        match self {
+            AssetRef::ById(asset_id) => {
+                buf.push(0x01); // BY_ID
+                asset_id.encode(buf);
+            }
+            AssetRef::ByGroup(gidx) => {
+                buf.push(0x02); // BY_GROUP
+                buf.extend_from_slice(&gidx.to_le_bytes());
+            }
+        }
+    }
+}
+
+/// A single asset group within a packet.
+#[derive(Clone, Debug)]
+pub struct AssetGroup {
+    /// If `None`, this is a fresh asset issuance. The asset ID will be derived from
+    /// `(this_txid, group_index)`.
+    pub asset_id: Option<AssetId>,
+    /// Control asset reference. Only valid for issuances (when `asset_id` is `None`).
+    pub control_asset: Option<AssetRef>,
+    /// Metadata key-value pairs attached to the asset group.
+    pub metadata: Option<Metadata>,
+    /// Asset inputs consumed by this group.
+    pub inputs: Vec<AssetInput>,
+    /// Asset outputs produced by this group.
+    pub outputs: Vec<AssetOutput>,
+}
+
 impl AssetGroup {
     fn encode(&self, buf: &mut Vec<u8>) {
         // Compute presence byte
@@ -155,35 +143,13 @@ impl AssetGroup {
     }
 }
 
-impl AssetId {
-    fn encode(&self, buf: &mut Vec<u8>) {
-        // txid as 32 bytes (internal byte order, not display order)
-        buf.extend_from_slice(self.txid.as_ref());
-        buf.extend_from_slice(&self.group_index.to_le_bytes());
-    }
-
-    pub fn id(&self) -> String {
-        format!(
-            "{}{}",
-            self.txid,
-            self.group_index.to_le_bytes().to_lower_hex_string()
-        )
-    }
-}
-
-impl AssetRef {
-    fn encode(&self, buf: &mut Vec<u8>) {
-        match self {
-            AssetRef::ById(asset_id) => {
-                buf.push(0x01); // BY_ID
-                asset_id.encode(buf);
-            }
-            AssetRef::ByGroup(gidx) => {
-                buf.push(0x02); // BY_GROUP
-                buf.extend_from_slice(&gidx.to_le_bytes());
-            }
-        }
-    }
+/// A local asset input referencing a transaction input by index.
+#[derive(Clone, Debug)]
+pub struct AssetInput {
+    /// Index into the transaction's inputs.
+    pub input_index: u16,
+    /// Amount of asset from this input.
+    pub amount: u64,
 }
 
 impl AssetInput {
@@ -194,6 +160,15 @@ impl AssetInput {
     }
 }
 
+/// A local asset output referencing a transaction output by index.
+#[derive(Clone, Debug)]
+pub struct AssetOutput {
+    /// Index into the transaction's outputs.
+    pub output_index: u16,
+    /// Amount of asset to this output.
+    pub amount: u64,
+}
+
 impl AssetOutput {
     fn encode(&self, buf: &mut Vec<u8>) {
         buf.push(0x01); // LOCAL
@@ -202,22 +177,8 @@ impl AssetOutput {
     }
 }
 
-/// Encode a uvarint (LEB128 unsigned variable-length integer).
-///
-/// This matches Go's `binary.PutUvarint` / protobuf unsigned varint encoding.
-fn encode_uvarint(buf: &mut Vec<u8>, mut value: u64) {
-    loop {
-        let mut byte = (value & 0x7f) as u8;
-        value >>= 7;
-        if value != 0 {
-            byte |= 0x80;
-        }
-        buf.push(byte);
-        if value == 0 {
-            break;
-        }
-    }
-}
+/// Key-value metadata map.
+pub type Metadata = Vec<(String, String)>;
 
 /// Encode a metadata map: count, then for each entry: key_len + key + value_len + value.
 fn encode_metadata(buf: &mut Vec<u8>, metadata: &[(String, String)]) {
@@ -257,25 +218,45 @@ pub fn add_asset_packet_to_psbt(psbt: &mut bitcoin::Psbt, packet: &Packet) {
         return;
     }
 
-    let txout = packet.to_txout();
+    let op_return_txout = packet.to_txout();
+
     let num_outputs = psbt.unsigned_tx.output.len();
 
+    // TODO: Is this actually possible?
     if num_outputs == 0 {
-        psbt.unsigned_tx.output.push(txout);
+        psbt.unsigned_tx.output.push(op_return_txout);
         psbt.outputs.push(bitcoin::psbt::Output::default());
         return;
     }
 
     // Insert before the last output (P2A anchor).
     let last_idx = num_outputs - 1;
-    psbt.unsigned_tx.output.insert(last_idx, txout);
+    psbt.unsigned_tx.output.insert(last_idx, op_return_txout);
     psbt.outputs
         .insert(last_idx, bitcoin::psbt::Output::default());
+}
+
+/// Encode a uvarint (LEB128 unsigned variable-length integer).
+///
+/// This matches Go's `binary.PutUvarint` / protobuf unsigned varint encoding.
+fn encode_uvarint(buf: &mut Vec<u8>, mut value: u64) {
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        buf.push(byte);
+        if value == 0 {
+            break;
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bitcoin::hex::DisplayHex;
 
     #[test]
     fn test_encode_uvarint() {
@@ -384,5 +365,57 @@ mod tests {
         // push_len byte, then 0x41 0x52 0x4b
         let data_start = 2; // 0x6a + push_len
         assert_eq!(&script_bytes[data_start..data_start + 3], &MAGIC_BYTES);
+    }
+
+    #[test]
+    fn test_asset_id_display_matches_from_str_format() {
+        let asset_id = AssetId {
+            txid: "58534acb681218c0fda8f6b6ae3b4cb5d8897e7c5fcba5792621c368b3db479c"
+                .parse()
+                .unwrap(),
+            group_index: 0,
+        };
+
+        let encoded = asset_id.to_string();
+        assert_eq!(
+            encoded,
+            "58534acb681218c0fda8f6b6ae3b4cb5d8897e7c5fcba5792621c368b3db479c0000"
+        );
+        assert_eq!(encoded.parse::<AssetId>().unwrap(), asset_id);
+    }
+
+    #[test]
+    fn test_asset_id_display_matches_from_str_format_for_non_zero_group() {
+        let asset_id = AssetId {
+            txid: "58534acb681218c0fda8f6b6ae3b4cb5d8897e7c5fcba5792621c368b3db479c"
+                .parse()
+                .unwrap(),
+            group_index: 1,
+        };
+
+        let encoded = asset_id.to_string();
+        assert_eq!(
+            encoded,
+            "58534acb681218c0fda8f6b6ae3b4cb5d8897e7c5fcba5792621c368b3db479c0100"
+        );
+        assert_eq!(encoded.parse::<AssetId>().unwrap(), asset_id);
+    }
+
+    #[test]
+    fn test_asset_id_binary_encoding_uses_txid_display_byte_order() {
+        let asset_id = AssetId {
+            txid: "58534acb681218c0fda8f6b6ae3b4cb5d8897e7c5fcba5792621c368b3db479c"
+                .parse()
+                .unwrap(),
+            group_index: 1,
+        };
+
+        let mut buf = Vec::new();
+        asset_id.encode(&mut buf);
+
+        assert_eq!(
+            buf.to_lower_hex_string(),
+            "58534acb681218c0fda8f6b6ae3b4cb5d8897e7c5fcba5792621c368b3db479c0100"
+        );
     }
 }
