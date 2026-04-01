@@ -36,10 +36,13 @@ use std::io;
 use std::io::Write;
 
 pub mod issue_asset;
+pub mod reissue_asset;
 
 pub use issue_asset::build_self_asset_issuance_transactions;
 pub use issue_asset::AssetBearingVtxoInput;
 pub use issue_asset::SelfAssetIssuanceTransactions;
+pub use reissue_asset::build_asset_reissuance_transactions;
+pub use reissue_asset::AssetReissuanceTransactions;
 
 /// A VTXO to be spent into an unconfirmed VTXO.
 #[derive(Debug, Clone)]
@@ -500,4 +503,25 @@ where
     }
 
     Ok(())
+}
+
+/// Return whether an offchain transaction has a BTC change output before the final anchor.
+///
+/// Before the asset packet is inserted, `build_offchain_transactions` produces
+/// `[receiver outputs..., optional change, anchor]`.
+pub(crate) fn has_btc_change_output(ark_tx: &Psbt, num_receiver_outputs: usize) -> bool {
+    ark_tx.unsigned_tx.output.len() > num_receiver_outputs + 1
+}
+
+/// Return the output index used to preserve assets already carried by the selected inputs.
+///
+/// Before the asset packet is inserted, `build_offchain_transactions` produces
+/// `[receiver outputs..., optional change, anchor]`. Existing carried assets stay on the BTC
+/// change output when it exists; otherwise they fall back to output `0`.
+pub(crate) fn preserved_asset_output_index(ark_tx: &Psbt, num_receiver_outputs: usize) -> u16 {
+    if has_btc_change_output(ark_tx, num_receiver_outputs) {
+        (ark_tx.unsigned_tx.output.len() - 2) as u16
+    } else {
+        0
+    }
 }

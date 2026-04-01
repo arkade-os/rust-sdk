@@ -6,20 +6,18 @@ use crate::wallet::OnchainWallet;
 use crate::Blockchain;
 use crate::Client;
 use crate::Error;
-use ark_core::asset;
-use ark_core::asset::packet::add_asset_packet_to_psbt;
 use ark_core::asset::AssetId;
 use ark_core::asset::ControlAssetConfig;
 use ark_core::coin_select::select_vtxos;
 use ark_core::coin_select::select_vtxos_for_asset;
 use ark_core::script::extract_checksig_pubkeys;
 use ark_core::send;
-use ark_core::send::build_offchain_transactions;
+use ark_core::send::build_asset_reissuance_transactions;
 use ark_core::send::build_self_asset_issuance_transactions;
 use ark_core::send::sign_ark_transaction;
 use ark_core::send::sign_checkpoint_transaction;
 use ark_core::send::AssetBearingVtxoInput;
-use ark_core::send::OffchainTransactions;
+use ark_core::send::AssetReissuanceTransactions;
 use ark_core::send::SelfAssetIssuanceTransactions;
 use ark_core::server::Asset;
 use ark_core::ErrorContext as _;
@@ -31,6 +29,7 @@ use bitcoin::Amount;
 use bitcoin::Txid;
 use bitcoin::XOnlyPublicKey;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 /// Result of an asset issuance.
 #[derive(Debug, Clone)]
@@ -72,6 +71,7 @@ where
             return Err(Error::ad_hoc("asset amount must be > 0"));
         }
 
+        // FIXME: Bug here. Should mark the actual change address VTXO as used!
         let (own_address, change_address_vtxo) = self.get_offchain_address()?;
 
         // We need a dust-amount VTXO to carry the issued asset.
@@ -284,6 +284,8 @@ where
             }
         };
 
+        // TODO: Steps 2 and 3 are hard to follow.
+
         // 2. Select VTXOs holding the control asset.
         let (vtxo_list, script_pubkey_to_vtxo_map) =
             self.list_vtxos().await.context("failed to list VTXOs")?;
@@ -299,8 +301,7 @@ where
             })
             .collect::<Vec<_>>();
 
-        let mut selected_outpoints: std::collections::HashSet<bitcoin::OutPoint> =
-            std::collections::HashSet::new();
+        let mut selected_outpoints: HashSet<bitcoin::OutPoint> = HashSet::new();
         let mut all_selected = Vec::new();
         let mut asset_changes: HashMap<AssetId, u64> = HashMap::new();
 
@@ -364,7 +365,7 @@ where
         }
 
         // 4. Build VTXO inputs.
-        let vtxo_inputs = all_selected
+        let reissuance_inputs = all_selected
             .iter()
             .map(|vto| {
                 let vtxo = script_pubkey_to_vtxo_map
@@ -375,115 +376,50 @@ where
                             vto.script_pubkey
                         ))
                     })?;
+
                 let (forfeit_script, control_block) = vtxo
                     .forfeit_spend_info()
                     .context("failed to get forfeit spend info")?;
-                Ok(send::VtxoInput::new(
-                    forfeit_script,
-                    None,
-                    control_block,
-                    vtxo.tapscripts(),
-                    vtxo.script_pubkey(),
-                    vto.amount,
-                    vto.outpoint,
-                ))
+
+                Ok(AssetBearingVtxoInput {
+                    input: send::VtxoInput::new(
+                        forfeit_script,
+                        None,
+                        control_block,
+                        vtxo.tapscripts(),
+                        vtxo.script_pubkey(),
+                        vto.amount,
+                        vto.outpoint,
+                    ),
+                    assets: vto.assets.clone(),
+                })
             })
             .collect::<Result<Vec<_>, Error>>()?;
 
         // 5. Build offchain transaction.
-        // Like the Go SDK, create a single receiver sending the control asset to self.
         let (change_address, change_address_vtxo) = self.get_offchain_address()?;
+        let asset_changes = asset_changes
+            .into_iter()
+            .map(|(asset_id, amount)| Asset { asset_id, amount })
+            .collect::<Vec<_>>();
 
-        let receivers = vec![crate::Receiver {
-            address: self_address,
-            amount: self.server_info.dust,
-            assets: vec![Asset {
-                asset_id: control_asset_id,
-                amount: 1,
-            }],
-        }];
-
-        let outputs: Vec<(&ark_core::ArkAddress, Amount)> =
-            receivers.iter().map(|r| (&r.address, r.amount)).collect();
-
-        let OffchainTransactions {
+        let AssetReissuanceTransactions {
             mut ark_tx,
             checkpoint_txs,
-        } = build_offchain_transactions(
-            &outputs,
-            Some(&change_address),
-            &vtxo_inputs,
+        } = build_asset_reissuance_transactions(
+            &self_address,
+            &change_address,
+            &reissuance_inputs,
+            &asset_changes,
             &self.server_info,
+            asset_id,
+            control_asset_id,
+            amount,
         )
         .map_err(Error::from)
-        .context("failed to build offchain transactions")?;
+        .context("failed to build asset reissuance transactions")?;
 
-        // 6. Build the asset packet using the same approach as send_assets.
-        // This creates groups for all asset transfers (control asset + any other assets).
-        let mut asset_inputs_map: HashMap<u16, Vec<Asset>> = HashMap::new();
-        for (idx, coin) in all_selected.iter().enumerate() {
-            if !coin.assets.is_empty() {
-                asset_inputs_map.insert(idx as u16, coin.assets.clone());
-            }
-        }
-
-        let num_psbt_outputs = ark_tx.unsigned_tx.output.len();
-        let has_change_output = num_psbt_outputs > receivers.len() + 1;
-        let change_output_index = if has_change_output {
-            num_psbt_outputs - 2
-        } else {
-            0
-        };
-        let change_assets: Vec<Asset> = if has_change_output {
-            asset_changes
-                .into_iter()
-                .map(|(asset_id, amount)| Asset { asset_id, amount })
-                .collect()
-        } else {
-            Vec::new()
-        };
-
-        let packet = crate::send_vtxo::create_asset_packet(
-            &asset_inputs_map,
-            &receivers,
-            &change_assets,
-            change_output_index,
-        )?;
-
-        // Now add the reissue output: find or create a group for the reissued asset.
-        let mut packet = packet.unwrap_or_else(|| asset::packet::Packet { groups: Vec::new() });
-
-        let reissue_output = asset::packet::AssetOutput {
-            output_index: 0, // reissued asset goes to the first receiver output
-            amount,
-        };
-
-        // Check if a group for the reissued asset already exists (e.g. from existing balance on
-        // the selected VTXO). This must target the issued asset, not the control asset.
-        let existing_group = packet.groups.iter_mut().find(|g| {
-            g.asset_id
-                .as_ref()
-                .map(|id| *id == asset_id)
-                .unwrap_or(false)
-        });
-
-        if let Some(group) = existing_group {
-            // Append reissue output to the existing asset group.
-            group.outputs.push(reissue_output);
-        } else {
-            // Create a new group for the reissued asset.
-            packet.groups.push(asset::packet::AssetGroup {
-                asset_id: Some(asset_id),
-                control_asset: None,
-                metadata: None,
-                inputs: vec![],
-                outputs: vec![reissue_output],
-            });
-        }
-
-        add_asset_packet_to_psbt(&mut ark_tx, &packet);
-
-        // 7. Sign, submit, finalize.
+        // 6. Sign, submit, finalize.
         for i in 0..checkpoint_txs.len() {
             let sign_fn = |input: &mut psbt::Input,
                            msg: secp256k1::Message|

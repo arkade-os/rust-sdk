@@ -1,10 +1,11 @@
-use super::build_offchain_transactions;
-use super::OffchainTransactions;
-use super::VtxoInput;
 use crate::asset;
 use crate::asset::packet::add_asset_packet_to_psbt;
 use crate::asset::AssetId;
 use crate::asset::ControlAssetConfig;
+use crate::send::build_offchain_transactions;
+use crate::send::preserved_asset_output_index;
+use crate::send::OffchainTransactions;
+use crate::send::VtxoInput;
 use crate::server;
 use crate::ArkAddress;
 use crate::Error;
@@ -120,7 +121,7 @@ pub fn build_self_asset_issuance_transactions(
     }
 
     // Preserve any assets carried by the funding VTXOs.
-    let existing_asset_output_index = preserved_asset_output_index(&ark_tx);
+    let existing_asset_output_index = preserved_asset_output_index(&ark_tx, 1);
     let mut existing_asset_groups: HashMap<AssetId, asset::packet::AssetGroup> = HashMap::new();
     for (input_index, input) in inputs.iter().enumerate() {
         for asset in &input.assets {
@@ -161,23 +162,6 @@ pub fn build_self_asset_issuance_transactions(
         checkpoint_txs,
         asset_ids,
     })
-}
-
-/// Return the output index used to preserve assets already carried by the selected inputs.
-///
-/// Before the asset packet is inserted, `build_offchain_transactions` produces
-/// `[receiver, optional change, anchor]`. Existing carried assets stay on the BTC change output
-/// when it exists; otherwise, for self-issuance, they fall back to the self-issued output at
-/// index `0`.
-fn preserved_asset_output_index(ark_tx: &Psbt) -> u16 {
-    let num_psbt_outputs = ark_tx.unsigned_tx.output.len();
-    let has_change_output = num_psbt_outputs > 2; // receiver + optional change + anchor
-
-    if has_change_output {
-        (num_psbt_outputs - 2) as u16
-    } else {
-        0
-    }
 }
 
 /// Derive the asset IDs created by a self-issuance transaction from the final transaction ID.
