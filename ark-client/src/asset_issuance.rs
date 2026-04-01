@@ -19,7 +19,6 @@ use ark_core::send::sign_checkpoint_transaction;
 use ark_core::send::AssetBearingVtxoInput;
 use ark_core::send::AssetReissuanceTransactions;
 use ark_core::send::SelfAssetIssuanceTransactions;
-use ark_core::server::Asset;
 use ark_core::ErrorContext as _;
 use bitcoin::key::Secp256k1;
 use bitcoin::psbt;
@@ -302,7 +301,6 @@ where
 
         let mut selected_outpoints: HashSet<bitcoin::OutPoint> = HashSet::new();
         let mut all_selected = Vec::new();
-        let mut asset_changes: HashMap<AssetId, u64> = HashMap::new();
 
         // Select the control asset VTXO (amount = 1).
         let (control_coins, control_change) =
@@ -314,16 +312,8 @@ where
         for coin in &control_coins {
             if selected_outpoints.insert(coin.outpoint) {
                 btc_provided += coin.amount;
-                for a in &coin.assets {
-                    if a.asset_id != control_asset_id {
-                        *asset_changes.entry(a.asset_id).or_insert(0) += a.amount;
-                    }
-                }
                 all_selected.push(coin.clone());
             }
-        }
-        if control_change > 0 {
-            asset_changes.insert(control_asset_id, control_change);
         }
 
         // 3. We need dust for the receiver output (reissued asset) + dust for the control asset
@@ -334,15 +324,26 @@ where
             .next()
             .ok_or_else(|| ark_core::Error::ad_hoc("no offchain address available"))?;
 
-        // Two dust outputs: one for the reissued asset, one for the control asset back to self.
-        // Plus a change output if there are other asset changes.
-        let mut btc_needed = self.server_info.dust * 2;
-        if !asset_changes.is_empty() {
-            btc_needed += self.server_info.dust;
-        }
+        loop {
+            // Two dust outputs: one for the reissued asset, one for the control asset back to self.
+            // Add another dust output when any selected input carries assets that must be preserved
+            // on BTC change during reissuance.
+            let has_preserved_asset_changes = control_change > 0
+                || all_selected.iter().any(|coin| {
+                    coin.assets
+                        .iter()
+                        .any(|asset| asset.asset_id != control_asset_id)
+                });
+            let mut btc_needed = self.server_info.dust * 2;
+            if has_preserved_asset_changes {
+                btc_needed += self.server_info.dust;
+            }
 
-        let btc_shortfall = btc_needed.checked_sub(btc_provided).unwrap_or(Amount::ZERO);
-        if btc_shortfall > Amount::ZERO {
+            let btc_shortfall = btc_needed.checked_sub(btc_provided).unwrap_or(Amount::ZERO);
+            if btc_shortfall == Amount::ZERO {
+                break;
+            }
+
             let available: Vec<_> = spendable
                 .iter()
                 .filter(|v| !selected_outpoints.contains(&v.outpoint))
@@ -355,9 +356,7 @@ where
 
             for coin in &btc_coins {
                 if selected_outpoints.insert(coin.outpoint) {
-                    for a in &coin.assets {
-                        *asset_changes.entry(a.asset_id).or_insert(0) += a.amount;
-                    }
+                    btc_provided += coin.amount;
                     all_selected.push(coin.clone());
                 }
             }
@@ -397,10 +396,6 @@ where
 
         // 5. Build offchain transaction.
         let (change_address, change_address_vtxo) = self.get_offchain_address()?;
-        let asset_changes = asset_changes
-            .into_iter()
-            .map(|(asset_id, amount)| Asset { asset_id, amount })
-            .collect::<Vec<_>>();
 
         let AssetReissuanceTransactions {
             mut ark_tx,
@@ -409,7 +404,6 @@ where
             &self_address,
             &change_address,
             &reissuance_inputs,
-            &asset_changes,
             &self.server_info,
             asset_id,
             control_asset_id,

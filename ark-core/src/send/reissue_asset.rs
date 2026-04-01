@@ -24,8 +24,9 @@ pub struct AssetReissuanceTransactions {
 /// Output `0` remains self-controlled and carries both the returned control asset and the newly
 /// reissued asset amount.
 ///
-/// Assets listed in `asset_changes` are preserved on the BTC change output when one exists. If no
-/// BTC change output exists, the builder returns an error rather than silently dropping them.
+/// Assets already carried by the selected inputs are preserved on the BTC change output when one
+/// exists. If no BTC change output exists, the builder returns an error rather than silently
+/// dropping them.
 ///
 /// # Arguments
 ///
@@ -34,13 +35,11 @@ pub struct AssetReissuanceTransactions {
 /// * `change_address` - The issuer's offchain change address, used if the transaction has BTC
 ///   change
 /// * `inputs` - The selected VTXO inputs to spend, together with any assets they already carry
-/// * `asset_changes` - Asset balances from the selected inputs that should be preserved on a BTC
-///   change output
 /// * `server_info` - Server configuration used to build the offchain transaction shape and dust
 ///   output
-/// * `asset_id` - The ID of the existing asset being reissued
+/// * `reissue_asset_id` - The ID of the existing asset being reissued
 /// * `control_asset_id` - The ID of the control asset authorizing the reissuance
-/// * `amount` - The additional amount of the asset to mint
+/// * `reissue_amount` - The additional amount of the asset to mint
 ///
 /// # Returns
 ///
@@ -50,7 +49,6 @@ pub fn build_asset_reissuance_transactions(
     own_address: &ArkAddress,
     change_address: &ArkAddress,
     inputs: &[AssetBearingVtxoInput],
-    asset_changes: &[server::Asset],
     server_info: &server::Info,
     reissue_asset_id: AssetId,
     control_asset_id: AssetId,
@@ -82,28 +80,17 @@ pub fn build_asset_reissuance_transactions(
     // asset changes exist but there is no BTC change output, to avoid silently dropping them. Since
     // output 0 is also self-controlled in reissuance, it may be valid to preserve those assets on
     // output 0 instead.
+    let (asset_inputs, change_assets) = derive_reissuance_assets(inputs, control_asset_id);
+
     let can_preserve_existing_assets = has_btc_change_output(&ark_tx, 1);
-    let change_assets = match (can_preserve_existing_assets, asset_changes.is_empty()) {
-        (true, _) => asset_changes.to_vec(),
-        (false, true) => Vec::new(),
+    match (can_preserve_existing_assets, change_assets.is_empty()) {
+        (true, _) | (false, true) => {}
         (false, false) => {
             return Err(Error::ad_hoc(
-                "asset reissuance cannot preserve existing assets without BTC change output",
+                "asset reissuance has preserved asset changes but no BTC change output",
             ));
         }
-    };
-
-    let asset_inputs = inputs
-        .iter()
-        .enumerate()
-        .filter_map(|(input_index, input)| {
-            if input.assets.is_empty() {
-                None
-            } else {
-                Some((input_index as u16, input.assets.clone()))
-            }
-        })
-        .collect::<HashMap<_, _>>();
+    }
 
     let mut packet = create_asset_packet(
         &asset_inputs,
@@ -145,6 +132,40 @@ pub fn build_asset_reissuance_transactions(
         ark_tx,
         checkpoint_txs,
     })
+}
+
+fn derive_reissuance_assets(
+    inputs: &[AssetBearingVtxoInput],
+    control_asset_id: AssetId,
+) -> (HashMap<u16, Vec<server::Asset>>, Vec<server::Asset>) {
+    let mut asset_inputs = HashMap::new();
+    let mut change_assets: HashMap<AssetId, u64> = HashMap::new();
+    let mut control_asset_amount = 0;
+
+    for (input_index, input) in inputs.iter().enumerate() {
+        if !input.assets.is_empty() {
+            asset_inputs.insert(input_index as u16, input.assets.clone());
+        }
+
+        for asset in &input.assets {
+            if asset.asset_id == control_asset_id {
+                control_asset_amount += asset.amount;
+            } else {
+                *change_assets.entry(asset.asset_id).or_insert(0) += asset.amount;
+            }
+        }
+    }
+
+    if control_asset_amount > 1 {
+        *change_assets.entry(control_asset_id).or_insert(0) += control_asset_amount - 1;
+    }
+
+    let change_assets = change_assets
+        .into_iter()
+        .map(|(asset_id, amount)| server::Asset { asset_id, amount })
+        .collect();
+
+    (asset_inputs, change_assets)
 }
 
 fn create_asset_packet(
@@ -264,7 +285,6 @@ mod tests {
             &own_address,
             &own_address,
             &[input],
-            &[],
             &server_info,
             asset_id,
             control_asset_id,
@@ -339,10 +359,6 @@ mod tests {
             &own_address,
             &own_address,
             &[input],
-            &[Asset {
-                asset_id: unrelated_asset_id,
-                amount: 9,
-            }],
             &server_info,
             asset_id,
             control_asset_id,
@@ -435,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn self_reissuance_merges_new_amount_into_existing_asset_group() {
+    fn self_reissuance_with_existing_asset_balance_preserves_it_on_change_output() {
         let server_info = test_server_info();
         let asset_id = AssetId {
             txid: Txid::from_byte_array([8; 32]),
@@ -447,7 +463,7 @@ mod tests {
         };
         let (input, own_address) = self_reissuance_input(
             10,
-            330,
+            660,
             vec![
                 Asset {
                     asset_id: control_asset_id,
@@ -464,7 +480,6 @@ mod tests {
             &own_address,
             &own_address,
             &[input],
-            &[],
             &server_info,
             asset_id,
             control_asset_id,
@@ -472,7 +487,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(res.ark_tx.unsigned_tx.output.len(), 3);
+        assert_eq!(res.ark_tx.unsigned_tx.output.len(), 4);
 
         let expected_packets = [
             Packet {
@@ -498,10 +513,16 @@ mod tests {
                             input_index: 0,
                             amount: 7,
                         }],
-                        outputs: vec![AssetOutput {
-                            output_index: 0,
-                            amount: 123,
-                        }],
+                        outputs: vec![
+                            AssetOutput {
+                                output_index: 1,
+                                amount: 7,
+                            },
+                            AssetOutput {
+                                output_index: 0,
+                                amount: 123,
+                            },
+                        ],
                     },
                 ],
             },
@@ -515,10 +536,16 @@ mod tests {
                             input_index: 0,
                             amount: 7,
                         }],
-                        outputs: vec![AssetOutput {
-                            output_index: 0,
-                            amount: 123,
-                        }],
+                        outputs: vec![
+                            AssetOutput {
+                                output_index: 1,
+                                amount: 7,
+                            },
+                            AssetOutput {
+                                output_index: 0,
+                                amount: 123,
+                            },
+                        ],
                     },
                     AssetGroup {
                         asset_id: Some(control_asset_id),
@@ -539,7 +566,7 @@ mod tests {
 
         assert!(expected_packets
             .iter()
-            .any(|packet| res.ark_tx.unsigned_tx.output[1] == packet.to_txout()));
+            .any(|packet| res.ark_tx.unsigned_tx.output[2] == packet.to_txout()));
     }
 
     #[test]
@@ -560,20 +587,22 @@ mod tests {
         let (input, own_address) = self_reissuance_input(
             7,
             330,
-            vec![Asset {
-                asset_id: control_asset_id,
-                amount: 1,
-            }],
+            vec![
+                Asset {
+                    asset_id: control_asset_id,
+                    amount: 1,
+                },
+                Asset {
+                    asset_id: unrelated_asset_id,
+                    amount: 9,
+                },
+            ],
         );
 
         let err = build_asset_reissuance_transactions(
             &own_address,
             &own_address,
             &[input],
-            &[Asset {
-                asset_id: unrelated_asset_id,
-                amount: 9,
-            }],
             &server_info,
             asset_id,
             control_asset_id,
