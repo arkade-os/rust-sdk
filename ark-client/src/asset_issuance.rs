@@ -303,7 +303,7 @@ where
         let mut all_selected = Vec::new();
 
         // Select the control asset VTXO (amount = 1).
-        let (control_coins, control_change) =
+        let (control_coins, _control_change) =
             select_vtxos_for_asset(spendable.clone(), 1, control_asset_id)
                 .map_err(Error::from)
                 .context("failed to select control asset for reissuance")?;
@@ -316,34 +316,19 @@ where
             }
         }
 
-        // 3. We need dust for the receiver output (reissued asset) + dust for the control asset
-        //    output back to self.
+        // 3. Reissuance is self-directed, so one dust receiver output is enough.
         let (self_address, _) = self
             .get_offchain_addresses()?
             .into_iter()
             .next()
             .ok_or_else(|| ark_core::Error::ad_hoc("no offchain address available"))?;
 
-        loop {
-            // Two dust outputs: one for the reissued asset, one for the control asset back to self.
-            // Add another dust output when any selected input carries assets that must be preserved
-            // on BTC change during reissuance.
-            let has_preserved_asset_changes = control_change > 0
-                || all_selected.iter().any(|coin| {
-                    coin.assets
-                        .iter()
-                        .any(|asset| asset.asset_id != control_asset_id)
-                });
-            let mut btc_needed = self.server_info.dust * 2;
-            if has_preserved_asset_changes {
-                btc_needed += self.server_info.dust;
-            }
-
-            let btc_shortfall = btc_needed.checked_sub(btc_provided).unwrap_or(Amount::ZERO);
-            if btc_shortfall == Amount::ZERO {
-                break;
-            }
-
+        let btc_shortfall = self
+            .server_info
+            .dust
+            .checked_sub(btc_provided)
+            .unwrap_or(Amount::ZERO);
+        if btc_shortfall > Amount::ZERO {
             let available: Vec<_> = spendable
                 .iter()
                 .filter(|v| !selected_outpoints.contains(&v.outpoint))
