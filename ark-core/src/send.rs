@@ -37,12 +37,15 @@ use std::io::Write;
 
 pub mod issue_asset;
 pub mod reissue_asset;
+pub mod send_asset;
 
 pub use issue_asset::build_self_asset_issuance_transactions;
-pub use issue_asset::AssetBearingVtxoInput;
 pub use issue_asset::SelfAssetIssuanceTransactions;
 pub use reissue_asset::build_asset_reissuance_transactions;
 pub use reissue_asset::AssetReissuanceTransactions;
+pub use send_asset::build_asset_send_transactions;
+pub use send_asset::AssetSendReceiver;
+pub use send_asset::AssetSendTransactions;
 
 /// A VTXO to be spent into an unconfirmed VTXO.
 #[derive(Debug, Clone)]
@@ -98,6 +101,13 @@ impl VtxoInput {
     }
 }
 
+/// A VTXO input together with any assets it currently carries.
+#[derive(Debug, Clone)]
+pub struct AssetBearingVtxoInput {
+    pub input: VtxoInput,
+    pub assets: Vec<server::Asset>,
+}
+
 #[derive(Debug, Clone)]
 pub struct OffchainTransactions {
     pub ark_tx: Psbt,
@@ -105,6 +115,11 @@ pub struct OffchainTransactions {
 }
 
 /// Build a transaction to send VTXOs to another [`ArkAddress`].
+pub(crate) fn btc_change_output_index(ark_tx: &Psbt, num_receiver_outputs: usize) -> Option<u16> {
+    (ark_tx.unsigned_tx.output.len() > num_receiver_outputs + 1)
+        .then_some((ark_tx.unsigned_tx.output.len() - 2) as u16)
+}
+
 pub fn build_offchain_transactions(
     outputs: &[(&ArkAddress, Amount)],
     // FIXME: Handle None + leftover sats as error. Clearly explain in docs.

@@ -74,7 +74,6 @@ pub use key_provider::Bip32KeyProvider;
 pub use key_provider::KeyProvider;
 pub use key_provider::StaticKeyProvider;
 pub use lightning_invoice;
-pub use send_vtxo::Receiver;
 pub use swap_storage::InMemorySwapStorage;
 #[cfg(feature = "sqlite")]
 pub use swap_storage::SqliteSwapStorage;

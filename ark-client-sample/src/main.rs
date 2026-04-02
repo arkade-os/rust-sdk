@@ -24,6 +24,7 @@ use ark_client::SwapAmount;
 use ark_client::TxStatus;
 use ark_core::asset::ControlAssetConfig;
 use ark_core::history;
+use ark_core::send::AssetSendReceiver;
 use ark_core::server::SubscriptionResponse;
 use ark_core::ArkAddress;
 use ark_core::ArkNote;
@@ -1314,7 +1315,7 @@ async fn run_command<K: KeyProvider>(
         } => {
             let asset_id = asset_id.parse()?;
 
-            let receiver = ark_client::Receiver {
+            let receiver = AssetSendReceiver {
                 address: address.0,
                 amount: client.dust(),
                 assets: vec![ark_core::server::Asset {

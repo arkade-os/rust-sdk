@@ -3,8 +3,8 @@ use crate::asset::packet::add_asset_packet_to_psbt;
 use crate::asset::AssetId;
 use crate::asset::ControlAssetConfig;
 use crate::send::build_offchain_transactions;
+use crate::send::AssetBearingVtxoInput;
 use crate::send::OffchainTransactions;
-use crate::send::VtxoInput;
 use crate::server;
 use crate::ArkAddress;
 use crate::Error;
@@ -12,13 +12,6 @@ use bitcoin::hashes::Hash as _;
 use bitcoin::Psbt;
 use bitcoin::Txid;
 use std::collections::HashMap;
-
-/// A VTXO input together with any assets it currently carries.
-#[derive(Debug, Clone)]
-pub struct AssetBearingVtxoInput {
-    pub input: VtxoInput,
-    pub assets: Vec<server::Asset>,
-}
 
 /// Unsigned transactions for self asset issuance plus the derived asset IDs.
 #[derive(Debug, Clone)]
