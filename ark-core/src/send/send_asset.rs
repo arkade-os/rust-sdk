@@ -13,17 +13,17 @@ use bitcoin::Amount;
 use bitcoin::Psbt;
 use std::collections::HashMap;
 
-/// A receiver for a generic offchain asset send.
+/// A receiver for a generic offchain send with optional assets.
 #[derive(Debug, Clone)]
-pub struct AssetSendReceiver {
+pub struct SendReceiver {
     pub address: ArkAddress,
     pub amount: Amount,
     pub assets: Vec<server::Asset>,
 }
 
-/// Unsigned transactions for a generic asset send.
+/// Unsigned transactions for a generic offchain send.
 #[derive(Debug, Clone)]
-pub struct AssetSendTransactions {
+pub struct SendTransactions {
     pub ark_tx: Psbt,
     pub checkpoint_txs: Vec<Psbt>,
 }
@@ -46,7 +46,7 @@ pub struct AssetSendTransactions {
 ///
 /// # Returns
 ///
-/// [`AssetSendTransactions`] containing the unsigned Ark transaction and unsigned checkpoint
+/// [`SendTransactions`] containing the unsigned Ark transaction and unsigned checkpoint
 /// transactions.
 ///
 /// # Errors
@@ -55,12 +55,12 @@ pub struct AssetSendTransactions {
 /// an asset that is not present in the selected inputs, if the requested amount for any asset
 /// exceeds the selected input amount for that asset, or if leftover assets would need to be
 /// preserved but the transaction has no BTC change output.
-pub fn build_asset_send_transactions(
-    receivers: &[AssetSendReceiver],
+pub fn build_send_transactions(
+    receivers: &[SendReceiver],
     change_address: &ArkAddress,
     inputs: &[AssetBearingVtxoInput],
     server_info: &server::Info,
-) -> Result<AssetSendTransactions, Error> {
+) -> Result<SendTransactions, Error> {
     let vtxo_inputs = inputs
         .iter()
         .map(|input| input.input.clone())
@@ -80,11 +80,11 @@ pub fn build_asset_send_transactions(
         server_info,
     )?;
 
-    if let Some(packet) = create_asset_send_packet(inputs, receivers, &ark_tx)? {
+    if let Some(packet) = create_send_packet(inputs, receivers, &ark_tx)? {
         add_asset_packet_to_psbt(&mut ark_tx, &packet);
     }
 
-    Ok(AssetSendTransactions {
+    Ok(SendTransactions {
         ark_tx,
         checkpoint_txs,
     })
@@ -100,9 +100,9 @@ pub fn build_asset_send_transactions(
 /// Returns an error if a receiver references an asset that is not present in the selected inputs,
 /// if the requested amount for any asset exceeds the selected input amount for that asset, or if
 /// leftover assets would need to be preserved but the transaction has no BTC change output.
-fn create_asset_send_packet(
+fn create_send_packet(
     inputs: &[AssetBearingVtxoInput],
-    receivers: &[AssetSendReceiver],
+    receivers: &[SendReceiver],
     ark_tx: &Psbt,
 ) -> Result<Option<asset::packet::Packet>, Error> {
     struct AssetTransfer {
@@ -232,14 +232,14 @@ mod tests {
     fn asset_send_without_assets_has_no_packet() {
         let server_info = test_server_info();
         let (input, own_address) = asset_send_input(1, 330, vec![]);
-        let receiver = AssetSendReceiver {
+        let receiver = SendReceiver {
             address: own_address,
             amount: Amount::from_sat(330),
             assets: vec![],
         };
 
-        let res = build_asset_send_transactions(&[receiver], &own_address, &[input], &server_info)
-            .unwrap();
+        let res =
+            build_send_transactions(&[receiver], &own_address, &[input], &server_info).unwrap();
 
         assert_eq!(res.ark_tx.unsigned_tx.output.len(), 2);
     }
@@ -259,7 +259,7 @@ mod tests {
                 amount: 10,
             }],
         );
-        let receiver = AssetSendReceiver {
+        let receiver = SendReceiver {
             address: own_address,
             amount: Amount::from_sat(330),
             assets: vec![Asset {
@@ -268,8 +268,8 @@ mod tests {
             }],
         };
 
-        let res = build_asset_send_transactions(&[receiver], &own_address, &[input], &server_info)
-            .unwrap();
+        let res =
+            build_send_transactions(&[receiver], &own_address, &[input], &server_info).unwrap();
 
         let expected_packet = Packet {
             groups: vec![AssetGroup {
@@ -307,7 +307,7 @@ mod tests {
             group_index: 1,
         };
         let (input, own_address) = asset_send_input(3, 330, vec![]);
-        let receiver = AssetSendReceiver {
+        let receiver = SendReceiver {
             address: own_address,
             amount: Amount::from_sat(330),
             assets: vec![Asset {
@@ -316,8 +316,8 @@ mod tests {
             }],
         };
 
-        let err = build_asset_send_transactions(&[receiver], &own_address, &[input], &server_info)
-            .unwrap_err();
+        let err =
+            build_send_transactions(&[receiver], &own_address, &[input], &server_info).unwrap_err();
 
         assert!(err.to_string().contains("receiver references asset"));
     }
@@ -337,7 +337,7 @@ mod tests {
                 amount: 10,
             }],
         );
-        let receiver = AssetSendReceiver {
+        let receiver = SendReceiver {
             address: own_address,
             amount: Amount::from_sat(330),
             assets: vec![Asset {
@@ -346,8 +346,8 @@ mod tests {
             }],
         };
 
-        let err = build_asset_send_transactions(&[receiver], &own_address, &[input], &server_info)
-            .unwrap_err();
+        let err =
+            build_send_transactions(&[receiver], &own_address, &[input], &server_info).unwrap_err();
 
         assert!(err
             .to_string()
@@ -379,7 +379,7 @@ mod tests {
                 },
             ],
         );
-        let receiver = AssetSendReceiver {
+        let receiver = SendReceiver {
             address: own_address,
             amount: Amount::from_sat(330),
             assets: vec![
@@ -394,8 +394,8 @@ mod tests {
             ],
         };
 
-        let res = build_asset_send_transactions(&[receiver], &own_address, &[input], &server_info)
-            .unwrap();
+        let res =
+            build_send_transactions(&[receiver], &own_address, &[input], &server_info).unwrap();
 
         let expected_packet = Packet {
             groups: vec![

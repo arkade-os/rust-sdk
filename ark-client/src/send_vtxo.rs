@@ -13,13 +13,13 @@ use ark_core::coin_select::select_vtxos_for_asset;
 use ark_core::intent;
 use ark_core::script::extract_checksig_pubkeys;
 use ark_core::send;
-use ark_core::send::build_asset_send_transactions;
 use ark_core::send::build_offchain_transactions;
+use ark_core::send::build_send_transactions;
 use ark_core::send::sign_ark_transaction;
 use ark_core::send::sign_checkpoint_transaction;
 use ark_core::send::AssetBearingVtxoInput;
-use ark_core::send::AssetSendReceiver;
 use ark_core::send::OffchainTransactions;
+use ark_core::send::SendReceiver;
 use ark_core::server::Asset;
 use ark_core::server::PendingTx;
 use ark_core::ArkAddress;
@@ -81,24 +81,17 @@ where
             .map_err(Error::from)
             .context("failed to select coins")?;
 
-        let has_assets = selected_coins.iter().any(|c| !c.assets.is_empty());
-
-        let vtxo_inputs =
-            self.build_vtxo_inputs(selected_coins.clone(), &script_pubkey_to_vtxo_map)?;
-
-        if !has_assets {
-            // Simple path: no assets involved.
-            let pending_tx = self
-                .submit_offchain_send(vtxo_inputs, address, amount)
-                .await?;
-            let ark_txid = pending_tx.ark_txid;
-            self.sign_and_finalize_pending_tx(pending_tx).await?;
-            return Ok(ark_txid);
-        }
-
-        // Asset-aware path: build an asset packet to preserve assets on the change output.
-        self.build_and_sign_offchain_tx_with_assets(selected_coins, vtxo_inputs, address, amount)
-            .await
+        let asset_inputs =
+            self.build_asset_bearing_vtxo_inputs(selected_coins, &script_pubkey_to_vtxo_map)?;
+        let receivers = vec![SendReceiver {
+            address,
+            amount,
+            assets: Vec::new(),
+        }];
+        let pending_tx = self.submit_asset_send(asset_inputs, receivers).await?;
+        let ark_txid = pending_tx.ark_txid;
+        self.sign_and_finalize_pending_tx(pending_tx).await?;
+        Ok(ark_txid)
     }
 
     /// Spend specific VTXOs in an Ark transaction sending the given `amount` to the given
@@ -135,20 +128,21 @@ where
             )));
         }
 
-        if selected_coins.iter().any(|coin| !coin.assets.is_empty()) {
-            return self
-                .build_and_sign_offchain_tx_with_assets(
-                    selected_coins,
-                    vtxo_inputs,
-                    address,
-                    amount,
-                )
-                .await;
-        }
+        let asset_inputs = selected_coins
+            .into_iter()
+            .zip(vtxo_inputs.into_iter())
+            .map(|(coin, input)| AssetBearingVtxoInput {
+                input,
+                assets: coin.assets,
+            })
+            .collect::<Vec<_>>();
+        let receivers = vec![SendReceiver {
+            address,
+            amount,
+            assets: Vec::new(),
+        }];
 
-        let pending_tx = self
-            .submit_offchain_send(vtxo_inputs, address, amount)
-            .await?;
+        let pending_tx = self.submit_asset_send(asset_inputs, receivers).await?;
         let ark_txid = pending_tx.ark_txid;
         self.sign_and_finalize_pending_tx(pending_tx).await?;
         Ok(ark_txid)
@@ -163,7 +157,7 @@ where
     /// # Returns
     ///
     /// The [`Txid`] of the generated Ark transaction.
-    pub async fn send_assets(&self, receivers: Vec<AssetSendReceiver>) -> Result<Txid, Error> {
+    pub async fn send_assets(&self, receivers: Vec<SendReceiver>) -> Result<Txid, Error> {
         let (vtxo_list, script_pubkey_to_vtxo_map) = self
             .list_vtxos()
             .await
@@ -292,17 +286,17 @@ where
             .collect::<Vec<_>>();
         let receivers = receivers
             .into_iter()
-            .map(|receiver| AssetSendReceiver {
+            .map(|receiver| SendReceiver {
                 address: receiver.address,
                 amount: receiver.amount,
                 assets: receiver.assets,
             })
             .collect::<Vec<_>>();
 
-        let send::AssetSendTransactions {
+        let send::SendTransactions {
             mut ark_tx,
             checkpoint_txs,
-        } = build_asset_send_transactions(
+        } = build_send_transactions(
             &receivers,
             &change_address,
             &asset_inputs,
@@ -501,7 +495,7 @@ where
             Vec::new()
         };
 
-        let empty_receivers = vec![AssetSendReceiver {
+        let empty_receivers = vec![SendReceiver {
             address: self_address,
             amount: self.server_info.dust,
             assets: Vec::new(), // no assets to receiver = burn
@@ -567,9 +561,19 @@ where
         amount: Amount,
     ) -> Result<Txid, Error> {
         let vtxo_inputs = self.coin_select_vtxo_inputs(amount).await?;
-        let pending_tx = self
-            .submit_offchain_send(vtxo_inputs, address, amount)
-            .await?;
+        let asset_inputs = vtxo_inputs
+            .into_iter()
+            .map(|input| AssetBearingVtxoInput {
+                input,
+                assets: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let receivers = vec![SendReceiver {
+            address,
+            amount,
+            assets: Vec::new(),
+        }];
+        let pending_tx = self.submit_asset_send(asset_inputs, receivers).await?;
         Ok(pending_tx.ark_txid)
     }
 
@@ -587,9 +591,19 @@ where
         address: ArkAddress,
         amount: Amount,
     ) -> Result<Txid, Error> {
-        let pending_tx = self
-            .submit_offchain_send(vtxo_inputs, address, amount)
-            .await?;
+        let asset_inputs = vtxo_inputs
+            .into_iter()
+            .map(|input| AssetBearingVtxoInput {
+                input,
+                assets: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let receivers = vec![SendReceiver {
+            address,
+            amount,
+            assets: Vec::new(),
+        }];
+        let pending_tx = self.submit_asset_send(asset_inputs, receivers).await?;
         Ok(pending_tx.ark_txid)
     }
 
@@ -788,31 +802,33 @@ where
             .collect()
     }
 
-    /// Build, sign the Ark transaction, and submit to the server *without* finalizing.
+    /// Convert selected [`VirtualTxOutPoint`]s into [`AssetBearingVtxoInput`]s.
+    fn build_asset_bearing_vtxo_inputs(
+        &self,
+        selected: Vec<ark_core::coin_select::VirtualTxOutPoint>,
+        script_pubkey_to_vtxo_map: &HashMap<bitcoin::ScriptBuf, ark_core::Vtxo>,
+    ) -> Result<Vec<AssetBearingVtxoInput>, Error> {
+        let vtxo_inputs = self.build_vtxo_inputs(selected.clone(), script_pubkey_to_vtxo_map)?;
+        Ok(vtxo_inputs
+            .into_iter()
+            .zip(selected.into_iter())
+            .map(|(input, coin)| AssetBearingVtxoInput {
+                input,
+                assets: coin.assets,
+            })
+            .collect())
+    }
+
+    /// Sign and submit a prebuilt offchain transaction to the server without finalizing.
     ///
     /// Returns the pending transaction payload from the server. The change-address key is marked
     /// as used.
-    async fn submit_offchain_send(
+    async fn submit_built_offchain_send(
         &self,
-        vtxo_inputs: Vec<send::VtxoInput>,
-        address: ArkAddress,
-        amount: Amount,
+        mut ark_tx: bitcoin::Psbt,
+        checkpoint_txs: Vec<bitcoin::Psbt>,
+        used_pk: XOnlyPublicKey,
     ) -> Result<PendingTx, Error> {
-        let (change_address, change_address_vtxo) = self.get_offchain_address()?;
-
-        let OffchainTransactions {
-            mut ark_tx,
-            checkpoint_txs,
-        } = build_offchain_transactions(
-            &[(&address, amount)],
-            Some(&change_address),
-            &vtxo_inputs,
-            &self.server_info,
-        )
-        .map_err(Error::from)
-        .context("failed to build offchain transactions")?;
-
-        // Sign the Ark transaction (one signature per checkpoint input).
         for i in 0..checkpoint_txs.len() {
             sign_ark_transaction(self.make_sign_fn(), &mut ark_tx, i)?;
         }
@@ -830,8 +846,6 @@ where
             signed_checkpoint_txs: res.signed_checkpoint_txs,
         };
 
-        // Mark the change-address key as used so future sends pick a new one.
-        let used_pk = change_address_vtxo.owner_pk();
         if let Err(err) = self.inner.key_provider.mark_as_used(&used_pk) {
             tracing::warn!(
                 "Failed updating keypair cache for used change address: {:?}",
@@ -840,6 +854,24 @@ where
         }
 
         Ok(pending_tx)
+    }
+
+    /// Build, sign the Ark transaction, and submit to the server *without* finalizing.
+    async fn submit_asset_send(
+        &self,
+        inputs: Vec<AssetBearingVtxoInput>,
+        receivers: Vec<SendReceiver>,
+    ) -> Result<PendingTx, Error> {
+        let (change_address, change_address_vtxo) = self.get_offchain_address()?;
+        let send::SendTransactions {
+            ark_tx,
+            checkpoint_txs,
+        } = build_send_transactions(&receivers, &change_address, &inputs, &self.server_info)
+            .map_err(Error::from)
+            .context("failed to build offchain asset-send transactions")?;
+
+        self.submit_built_offchain_send(ark_tx, checkpoint_txs, change_address_vtxo.owner_pk())
+            .await
     }
 
     /// Sign checkpoint transactions from a [`PendingTx`] and finalize.
@@ -890,75 +922,6 @@ where
 
         self.finalize_offchain_tx(ark_txid, signed_checkpoint_txs)
             .await
-    }
-
-    /// Build and sign an Ark transaction while preserving any assets carried by the selected
-    /// inputs on the BTC change output.
-    async fn build_and_sign_offchain_tx_with_assets(
-        &self,
-        selected_coins: Vec<ark_core::coin_select::VirtualTxOutPoint>,
-        vtxo_inputs: Vec<send::VtxoInput>,
-        address: ArkAddress,
-        amount: Amount,
-    ) -> Result<Txid, Error> {
-        let (change_address, change_address_vtxo) = self.get_offchain_address()?;
-        let asset_inputs = vtxo_inputs
-            .into_iter()
-            .zip(selected_coins.into_iter())
-            .map(|(input, coin)| AssetBearingVtxoInput {
-                input,
-                assets: coin.assets,
-            })
-            .collect::<Vec<_>>();
-        let receivers = vec![AssetSendReceiver {
-            address,
-            amount,
-            assets: Vec::new(),
-        }];
-
-        let send::AssetSendTransactions {
-            mut ark_tx,
-            checkpoint_txs,
-        } = build_asset_send_transactions(
-            &receivers,
-            &change_address,
-            &asset_inputs,
-            &self.server_info,
-        )
-        .map_err(Error::from)
-        .context("failed to build offchain asset-send transactions")?;
-
-        // Sign, submit, finalize.
-        for i in 0..checkpoint_txs.len() {
-            sign_ark_transaction(self.make_sign_fn(), &mut ark_tx, i)?;
-        }
-
-        let ark_txid = ark_tx.unsigned_tx.compute_txid();
-
-        let res = self
-            .network_client()
-            .submit_offchain_transaction_request(ark_tx, checkpoint_txs)
-            .await
-            .map_err(Error::ark_server)
-            .context("failed to submit offchain transaction request")?;
-
-        let pending_tx = PendingTx {
-            ark_txid: res.signed_ark_tx.unsigned_tx.compute_txid(),
-            signed_ark_tx: res.signed_ark_tx,
-            signed_checkpoint_txs: res.signed_checkpoint_txs,
-        };
-
-        self.sign_and_finalize_pending_tx(pending_tx).await?;
-
-        let used_pk = change_address_vtxo.owner_pk();
-        if let Err(err) = self.inner.key_provider.mark_as_used(&used_pk) {
-            tracing::warn!(
-                "Failed updating keypair cache for used change address: {:?}",
-                err
-            );
-        }
-
-        Ok(ark_txid)
     }
 
     /// Finalize an offchain transaction.
@@ -1188,7 +1151,7 @@ where
 /// if there are no assets to transfer.
 pub fn create_asset_packet(
     asset_inputs: &HashMap<u16, Vec<Asset>>,
-    receivers: &[AssetSendReceiver],
+    receivers: &[SendReceiver],
     change_assets: &[Asset],
     change_output_index: usize,
 ) -> Result<Option<asset::packet::Packet>, Error> {

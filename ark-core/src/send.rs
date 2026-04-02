@@ -43,9 +43,9 @@ pub use issue_asset::build_self_asset_issuance_transactions;
 pub use issue_asset::SelfAssetIssuanceTransactions;
 pub use reissue_asset::build_asset_reissuance_transactions;
 pub use reissue_asset::AssetReissuanceTransactions;
-pub use send_asset::build_asset_send_transactions;
-pub use send_asset::AssetSendReceiver;
-pub use send_asset::AssetSendTransactions;
+pub use send_asset::build_send_transactions;
+pub use send_asset::SendReceiver;
+pub use send_asset::SendTransactions;
 
 /// A VTXO to be spent into an unconfirmed VTXO.
 #[derive(Debug, Clone)]

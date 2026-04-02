@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use ark_core::asset::ControlAssetConfig;
-use ark_core::send::AssetSendReceiver;
+use ark_core::send::SendReceiver;
 use bitcoin::key::Secp256k1;
 use bitcoin::Amount;
 use common::init_tracing;
@@ -82,7 +82,7 @@ pub async fn e2e_assets() {
     let (bob_address, _) = bob.get_offchain_address().unwrap();
 
     let send_txid = alice
-        .send_assets(vec![AssetSendReceiver {
+        .send_assets(vec![SendReceiver {
             address: bob_address,
             amount: alice.dust(),
             assets: vec![ark_core::server::Asset {
