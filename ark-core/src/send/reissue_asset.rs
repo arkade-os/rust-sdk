@@ -7,8 +7,12 @@ use crate::send::OffchainTransactions;
 use crate::server;
 use crate::ArkAddress;
 use crate::Error;
+use bitcoin::hashes::Hash as _;
 use bitcoin::Psbt;
 use std::collections::HashMap;
+
+/// Self-controlled output used by reissuance packet assignments.
+const SELF_REISSUANCE_OUTPUT_INDEX: u16 = 0;
 
 /// Unsigned transactions for asset reissuance.
 #[derive(Debug, Clone)]
@@ -19,13 +23,13 @@ pub struct AssetReissuanceTransactions {
 
 /// Build unsigned offchain transactions for reissuing an existing asset to self.
 ///
-/// Output `0` remains self-controlled and carries the returned control asset, the newly reissued
-/// asset amount, and any other assets already carried by the selected inputs.
+/// Output [`SELF_REISSUANCE_OUTPUT_INDEX`] remains self-controlled and carries the preserved
+/// control-asset balance, the newly reissued asset amount, and any other assets already carried by
+/// the selected inputs.
 ///
 /// If the selected inputs already carry units of `reissue_asset_id`, those existing units are
-/// merged into the same asset group and output `0` allocation as the newly reissued amount.
-/// Unrelated carried assets, as well as any control-asset amount beyond the single returned unit,
-/// are also preserved on output `0`.
+/// merged into the same asset group and output [`SELF_REISSUANCE_OUTPUT_INDEX`] allocation as the
+/// newly reissued amount.
 ///
 /// # Arguments
 ///
@@ -44,6 +48,11 @@ pub struct AssetReissuanceTransactions {
 ///
 /// [`AssetReissuanceTransactions`] containing the unsigned Ark transaction and unsigned checkpoint
 /// transactions.
+///
+/// # Errors
+///
+/// Returns an error if `reissue_amount` is zero, or if the selected inputs do not include a
+/// non-zero balance of `control_asset_id` to authorize the reissuance.
 pub fn build_asset_reissuance_transactions(
     own_address: &ArkAddress,
     change_address: &ArkAddress,
@@ -58,7 +67,7 @@ pub fn build_asset_reissuance_transactions(
     }
 
     let packet =
-        create_reissuance_packet(inputs, reissue_asset_id, control_asset_id, reissue_amount);
+        create_reissuance_packet(inputs, reissue_asset_id, control_asset_id, reissue_amount)?;
 
     let vtxo_inputs = inputs
         .iter()
@@ -85,10 +94,10 @@ pub fn build_asset_reissuance_transactions(
 
 /// Create the asset packet for a self-reissuance transaction.
 ///
-/// Output `0` is treated as the self-controlled destination for all assets involved in the
-/// reissuance flow. The returned control asset, the newly reissued amount, any existing carried
-/// balance of `reissue_asset_id`, and any other preserved carried assets are all assigned to output
-/// `0`.
+/// Output [`SELF_REISSUANCE_OUTPUT_INDEX`] is treated as the self-controlled destination for all
+/// assets involved in the reissuance flow. The returned control asset, the newly reissued amount,
+/// any existing carried balance of `reissue_asset_id`, and any other preserved carried assets are
+/// all assigned to output [`SELF_REISSUANCE_OUTPUT_INDEX`].
 ///
 /// # Arguments
 ///
@@ -100,7 +109,12 @@ pub fn build_asset_reissuance_transactions(
 /// # Returns
 ///
 /// An [`asset::packet::Packet`] describing how carried and newly reissued assets are assigned to
-/// transaction output `0`.
+/// transaction output [`SELF_REISSUANCE_OUTPUT_INDEX`].
+///
+/// # Errors
+///
+/// Returns an error if the selected inputs do not include a non-zero balance of
+/// `control_asset_id` to authorize the reissuance.
 fn create_reissuance_packet(
     inputs: &[AssetBearingVtxoInput],
     reissue_asset_id: AssetId,
@@ -109,70 +123,79 @@ fn create_reissuance_packet(
 ) -> Result<asset::packet::Packet, Error> {
     struct AssetTransfer {
         inputs: Vec<asset::packet::AssetInput>,
-        outputs: Vec<asset::packet::AssetOutput>,
+        output_amount: u64,
     }
 
     let mut transfers: HashMap<AssetId, AssetTransfer> = HashMap::new();
-    let mut existing_reissue_amount = 0;
 
-    for input in inputs.iter() {
+    // For every distinct asset (reissue, control and unrelated!) in the input set, generate asset
+    // inputs and collect the total output amount (to ensure asset preservation).
+    for (input_index, input) in inputs.iter().enumerate() {
         for asset in &input.assets {
             let transfer = transfers
                 .entry(asset.asset_id)
                 .or_insert_with(|| AssetTransfer {
                     inputs: Vec::new(),
-                    outputs: Vec::new(),
+                    output_amount: 0,
                 });
 
-            if asset.asset_id == reissue_asset_id {
-                existing_reissue_amount += asset.amount;
-            } else {
-                transfer.outputs.push(asset::packet::AssetOutput {
-                    output_index: 0,
-                    amount: asset.amount,
-                });
-            }
+            transfer.inputs.push(asset::packet::AssetInput {
+                input_index: input_index as u16,
+                amount: asset.amount,
+            });
+            transfer.output_amount += asset.amount;
         }
     }
 
-    // Ensure that control asset is an input to the transaction. Otherwise the Arkade server will
+    // Ensure that control asset is an input to the transaction. Otherwise, the Arkade server will
     // not authorise the reissuance.
+    {
+        let control_transfer = transfers.get(&control_asset_id).ok_or_else(|| {
+            Error::ad_hoc("control asset missing from reissuance transaction inputs")
+        })?;
+        let control_input_amount: u64 = control_transfer.inputs.iter().map(|i| i.amount).sum();
 
-    let control_asset_transfers = transfers
-        .get(&control_asset_id)
-        .map(|t| t.inputs.as_slice())
-        .unwrap_or_default();
-    let control_input_amount: u64 = control_asset_transfers.iter().map(|i| i.amount).sum();
-
-    if control_input_amount == 0 {
-        return Err(Error::ad_hoc(
-            "control asset missing from reissuance transaction inputs",
-        ));
+        if control_input_amount == 0 {
+            return Err(Error::ad_hoc(
+                "control asset missing from reissuance transaction inputs",
+            ));
+        }
     }
 
-    let reissue_transfer = transfers
-        .entry(reissue_asset_id)
-        .or_insert_with(|| AssetTransfer {
-            inputs: Vec::new(),
-            outputs: Vec::new(),
-        });
-    reissue_transfer.outputs.push(asset::packet::AssetOutput {
-        output_index: 0,
-        amount: existing_reissue_amount + reissue_amount,
+    // Actually include the newly minted assets in the asset output for the reissued asset.
+    {
+        let reissue_transfer = transfers
+            .entry(reissue_asset_id)
+            .or_insert_with(|| AssetTransfer {
+                inputs: Vec::new(),
+                output_amount: 0,
+            });
+        reissue_transfer.output_amount += reissue_amount;
+    }
+
+    let mut groups = transfers
+        .into_iter()
+        .map(|(asset_id, transfer)| asset::packet::AssetGroup {
+            asset_id: Some(asset_id),
+            control_asset: None,
+            metadata: None,
+            inputs: transfer.inputs,
+            outputs: vec![asset::packet::AssetOutput {
+                output_index: SELF_REISSUANCE_OUTPUT_INDEX,
+                amount: transfer.output_amount,
+            }],
+        })
+        .collect::<Vec<_>>();
+
+    // Sort the groups to make it easier to test the behaviour. This is _not_ required.
+    groups.sort_by_key(|group| {
+        let asset_id = group
+            .asset_id
+            .expect("reissuance packet groups always have asset ids");
+        (*asset_id.txid.as_byte_array(), asset_id.group_index)
     });
 
-    Ok(asset::packet::Packet {
-        groups: transfers
-            .into_iter()
-            .map(|(asset_id, transfer)| asset::packet::AssetGroup {
-                asset_id: Some(asset_id),
-                control_asset: None,
-                metadata: None,
-                inputs: transfer.inputs,
-                outputs: transfer.outputs,
-            })
-            .collect(),
-    })
+    Ok(asset::packet::Packet { groups })
 }
 
 #[cfg(test)]
@@ -186,7 +209,6 @@ mod tests {
     use crate::send::VtxoInput;
     use crate::server::Asset;
     use crate::server::Info;
-    use bitcoin::hashes::Hash as _;
     use bitcoin::key::Secp256k1;
     use bitcoin::opcodes::OP_TRUE;
     use bitcoin::script::Builder;
@@ -209,12 +231,13 @@ mod tests {
             txid: Txid::from_byte_array([2; 32]),
             group_index: 1,
         };
+
         let (input, own_address) = self_reissuance_input(
-            3,
-            330,
+            Txid::from_byte_array([3; 32]),
+            // Only provide control asset as input.
             vec![Asset {
                 asset_id: control_asset_id,
-                amount: 1,
+                amount: 5,
             }],
         );
 
@@ -229,93 +252,70 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(res.ark_tx.unsigned_tx.output.len(), 3);
+        // Newly minted asset.
+        let reissued_group = AssetGroup {
+            asset_id: Some(asset_id),
+            control_asset: None,
+            metadata: None,
+            inputs: vec![],
+            outputs: vec![AssetOutput {
+                output_index: 0,
+                amount: 123,
+            }],
+        };
 
-        let expected_packets = [
-            Packet {
-                groups: vec![
-                    AssetGroup {
-                        asset_id: Some(control_asset_id),
-                        control_asset: None,
-                        metadata: None,
-                        inputs: vec![AssetInput {
-                            input_index: 0,
-                            amount: 1,
-                        }],
-                        outputs: vec![AssetOutput {
-                            output_index: 0,
-                            amount: 1,
-                        }],
-                    },
-                    AssetGroup {
-                        asset_id: Some(asset_id),
-                        control_asset: None,
-                        metadata: None,
-                        inputs: vec![],
-                        outputs: vec![AssetOutput {
-                            output_index: 0,
-                            amount: 123,
-                        }],
-                    },
-                ],
-            },
-            Packet {
-                groups: vec![
-                    AssetGroup {
-                        asset_id: Some(asset_id),
-                        control_asset: None,
-                        metadata: None,
-                        inputs: vec![],
-                        outputs: vec![AssetOutput {
-                            output_index: 0,
-                            amount: 123,
-                        }],
-                    },
-                    AssetGroup {
-                        asset_id: Some(control_asset_id),
-                        control_asset: None,
-                        metadata: None,
-                        inputs: vec![AssetInput {
-                            input_index: 0,
-                            amount: 1,
-                        }],
-                        outputs: vec![AssetOutput {
-                            output_index: 0,
-                            amount: 1,
-                        }],
-                    },
-                ],
-            },
-        ];
+        // Get back control asset in full.
+        let control_group = AssetGroup {
+            asset_id: Some(control_asset_id),
+            control_asset: None,
+            metadata: None,
+            inputs: vec![AssetInput {
+                input_index: 0,
+                amount: 5,
+            }],
+            outputs: vec![AssetOutput {
+                output_index: 0,
+                amount: 5,
+            }],
+        };
 
-        assert!(expected_packets
-            .iter()
-            .any(|packet| res.ark_tx.unsigned_tx.output[1] == packet.to_txout()));
+        let expected_packet = Packet {
+            groups: vec![reissued_group, control_group],
+        };
+
+        let asset_packet_index = asset_packet_index(&res.ark_tx);
+
+        assert_eq!(
+            res.ark_tx.unsigned_tx.output[asset_packet_index],
+            expected_packet.to_txout()
+        );
     }
 
     #[test]
-    fn self_reissuance_with_btc_change_preserves_asset_changes_on_output_zero() {
+    fn self_reissuance_preserves_unrelated_carried_assets_on_output_zero() {
         let server_info = test_server_info();
         let asset_id = AssetId {
-            txid: Txid::from_byte_array([4; 32]),
+            txid: Txid::from_byte_array([1; 32]),
             group_index: 0,
         };
         let control_asset_id = AssetId {
-            txid: Txid::from_byte_array([5; 32]),
+            txid: Txid::from_byte_array([2; 32]),
             group_index: 1,
         };
         let unrelated_asset_id = AssetId {
-            txid: Txid::from_byte_array([6; 32]),
+            txid: Txid::from_byte_array([3; 32]),
             group_index: 2,
         };
+
         let (input, own_address) = self_reissuance_input(
-            7,
-            660,
+            Txid::from_byte_array([4; 32]),
             vec![
+                // Control asset.
                 Asset {
                     asset_id: control_asset_id,
                     amount: 1,
                 },
+                // Unrelated asset.
                 Asset {
                     asset_id: unrelated_asset_id,
                     amount: 9,
@@ -334,8 +334,19 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(res.ark_tx.unsigned_tx.output.len(), 4);
+        // Newly minted asset.
+        let reissued_group = AssetGroup {
+            asset_id: Some(asset_id),
+            control_asset: None,
+            metadata: None,
+            inputs: vec![],
+            outputs: vec![AssetOutput {
+                output_index: 0,
+                amount: 123,
+            }],
+        };
 
+        // Get back control asset in full.
         let control_group = AssetGroup {
             asset_id: Some(control_asset_id),
             control_asset: None,
@@ -349,6 +360,8 @@ mod tests {
                 amount: 1,
             }],
         };
+
+        // Get back unrelated asset in full.
         let unrelated_group = AssetGroup {
             asset_id: Some(unrelated_asset_id),
             control_asset: None,
@@ -362,81 +375,40 @@ mod tests {
                 amount: 9,
             }],
         };
-        let reissued_group = AssetGroup {
-            asset_id: Some(asset_id),
-            control_asset: None,
-            metadata: None,
-            inputs: vec![],
-            outputs: vec![AssetOutput {
-                output_index: 0,
-                amount: 123,
-            }],
-        };
-        let expected_packets = [
-            Packet {
-                groups: vec![
-                    control_group.clone(),
-                    unrelated_group.clone(),
-                    reissued_group.clone(),
-                ],
-            },
-            Packet {
-                groups: vec![
-                    control_group.clone(),
-                    reissued_group.clone(),
-                    unrelated_group.clone(),
-                ],
-            },
-            Packet {
-                groups: vec![
-                    unrelated_group.clone(),
-                    control_group.clone(),
-                    reissued_group.clone(),
-                ],
-            },
-            Packet {
-                groups: vec![
-                    unrelated_group.clone(),
-                    reissued_group.clone(),
-                    control_group.clone(),
-                ],
-            },
-            Packet {
-                groups: vec![
-                    reissued_group.clone(),
-                    control_group.clone(),
-                    unrelated_group.clone(),
-                ],
-            },
-            Packet {
-                groups: vec![reissued_group, unrelated_group, control_group],
-            },
-        ];
 
-        assert!(expected_packets
-            .iter()
-            .any(|packet| res.ark_tx.unsigned_tx.output[2] == packet.to_txout()));
+        let expected_packet = Packet {
+            groups: vec![reissued_group, control_group, unrelated_group],
+        };
+
+        let asset_packet_index = asset_packet_index(&res.ark_tx);
+
+        assert_eq!(
+            res.ark_tx.unsigned_tx.output[asset_packet_index],
+            expected_packet.to_txout()
+        );
     }
 
     #[test]
     fn self_reissuance_with_existing_asset_balance_merges_it_into_output_zero() {
         let server_info = test_server_info();
         let asset_id = AssetId {
-            txid: Txid::from_byte_array([8; 32]),
+            txid: Txid::from_byte_array([1; 32]),
             group_index: 0,
         };
         let control_asset_id = AssetId {
-            txid: Txid::from_byte_array([9; 32]),
+            txid: Txid::from_byte_array([2; 32]),
             group_index: 1,
         };
+
         let (input, own_address) = self_reissuance_input(
-            10,
-            660,
+            Txid::from_byte_array([3; 32]),
             vec![
+                // Control asset.
                 Asset {
                     asset_id: control_asset_id,
                     amount: 1,
                 },
+                // The same asset we are about to reissue.
                 Asset {
                     asset_id,
                     amount: 7,
@@ -455,119 +427,22 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(res.ark_tx.unsigned_tx.output.len(), 4);
-
-        let expected_packets = [
-            Packet {
-                groups: vec![
-                    AssetGroup {
-                        asset_id: Some(control_asset_id),
-                        control_asset: None,
-                        metadata: None,
-                        inputs: vec![AssetInput {
-                            input_index: 0,
-                            amount: 1,
-                        }],
-                        outputs: vec![AssetOutput {
-                            output_index: 0,
-                            amount: 1,
-                        }],
-                    },
-                    AssetGroup {
-                        asset_id: Some(asset_id),
-                        control_asset: None,
-                        metadata: None,
-                        inputs: vec![AssetInput {
-                            input_index: 0,
-                            amount: 7,
-                        }],
-                        outputs: vec![AssetOutput {
-                            output_index: 0,
-                            amount: 130,
-                        }],
-                    },
-                ],
-            },
-            Packet {
-                groups: vec![
-                    AssetGroup {
-                        asset_id: Some(asset_id),
-                        control_asset: None,
-                        metadata: None,
-                        inputs: vec![AssetInput {
-                            input_index: 0,
-                            amount: 7,
-                        }],
-                        outputs: vec![AssetOutput {
-                            output_index: 0,
-                            amount: 130,
-                        }],
-                    },
-                    AssetGroup {
-                        asset_id: Some(control_asset_id),
-                        control_asset: None,
-                        metadata: None,
-                        inputs: vec![AssetInput {
-                            input_index: 0,
-                            amount: 1,
-                        }],
-                        outputs: vec![AssetOutput {
-                            output_index: 0,
-                            amount: 1,
-                        }],
-                    },
-                ],
-            },
-        ];
-
-        assert!(expected_packets
-            .iter()
-            .any(|packet| res.ark_tx.unsigned_tx.output[2] == packet.to_txout()));
-    }
-
-    #[test]
-    fn self_reissuance_without_btc_change_preserves_asset_changes_on_output_zero() {
-        let server_info = test_server_info();
-        let asset_id = AssetId {
-            txid: Txid::from_byte_array([4; 32]),
-            group_index: 0,
+        // Reissued asset includes preserved balance plus newly minted amount.
+        let reissued_group = AssetGroup {
+            asset_id: Some(asset_id),
+            control_asset: None,
+            metadata: None,
+            inputs: vec![AssetInput {
+                input_index: 0,
+                amount: 7,
+            }],
+            outputs: vec![AssetOutput {
+                output_index: 0,
+                amount: 130,
+            }],
         };
-        let control_asset_id = AssetId {
-            txid: Txid::from_byte_array([5; 32]),
-            group_index: 1,
-        };
-        let unrelated_asset_id = AssetId {
-            txid: Txid::from_byte_array([6; 32]),
-            group_index: 2,
-        };
-        let (input, own_address) = self_reissuance_input(
-            7,
-            330,
-            vec![
-                Asset {
-                    asset_id: control_asset_id,
-                    amount: 1,
-                },
-                Asset {
-                    asset_id: unrelated_asset_id,
-                    amount: 9,
-                },
-            ],
-        );
 
-        let res = build_asset_reissuance_transactions(
-            &own_address,
-            &own_address,
-            &[input],
-            &server_info,
-            asset_id,
-            control_asset_id,
-            123,
-        )
-        .unwrap();
-
-        assert_eq!(res.ark_tx.unsigned_tx.output.len(), 3);
-
+        // Get back control asset in full.
         let control_group = AssetGroup {
             asset_id: Some(control_asset_id),
             control_asset: None,
@@ -581,73 +456,57 @@ mod tests {
                 amount: 1,
             }],
         };
-        let unrelated_group = AssetGroup {
-            asset_id: Some(unrelated_asset_id),
-            control_asset: None,
-            metadata: None,
-            inputs: vec![AssetInput {
-                input_index: 0,
-                amount: 9,
-            }],
-            outputs: vec![AssetOutput {
-                output_index: 0,
-                amount: 9,
-            }],
-        };
-        let reissued_group = AssetGroup {
-            asset_id: Some(asset_id),
-            control_asset: None,
-            metadata: None,
-            inputs: vec![],
-            outputs: vec![AssetOutput {
-                output_index: 0,
-                amount: 123,
-            }],
-        };
-        let expected_packets = [
-            Packet {
-                groups: vec![
-                    control_group.clone(),
-                    unrelated_group.clone(),
-                    reissued_group.clone(),
-                ],
-            },
-            Packet {
-                groups: vec![
-                    control_group.clone(),
-                    reissued_group.clone(),
-                    unrelated_group.clone(),
-                ],
-            },
-            Packet {
-                groups: vec![
-                    unrelated_group.clone(),
-                    control_group.clone(),
-                    reissued_group.clone(),
-                ],
-            },
-            Packet {
-                groups: vec![
-                    unrelated_group.clone(),
-                    reissued_group.clone(),
-                    control_group.clone(),
-                ],
-            },
-            Packet {
-                groups: vec![
-                    reissued_group.clone(),
-                    control_group.clone(),
-                    unrelated_group.clone(),
-                ],
-            },
-            Packet {
-                groups: vec![reissued_group, unrelated_group, control_group],
-            },
-        ];
 
-        assert!(expected_packets
-            .iter()
-            .any(|packet| res.ark_tx.unsigned_tx.output[1] == packet.to_txout()));
+        let expected_packet = Packet {
+            groups: vec![reissued_group, control_group],
+        };
+
+        let asset_packet_index = asset_packet_index(&res.ark_tx);
+
+        assert_eq!(
+            res.ark_tx.unsigned_tx.output[asset_packet_index],
+            expected_packet.to_txout()
+        );
+    }
+
+    #[test]
+    fn self_reissuance_without_control_asset_input_errors() {
+        let server_info = test_server_info();
+        let asset_id = AssetId {
+            txid: Txid::from_byte_array([1; 32]),
+            group_index: 0,
+        };
+        let control_asset_id = AssetId {
+            txid: Txid::from_byte_array([2; 32]),
+            group_index: 1,
+        };
+        let unrelated_asset_id = AssetId {
+            txid: Txid::from_byte_array([3; 32]),
+            group_index: 2,
+        };
+
+        let (input, own_address) = self_reissuance_input(
+            Txid::from_byte_array([4; 32]),
+            vec![Asset {
+                asset_id: unrelated_asset_id,
+                amount: 9,
+            }],
+        );
+
+        let err = build_asset_reissuance_transactions(
+            &own_address,
+            &own_address,
+            &[input],
+            &server_info,
+            asset_id,
+            control_asset_id,
+            123,
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("control asset missing from reissuance transaction inputs"));
     }
 
     fn test_server_info() -> Info {
@@ -686,8 +545,7 @@ mod tests {
     }
 
     fn self_reissuance_input(
-        outpoint_tag: u8,
-        amount_sat: u64,
+        asset_bearing_input_txid: Txid,
         assets: Vec<Asset>,
     ) -> (AssetBearingVtxoInput, ArkAddress) {
         let secp = Secp256k1::new();
@@ -722,12 +580,18 @@ mod tests {
                     control_block,
                     vec![spend_script],
                     own_address.to_p2tr_script_pubkey(),
-                    Amount::from_sat(amount_sat),
-                    OutPoint::new(Txid::from_byte_array([outpoint_tag; 32]), 0),
+                    Amount::from_sat(330),
+                    OutPoint::new(asset_bearing_input_txid, 0),
                 ),
                 assets,
             },
             own_address,
         )
+    }
+
+    // The location of the asset packet in the transaction. It's always the second-to-last output,
+    // just before the anchor output.
+    fn asset_packet_index(ark_tx: &Psbt) -> usize {
+        ark_tx.unsigned_tx.output.len() - 2
     }
 }
