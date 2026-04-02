@@ -51,8 +51,9 @@ pub struct AssetReissuanceTransactions {
 ///
 /// # Errors
 ///
-/// Returns an error if `reissue_amount` is zero, or if the selected inputs do not include a
-/// non-zero balance of `control_asset_id` to authorize the reissuance.
+/// Returns an error if `reissue_amount` is zero, if unsigned offchain transaction construction
+/// fails, or if the selected inputs do not include a non-zero balance of `control_asset_id` to
+/// authorize the reissuance.
 pub fn build_asset_reissuance_transactions(
     own_address: &ArkAddress,
     change_address: &ArkAddress,
@@ -148,12 +149,13 @@ fn create_reissuance_packet(
     }
 
     // Ensure that control asset is an input to the transaction. Otherwise, the Arkade server will
-    // not authorise the reissuance.
+    // not authorise reissuance.
     {
-        let control_transfer = transfers.get(&control_asset_id).ok_or_else(|| {
-            Error::ad_hoc("control asset missing from reissuance transaction inputs")
-        })?;
-        let control_input_amount: u64 = control_transfer.inputs.iter().map(|i| i.amount).sum();
+        let control_transfer = transfers
+            .get(&control_asset_id)
+            .map(|t| t.inputs.as_slice())
+            .unwrap_or_default();
+        let control_input_amount: u64 = control_transfer.iter().map(|i| i.amount).sum();
 
         if control_input_amount == 0 {
             return Err(Error::ad_hoc(

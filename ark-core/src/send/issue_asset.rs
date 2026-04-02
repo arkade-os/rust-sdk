@@ -3,12 +3,12 @@ use crate::asset::packet::add_asset_packet_to_psbt;
 use crate::asset::AssetId;
 use crate::asset::ControlAssetConfig;
 use crate::send::build_offchain_transactions;
-use crate::send::preserved_asset_output_index;
 use crate::send::OffchainTransactions;
 use crate::send::VtxoInput;
 use crate::server;
 use crate::ArkAddress;
 use crate::Error;
+use bitcoin::hashes::Hash as _;
 use bitcoin::Psbt;
 use bitcoin::Txid;
 use std::collections::HashMap;
@@ -28,16 +28,16 @@ pub struct SelfAssetIssuanceTransactions {
     pub asset_ids: Vec<AssetId>,
 }
 
+/// Self-controlled output used by self-issuance packet assignments.
+const SELF_ISSUANCE_OUTPUT_INDEX: u16 = 0;
+
 /// Build unsigned offchain transactions for issuing a fresh asset to self.
 ///
-/// The issued asset is always placed on output `0`, with `server_info.dust` used as the
-/// carrier amount for the self-issued VTXO.
+/// Output [`SELF_ISSUANCE_OUTPUT_INDEX`] remains self-controlled and carries the newly issued
+/// asset amount together with any assets already carried by the selected inputs.
 ///
-/// Assets already carried by the selected inputs are preserved on the BTC change output when one
-/// exists. Otherwise, they are preserved on the self-issued output at index `0`.
-///
-/// This builder is therefore intended for self-issuance flows, where output `0` remains under the
-/// issuer's control.
+/// This builder is therefore intended for self-issuance flows, where output
+/// [`SELF_ISSUANCE_OUTPUT_INDEX`] remains under the issuer's control.
 ///
 /// # Arguments
 ///
@@ -56,6 +56,12 @@ pub struct SelfAssetIssuanceTransactions {
 ///
 /// [`SelfAssetIssuanceTransactions`] containing the unsigned Ark transaction, unsigned checkpoint
 /// transactions, and the derived asset IDs for the issued asset groups.
+///
+/// # Errors
+///
+/// Returns an error if `amount` is zero, if an existing control asset is requested but the
+/// selected inputs do not include a non-zero balance of that asset, or if unsigned offchain
+/// transaction construction fails.
 pub fn build_self_asset_issuance_transactions(
     own_address: &ArkAddress,
     change_address: &ArkAddress,
@@ -84,72 +90,12 @@ pub fn build_self_asset_issuance_transactions(
         server_info,
     )?;
 
-    let mut groups = Vec::new();
-
-    // If creating a new control asset, it goes first.
-    if let Some(ControlAssetConfig::New { amount: ctrl_amt }) = &control_asset_config {
-        groups.push(asset::packet::AssetGroup {
-            asset_id: None,
-            control_asset: None,
-            metadata: metadata.clone(),
-            inputs: vec![],
-            outputs: vec![asset::packet::AssetOutput {
-                output_index: 0,
-                amount: (*ctrl_amt).into(),
-            }],
-        });
-    }
-
-    // Include issued asset.
-    {
-        let control_asset_ref = match &control_asset_config {
-            Some(ControlAssetConfig::New { .. }) => Some(asset::packet::AssetRef::ByGroup(0)),
-            Some(ControlAssetConfig::Existing { id }) => Some(asset::packet::AssetRef::ById(*id)),
-            None => None,
-        };
-
-        groups.push(asset::packet::AssetGroup {
-            asset_id: None,
-            control_asset: control_asset_ref,
-            metadata,
-            inputs: vec![],
-            outputs: vec![asset::packet::AssetOutput {
-                output_index: 0,
-                amount,
-            }],
-        });
-    }
-
-    // Preserve any assets carried by the funding VTXOs.
-    let existing_asset_output_index = preserved_asset_output_index(&ark_tx, 1);
-    let mut existing_asset_groups: HashMap<AssetId, asset::packet::AssetGroup> = HashMap::new();
-    for (input_index, input) in inputs.iter().enumerate() {
-        for asset in &input.assets {
-            let group = existing_asset_groups
-                .entry(asset.asset_id)
-                .or_insert_with(|| asset::packet::AssetGroup {
-                    asset_id: Some(asset.asset_id),
-                    control_asset: None,
-                    metadata: None,
-                    inputs: Vec::new(),
-                    outputs: vec![asset::packet::AssetOutput {
-                        output_index: existing_asset_output_index,
-                        amount: 0,
-                    }],
-                });
-
-            group.inputs.push(asset::packet::AssetInput {
-                input_index: input_index as u16,
-                amount: asset.amount,
-            });
-
-            group.outputs[0].amount += asset.amount;
-        }
-    }
-
-    groups.extend(existing_asset_groups.into_values());
-
-    let packet = asset::packet::Packet { groups };
+    let packet = create_self_issuance_packet(
+        inputs,
+        amount,
+        control_asset_config.as_ref(),
+        metadata.as_ref(),
+    )?;
     add_asset_packet_to_psbt(&mut ark_tx, &packet);
 
     let asset_ids = derive_issued_asset_ids(
@@ -162,6 +108,132 @@ pub fn build_self_asset_issuance_transactions(
         checkpoint_txs,
         asset_ids,
     })
+}
+
+/// Create the asset packet for a self-issuance transaction.
+///
+/// Output [`SELF_ISSUANCE_OUTPUT_INDEX`] is treated as the self-controlled destination for the
+/// newly issued asset and any assets already carried by the selected inputs.
+///
+/// If a new control asset is created, it is emitted as group `0` so the issued asset can refer to
+/// it via [`asset::packet::AssetRef::ByGroup`]. Carried assets are preserved on output
+/// [`SELF_ISSUANCE_OUTPUT_INDEX`] as well.
+///
+/// # Arguments
+///
+/// * `inputs` - The selected VTXO inputs to spend, together with any assets they already carry
+/// * `amount` - The amount of the new asset to issue
+/// * `control_asset_config` - Optional control asset configuration for making the issued asset
+///   reissuable
+/// * `metadata` - Optional metadata to attach to the newly issued asset group
+///
+/// # Returns
+///
+/// An [`asset::packet::Packet`] describing how newly issued and carried assets are assigned to
+/// output [`SELF_ISSUANCE_OUTPUT_INDEX`].
+///
+/// # Errors
+///
+/// Returns an error if `control_asset_config` references an existing control asset id that is not
+/// present with a non-zero balance in the selected inputs.
+fn create_self_issuance_packet(
+    inputs: &[AssetBearingVtxoInput],
+    amount: u64,
+    control_asset_config: Option<&ControlAssetConfig>,
+    metadata: Option<&Vec<(String, String)>>,
+) -> Result<asset::packet::Packet, Error> {
+    let mut groups = Vec::new();
+
+    // If we are generating a new control asset as part of issuing, it belongs in group `0`.
+    if let Some(ControlAssetConfig::New {
+        amount: control_amount,
+    }) = control_asset_config
+    {
+        groups.push(asset::packet::AssetGroup {
+            asset_id: None,
+            control_asset: None,
+            metadata: metadata.cloned(),
+            inputs: vec![],
+            outputs: vec![asset::packet::AssetOutput {
+                output_index: SELF_ISSUANCE_OUTPUT_INDEX,
+                amount: (*control_amount).into(),
+            }],
+        });
+    }
+
+    let control_asset_ref = match control_asset_config {
+        Some(ControlAssetConfig::New { .. }) => Some(asset::packet::AssetRef::ByGroup(0)),
+        Some(ControlAssetConfig::Existing { id }) => Some(asset::packet::AssetRef::ById(*id)),
+        None => None,
+    };
+
+    // The issued asset can be in either:
+    //
+    // - group `0`, if no new control asset was generated; or
+    // - group `1`, if a new control asset was generated.
+    groups.push(asset::packet::AssetGroup {
+        asset_id: None,
+        control_asset: control_asset_ref,
+        metadata: metadata.cloned(),
+        inputs: vec![],
+        outputs: vec![asset::packet::AssetOutput {
+            output_index: SELF_ISSUANCE_OUTPUT_INDEX,
+            amount,
+        }],
+    });
+
+    // Ensure asset preservation.
+    let mut existing_asset_groups: HashMap<AssetId, asset::packet::AssetGroup> = HashMap::new();
+    for (input_index, input) in inputs.iter().enumerate() {
+        for asset in &input.assets {
+            let group = existing_asset_groups
+                .entry(asset.asset_id)
+                .or_insert_with(|| asset::packet::AssetGroup {
+                    asset_id: Some(asset.asset_id),
+                    control_asset: None,
+                    metadata: None,
+                    inputs: Vec::new(),
+                    outputs: vec![asset::packet::AssetOutput {
+                        output_index: SELF_ISSUANCE_OUTPUT_INDEX,
+                        amount: 0,
+                    }],
+                });
+
+            group.inputs.push(asset::packet::AssetInput {
+                input_index: input_index as u16,
+                amount: asset.amount,
+            });
+            group.outputs[0].amount += asset.amount;
+        }
+    }
+
+    // If the control asset is referenced by ID (it existed before this transaction), ensure that it
+    // is an input to the transaction. Otherwise, the Arkade server will not authorise issuance.
+    if let Some(ControlAssetConfig::Existing { id }) = control_asset_config {
+        let control_group = existing_asset_groups
+            .get(id)
+            .map(|t| t.inputs.as_slice())
+            .unwrap_or_default();
+        let control_input_amount: u64 = control_group.iter().map(|i| i.amount).sum();
+
+        if control_input_amount == 0 {
+            return Err(Error::ad_hoc(
+                "control asset missing from issuance transaction inputs",
+            ));
+        }
+    }
+
+    // Sort the remaining groups to make it easier to test the behaviour. This is _not_ required.
+    let mut existing_asset_groups = existing_asset_groups.into_values().collect::<Vec<_>>();
+    existing_asset_groups.sort_by_key(|group| {
+        let asset_id = group
+            .asset_id
+            .expect("issuance carried-asset groups always have asset ids");
+        (asset_id.txid.to_byte_array(), asset_id.group_index)
+    });
+    groups.extend(existing_asset_groups);
+
+    Ok(asset::packet::Packet { groups })
 }
 
 /// Derive the asset IDs created by a self-issuance transaction from the final transaction ID.
@@ -197,7 +269,6 @@ mod tests {
     use crate::server;
     use crate::server::Asset;
     use crate::ArkAddress;
-    use bitcoin::hashes::Hash as _;
     use bitcoin::key::Secp256k1;
     use bitcoin::opcodes::OP_TRUE;
     use bitcoin::script::Builder;
@@ -263,8 +334,7 @@ mod tests {
     fn self_issuance_without_carried_assets_has_only_issued_group() {
         let server_info = test_server_info();
 
-        // Exact dust input: enough to create the issuance output, but no BTC change output.
-        let (input, own_address) = self_issuance_input(10, 330, vec![]);
+        let (input, own_address) = self_issuance_input(Vec::new());
 
         let res = build_self_asset_issuance_transactions(
             &own_address,
@@ -277,41 +347,43 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(res.ark_tx.unsigned_tx.output.len(), 3);
-
-        let expected_packet = Packet {
-            groups: vec![AssetGroup {
-                asset_id: None,
-                control_asset: None,
-                metadata: None,
-                inputs: vec![],
-                outputs: vec![AssetOutput {
-                    output_index: 0,
-                    amount: 123,
-                }],
+        // Newly minted asset.
+        let issued_group = AssetGroup {
+            asset_id: None,
+            // Cannot be reissued.
+            control_asset: None,
+            metadata: None,
+            inputs: vec![],
+            outputs: vec![AssetOutput {
+                output_index: SELF_ISSUANCE_OUTPUT_INDEX,
+                amount: 123,
             }],
         };
 
-        assert_eq!(res.ark_tx.unsigned_tx.output[1], expected_packet.to_txout());
+        let expected_packet = Packet {
+            groups: vec![issued_group],
+        };
+
+        let asset_packet_index = asset_packet_index(&res.ark_tx);
+
+        assert_eq!(
+            res.ark_tx.unsigned_tx.output[asset_packet_index],
+            expected_packet.to_txout()
+        );
     }
 
     #[test]
-    fn self_issuance_with_carried_assets_preserves_them_on_change_output_when_present() {
+    fn self_issuance_preserves_carried_assets_on_output_zero() {
         let server_info = test_server_info();
-        let existing_asset_id = AssetId {
+        let unrelated_asset_id = AssetId {
             txid: Txid::from_byte_array([11; 32]),
             group_index: 4,
         };
 
-        // 2x dust input: one dust output for issuance plus one dust BTC change output.
-        let (input, own_address) = self_issuance_input(
-            12,
-            660,
-            vec![Asset {
-                asset_id: existing_asset_id,
-                amount: 7,
-            }],
-        );
+        let (input, own_address) = self_issuance_input(vec![Asset {
+            asset_id: unrelated_asset_id,
+            amount: 7,
+        }]);
 
         let res = build_self_asset_issuance_transactions(
             &own_address,
@@ -324,56 +396,50 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(res.ark_tx.unsigned_tx.output.len(), 4);
-
-        let expected_packet = Packet {
-            groups: vec![
-                AssetGroup {
-                    asset_id: None,
-                    control_asset: None,
-                    metadata: None,
-                    inputs: vec![],
-                    outputs: vec![AssetOutput {
-                        output_index: 0,
-                        amount: 123,
-                    }],
-                },
-                AssetGroup {
-                    asset_id: Some(existing_asset_id),
-                    control_asset: None,
-                    metadata: None,
-                    inputs: vec![AssetInput {
-                        input_index: 0,
-                        amount: 7,
-                    }],
-                    outputs: vec![AssetOutput {
-                        output_index: 1,
-                        amount: 7,
-                    }],
-                },
-            ],
+        // Newly minted asset.
+        let issued_group = AssetGroup {
+            asset_id: None,
+            // Cannot be reissued.
+            control_asset: None,
+            metadata: None,
+            inputs: vec![],
+            outputs: vec![AssetOutput {
+                output_index: SELF_ISSUANCE_OUTPUT_INDEX,
+                amount: 123,
+            }],
         };
 
-        assert_eq!(res.ark_tx.unsigned_tx.output[2], expected_packet.to_txout());
+        // Get back unrelated asset in full.
+        let unrelated_group = AssetGroup {
+            asset_id: Some(unrelated_asset_id),
+            control_asset: None,
+            metadata: None,
+            inputs: vec![AssetInput {
+                input_index: 0,
+                amount: 7,
+            }],
+            outputs: vec![AssetOutput {
+                output_index: SELF_ISSUANCE_OUTPUT_INDEX,
+                amount: 7,
+            }],
+        };
+
+        let expected_packet = Packet {
+            groups: vec![issued_group, unrelated_group],
+        };
+
+        let asset_packet_index = asset_packet_index(&res.ark_tx);
+
+        assert_eq!(
+            res.ark_tx.unsigned_tx.output[asset_packet_index],
+            expected_packet.to_txout()
+        );
     }
 
     #[test]
-    fn self_issuance_with_carried_assets_and_no_btc_change_preserves_them_on_output_zero() {
+    fn self_issuance_with_new_control_asset_emits_control_group_before_issued_group() {
         let server_info = test_server_info();
-        let existing_asset_id = AssetId {
-            txid: Txid::from_byte_array([13; 32]),
-            group_index: 2,
-        };
-
-        // Exact dust input again: carried assets must fall back to the self-issuance output.
-        let (input, own_address) = self_issuance_input(
-            14,
-            330,
-            vec![Asset {
-                asset_id: existing_asset_id,
-                amount: 11,
-            }],
-        );
+        let (input, own_address) = self_issuance_input(Vec::new());
 
         let res = build_self_asset_issuance_transactions(
             &own_address,
@@ -381,42 +447,149 @@ mod tests {
             &[input],
             &server_info,
             123,
-            None,
+            // Configured to mint a new control asset.
+            Some(ControlAssetConfig::new(5).unwrap()),
             None,
         )
         .unwrap();
 
-        assert_eq!(res.ark_tx.unsigned_tx.output.len(), 3);
-
-        let expected_packet = Packet {
-            groups: vec![
-                AssetGroup {
-                    asset_id: None,
-                    control_asset: None,
-                    metadata: None,
-                    inputs: vec![],
-                    outputs: vec![AssetOutput {
-                        output_index: 0,
-                        amount: 123,
-                    }],
-                },
-                AssetGroup {
-                    asset_id: Some(existing_asset_id),
-                    control_asset: None,
-                    metadata: None,
-                    inputs: vec![AssetInput {
-                        input_index: 0,
-                        amount: 11,
-                    }],
-                    outputs: vec![AssetOutput {
-                        output_index: 0,
-                        amount: 11,
-                    }],
-                },
-            ],
+        // Acquire control asset in full.
+        let control_group = AssetGroup {
+            asset_id: None,
+            control_asset: None,
+            metadata: None,
+            inputs: vec![],
+            outputs: vec![AssetOutput {
+                output_index: SELF_ISSUANCE_OUTPUT_INDEX,
+                amount: 5,
+            }],
         };
 
-        assert_eq!(res.ark_tx.unsigned_tx.output[1], expected_packet.to_txout());
+        // Newly minted asset.
+        let issued_group = AssetGroup {
+            asset_id: None,
+            // Can be reissued. Referenced control asset by group because it's in the same
+            // transaction.
+            control_asset: Some(asset::packet::AssetRef::ByGroup(0)),
+            metadata: None,
+            inputs: vec![],
+            outputs: vec![AssetOutput {
+                output_index: SELF_ISSUANCE_OUTPUT_INDEX,
+                amount: 123,
+            }],
+        };
+
+        let expected_packet = Packet {
+            groups: vec![control_group, issued_group],
+        };
+
+        let asset_packet_index = asset_packet_index(&res.ark_tx);
+
+        assert_eq!(
+            res.ark_tx.unsigned_tx.output[asset_packet_index],
+            expected_packet.to_txout()
+        );
+    }
+
+    #[test]
+    fn self_issuance_with_existing_control_asset_preserves_it_and_references_it_by_id() {
+        let server_info = test_server_info();
+        let control_asset_id = AssetId {
+            txid: Txid::from_byte_array([14; 32]),
+            group_index: 2,
+        };
+
+        let (input, own_address) = self_issuance_input(vec![
+            // Control asset.
+            Asset {
+                asset_id: control_asset_id,
+                amount: 3,
+            },
+        ]);
+
+        let res = build_self_asset_issuance_transactions(
+            &own_address,
+            &own_address,
+            &[input],
+            &server_info,
+            123,
+            // Configured to reuse an existing control asset.
+            Some(ControlAssetConfig::existing(control_asset_id)),
+            None,
+        )
+        .unwrap();
+
+        // Newly minted asset.
+        let issued_group = AssetGroup {
+            asset_id: None,
+            // Can be reissued. Referenced control asset by ID because it existed before this
+            // transaction.
+            control_asset: Some(asset::packet::AssetRef::ById(control_asset_id)),
+            metadata: None,
+            inputs: vec![],
+            outputs: vec![AssetOutput {
+                output_index: SELF_ISSUANCE_OUTPUT_INDEX,
+                amount: 123,
+            }],
+        };
+
+        // Get back control asset in full.
+        let control_group = AssetGroup {
+            asset_id: Some(control_asset_id),
+            control_asset: None,
+            metadata: None,
+            inputs: vec![AssetInput {
+                input_index: 0,
+                amount: 3,
+            }],
+            outputs: vec![AssetOutput {
+                output_index: SELF_ISSUANCE_OUTPUT_INDEX,
+                amount: 3,
+            }],
+        };
+
+        let expected_packet = Packet {
+            groups: vec![issued_group, control_group],
+        };
+
+        let asset_packet_index = asset_packet_index(&res.ark_tx);
+
+        assert_eq!(
+            res.ark_tx.unsigned_tx.output[asset_packet_index],
+            expected_packet.to_txout()
+        );
+    }
+
+    #[test]
+    fn self_issuance_without_control_asset_input_errors() {
+        let server_info = test_server_info();
+        let control_asset_id = AssetId {
+            txid: Txid::from_byte_array([16; 32]),
+            group_index: 3,
+        };
+        let unrelated_asset_id = AssetId {
+            txid: Txid::from_byte_array([17; 32]),
+            group_index: 1,
+        };
+        let (input, own_address) = self_issuance_input(vec![Asset {
+            asset_id: unrelated_asset_id,
+            amount: 9,
+        }]);
+
+        let err = build_self_asset_issuance_transactions(
+            &own_address,
+            &own_address,
+            &[input],
+            &server_info,
+            123,
+            Some(ControlAssetConfig::existing(control_asset_id)),
+            None,
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("control asset missing from issuance transaction inputs"));
     }
 
     fn test_server_info() -> server::Info {
@@ -456,11 +629,7 @@ mod tests {
         }
     }
 
-    fn self_issuance_input(
-        outpoint_tag: u8,
-        amount_sat: u64,
-        assets: Vec<Asset>,
-    ) -> (AssetBearingVtxoInput, ArkAddress) {
+    fn self_issuance_input(assets: Vec<Asset>) -> (AssetBearingVtxoInput, ArkAddress) {
         let secp = Secp256k1::new();
 
         let server_pk: bitcoin::key::PublicKey =
@@ -493,12 +662,18 @@ mod tests {
                     control_block,
                     vec![spend_script],
                     own_address.to_p2tr_script_pubkey(),
-                    Amount::from_sat(amount_sat),
-                    OutPoint::new(Txid::from_byte_array([outpoint_tag; 32]), 0),
+                    Amount::from_sat(330),
+                    OutPoint::new(Txid::from_byte_array([0; 32]), 0),
                 ),
                 assets,
             },
             own_address,
         )
+    }
+
+    // The location of the asset packet in the transaction. It's always the second-to-last output,
+    // just before the anchor output.
+    fn asset_packet_index(ark_tx: &Psbt) -> usize {
+        ark_tx.unsigned_tx.output.len() - 2
     }
 }
