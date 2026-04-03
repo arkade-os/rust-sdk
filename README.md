@@ -35,14 +35,14 @@ ark-core = "0.1" # Replace with actual version
 ### Client Initialization
 
 ```rust
-use ark_client::Client;
-use ark_client::OfflineClient;
+use ark_client::{Client, InMemorySwapStorage, OfflineClient, StaticKeyProvider};
 use bitcoin::key::Keypair;
 use bitcoin::secp256k1::SecretKey;
 use std::sync::Arc;
+use std::time::Duration;
 
-// Initialize the client
-async fn init_client() -> Result<Client<MyBlockchain, MyWallet>, ark_client::Error> {
+// Initialize the client using a static keypair (convenience wrapper)
+async fn init_client() -> Result<Client<MyBlockchain, MyWallet, InMemorySwapStorage, StaticKeyProvider>, ark_client::Error> {
     // Create a keypair for signing transactions
     let secp = bitcoin::key::Secp256k1::new();
     let secret_key = SecretKey::from_str("your_private_key_here")?;
@@ -51,15 +51,16 @@ async fn init_client() -> Result<Client<MyBlockchain, MyWallet>, ark_client::Err
     // Initialize blockchain and wallet implementations
     let blockchain = Arc::new(MyBlockchain::new("https://esplora.example.com"));
     let wallet = Arc::new(MyWallet::new());
+    let timeout = Duration::from_secs(30);
 
-    // Create the offline client
-    let offline_client = OfflineClient::new(
+    // Create the offline client using new_with_keypair (wraps keypair in StaticKeyProvider)
+    let offline_client = OfflineClient::new_with_keypair(
         "my-ark-client".to_string(),
         keypair,
         blockchain,
         wallet,
         "https://ark-server.example.com".to_string(),
-        InMemorySwapStorage::default(),
+        Arc::new(InMemorySwapStorage::default()),
         "http://boltz.example.com".to_string(),
         timeout,
     );
