@@ -27,7 +27,13 @@ impl TryFrom<models::GetEventStreamResponse> for StreamEvent {
     type Error = ConversionError;
 
     fn try_from(response: models::GetEventStreamResponse) -> Result<Self, Self::Error> {
-        if let Some(batch_started) = response.batch_started {
+        if response.heartbeat.is_some() {
+            return Ok(StreamEvent::Heartbeat);
+        } else if let Some(stream_started) = response.stream_started {
+            return Ok(StreamEvent::StreamStarted(StreamStartedEvent {
+                id: stream_started.id.unwrap_or_default(),
+            }));
+        } else if let Some(batch_started) = response.batch_started {
             return Ok(StreamEvent::BatchStarted(batch_started.try_into()?));
         } else if let Some(batch_finalization) = response.batch_finalization {
             return Ok(StreamEvent::BatchFinalization(

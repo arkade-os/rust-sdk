@@ -323,35 +323,44 @@ impl Client {
 
         // Create the SSE event stream
         let stream = stream::unfold(byte_stream, |mut byte_stream| async move {
-            match byte_stream.next().await {
-                Some(chunk_result) => {
-                    let result = match chunk_result {
-                        Ok(bytes) => {
-                            let event = String::from_utf8(bytes.to_vec());
-                            match event {
-                                Ok(event) => {
-                                    if let Ok(response) =
-                                        serde_json::from_str::<models::GetEventStreamResponse>(
-                                            &event,
-                                        )
-                                    {
-                                        match StreamEvent::try_from(response) {
-                                            Ok(stream_event) => Ok(stream_event),
-                                            Err(e) => Err(Error::conversion(e)),
+            loop {
+                match byte_stream.next().await {
+                    Some(chunk_result) => {
+                        let result = match chunk_result {
+                            Ok(bytes) => {
+                                let event = String::from_utf8(bytes.to_vec());
+                                match event {
+                                    Ok(event) => {
+                                        let event = event.trim();
+                                        // Skip empty lines and SSE comments
+                                        if event.is_empty() || event.starts_with(':') {
+                                            continue;
                                         }
-                                    } else {
-                                        // Handle parse error
-                                        Err(Error::conversion("Failed to parse JSON"))
+                                        // Strip SSE `data: ` prefix
+                                        let event = event.strip_prefix("data: ").unwrap_or(event);
+                                        if let Ok(response) =
+                                            serde_json::from_str::<models::GetEventStreamResponse>(
+                                                event,
+                                            )
+                                        {
+                                            match StreamEvent::try_from(response) {
+                                                Ok(stream_event) => Ok(stream_event),
+                                                Err(e) => Err(Error::conversion(e)),
+                                            }
+                                        } else {
+                                            // Handle parse error
+                                            Err(Error::conversion("Failed to parse JSON"))
+                                        }
                                     }
+                                    Err(error) => Err(Error::conversion(error)),
                                 }
-                                Err(error) => Err(Error::conversion(error)),
                             }
-                        }
-                        Err(e) => Err(Error::request(e)),
-                    };
-                    Some((result, byte_stream))
+                            Err(e) => Err(Error::request(e)),
+                        };
+                        return Some((result, byte_stream));
+                    }
+                    None => return None,
                 }
-                None => None,
             }
         });
 
@@ -546,10 +555,17 @@ impl Client {
                             Ok(bytes) => {
                                 let event = String::from_utf8(bytes.to_vec());
                                 match event {
-                                    Ok(event) if !event.trim().is_empty() => {
+                                    Ok(event) => {
+                                        let event = event.trim();
+                                        // Skip empty lines and SSE comments
+                                        if event.is_empty() || event.starts_with(':') {
+                                            continue;
+                                        }
+                                        // Strip SSE `data: ` prefix
+                                        let event = event.strip_prefix("data: ").unwrap_or(event);
                                         if let Ok(response) =
                                             serde_json::from_str::<models::GetSubscriptionResponse>(
-                                                &event,
+                                                event,
                                             )
                                         {
                                             match SubscriptionResponse::try_from(response) {
@@ -562,12 +578,6 @@ impl Client {
                                             // Handle parse error
                                             Err(Error::conversion("Failed to parse JSON"))
                                         }
-                                    }
-                                    Ok(_) => {
-                                        // Handle empty string case - skip and continue to next
-                                        // iteration
-                                        tracing::trace!("Ignoring empty response");
-                                        continue;
                                     }
                                     Err(error) => Err(Error::conversion(error)),
                                 }
