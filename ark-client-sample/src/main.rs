@@ -25,6 +25,7 @@ use ark_client::TxStatus;
 use ark_core::asset::ControlAssetConfig;
 use ark_core::history;
 use ark_core::send::SendReceiver;
+use ark_core::send::VtxoInput;
 use ark_core::server::SubscriptionResponse;
 use ark_core::ArkAddress;
 use ark_core::ArkNote;
@@ -1190,7 +1191,7 @@ async fn run_command<K: KeyProvider>(
             )
             .map_err(|e| anyhow!(e))?;
 
-            let vtxo_inputs: Vec<ark_core::send::VtxoInput> = selected
+            let vtxo_inputs: Vec<VtxoInput> = selected
                 .into_iter()
                 .map(|coin| {
                     let vtxo = script_pubkey_to_vtxo_map
@@ -1201,7 +1202,7 @@ async fn run_command<K: KeyProvider>(
                     let (forfeit_script, control_block) = vtxo
                         .forfeit_spend_info()
                         .context("failed to get forfeit spend info")?;
-                    Ok(ark_core::send::VtxoInput::new(
+                    Ok(VtxoInput::new(
                         forfeit_script,
                         None,
                         control_block,
@@ -1209,6 +1210,7 @@ async fn run_command<K: KeyProvider>(
                         vtxo.script_pubkey(),
                         coin.amount,
                         coin.outpoint,
+                        coin.assets,
                     ))
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -1324,10 +1326,7 @@ async fn run_command<K: KeyProvider>(
                 }],
             };
 
-            let txid = client
-                .send_assets(vec![receiver])
-                .await
-                .map_err(|e| anyhow!(e))?;
+            let txid = client.send(vec![receiver]).await.map_err(|e| anyhow!(e))?;
 
             println!(
                 "{}",

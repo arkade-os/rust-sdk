@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use ark_core::coin_select::select_vtxos;
+use ark_core::send::VtxoInput;
 use bitcoin::key::Secp256k1;
 use bitcoin::Amount;
 use common::init_tracing;
@@ -112,12 +113,12 @@ pub async fn e2e_continue_pending_tx_multi_input() {
         selected.len()
     );
 
-    let vtxo_inputs: Vec<ark_core::send::VtxoInput> = selected
+    let vtxo_inputs: Vec<VtxoInput> = selected
         .into_iter()
         .map(|coin| {
             let vtxo = script_pubkey_to_vtxo_map.get(&coin.script_pubkey).unwrap();
             let (forfeit_script, control_block) = vtxo.forfeit_spend_info().unwrap();
-            ark_core::send::VtxoInput::new(
+            VtxoInput::new(
                 forfeit_script,
                 None,
                 control_block,
@@ -125,6 +126,7 @@ pub async fn e2e_continue_pending_tx_multi_input() {
                 vtxo.script_pubkey(),
                 coin.amount,
                 coin.outpoint,
+                coin.assets,
             )
         })
         .collect();

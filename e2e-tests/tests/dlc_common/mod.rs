@@ -15,11 +15,12 @@ use ark_core::boarding_output::BoardingOutpoints;
 use ark_core::intent;
 use ark_core::script::csv_sig_script;
 use ark_core::script::multisig_script;
-use ark_core::send;
 use ark_core::send::build_offchain_transactions;
 use ark_core::send::sign_ark_transaction;
 use ark_core::send::sign_checkpoint_transaction;
 use ark_core::send::OffchainTransactions;
+use ark_core::send::SendReceiver;
+use ark_core::send::VtxoInput;
 use ark_core::server;
 use ark_core::server::BatchTreeEventType;
 use ark_core::server::GetVtxosRequest;
@@ -147,17 +148,21 @@ pub async fn run_dlc_scenario(nigiri: &Nigiri, run_refund_scenario: bool) -> Res
         )?
     };
 
+    // The change address is superfluous because we are _draining_ the input.
+    let change_address = &dlc_vtxo.to_ark_address();
+
     // We build the DLC funding transaction, but we don't "broadcast" it yet. We use it as a
     // reference point to build the rest of the DLC.
     let OffchainTransactions {
         ark_tx: mut dlc_virtual_tx,
         checkpoint_txs: dlc_checkpoint_txs,
     } = build_offchain_transactions(
-        &[(
-            &dlc_vtxo.to_ark_address(),
-            alice_fund_amount + bob_fund_amount,
-        )],
-        None,
+        &[SendReceiver {
+            address: dlc_vtxo.to_ark_address(),
+            amount: alice_fund_amount + bob_fund_amount,
+            assets: Vec::new(),
+        }],
+        change_address,
         &[alice_dlc_input.clone(), bob_dlc_input.clone()],
         &server_info,
     )
@@ -189,7 +194,7 @@ pub async fn run_dlc_scenario(nigiri: &Nigiri, run_refund_scenario: bool) -> Res
 
     let control_block = dlc_vtxo.get_spend_info(dlc_refund_script.clone())?;
 
-    let refund_dlc_vtxo_input = send::VtxoInput::new(
+    let refund_dlc_vtxo_input = VtxoInput::new(
         dlc_refund_script,
         Some(refund_locktime),
         control_block,
@@ -197,17 +202,29 @@ pub async fn run_dlc_scenario(nigiri: &Nigiri, run_refund_scenario: bool) -> Res
         dlc_vtxo.script_pubkey(),
         dlc_output.value,
         dlc_outpoint,
+        Vec::new(),
     );
+
+    // The change address is superfluous because we are _draining_ the input.
+    let change_address = &alice_payout_vtxo.to_ark_address();
 
     // We build a refund transaction spending from the DLC VTXO.
     let alice_refund_payout = alice_fund_amount;
     let bob_refund_payout = bob_fund_amount;
     let refund_offchain_txs = build_offchain_transactions(
         &[
-            (&alice_payout_vtxo.to_ark_address(), alice_refund_payout),
-            (&bob_payout_vtxo.to_ark_address(), bob_refund_payout),
+            SendReceiver {
+                address: alice_payout_vtxo.to_ark_address(),
+                amount: alice_refund_payout,
+                assets: Vec::new(),
+            },
+            SendReceiver {
+                address: bob_payout_vtxo.to_ark_address(),
+                amount: bob_refund_payout,
+                assets: Vec::new(),
+            },
         ],
-        None,
+        change_address,
         std::slice::from_ref(&refund_dlc_vtxo_input),
         &server_info,
     )
@@ -215,7 +232,7 @@ pub async fn run_dlc_scenario(nigiri: &Nigiri, run_refund_scenario: bool) -> Res
 
     let control_block = dlc_vtxo.get_spend_info(dlc_multisig_script.clone())?;
 
-    let cet_dlc_vtxo_input = send::VtxoInput::new(
+    let cet_dlc_vtxo_input = VtxoInput::new(
         dlc_multisig_script,
         None,
         control_block,
@@ -223,17 +240,29 @@ pub async fn run_dlc_scenario(nigiri: &Nigiri, run_refund_scenario: bool) -> Res
         dlc_vtxo.script_pubkey(),
         dlc_output.value,
         dlc_outpoint,
+        Vec::new(),
     );
+
+    // The change address is superfluous because we are _draining_ the input.
+    let change_address = &alice_payout_vtxo.to_ark_address();
 
     // We build CETs spending from the DLC VTXO.
     let alice_heads_payout = Amount::from_sat(70_000_000);
     let bob_heads_payout = dlc_output.value - alice_heads_payout;
     let heads_cet_offchain_txs = build_offchain_transactions(
         &[
-            (&alice_payout_vtxo.to_ark_address(), alice_heads_payout),
-            (&bob_payout_vtxo.to_ark_address(), bob_heads_payout),
+            SendReceiver {
+                address: alice_payout_vtxo.to_ark_address(),
+                amount: alice_heads_payout,
+                assets: Vec::new(),
+            },
+            SendReceiver {
+                address: bob_payout_vtxo.to_ark_address(),
+                amount: bob_heads_payout,
+                assets: Vec::new(),
+            },
         ],
-        None,
+        change_address,
         std::slice::from_ref(&cet_dlc_vtxo_input),
         &server_info,
     )
@@ -243,10 +272,18 @@ pub async fn run_dlc_scenario(nigiri: &Nigiri, run_refund_scenario: bool) -> Res
     let bob_tails_payout = dlc_output.value - alice_tails_payout;
     let tails_cet_offchain_txs = build_offchain_transactions(
         &[
-            (&alice_payout_vtxo.to_ark_address(), alice_tails_payout),
-            (&bob_payout_vtxo.to_ark_address(), bob_tails_payout),
+            SendReceiver {
+                address: alice_payout_vtxo.to_ark_address(),
+                amount: alice_tails_payout,
+                assets: Vec::new(),
+            },
+            SendReceiver {
+                address: bob_payout_vtxo.to_ark_address(),
+                amount: bob_tails_payout,
+                assets: Vec::new(),
+            },
         ],
-        None,
+        change_address,
         std::slice::from_ref(&cet_dlc_vtxo_input),
         &server_info,
     )
@@ -564,7 +601,7 @@ async fn fund_vtxo(
     server_info: &server::Info,
     kp: &Keypair,
     amount: Amount,
-) -> Result<send::VtxoInput> {
+) -> Result<VtxoInput> {
     let secp = Secp256k1::new();
 
     let pk = kp.public_key().x_only_public_key().0;
@@ -619,7 +656,7 @@ async fn fund_vtxo(
 
     let (forfeit_script, control_block) = vtxo.forfeit_spend_info()?;
 
-    let vtxo_input = send::VtxoInput::new(
+    let vtxo_input = VtxoInput::new(
         forfeit_script,
         None,
         control_block,
@@ -627,6 +664,7 @@ async fn fund_vtxo(
         vtxo.script_pubkey(),
         virtual_tx_outpoint.amount,
         virtual_tx_outpoint.outpoint,
+        virtual_tx_outpoint.assets.clone(),
     );
 
     Ok(vtxo_input)

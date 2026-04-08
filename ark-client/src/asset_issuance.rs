@@ -16,7 +16,6 @@ use ark_core::send::build_asset_reissuance_transactions;
 use ark_core::send::build_self_asset_issuance_transactions;
 use ark_core::send::sign_ark_transaction;
 use ark_core::send::sign_checkpoint_transaction;
-use ark_core::send::AssetBearingVtxoInput;
 use ark_core::send::AssetReissuanceTransactions;
 use ark_core::send::SelfAssetIssuanceTransactions;
 use ark_core::ErrorContext as _;
@@ -110,18 +109,16 @@ where
                     .forfeit_spend_info()
                     .context("failed to get forfeit spend info")?;
 
-                Ok(AssetBearingVtxoInput {
-                    input: send::VtxoInput::new(
-                        forfeit_script,
-                        None,
-                        control_block,
-                        vtxo.tapscripts(),
-                        vtxo.script_pubkey(),
-                        vto.amount,
-                        vto.outpoint,
-                    ),
-                    assets: vto.assets.clone(),
-                })
+                Ok(send::VtxoInput::new(
+                    forfeit_script,
+                    None,
+                    control_block,
+                    vtxo.tapscripts(),
+                    vtxo.script_pubkey(),
+                    vto.amount,
+                    vto.outpoint,
+                    vto.assets.clone(),
+                ))
             })
             .collect::<Result<Vec<_>, Error>>()?;
 
@@ -364,18 +361,16 @@ where
                     .forfeit_spend_info()
                     .context("failed to get forfeit spend info")?;
 
-                Ok(AssetBearingVtxoInput {
-                    input: send::VtxoInput::new(
-                        forfeit_script,
-                        None,
-                        control_block,
-                        vtxo.tapscripts(),
-                        vtxo.script_pubkey(),
-                        vto.amount,
-                        vto.outpoint,
-                    ),
-                    assets: vto.assets.clone(),
-                })
+                Ok(send::VtxoInput::new(
+                    forfeit_script,
+                    None,
+                    control_block,
+                    vtxo.tapscripts(),
+                    vtxo.script_pubkey(),
+                    vto.amount,
+                    vto.outpoint,
+                    vto.assets.clone(),
+                ))
             })
             .collect::<Result<Vec<_>, Error>>()?;
 

@@ -13,6 +13,7 @@ use ark_core::send::build_offchain_transactions;
 use ark_core::send::sign_ark_transaction;
 use ark_core::send::sign_checkpoint_transaction;
 use ark_core::send::OffchainTransactions;
+use ark_core::send::SendReceiver;
 use ark_core::send::VtxoInput;
 use ark_core::server::parse_sequence_number;
 use ark_core::server::PendingTx;
@@ -569,7 +570,11 @@ where
         let (refund_address, _) = self.get_offchain_address()?;
         let refund_amount = swap_data.amount;
 
-        let outputs = vec![(&refund_address, refund_amount)];
+        let outputs = vec![SendReceiver {
+            address: refund_address,
+            amount: refund_amount,
+            assets: Vec::new(),
+        }];
 
         let refund_script = vhtlc.refund_without_receiver_script();
 
@@ -592,14 +597,18 @@ where
             script_pubkey,
             refund_amount,
             vhtlc_outpoint.outpoint,
+            vhtlc_outpoint.assets,
         );
+
+        // The change address is superfluous because we are _draining_ the VHTLC.
+        let change_address = &refund_address;
 
         let OffchainTransactions {
             mut ark_tx,
             checkpoint_txs,
         } = build_offchain_transactions(
             &outputs,
-            None,
+            change_address,
             std::slice::from_ref(&vhtlc_input),
             &self.server_info,
         )?;
@@ -843,7 +852,11 @@ where
         let (refund_address, _) = self.get_offchain_address()?;
         let refund_amount = swap_data.amount;
 
-        let outputs = vec![(&refund_address, refund_amount)];
+        let outputs = vec![SendReceiver {
+            address: refund_address,
+            amount: refund_amount,
+            assets: Vec::new(),
+        }];
 
         // Use the collaborative refund script which requires sender + receiver + server signatures.
         let refund_script = vhtlc.refund_script();
@@ -865,14 +878,18 @@ where
             script_pubkey,
             refund_amount,
             vhtlc_outpoint.outpoint,
+            vhtlc_outpoint.assets,
         );
+
+        // The change address is superfluous because we are _draining_ the VHTLC.
+        let change_address = &refund_address;
 
         let OffchainTransactions {
             mut ark_tx,
             checkpoint_txs,
         } = build_offchain_transactions(
             &outputs,
-            None,
+            change_address,
             std::slice::from_ref(&vhtlc_input),
             &self.server_info,
         )?;
@@ -1381,7 +1398,11 @@ where
             .context("failed to get offchain address")?;
         let claim_amount = swap.amount;
 
-        let outputs = vec![(&claim_address, claim_amount)];
+        let outputs = vec![SendReceiver {
+            address: claim_address,
+            amount: claim_amount,
+            assets: Vec::new(),
+        }];
 
         let spend_info = vhtlc.taproot_spend_info();
         let script_ver = (vhtlc.claim_script(), LeafVersion::TapScript);
@@ -1400,14 +1421,18 @@ where
             script_pubkey,
             claim_amount,
             vhtlc_outpoint.outpoint,
+            vhtlc_outpoint.assets,
         );
+
+        // The change address is superfluous because we are _draining_ the VHTLC.
+        let change_address = &claim_address;
 
         let OffchainTransactions {
             mut ark_tx,
             checkpoint_txs,
         } = build_offchain_transactions(
             &outputs,
-            None,
+            change_address,
             std::slice::from_ref(&vhtlc_input),
             &self.server_info,
         )
@@ -1625,7 +1650,11 @@ where
             .context("failed to get offchain address")?;
         let claim_amount = swap.amount;
 
-        let outputs = vec![(&claim_address, claim_amount)];
+        let outputs = vec![SendReceiver {
+            address: claim_address,
+            amount: claim_amount,
+            assets: Vec::new(),
+        }];
 
         let spend_info = vhtlc.taproot_spend_info();
         let script_ver = (vhtlc.claim_script(), LeafVersion::TapScript);
@@ -1644,14 +1673,18 @@ where
             script_pubkey,
             claim_amount,
             vhtlc_outpoint.outpoint,
+            vhtlc_outpoint.assets,
         );
+
+        // The change address is superfluous because we are _draining_ the VHTLC.
+        let change_address = &claim_address;
 
         let OffchainTransactions {
             mut ark_tx,
             checkpoint_txs,
         } = build_offchain_transactions(
             &outputs,
-            None,
+            change_address,
             std::slice::from_ref(&vhtlc_input),
             &self.server_info,
         )

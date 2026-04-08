@@ -82,7 +82,7 @@ pub async fn e2e_assets() {
     let (bob_address, _) = bob.get_offchain_address().unwrap();
 
     let send_txid = alice
-        .send_assets(vec![SendReceiver {
+        .send(vec![SendReceiver {
             address: bob_address,
             amount: alice.dust(),
             assets: vec![ark_core::server::Asset {

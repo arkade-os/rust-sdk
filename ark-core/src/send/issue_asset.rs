@@ -3,8 +3,9 @@ use crate::asset::packet::add_asset_packet_to_psbt;
 use crate::asset::AssetId;
 use crate::asset::ControlAssetConfig;
 use crate::send::build_offchain_transactions;
-use crate::send::AssetBearingVtxoInput;
 use crate::send::OffchainTransactions;
+use crate::send::SendReceiver;
+use crate::send::VtxoInput;
 use crate::server;
 use crate::ArkAddress;
 use crate::Error;
@@ -58,7 +59,7 @@ const SELF_ISSUANCE_OUTPUT_INDEX: u16 = 0;
 pub fn build_self_asset_issuance_transactions(
     own_address: &ArkAddress,
     change_address: &ArkAddress,
-    inputs: &[AssetBearingVtxoInput],
+    inputs: &[VtxoInput],
     server_info: &server::Info,
     amount: u64,
     control_asset_config: Option<ControlAssetConfig>,
@@ -68,18 +69,17 @@ pub fn build_self_asset_issuance_transactions(
         return Err(Error::ad_hoc("asset amount must be > 0"));
     }
 
-    let vtxo_inputs = inputs
-        .iter()
-        .map(|input| input.input.clone())
-        .collect::<Vec<_>>();
-
     let OffchainTransactions {
         mut ark_tx,
         checkpoint_txs,
     } = build_offchain_transactions(
-        &[(own_address, server_info.dust)],
-        Some(change_address),
-        &vtxo_inputs,
+        &[SendReceiver {
+            address: *own_address,
+            amount: server_info.dust,
+            assets: Vec::new(),
+        }],
+        change_address,
+        inputs,
         server_info,
     )?;
 
@@ -130,7 +130,7 @@ pub fn build_self_asset_issuance_transactions(
 /// Returns an error if `control_asset_config` references an existing control asset id that is not
 /// present with a non-zero balance in the selected inputs.
 fn create_self_issuance_packet(
-    inputs: &[AssetBearingVtxoInput],
+    inputs: &[VtxoInput],
     amount: u64,
     control_asset_config: Option<&ControlAssetConfig>,
     metadata: Option<&Vec<(String, String)>>,
@@ -622,7 +622,7 @@ mod tests {
         }
     }
 
-    fn self_issuance_input(assets: Vec<Asset>) -> (AssetBearingVtxoInput, ArkAddress) {
+    fn self_issuance_input(assets: Vec<Asset>) -> (VtxoInput, ArkAddress) {
         let secp = Secp256k1::new();
 
         let server_pk: bitcoin::key::PublicKey =
@@ -648,18 +648,16 @@ mod tests {
         let own_address = ArkAddress::new(Network::Regtest, server_xonly, spend_info.output_key());
 
         (
-            AssetBearingVtxoInput {
-                input: VtxoInput::new(
-                    spend_script.clone(),
-                    None,
-                    control_block,
-                    vec![spend_script],
-                    own_address.to_p2tr_script_pubkey(),
-                    Amount::from_sat(330),
-                    OutPoint::new(Txid::from_byte_array([0; 32]), 0),
-                ),
+            VtxoInput::new(
+                spend_script.clone(),
+                None,
+                control_block,
+                vec![spend_script],
+                own_address.to_p2tr_script_pubkey(),
+                Amount::from_sat(330),
+                OutPoint::new(Txid::from_byte_array([0; 32]), 0),
                 assets,
-            },
+            ),
             own_address,
         )
     }
