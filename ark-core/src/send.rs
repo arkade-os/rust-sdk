@@ -104,6 +104,14 @@ impl VtxoInput {
     pub fn script_pubkey(&self) -> ScriptBuf {
         self.script_pubkey.clone()
     }
+
+    pub fn amount(&self) -> Amount {
+        self.amount
+    }
+
+    pub fn assets(&self) -> &[Asset] {
+        &self.assets
+    }
 }
 
 /// A receiver for a generic offchain send with optional assets.
@@ -112,6 +120,16 @@ pub struct SendReceiver {
     pub address: ArkAddress,
     pub amount: Amount,
     pub assets: Vec<Asset>,
+}
+
+impl SendReceiver {
+    pub fn bitcoin(address: ArkAddress, amount: Amount) -> Self {
+        Self {
+            address,
+            amount,
+            assets: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

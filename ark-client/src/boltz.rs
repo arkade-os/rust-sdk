@@ -338,7 +338,10 @@ where
 
         let vhtlc_address = swap_response.address;
         let amount = swap_response.expected_amount;
-        let txid = self.send_vtxo(vhtlc_address, amount).await?;
+
+        let txid = self
+            .send(vec![SendReceiver::bitcoin(vhtlc_address, amount)])
+            .await?;
 
         tracing::info!(swap_id = swap_response.id, %amount, "Funded VHTLC");
 

@@ -226,7 +226,7 @@ where
             sign_checkpoint_transaction(sign_fn, checkpoint_psbt)?;
         }
 
-        self.finalize_with_retry(ark_txid, res.signed_checkpoint_txs)
+        self.finalize_offchain_tx(ark_txid, res.signed_checkpoint_txs)
             .await?;
 
         // Mark key as used.
@@ -476,7 +476,7 @@ where
             sign_checkpoint_transaction(sign_fn, checkpoint_psbt)?;
         }
 
-        self.finalize_with_retry(ark_txid, res.signed_checkpoint_txs)
+        self.finalize_offchain_tx(ark_txid, res.signed_checkpoint_txs)
             .await?;
 
         let used_pk = change_address_vtxo.owner_pk();

@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use ark_core::coin_select::select_vtxos;
+use ark_core::send::SendReceiver;
 use ark_core::send::VtxoInput;
 use bitcoin::key::Secp256k1;
 use bitcoin::Amount;
@@ -53,7 +54,10 @@ pub async fn e2e_continue_pending_tx_multi_input() {
     // Step 2: Alice sends to Bob → Alice gets change VTXO.
     let send_to_bob = Amount::from_sat(40_000_000); // 0.4 BTC
     let (bob_address, _) = bob.get_offchain_address().unwrap();
-    alice.send_vtxo(bob_address, send_to_bob).await.unwrap();
+    alice
+        .send(vec![SendReceiver::bitcoin(bob_address, send_to_bob)])
+        .await
+        .unwrap();
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     let alice_change = alice_fund_amount - send_to_bob;
@@ -64,7 +68,9 @@ pub async fn e2e_continue_pending_tx_multi_input() {
     // Step 3: Bob sends back to Alice → Alice now has 2 VTXOs.
     let send_back = Amount::from_sat(20_000_000); // 0.2 BTC
     let (alice_address, _) = alice.get_offchain_address().unwrap();
-    bob.send_vtxo(alice_address, send_back).await.unwrap();
+    bob.send(vec![SendReceiver::bitcoin(alice_address, send_back)])
+        .await
+        .unwrap();
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     let alice_total = alice_change + send_back;

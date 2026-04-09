@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use crate::common::wait_until_balance;
+use ark_core::send::SendReceiver;
 use bitcoin::key::Secp256k1;
 use bitcoin::Amount;
 use common::init_tracing;
@@ -85,7 +86,10 @@ pub async fn e2e() {
     );
 
     let virtual_txid = alice
-        .send_vtxo(bob_offchain_address, send_to_bob_vtxo_amount)
+        .send(vec![SendReceiver::bitcoin(
+            bob_offchain_address,
+            send_to_bob_vtxo_amount,
+        )])
         .await
         .unwrap();
 

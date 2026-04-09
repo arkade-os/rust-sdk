@@ -584,7 +584,7 @@ async fn run_command<K: KeyProvider>(
         } => {
             for (address, amount) in &addresses_and_amounts.0 {
                 let txid = client
-                    .send_vtxo(*address, *amount)
+                    .send(vec![SendReceiver::bitcoin(*address, *amount)])
                     .await
                     .map_err(|e| anyhow!(e))?;
                 tracing::info!("Sent to address {address} amount {amount} in txid {txid}")
@@ -604,7 +604,10 @@ async fn run_command<K: KeyProvider>(
                 .collect::<Result<Vec<_>>>()?;
 
             let txid = client
-                .send_vtxo_selection(&vtxo_outpoints, address.0, Amount::from_sat(*amount))
+                .send_selection(
+                    &vtxo_outpoints,
+                    vec![SendReceiver::bitcoin(address.0, Amount::from_sat(*amount))],
+                )
                 .await
                 .map_err(|e| anyhow!(e))?;
             tracing::info!(
