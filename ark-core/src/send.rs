@@ -609,6 +609,45 @@ pub fn build_asset_send_transactions(
     Ok(offchain)
 }
 
+/// Build unsigned offchain transactions for burning a specific amount of an asset.
+///
+/// The burn is represented by consuming the selected asset amount from the chosen inputs without
+/// creating a corresponding asset output. Any remaining carried assets are preserved on the BTC
+/// change output.
+///
+/// # Errors
+///
+/// Returns an error if BTC transaction construction fails, if the selected inputs do not contain
+/// the asset to burn, if the selected amount for the burned asset is insufficient, or if leftover
+/// carried assets would need to be preserved but the transaction has no BTC change output.
+pub fn build_asset_burn_transactions(
+    own_address: &ArkAddress,
+    change_address: &ArkAddress,
+    vtxo_inputs: &[VtxoInput],
+    server_info: &server::Info,
+    burn_asset_id: AssetId,
+    burn_amount: u64,
+) -> Result<OffchainTransactions, Error> {
+    let mut offchain = build_offchain_transactions(
+        &[SendReceiver {
+            address: *own_address,
+            amount: server_info.dust,
+            assets: Vec::new(),
+        }],
+        change_address,
+        vtxo_inputs,
+        server_info,
+    )?;
+
+    if let Some(packet) =
+        create_burn_packet(vtxo_inputs, burn_asset_id, burn_amount, &offchain.ark_tx)?
+    {
+        add_asset_packet_to_psbt(&mut offchain.ark_tx, &packet);
+    }
+
+    Ok(offchain)
+}
+
 /// Create the asset packet for a generic asset send.
 ///
 /// Receiver asset allocations are assigned to their corresponding receiver output indexes. Any
@@ -713,6 +752,105 @@ fn create_send_packet(
         let asset_id = group
             .asset_id
             .expect("generic asset-send groups always have asset ids");
+        (*asset_id.txid.as_byte_array(), asset_id.group_index)
+    });
+
+    Ok(Some(asset::packet::Packet { groups }))
+}
+
+fn create_burn_packet(
+    inputs: &[VtxoInput],
+    burn_asset_id: AssetId,
+    burn_amount: u64,
+    ark_tx: &Psbt,
+) -> Result<Option<asset::packet::Packet>, Error> {
+    struct AssetTransfer {
+        inputs: Vec<asset::packet::AssetInput>,
+        input_amount: u64,
+    }
+
+    let mut transfers: HashMap<AssetId, AssetTransfer> = HashMap::new();
+
+    for (input_index, input) in inputs.iter().enumerate() {
+        for asset in input.assets() {
+            let transfer = transfers
+                .entry(asset.asset_id)
+                .or_insert_with(|| AssetTransfer {
+                    inputs: Vec::new(),
+                    input_amount: 0,
+                });
+
+            transfer.inputs.push(asset::packet::AssetInput {
+                input_index: input_index as u16,
+                amount: asset.amount,
+            });
+            transfer.input_amount += asset.amount;
+        }
+    }
+
+    if transfers.is_empty() {
+        return Err(Error::ad_hoc(format!(
+            "selected inputs do not contain asset {}",
+            burn_asset_id
+        )));
+    }
+
+    let burn_input_amount = transfers
+        .get(&burn_asset_id)
+        .ok_or_else(|| {
+            Error::ad_hoc(format!(
+                "selected inputs do not contain asset {}",
+                burn_asset_id
+            ))
+        })?
+        .input_amount;
+
+    let burn_leftover_amount = burn_input_amount.checked_sub(burn_amount).ok_or_else(|| {
+        Error::ad_hoc(format!(
+            "requested burn amount for asset {} exceeds selected input amount",
+            burn_asset_id
+        ))
+    })?;
+
+    let change_output_index = btc_change_output_index(ark_tx, 1);
+    let mut groups = Vec::new();
+
+    for (asset_id, transfer) in transfers.into_iter() {
+        let leftover_amount = if asset_id == burn_asset_id {
+            burn_leftover_amount
+        } else {
+            transfer.input_amount
+        };
+
+        let mut outputs = Vec::new();
+        match (change_output_index, leftover_amount) {
+            (Some(change_output_index), leftover_amount) if leftover_amount > 0 => {
+                outputs.push(asset::packet::AssetOutput {
+                    output_index: change_output_index,
+                    amount: leftover_amount,
+                });
+            }
+            (None, leftover_amount) if leftover_amount > 0 => {
+                return Err(Error::ad_hoc(
+                    "asset burn has preserved asset changes but no BTC change output",
+                ));
+            }
+            _ => {}
+        }
+
+        groups.push(asset::packet::AssetGroup {
+            asset_id: Some(asset_id),
+            control_asset: None,
+            metadata: None,
+            inputs: transfer.inputs,
+            outputs,
+        });
+    }
+
+    groups.sort_by_key(|group| {
+        let asset_id = group
+            .asset_id
+            .expect("asset-burn groups always have asset ids");
         (*asset_id.txid.as_byte_array(), asset_id.group_index)
     });
 
@@ -972,6 +1110,134 @@ mod tests {
         );
     }
 
+    #[test]
+    fn build_asset_burn_transactions_routes_leftover_assets_to_change() {
+        let server_info = test_server_info();
+        let burn_asset_id = AssetId {
+            txid: Txid::from_byte_array([16; 32]),
+            group_index: 0,
+        };
+        let carried_asset_id = AssetId {
+            txid: Txid::from_byte_array([17; 32]),
+            group_index: 1,
+        };
+        let (input, own_address) = asset_send_input(
+            6,
+            660,
+            vec![
+                Asset {
+                    asset_id: burn_asset_id,
+                    amount: 10,
+                },
+                Asset {
+                    asset_id: carried_asset_id,
+                    amount: 4,
+                },
+            ],
+        );
+
+        let res = build_asset_burn_transactions(
+            &own_address,
+            &own_address,
+            &[input],
+            &server_info,
+            burn_asset_id,
+            6,
+        )
+        .unwrap();
+
+        let expected_packet = Packet {
+            groups: vec![
+                AssetGroup {
+                    asset_id: Some(burn_asset_id),
+                    control_asset: None,
+                    metadata: None,
+                    inputs: vec![AssetInput {
+                        input_index: 0,
+                        amount: 10,
+                    }],
+                    outputs: vec![AssetOutput {
+                        output_index: 1,
+                        amount: 4,
+                    }],
+                },
+                AssetGroup {
+                    asset_id: Some(carried_asset_id),
+                    control_asset: None,
+                    metadata: None,
+                    inputs: vec![AssetInput {
+                        input_index: 0,
+                        amount: 4,
+                    }],
+                    outputs: vec![AssetOutput {
+                        output_index: 1,
+                        amount: 4,
+                    }],
+                },
+            ],
+        };
+
+        assert_eq!(
+            res.ark_tx.unsigned_tx.output[asset_packet_index(&res.ark_tx)],
+            expected_packet.to_txout()
+        );
+    }
+
+    #[test]
+    fn build_asset_burn_transactions_errors_when_asset_is_missing() {
+        let server_info = test_server_info();
+        let missing_asset_id = AssetId {
+            txid: Txid::from_byte_array([18; 32]),
+            group_index: 0,
+        };
+        let (input, own_address) = asset_send_input(7, 330, vec![]);
+
+        let err = build_asset_burn_transactions(
+            &own_address,
+            &own_address,
+            &[input],
+            &server_info,
+            missing_asset_id,
+            1,
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("selected inputs do not contain asset"));
+    }
+
+    #[test]
+    fn build_asset_burn_transactions_errors_when_leftover_assets_need_change() {
+        let server_info = test_server_info();
+        let burn_asset_id = AssetId {
+            txid: Txid::from_byte_array([19; 32]),
+            group_index: 0,
+        };
+        let (input, own_address) = asset_send_input(
+            8,
+            330,
+            vec![Asset {
+                asset_id: burn_asset_id,
+                amount: 10,
+            }],
+        );
+
+        let err = build_asset_burn_transactions(
+            &own_address,
+            &own_address,
+            &[input],
+            &server_info,
+            burn_asset_id,
+            6,
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("asset burn has preserved asset changes but no BTC change output"));
+    }
+
     fn test_server_info() -> Info {
         let signer_pk = "0250929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0"
             .parse()
@@ -1004,6 +1270,8 @@ mod tests {
             deprecated_signers: vec![],
             service_status: Default::default(),
             digest: "test".into(),
+            max_tx_weight: 40_000,
+            max_op_return_outputs: 3,
         }
     }
 

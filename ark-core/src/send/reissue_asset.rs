@@ -543,6 +543,8 @@ mod tests {
             deprecated_signers: vec![],
             service_status: Default::default(),
             digest: "test".into(),
+            max_tx_weight: 40_000,
+            max_op_return_outputs: 3,
         }
     }
 

@@ -47,7 +47,7 @@ pub mod key_provider;
 pub mod swap_storage;
 pub mod wallet;
 
-mod asset_issuance;
+mod asset;
 mod batch;
 mod boltz;
 mod coin_select;
@@ -56,7 +56,7 @@ mod send_vtxo;
 mod unilateral_exit;
 mod utils;
 
-pub use asset_issuance::IssueAssetResult;
+pub use asset::IssueAssetResult;
 pub use boltz::ChainSwapAmount;
 pub use boltz::ChainSwapData;
 pub use boltz::ChainSwapDirection;

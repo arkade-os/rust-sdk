@@ -834,7 +834,10 @@ async fn run_command<K: KeyProvider>(
                     tracing::info!(swap_id = result.swap_id, "Funding ARK VHTLC...");
 
                     let fund_txid = client
-                        .send_vtxo(lockup_address, result.user_lockup_amount)
+                        .send(vec![SendReceiver::bitcoin(
+                            lockup_address,
+                            result.user_lockup_amount,
+                        )])
                         .await
                         .map_err(|e| anyhow!(e))?;
 
