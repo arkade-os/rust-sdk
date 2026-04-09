@@ -58,6 +58,18 @@ impl Error {
         Error::new(Kind::EventStream).with(source)
     }
 
+    /// Returns `true` if the server rejected the request because the SDK
+    /// version is too old.
+    pub fn is_version_mismatch(&self) -> bool {
+        if let Some(source) = &self.inner.source {
+            if let Some(status) = source.downcast_ref::<tonic::Status>() {
+                return status.code() == tonic::Code::FailedPrecondition
+                    && status.message().contains("BUILD_VERSION_TOO_OLD");
+            }
+        }
+        false
+    }
+
     fn description(&self) -> &str {
         match &self.inner.kind {
             Kind::Connect => "failed to connect to Ark server",
@@ -101,5 +113,43 @@ impl StdError for Error {
             .source
             .as_ref()
             .map(|source| &**source as &(dyn StdError + 'static))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_version_mismatch_true_for_matching_status() {
+        let status = tonic::Status::failed_precondition("BUILD_VERSION_TOO_OLD");
+        let err = Error::request(status);
+        assert!(err.is_version_mismatch());
+    }
+
+    #[test]
+    fn is_version_mismatch_false_for_other_failed_precondition() {
+        let status = tonic::Status::failed_precondition("something else");
+        let err = Error::request(status);
+        assert!(!err.is_version_mismatch());
+    }
+
+    #[test]
+    fn is_version_mismatch_false_for_other_code() {
+        let status = tonic::Status::internal("BUILD_VERSION_TOO_OLD");
+        let err = Error::request(status);
+        assert!(!err.is_version_mismatch());
+    }
+
+    #[test]
+    fn is_version_mismatch_false_for_non_tonic_error() {
+        let err = Error::request("some string error");
+        assert!(!err.is_version_mismatch());
+    }
+
+    #[test]
+    fn is_version_mismatch_false_when_no_source() {
+        let err = Error::not_connected();
+        assert!(!err.is_version_mismatch());
     }
 }
