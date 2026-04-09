@@ -39,6 +39,15 @@ impl Error {
         Error::new(Kind::Conversion).with(source)
     }
 
+    /// Returns `true` if the server rejected the request because the SDK
+    /// version is too old.
+    pub fn is_version_mismatch(&self) -> bool {
+        if let Some(source) = &self.inner.source {
+            return source.to_string().contains("BUILD_VERSION_TOO_OLD");
+        }
+        false
+    }
+
     fn description(&self) -> &str {
         match &self.inner.kind {
             Kind::Request => "request failed",
@@ -79,5 +88,28 @@ impl StdError for Error {
 impl From<ConversionError> for Error {
     fn from(value: ConversionError) -> Self {
         Error::conversion(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_version_mismatch_true_when_source_contains_marker() {
+        let err = Error::request("BUILD_VERSION_TOO_OLD: upgrade your client");
+        assert!(err.is_version_mismatch());
+    }
+
+    #[test]
+    fn is_version_mismatch_false_for_other_errors() {
+        let err = Error::request("connection refused");
+        assert!(!err.is_version_mismatch());
+    }
+
+    #[test]
+    fn is_version_mismatch_false_when_no_source() {
+        let err = Error::new(Kind::Request);
+        assert!(!err.is_version_mismatch());
     }
 }
