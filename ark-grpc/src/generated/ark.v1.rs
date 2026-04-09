@@ -198,6 +198,8 @@ pub struct TxNotification {
     /// key: outpoint, value: checkpoint txid
     #[prost(map = "string, message", tag = "5")]
     pub checkpoint_txs: ::std::collections::HashMap<::prost::alloc::string::String, TxData>,
+    #[prost(message, repeated, tag = "6")]
+    pub swept_vtxos: ::prost::alloc::vec::Vec<Outpoint>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Tapscripts {
@@ -413,6 +415,8 @@ pub struct GetInfoResponse {
     pub digest: ::prost::alloc::string::String,
     #[prost(int64, tag = "20")]
     pub max_tx_weight: i64,
+    #[prost(int64, tag = "21")]
+    pub max_op_return_outputs: i64,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RegisterIntentRequest {
@@ -617,7 +621,7 @@ pub struct GetPendingTxResponse {
 pub struct GetTransactionsStreamRequest {}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetTransactionsStreamResponse {
-    #[prost(oneof = "get_transactions_stream_response::Data", tags = "1, 2, 3")]
+    #[prost(oneof = "get_transactions_stream_response::Data", tags = "1, 2, 3, 4")]
     pub data: ::core::option::Option<get_transactions_stream_response::Data>,
 }
 /// Nested message and enum types in `GetTransactionsStreamResponse`.
@@ -630,11 +634,13 @@ pub mod get_transactions_stream_response {
         ArkTx(super::TxNotification),
         #[prost(message, tag = "3")]
         Heartbeat(super::Heartbeat),
+        #[prost(message, tag = "4")]
+        SweepTx(super::TxNotification),
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetIntentRequest {
-    #[prost(oneof = "get_intent_request::Filter", tags = "1")]
+    #[prost(oneof = "get_intent_request::Filter", tags = "1, 2")]
     pub filter: ::core::option::Option<get_intent_request::Filter>,
 }
 /// Nested message and enum types in `GetIntentRequest`.
@@ -643,12 +649,19 @@ pub mod get_intent_request {
     pub enum Filter {
         #[prost(string, tag = "1")]
         Txid(::prost::alloc::string::String),
+        #[prost(message, tag = "2")]
+        Intent(super::Intent),
     }
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+/// The repeated intents field is always populated with the matching results.
+/// The singular intent field is only set for backward compatibility when the
+/// request uses the txid filter, in which case it mirrors intents\[0\].
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetIntentResponse {
     #[prost(message, optional, tag = "1")]
     pub intent: ::core::option::Option<Intent>,
+    #[prost(message, repeated, tag = "2")]
+    pub intents: ::prost::alloc::vec::Vec<Intent>,
 }
 /// Generated client implementations.
 pub mod ark_service_client {

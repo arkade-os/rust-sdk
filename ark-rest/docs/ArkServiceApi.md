@@ -11,6 +11,7 @@ All URIs are relative to _http://localhost_
 | [**ark_service_get_event_stream**](ArkServiceApi.md#ark_service_get_event_stream)                   | **GET** /v1/batch/events                 |             |
 | [**ark_service_get_info**](ArkServiceApi.md#ark_service_get_info)                                   | **GET** /v1/info                         |             |
 | [**ark_service_get_intent**](ArkServiceApi.md#ark_service_get_intent)                               | **GET** /v1/intent                       |             |
+| [**ark_service_get_intent2**](ArkServiceApi.md#ark_service_get_intent2)                             | **POST** /v1/intent                      |             |
 | [**ark_service_get_pending_tx**](ArkServiceApi.md#ark_service_get_pending_tx)                       | **POST** /v1/tx/pending                  |             |
 | [**ark_service_get_transactions_stream**](ArkServiceApi.md#ark_service_get_transactions_stream)     | **GET** /v1/txs                          |             |
 | [**ark_service_register_intent**](ArkServiceApi.md#ark_service_register_intent)                     | **POST** /v1/batch/registerIntent        |             |
@@ -182,13 +183,15 @@ No authorization required
 
 ## ark_service_get_intent
 
-> models::GetIntentResponse ark_service_get_intent(txid)
+> models::GetIntentResponse ark_service_get_intent(txid, intent_period_proof, intent_period_message)
 
 ### Parameters
 
-| Name     | Type               | Description | Required | Notes |
-| -------- | ------------------ | ----------- | -------- | ----- |
-| **txid** | Option<**String**> |             |          |       |
+| Name                      | Type               | Description | Required | Notes |
+| ------------------------- | ------------------ | ----------- | -------- | ----- |
+| **txid**                  | Option<**String**> |             |          |       |
+| **intent_period_proof**   | Option<**String**> |             |          |       |
+| **intent_period_message** | Option<**String**> |             |          |       |
 
 ### Return type
 
@@ -201,6 +204,31 @@ No authorization required
 ### HTTP request headers
 
 - **Content-Type**: Not defined
+- **Accept**: application/json
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+## ark_service_get_intent2
+
+> models::GetIntentResponse ark_service_get_intent2(get_intent_request)
+
+### Parameters
+
+| Name                   | Type                                        | Description | Required   | Notes |
+| ---------------------- | ------------------------------------------- | ----------- | ---------- | ----- |
+| **get_intent_request** | [**GetIntentRequest**](GetIntentRequest.md) |             | [required] |       |
+
+### Return type
+
+[**models::GetIntentResponse**](GetIntentResponse.md)
+
+### Authorization
+
+No authorization required
+
+### HTTP request headers
+
+- **Content-Type**: application/json
 - **Accept**: application/json
 
 [[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
