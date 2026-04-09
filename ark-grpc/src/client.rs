@@ -69,13 +69,39 @@ use futures::Stream;
 use futures::StreamExt;
 use futures::TryStreamExt;
 use std::collections::HashMap;
+use std::fmt;
 use std::str::FromStr;
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Copy)]
+struct VersionInterceptor;
+
+impl tonic::service::Interceptor for VersionInterceptor {
+    fn call(&mut self, mut req: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
+        req.metadata_mut().insert(
+            "x-build-version",
+            tonic::metadata::MetadataValue::from_static(env!("CARGO_PKG_VERSION")),
+        );
+        Ok(req)
+    }
+}
+
+type InterceptedChannel =
+    tonic::codegen::InterceptedService<tonic::transport::Channel, VersionInterceptor>;
+
+#[derive(Clone)]
 pub struct Client {
     url: String,
-    ark_client: Option<ArkServiceClient<tonic::transport::Channel>>,
-    indexer_client: Option<IndexerServiceClient<tonic::transport::Channel>>,
+    ark_client: Option<ArkServiceClient<InterceptedChannel>>,
+    indexer_client: Option<IndexerServiceClient<InterceptedChannel>>,
+}
+
+impl fmt::Debug for Client {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Client")
+            .field("url", &self.url)
+            .field("connected", &self.ark_client.is_some())
+            .finish()
+    }
 }
 
 impl Client {
@@ -88,12 +114,15 @@ impl Client {
     }
 
     pub async fn connect(&mut self) -> Result<(), Error> {
-        let ark_service_client = ArkServiceClient::connect(self.url.clone())
+        let channel = tonic::transport::Endpoint::from_shared(self.url.clone())
+            .map_err(Error::connect)?
+            .connect()
             .await
             .map_err(Error::connect)?;
-        let indexer_client = IndexerServiceClient::connect(self.url.clone())
-            .await
-            .map_err(Error::connect)?;
+
+        let ark_service_client =
+            ArkServiceClient::with_interceptor(channel.clone(), VersionInterceptor);
+        let indexer_client = IndexerServiceClient::with_interceptor(channel, VersionInterceptor);
 
         self.ark_client = Some(ark_service_client);
         self.indexer_client = Some(indexer_client);
@@ -602,11 +631,11 @@ impl Client {
         Ok(SignedAmount::from_sat(response.fee))
     }
 
-    fn ark_client(&self) -> Result<ArkServiceClient<tonic::transport::Channel>, Error> {
+    fn ark_client(&self) -> Result<ArkServiceClient<InterceptedChannel>, Error> {
         // Cloning an `ArkServiceClient<Channel>` is cheap.
         self.ark_client.clone().ok_or(Error::not_connected())
     }
-    fn indexer_client(&self) -> Result<IndexerServiceClient<tonic::transport::Channel>, Error> {
+    fn indexer_client(&self) -> Result<IndexerServiceClient<InterceptedChannel>, Error> {
         self.indexer_client.clone().ok_or(Error::not_connected())
     }
 }
