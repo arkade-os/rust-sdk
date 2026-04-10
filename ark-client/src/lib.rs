@@ -797,6 +797,38 @@ where
         Ok(vtxo_list)
     }
 
+    pub async fn list_vtxos_for_outpoints(
+        &self,
+        outpoints: Vec<OutPoint>,
+    ) -> Result<(VtxoList, HashMap<ScriptBuf, Vtxo>), Error> {
+        let ark_addresses = self.get_offchain_addresses()?;
+
+        let script_pubkey_to_vtxo_map = ark_addresses
+            .iter()
+            .map(|(a, v)| (a.to_p2tr_script_pubkey(), v.clone()))
+            .collect::<HashMap<_, _>>();
+
+        let request = GetVtxosRequest::new_for_outpoints(&outpoints);
+        let virtual_tx_outpoints = self.fetch_all_vtxos(request).await?;
+
+        // Filter out outpoints for which we don't have spend info.
+        let virtual_tx_outpoints = virtual_tx_outpoints
+            .into_iter()
+            .filter(|v| match script_pubkey_to_vtxo_map.get(&v.script) {
+                Some(_) => true,
+                None => {
+                    tracing::debug!(outpoint = %v.outpoint, "Missing spend info for VTXO");
+
+                    false
+                }
+            })
+            .collect();
+
+        let vtxo_list = VtxoList::new(self.server_info.dust, virtual_tx_outpoints);
+
+        Ok((vtxo_list, script_pubkey_to_vtxo_map))
+    }
+
     pub async fn get_vtxo_chain(
         &self,
         out_point: OutPoint,

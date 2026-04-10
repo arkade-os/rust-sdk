@@ -320,8 +320,11 @@ where
         vtxo_outpoints: &[OutPoint],
     ) -> Result<Vec<VtxoInput>, Error> {
         let requested_outpoints: HashSet<_> = vtxo_outpoints.iter().copied().collect();
-        let (vtxo_list, script_pubkey_to_vtxo_map) =
-            self.list_vtxos().await.context("failed to get VTXO list")?;
+
+        let (vtxo_list, script_pubkey_to_vtxo_map) = self
+            .list_vtxos_for_outpoints(vtxo_outpoints.to_vec())
+            .await
+            .context("failed to get VTXO list")?;
 
         let selected: Vec<_> = vtxo_list
             .spendable_offchain()
