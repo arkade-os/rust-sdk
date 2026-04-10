@@ -122,7 +122,7 @@ where
         let (spendable, script_pubkey_to_vtxo_map) = self.spendable_virtual_vtxos().await?;
 
         let (control_coins, _control_change) =
-            select_vtxos_for_asset(spendable.clone(), 1, control_asset_id)
+            select_vtxos_for_asset(&spendable, 1, control_asset_id)
                 .map_err(Error::from)
                 .context("failed to select control asset for reissuance")?;
 
@@ -194,10 +194,9 @@ where
 
         let (spendable, script_pubkey_to_vtxo_map) = self.spendable_virtual_vtxos().await?;
 
-        let (asset_coins, asset_change) =
-            select_vtxos_for_asset(spendable.clone(), amount, asset_id)
-                .map_err(Error::from)
-                .context("failed to select coins for asset burn")?;
+        let (asset_coins, asset_change) = select_vtxos_for_asset(&spendable, amount, asset_id)
+            .map_err(Error::from)
+            .context("failed to select coins for asset burn")?;
 
         let mut selected_outpoints: HashSet<_> =
             asset_coins.iter().map(|coin| coin.outpoint).collect();

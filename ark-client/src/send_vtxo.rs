@@ -257,7 +257,7 @@ where
                     .collect();
 
                 let (asset_coins, asset_change) =
-                    select_vtxos_for_asset(available, amount_to_select, asset.asset_id)
+                    select_vtxos_for_asset(&available, amount_to_select, asset.asset_id)
                         .map_err(Error::from)
                         .context("failed to select coins for asset transfer")?;
 

@@ -61,14 +61,15 @@ pub fn select_vtxos(
 ///
 /// Returns the selected VTXOs and the asset change amount.
 pub fn select_vtxos_for_asset(
-    mut virtual_tx_outpoints: Vec<VirtualTxOutPoint>,
+    virtual_tx_outpoints: &[VirtualTxOutPoint],
     amount: u64,
     asset_id: AssetId,
 ) -> Result<(Vec<VirtualTxOutPoint>, u64), Error> {
     // Filter to only VTXOs containing this asset.
     let mut candidates: Vec<VirtualTxOutPoint> = virtual_tx_outpoints
-        .drain(..)
+        .iter()
         .filter(|v| v.assets.iter().any(|a| a.asset_id == asset_id))
+        .cloned()
         .collect();
 
     // Sort by expiration (older first).
@@ -81,23 +82,26 @@ pub fn select_vtxos_for_asset(
         if selected_amount >= amount {
             break;
         }
-        let asset_amt = vtxo
+
+        if let Some(asset) = vtxo
             .assets
             .iter()
-            .find(|a| a.asset_id == asset_id)
-            .map(|a| a.amount)
-            .unwrap_or(0);
-        selected_amount += asset_amt;
-        selected.push(vtxo);
+            .find(|a| a.asset_id == asset_id && a.amount != 0)
+        {
+            selected_amount += asset.amount;
+            selected.push(vtxo);
+        }
     }
 
-    if selected_amount < amount {
-        return Err(Error::coin_select(format!(
+    let change = match selected_amount.checked_sub(amount) {
+        Some(change) => change,
+        None => {
+            return Err(Error::coin_select(format!(
             "insufficient asset funds for {asset_id}: selected = {selected_amount}, needed = {amount}"
         )));
-    }
+        }
+    };
 
-    let change = selected_amount - amount;
     Ok((selected, change))
 }
 
