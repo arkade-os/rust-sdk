@@ -865,7 +865,13 @@ where
         let mut asset_balances: HashMap<AssetId, u64> = HashMap::new();
         for vtxo in vtxo_list.spendable_offchain() {
             for asset in &vtxo.assets {
-                *asset_balances.entry(asset.asset_id).or_insert(0) += asset.amount;
+                let total = asset_balances
+                    .get(&asset.asset_id)
+                    .copied()
+                    .unwrap_or(0)
+                    .checked_add(asset.amount)
+                    .ok_or_else(|| Error::ad_hoc("asset balance overflow"))?;
+                asset_balances.insert(asset.asset_id, total);
             }
         }
 

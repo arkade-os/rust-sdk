@@ -196,7 +196,13 @@ fn create_self_issuance_packet(
                 input_index: input_index as u16,
                 amount: asset.amount,
             });
-            group.outputs[0].amount += asset.amount;
+
+            group.outputs[0].amount = group.outputs[0]
+                .amount
+                .checked_add(asset.amount)
+                .ok_or_else(|| {
+                    Error::ad_hoc("asset amount overflow while preserving carried assets")
+                })?;
         }
     }
 

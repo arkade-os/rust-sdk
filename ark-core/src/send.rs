@@ -681,7 +681,11 @@ fn create_send_packet(
                 input_index: input_index as u16,
                 amount: asset.amount,
             });
-            transfer.input_amount += asset.amount;
+
+            transfer.input_amount = transfer
+                .input_amount
+                .checked_add(asset.amount)
+                .ok_or_else(|| Error::ad_hoc("asset input amount overflow"))?;
         }
     }
 
