@@ -261,7 +261,7 @@ enum Commands {
         /// Create a new control asset with this amount (enables reissuance).
         #[arg(long)]
         control_amount: Option<u64>,
-        /// Use an existing control asset ID (format: txid:gidx).
+        /// Use an existing control asset ID (68-char hex format).
         #[arg(long)]
         control_asset_id: Option<String>,
         /// Metadata key-value pairs (format: key=value, comma-separated).
