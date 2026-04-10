@@ -869,6 +869,9 @@ impl TryFrom<generated::ark::v1::get_transactions_stream_response::Data> for Str
             generated::ark::v1::get_transactions_stream_response::Data::Heartbeat(_) => {
                 Ok(StreamTransactionData::Heartbeat)
             }
+            generated::ark::v1::get_transactions_stream_response::Data::SweepTx(tx) => {
+                Ok(StreamTransactionData::Ark(ArkTransaction::try_from(tx)?))
+            }
         }
     }
 }
@@ -913,10 +916,40 @@ impl TryFrom<generated::ark::v1::TxNotification> for ArkTransaction {
             .map(VirtualTxOutPoint::try_from)
             .collect::<Result<Vec<_>, _>>()?;
 
+        let tx = if value.tx.is_empty() {
+            None
+        } else {
+            let base64 = base64::engine::GeneralPurpose::new(
+                &base64::alphabet::STANDARD,
+                base64::engine::GeneralPurposeConfig::new(),
+            );
+            let bytes = base64.decode(&value.tx).map_err(Error::conversion)?;
+            Some(Psbt::deserialize(&bytes).map_err(Error::conversion)?)
+        };
+
+        let checkpoint_txs = value
+            .checkpoint_txs
+            .into_iter()
+            .map(|(k, v)| {
+                let out_point = OutPoint::from_str(k.as_str()).map_err(Error::conversion)?;
+                let txid = v.txid.parse().map_err(Error::conversion)?;
+                Ok((out_point, txid))
+            })
+            .collect::<Result<HashMap<_, _>, Error>>()?;
+
+        let swept_vtxos = value
+            .swept_vtxos
+            .into_iter()
+            .map(OutPoint::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+
         Ok(ArkTransaction {
             txid: Txid::from_str(value.txid.as_str()).map_err(Error::conversion)?,
+            tx,
             spent_vtxos,
             unspent_vtxos: spendable_vtxos,
+            checkpoint_txs,
+            swept_vtxos,
         })
     }
 }

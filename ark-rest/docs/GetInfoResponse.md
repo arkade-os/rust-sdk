@@ -12,6 +12,7 @@
 | **fees**                  | Option<[**models::FeeInfo**](FeeInfo.md)>                        |                                                           | [optional] |
 | **forfeit_address**       | Option<**String**>                                               |                                                           | [optional] |
 | **forfeit_pubkey**        | Option<**String**>                                               |                                                           | [optional] |
+| **max_op_return_outputs** | Option<**i64**>                                                  |                                                           | [optional] |
 | **max_tx_weight**         | Option<**i64**>                                                  |                                                           | [optional] |
 | **network**               | Option<**String**>                                               |                                                           | [optional] |
 | **scheduled_session**     | Option<[**models::ScheduledSession**](ScheduledSession.md)>      |                                                           | [optional] |

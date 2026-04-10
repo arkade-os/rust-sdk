@@ -444,6 +444,8 @@ pub struct Info {
     pub deprecated_signers: Vec<DeprecatedSigner>,
     pub service_status: HashMap<String, String>,
     pub digest: String,
+    pub max_tx_weight: i64,
+    pub max_op_return_outputs: i64,
 }
 
 /// Fee information from the server.
@@ -597,8 +599,12 @@ pub enum StreamTransactionData {
 
 pub struct ArkTransaction {
     pub txid: Txid,
+    pub tx: Option<Psbt>,
     pub spent_vtxos: Vec<VirtualTxOutPoint>,
     pub unspent_vtxos: Vec<VirtualTxOutPoint>,
+    /// key: outpoint, value: checkpoint txid. Only set for offchain txs.
+    pub checkpoint_txs: HashMap<OutPoint, Txid>,
+    pub swept_vtxos: Vec<OutPoint>,
 }
 
 pub struct CommitmentTransaction {

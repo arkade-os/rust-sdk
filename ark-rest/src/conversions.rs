@@ -291,6 +291,19 @@ impl TryFrom<GetInfoResponse> for ark_core::server::Info {
         // Parse service_status
         let service_status = response.service_status.unwrap_or_default();
 
+        let max_tx_weight_str = response
+            .max_tx_weight
+            .ok_or_else(|| ConversionError("Missing max_tx_weight".to_string()))?;
+        let max_tx_weight = i64::from_str(&max_tx_weight_str)
+            .map_err(|e| ConversionError(format!("Could not parse max_tx_weight: {e:#}")))?;
+
+        let max_op_return_outputs_str = response
+            .max_op_return_outputs
+            .ok_or_else(|| ConversionError("Missing max_op_return_outputs".to_string()))?;
+        let max_op_return_outputs = i64::from_str(&max_op_return_outputs_str).map_err(|e| {
+            ConversionError(format!("Could not parse max_op_return_outputs: {e:#}"))
+        })?;
+
         Ok(ark_core::server::Info {
             version,
             signer_pk,
@@ -311,6 +324,8 @@ impl TryFrom<GetInfoResponse> for ark_core::server::Info {
             deprecated_signers,
             service_status,
             digest,
+            max_tx_weight,
+            max_op_return_outputs,
         })
     }
 }

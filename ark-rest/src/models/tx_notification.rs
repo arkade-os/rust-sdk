@@ -21,6 +21,8 @@ pub struct TxNotification {
     pub spendable_vtxos: Option<Vec<models::Vtxo>>,
     #[serde(rename = "spentVtxos", skip_serializing_if = "Option::is_none")]
     pub spent_vtxos: Option<Vec<models::Vtxo>>,
+    #[serde(rename = "sweptVtxos", skip_serializing_if = "Option::is_none")]
+    pub swept_vtxos: Option<Vec<models::Outpoint>>,
     #[serde(rename = "tx", skip_serializing_if = "Option::is_none")]
     pub tx: Option<String>,
     #[serde(rename = "txid", skip_serializing_if = "Option::is_none")]
@@ -33,6 +35,7 @@ impl TxNotification {
             checkpoint_txs: None,
             spendable_vtxos: None,
             spent_vtxos: None,
+            swept_vtxos: None,
             tx: None,
             txid: None,
         }

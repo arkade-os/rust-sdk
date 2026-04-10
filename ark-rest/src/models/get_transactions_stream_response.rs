@@ -20,6 +20,8 @@ pub struct GetTransactionsStreamResponse {
     pub commitment_tx: Option<models::TxNotification>,
     #[serde(rename = "heartbeat", skip_serializing_if = "Option::is_none")]
     pub heartbeat: Option<serde_json::Value>,
+    #[serde(rename = "sweepTx", skip_serializing_if = "Option::is_none")]
+    pub sweep_tx: Option<models::TxNotification>,
 }
 
 impl GetTransactionsStreamResponse {
@@ -28,6 +30,7 @@ impl GetTransactionsStreamResponse {
             ark_tx: None,
             commitment_tx: None,
             heartbeat: None,
+            sweep_tx: None,
         }
     }
 }

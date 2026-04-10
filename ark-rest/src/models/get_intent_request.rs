@@ -14,12 +14,17 @@ use serde::Serialize;
 
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GetIntentRequest {
+    #[serde(rename = "intent", skip_serializing_if = "Option::is_none")]
+    pub intent: Option<models::Intent>,
     #[serde(rename = "txid", skip_serializing_if = "Option::is_none")]
     pub txid: Option<String>,
 }
 
 impl GetIntentRequest {
     pub fn new() -> GetIntentRequest {
-        GetIntentRequest { txid: None }
+        GetIntentRequest {
+            intent: None,
+            txid: None,
+        }
     }
 }

@@ -12,14 +12,25 @@ use crate::models;
 use serde::Deserialize;
 use serde::Serialize;
 
+/// GetIntentResponse : The repeated intents field is always populated with the matching results.
+/// The singular intent field is only set for backward compatibility when the request uses the txid
+/// filter, in which case it mirrors intents[0].
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GetIntentResponse {
     #[serde(rename = "intent", skip_serializing_if = "Option::is_none")]
     pub intent: Option<models::Intent>,
+    #[serde(rename = "intents", skip_serializing_if = "Option::is_none")]
+    pub intents: Option<Vec<models::Intent>>,
 }
 
 impl GetIntentResponse {
+    /// The repeated intents field is always populated with the matching results. The singular
+    /// intent field is only set for backward compatibility when the request uses the txid filter,
+    /// in which case it mirrors intents[0].
     pub fn new() -> GetIntentResponse {
-        GetIntentResponse { intent: None }
+        GetIntentResponse {
+            intent: None,
+            intents: None,
+        }
     }
 }

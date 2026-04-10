@@ -92,6 +92,8 @@ impl TryFrom<generated::ark::v1::GetInfoResponse> for server::Info {
             deprecated_signers,
             service_status: value.service_status,
             digest: value.digest,
+            max_tx_weight: value.max_tx_weight,
+            max_op_return_outputs: value.max_op_return_outputs,
         })
     }
 }

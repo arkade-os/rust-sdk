@@ -395,6 +395,12 @@
               "$ref": "#/components/schemas/Vtxo"
             }
           },
+          "sweptVtxos": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Outpoint"
+            }
+          },
           "tx": {
             "type": "string"
           },
@@ -623,6 +629,10 @@
           "forfeitPubkey": {
             "type": "string"
           },
+          "maxOpReturnOutputs": {
+            "type": "integer",
+            "format": "int64"
+          },
           "maxTxWeight": {
             "type": "integer",
             "format": "int64"
@@ -677,6 +687,9 @@
         "title": "GetIntentRequest",
         "type": "object",
         "properties": {
+          "intent": {
+            "$ref": "#/components/schemas/Intent"
+          },
           "txid": {
             "type": "string"
           }
@@ -685,9 +698,16 @@
       "GetIntentResponse": {
         "title": "GetIntentResponse",
         "type": "object",
+        "description": "The repeated intents field is always populated with the matching results.\nThe singular intent field is only set for backward compatibility when the\nrequest uses the txid filter, in which case it mirrors intents[0].",
         "properties": {
           "intent": {
             "$ref": "#/components/schemas/Intent"
+          },
+          "intents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Intent"
+            }
           }
         }
       },
@@ -728,6 +748,9 @@
           },
           "heartbeat": {
             "$ref": "#/components/schemas/Heartbeat"
+          },
+          "sweepTx": {
+            "$ref": "#/components/schemas/TxNotification"
           }
         }
       },
@@ -2230,8 +2253,60 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "intent.proof",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "intent.message",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
           }
         ],
+        "responses": {
+          "200": {
+            "description": "a successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetIntentResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Status"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "ArkService"
+        ],
+        "operationId": "ArkService_GetIntent2",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GetIntentRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "description": "a successful response.",
