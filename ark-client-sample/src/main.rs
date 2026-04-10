@@ -582,13 +582,19 @@ async fn run_command<K: KeyProvider>(
         Commands::SendToArkAddresses {
             addresses_and_amounts,
         } => {
-            for (address, amount) in &addresses_and_amounts.0 {
-                let txid = client
-                    .send(vec![SendReceiver::bitcoin(*address, *amount)])
-                    .await
-                    .map_err(|e| anyhow!(e))?;
-                tracing::info!("Sent to address {address} amount {amount} in txid {txid}")
-            }
+            let receivers = addresses_and_amounts
+                .0
+                .iter()
+                .map(|(address, amount)| SendReceiver::bitcoin(*address, *amount))
+                .collect();
+
+            let txid = client.send(receivers).await.map_err(|e| anyhow!(e))?;
+
+            tracing::info!(
+                "Sent to {} address(es) in txid {}",
+                addresses_and_amounts.0.len(),
+                txid
+            );
         }
         Commands::SendToArkAddressWithVtxos {
             vtxos,
