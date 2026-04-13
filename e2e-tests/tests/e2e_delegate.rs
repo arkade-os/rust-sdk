@@ -146,19 +146,18 @@ pub async fn e2e_delegate() {
         "delegated settlement should preserve issued asset balance"
     );
 
-    let pre_settlement_outpoint = vtxos_before.all_unspent().next().unwrap().outpoint;
-    let settled_outpoint = vtxos_after.spent().next().unwrap();
+    let vtxos_pre_settlement = vtxos_before.all_unspent().collect::<Vec<_>>();
+    let vtxos_post_settlement = vtxos_after.spent().collect::<Vec<_>>();
 
-    assert_eq!(
-        pre_settlement_outpoint, settled_outpoint.outpoint,
-        "original VTXO should be spent"
-    );
-
-    let old_vtxo_settlement_txid = settled_outpoint.settled_by.unwrap();
-    let new_vtxo_commitment_txid = vtxos_after.all_unspent().next().unwrap().commitment_txids[0];
-
-    assert_eq!(
-        old_vtxo_settlement_txid, new_vtxo_commitment_txid,
-        "VTXO should be settled"
-    );
+    // Verify that every pre-settlement VTXO was settled into one of the post-settlement VTXOs.
+    for pre in vtxos_pre_settlement {
+        assert!(
+            vtxos_post_settlement.iter().any(|post| {
+                post.outpoint == pre.outpoint && post.settled_by == Some(commitment_txid)
+            }),
+            "expected pre-settlement VTXO {} to be marked spent by delegated settlement {}",
+            pre.outpoint,
+            commitment_txid
+        );
+    }
 }

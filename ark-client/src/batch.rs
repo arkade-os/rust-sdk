@@ -483,10 +483,14 @@ where
 
         let server_info = &self.server_info;
 
-        let outputs = vec![intent::Output::Offchain(TxOut {
+        let mut outputs = vec![intent::Output::Offchain(TxOut {
             value: total_amount,
             script_pubkey: to_address.to_p2tr_script_pubkey(),
         })];
+
+        if let Some(packet) = create_asset_preservation_packet(&vtxo_inputs, &outputs)? {
+            outputs.push(intent::Output::AssetPacket(packet.to_txout()));
+        }
 
         let delegate = batch::prepare_delegate_psbts(
             vtxo_inputs,
