@@ -76,7 +76,27 @@ pub async fn e2e_assets() {
         "issued asset balance"
     );
 
-    tracing::info!("=== Step 2: Send asset to Bob ===");
+    tracing::info!("=== Step 2: Settle asset ===");
+
+    alice.settle(&mut rng).await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let balance = alice.offchain_balance().await.unwrap();
+
+    tracing::info!(?balance, "Balance after settlement");
+
+    assert_eq!(
+        balance.asset_balances().get(&control_asset_id).copied(),
+        Some(control_amount),
+        "control asset balance"
+    );
+    assert_eq!(
+        balance.asset_balances().get(&issued_asset_id).copied(),
+        Some(issue_amount),
+        "issued asset balance"
+    );
+
+    tracing::info!("=== Step 3: Send asset to Bob ===");
 
     let send_amount: u64 = 200;
     let (bob_address, _) = bob.get_offchain_address().unwrap();
@@ -116,7 +136,7 @@ pub async fn e2e_assets() {
         "bob asset balance after send"
     );
 
-    tracing::info!("=== Step 3: Reissue asset ===");
+    tracing::info!("=== Step 4: Reissue asset ===");
 
     let reissue_amount: u64 = 500;
 
@@ -151,7 +171,7 @@ pub async fn e2e_assets() {
         "control asset preserved after reissue"
     );
 
-    tracing::info!("=== Step 4: Burn asset ===");
+    tracing::info!("=== Step 5: Burn asset ===");
 
     let burn_amount: u64 = 300;
 

@@ -127,6 +127,7 @@ pub async fn e2e_multisig_delegate() {
         msig_output.bob_alice_spend_info(),
         false,
         false,
+        Vec::new(),
     );
 
     let mut delegate = batch::prepare_delegate_psbts(

@@ -768,6 +768,7 @@ where
             (script_ver.0, control_block),
             false,
             true,
+            vhtlc_outpoint.assets,
         );
 
         let commitment_txid = self
@@ -2997,6 +2998,7 @@ where
                     info.intent_spend_info.clone(),
                     false,
                     vtxo.is_swept,
+                    vtxo.assets.clone(),
                     vec![preimage.to_vec()],
                 ),
                 None => intent::Input::new(
@@ -3011,6 +3013,7 @@ where
                     info.intent_spend_info.clone(),
                     false,
                     vtxo.is_swept,
+                    vtxo.assets.clone(),
                 ),
             };
 

@@ -540,7 +540,7 @@ fn derive_vtxo_connector_map(
     let mut virtual_tx_outpoints = vtxo_inputs
         .iter()
         .filter_map(|vtxo_input| {
-            ((vtxo_input.amount() > dust) && !vtxo_input.is_swept())
+            ((vtxo_input.amount() >= dust) && !vtxo_input.is_swept())
                 .then_some(vtxo_input.outpoint())
         })
         .collect::<Vec<_>>();
@@ -548,8 +548,7 @@ fn derive_vtxo_connector_map(
     // Sort virtual TX outpoints for deterministic ordering.
     virtual_tx_outpoints.sort_by(|a, b| a.txid.cmp(&b.txid).then(a.vout.cmp(&b.vout)));
 
-    // Ensure we have matching counts.
-    if virtual_tx_outpoints.len() != connector_outpoints.len() {
+    if connector_outpoints.len() < virtual_tx_outpoints.len() {
         return Err(Error::ad_hoc(format!(
             "mismatch between VTXO count ({}) and connector count ({})",
             virtual_tx_outpoints.len(),
@@ -836,7 +835,7 @@ fn derive_vtxo_connector_map_delegate(
     virtual_tx_outpoints.sort_by(|a, b| a.txid.cmp(&b.txid).then(a.vout.cmp(&b.vout)));
 
     // Ensure we have matching counts.
-    if virtual_tx_outpoints.len() != connector_outpoints.len() {
+    if connector_outpoints.len() < virtual_tx_outpoints.len() {
         return Err(Error::ad_hoc(format!(
             "mismatch between VTXO count ({}) and connector count ({})",
             virtual_tx_outpoints.len(),

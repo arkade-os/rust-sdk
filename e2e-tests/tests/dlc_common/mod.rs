@@ -1180,6 +1180,7 @@ async fn settle(
                     boarding_output.exit_spend_info(),
                     true,
                     false,
+                    Vec::new(),
                 )
             },
         );
@@ -1199,6 +1200,7 @@ async fn settle(
                     vtxo.exit_spend_info()?,
                     false,
                     virtual_tx_outpoint.is_swept,
+                    virtual_tx_outpoint.assets.clone(),
                 ))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1447,6 +1449,7 @@ async fn settle(
                 spend_info,
                 false,
                 virtual_tx_outpoint.is_swept,
+                virtual_tx_outpoint.assets,
             ))
         })
         .collect::<Result<Vec<_>, _>>()?;

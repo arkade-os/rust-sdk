@@ -688,6 +688,7 @@ where
                     spend_info,
                     false,
                     virtual_tx_outpoint.is_swept,
+                    virtual_tx_outpoint.assets.clone(),
                 ));
             }
 
