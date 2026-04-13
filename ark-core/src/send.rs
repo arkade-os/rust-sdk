@@ -816,7 +816,7 @@ fn create_burn_packet(
         ))
     })?;
 
-    let change_output_index = btc_change_output_index(ark_tx, 1);
+    let preserved_output_index = btc_change_output_index(ark_tx, 1).unwrap_or(0);
     let mut groups = Vec::new();
 
     for (asset_id, transfer) in transfers.into_iter() {
@@ -827,19 +827,11 @@ fn create_burn_packet(
         };
 
         let mut outputs = Vec::new();
-        match (change_output_index, leftover_amount) {
-            (Some(change_output_index), leftover_amount) if leftover_amount > 0 => {
-                outputs.push(asset::packet::AssetOutput {
-                    output_index: change_output_index,
-                    amount: leftover_amount,
-                });
-            }
-            (None, leftover_amount) if leftover_amount > 0 => {
-                return Err(Error::ad_hoc(
-                    "asset burn has preserved asset changes but no BTC change output",
-                ));
-            }
-            _ => {}
+        if leftover_amount > 0 {
+            outputs.push(asset::packet::AssetOutput {
+                output_index: preserved_output_index,
+                amount: leftover_amount,
+            });
         }
 
         groups.push(asset::packet::AssetGroup {
@@ -1212,7 +1204,7 @@ mod tests {
     }
 
     #[test]
-    fn build_asset_burn_transactions_errors_when_leftover_assets_need_change() {
+    fn build_asset_burn_transactions_routes_leftover_assets_to_self_output_without_btc_change() {
         let server_info = test_server_info();
         let burn_asset_id = AssetId {
             txid: Txid::from_byte_array([19; 32]),
@@ -1227,7 +1219,7 @@ mod tests {
             }],
         );
 
-        let err = build_asset_burn_transactions(
+        let res = build_asset_burn_transactions(
             &own_address,
             &own_address,
             &[input],
@@ -1235,11 +1227,28 @@ mod tests {
             burn_asset_id,
             6,
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(err
-            .to_string()
-            .contains("asset burn has preserved asset changes but no BTC change output"));
+        let expected_packet = Packet {
+            groups: vec![AssetGroup {
+                asset_id: Some(burn_asset_id),
+                control_asset: None,
+                metadata: None,
+                inputs: vec![AssetInput {
+                    input_index: 0,
+                    amount: 10,
+                }],
+                outputs: vec![AssetOutput {
+                    output_index: 0,
+                    amount: 4,
+                }],
+            }],
+        };
+
+        assert_eq!(
+            res.ark_tx.unsigned_tx.output[asset_packet_index(&res.ark_tx)],
+            expected_packet.to_txout()
+        );
     }
 
     fn test_server_info() -> Info {
