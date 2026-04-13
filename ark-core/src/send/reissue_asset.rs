@@ -144,24 +144,19 @@ fn create_reissuance_packet(
                 input_index: input_index as u16,
                 amount: asset.amount,
             });
-            transfer.output_amount += asset.amount;
+            transfer.output_amount = transfer
+                .output_amount
+                .checked_add(asset.amount)
+                .ok_or_else(|| Error::ad_hoc("reissuance preserved asset amount overflow"))?;
         }
     }
 
     // Ensure that control asset is an input to the transaction. Otherwise, the Arkade server will
     // not authorise reissuance.
-    {
-        let control_transfer = transfers
-            .get(&control_asset_id)
-            .map(|t| t.inputs.as_slice())
-            .unwrap_or_default();
-        let control_input_amount: u64 = control_transfer.iter().map(|i| i.amount).sum();
-
-        if control_input_amount == 0 {
-            return Err(Error::ad_hoc(
-                "control asset missing from reissuance transaction inputs",
-            ));
-        }
+    if !transfers.contains_key(&control_asset_id) {
+        return Err(Error::ad_hoc(
+            "control asset missing from reissuance transaction inputs",
+        ));
     }
 
     // Actually include the newly minted assets in the asset output for the reissued asset.
@@ -172,7 +167,10 @@ fn create_reissuance_packet(
                 inputs: Vec::new(),
                 output_amount: 0,
             });
-        reissue_transfer.output_amount += reissue_amount;
+        reissue_transfer.output_amount = reissue_transfer
+            .output_amount
+            .checked_add(reissue_amount)
+            .ok_or_else(|| Error::ad_hoc("reissuance minted asset amount overflow"))?;
     }
 
     let mut groups = transfers
@@ -509,6 +507,97 @@ mod tests {
         assert!(err
             .to_string()
             .contains("control asset missing from reissuance transaction inputs"));
+    }
+
+    #[test]
+    fn self_reissuance_errors_when_preserved_asset_amount_overflows() {
+        let server_info = test_server_info();
+        let asset_id = AssetId {
+            txid: Txid::from_byte_array([5; 32]),
+            group_index: 0,
+        };
+        let control_asset_id = AssetId {
+            txid: Txid::from_byte_array([6; 32]),
+            group_index: 1,
+        };
+
+        let (input_a, own_address) = self_reissuance_input(
+            Txid::from_byte_array([7; 32]),
+            vec![
+                Asset {
+                    asset_id: control_asset_id,
+                    amount: 1,
+                },
+                Asset {
+                    asset_id,
+                    amount: u64::MAX,
+                },
+            ],
+        );
+        let (input_b, _) = self_reissuance_input(
+            Txid::from_byte_array([8; 32]),
+            vec![Asset {
+                asset_id,
+                amount: 1,
+            }],
+        );
+
+        let err = build_asset_reissuance_transactions(
+            &own_address,
+            &own_address,
+            &[input_a, input_b],
+            &server_info,
+            asset_id,
+            control_asset_id,
+            1,
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("reissuance preserved asset amount overflow"));
+    }
+
+    #[test]
+    fn self_reissuance_errors_when_minted_asset_amount_overflows() {
+        let server_info = test_server_info();
+        let asset_id = AssetId {
+            txid: Txid::from_byte_array([9; 32]),
+            group_index: 0,
+        };
+        let control_asset_id = AssetId {
+            txid: Txid::from_byte_array([10; 32]),
+            group_index: 1,
+        };
+
+        let (input, own_address) = self_reissuance_input(
+            Txid::from_byte_array([11; 32]),
+            vec![
+                Asset {
+                    asset_id: control_asset_id,
+                    amount: 1,
+                },
+                Asset {
+                    asset_id,
+                    amount: u64::MAX,
+                },
+            ],
+        );
+
+        let err = build_asset_reissuance_transactions(
+            &own_address,
+            &own_address,
+            &[input],
+            &server_info,
+            asset_id,
+            control_asset_id,
+            1,
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("reissuance minted asset amount overflow"));
     }
 
     fn test_server_info() -> Info {
