@@ -202,6 +202,7 @@ impl ArkNote {
             (note_script, control_block),
             false, // not onchain
             false, // not swept
+            Vec::new(),
             vec![self.preimage.to_vec()],
         ))
     }

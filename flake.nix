@@ -50,6 +50,7 @@
               pkg-config
               postgresql
               rustAnalyzer
+              sccache
               # Must appear _before_ `rustToolchainWithWasm`.
               rustfmt
               rustToolchainWithWasm
@@ -61,6 +62,12 @@
             ];
 
             RUST_SRC_PATH = "${rustToolchainWithWasm}/lib/rustlib/src/rust/library";
+            RUSTC_WRAPPER = "${pkgs.sccache}/bin/sccache";
+            SCCACHE_CACHE_SIZE = "20G";
+
+            shellHook = ''
+              echo "sccache: $(${pkgs.sccache}/bin/sccache --version)"
+            '';
           };
         }
     );

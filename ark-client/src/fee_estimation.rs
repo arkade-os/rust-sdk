@@ -215,6 +215,7 @@ where
                     spend_info,
                     false,
                     v.is_swept,
+                    v.assets.clone(),
                 ))
             })
             .collect::<Result<Vec<_>, Error>>()?;
@@ -318,6 +319,7 @@ where
                     spend_info,
                     false,
                     v.is_swept,
+                    v.assets.clone(),
                 ))
             })
             .collect::<Result<Vec<_>, Error>>()?;

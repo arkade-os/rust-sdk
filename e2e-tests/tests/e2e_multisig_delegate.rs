@@ -4,6 +4,7 @@ use crate::msig_output::MsigOutputScript;
 use crate::msig_output::MsigOutputTaprootOptions;
 use ark_core::batch;
 use ark_core::intent;
+use ark_core::send::SendReceiver;
 use ark_core::VtxoList;
 use bitcoin::key::Keypair;
 use bitcoin::key::Secp256k1;
@@ -89,7 +90,10 @@ pub async fn e2e_multisig_delegate() {
     let msig_output_amount = Amount::from_sat(10_000);
 
     let txid = alice
-        .send_vtxo(msig_output.address(), msig_output_amount)
+        .send(vec![SendReceiver::bitcoin(
+            msig_output.address(),
+            msig_output_amount,
+        )])
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -123,6 +127,7 @@ pub async fn e2e_multisig_delegate() {
         msig_output.bob_alice_spend_info(),
         false,
         false,
+        Vec::new(),
     );
 
     let mut delegate = batch::prepare_delegate_psbts(

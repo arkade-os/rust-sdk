@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use crate::common::wait_until_balance;
+use ark_core::send::SendReceiver;
 use bitcoin::key::Secp256k1;
 use bitcoin::Amount;
 use common::init_tracing;
@@ -41,7 +42,10 @@ pub async fn send_subdust_amount() {
     let (bob_offchain_address, _) = bob.get_offchain_address().unwrap();
 
     alice
-        .send_vtxo(bob_offchain_address, sub_dust_amount)
+        .send(vec![SendReceiver::bitcoin(
+            bob_offchain_address,
+            sub_dust_amount,
+        )])
         .await
         .unwrap();
 
@@ -50,9 +54,12 @@ pub async fn send_subdust_amount() {
 
     let (alice_offchain_address, _) = alice.get_offchain_address().unwrap();
 
-    bob.send_vtxo(alice_offchain_address, sub_dust_amount)
-        .await
-        .expect_err("should not be able to send sub-dust amount");
+    bob.send(vec![SendReceiver::bitcoin(
+        alice_offchain_address,
+        sub_dust_amount,
+    )])
+    .await
+    .expect_err("should not be able to send sub-dust amount");
 
     bob.settle(&mut rng)
         .await
@@ -62,7 +69,10 @@ pub async fn send_subdust_amount() {
     let regular_amount = Amount::from_sat(100_000);
 
     alice
-        .send_vtxo(bob_offchain_address, regular_amount)
+        .send(vec![SendReceiver::bitcoin(
+            bob_offchain_address,
+            regular_amount,
+        )])
         .await
         .unwrap();
 

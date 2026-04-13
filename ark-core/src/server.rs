@@ -1,5 +1,6 @@
 //! Messages exchanged between the client and the Ark server.
 
+use crate::asset::AssetId;
 use crate::tx_graph::TxGraphChunk;
 use crate::ArkAddress;
 use crate::Error;
@@ -386,6 +387,8 @@ pub struct VirtualTxOutPoint {
     pub settled_by: Option<Txid>,
     /// The Ark transaction that _spends_ this VTXO (if we omit the checkpoint transaction).
     pub ark_txid: Option<Txid>,
+    /// Assets carried by this VTXO.
+    pub assets: Vec<Asset>,
 }
 
 impl VirtualTxOutPoint {
@@ -685,6 +688,28 @@ pub enum Network {
     Signet,
     Regtest,
     Mutinynet,
+}
+
+/// An asset carried by a VTXO.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Asset {
+    pub asset_id: AssetId,
+    pub amount: u64,
+}
+
+/// Metadata about an issued asset, including its control asset reference.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AssetInfo {
+    pub asset_id: AssetId,
+    pub control_asset_id: Option<AssetId>,
+    pub supply: u64,
+    pub metadata: String,
+}
+
+impl AssetInfo {
+    pub fn can_be_reissued(&self) -> bool {
+        self.control_asset_id.is_some()
+    }
 }
 
 impl From<Network> for bitcoin::Network {

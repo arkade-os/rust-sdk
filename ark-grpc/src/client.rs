@@ -19,9 +19,11 @@ use crate::generated::ark::v1::SubmitTreeSignaturesRequest;
 use crate::generated::ark::v1::SubscribeForScriptsRequest;
 use crate::generated::ark::v1::UnsubscribeForScriptsRequest;
 use crate::Error;
+use ark_core::asset::AssetId;
 use ark_core::history;
 use ark_core::server::parse_sequence_number;
 use ark_core::server::ArkTransaction;
+use ark_core::server::AssetInfo;
 use ark_core::server::BatchFailed;
 use ark_core::server::BatchFinalizationEvent;
 use ark_core::server::BatchFinalizedEvent;
@@ -600,6 +602,35 @@ impl Client {
         let response = response.into_inner();
 
         Ok(SignedAmount::from_sat(response.fee))
+    }
+
+    pub async fn get_asset(&self, asset_id: AssetId) -> Result<AssetInfo, Error> {
+        let mut client = self.indexer_client()?;
+
+        let response = client
+            .get_asset(generated::ark::v1::GetAssetRequest {
+                asset_id: asset_id.to_string(),
+            })
+            .await
+            .map_err(Error::request)?;
+
+        let inner = response.into_inner();
+
+        let supply = inner.supply.parse::<u64>().map_err(Error::conversion)?;
+
+        let asset_id = inner.asset_id.parse().map_err(Error::conversion)?;
+        let control_asset_id = if inner.control_asset.is_empty() {
+            None
+        } else {
+            Some(inner.control_asset.parse().map_err(Error::conversion)?)
+        };
+
+        Ok(AssetInfo {
+            asset_id,
+            control_asset_id,
+            supply,
+            metadata: inner.metadata,
+        })
     }
 
     fn ark_client(&self) -> Result<ArkServiceClient<tonic::transport::Channel>, Error> {

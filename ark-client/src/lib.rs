@@ -4,6 +4,7 @@ use crate::utils::sleep;
 use crate::utils::timeout_op;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
+use ark_core::asset::AssetId;
 use ark_core::build_anchor_tx;
 use ark_core::history;
 use ark_core::history::generate_incoming_vtxo_transaction_history;
@@ -46,6 +47,7 @@ pub mod key_provider;
 pub mod swap_storage;
 pub mod wallet;
 
+mod asset;
 mod batch;
 mod boltz;
 mod coin_select;
@@ -54,6 +56,7 @@ mod send_vtxo;
 mod unilateral_exit;
 mod utils;
 
+pub use asset::IssueAssetResult;
 pub use boltz::ChainSwapAmount;
 pub use boltz::ChainSwapData;
 pub use boltz::ChainSwapDirection;
@@ -313,11 +316,12 @@ pub struct AddressVtxos {
     pub spent: Vec<VirtualTxOutPoint>,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct OffChainBalance {
     pre_confirmed: Amount,
     confirmed: Amount,
     recoverable: Amount,
+    asset_balances: HashMap<AssetId, u64>,
 }
 
 impl OffChainBalance {
@@ -336,6 +340,11 @@ impl OffChainBalance {
 
     pub fn total(&self) -> Amount {
         self.pre_confirmed + self.confirmed + self.recoverable
+    }
+
+    /// Asset balances keyed by asset ID.
+    pub fn asset_balances(&self) -> &HashMap<AssetId, u64> {
+        &self.asset_balances
     }
 }
 
@@ -788,6 +797,38 @@ where
         Ok(vtxo_list)
     }
 
+    pub async fn list_vtxos_for_outpoints(
+        &self,
+        outpoints: Vec<OutPoint>,
+    ) -> Result<(VtxoList, HashMap<ScriptBuf, Vtxo>), Error> {
+        let ark_addresses = self.get_offchain_addresses()?;
+
+        let script_pubkey_to_vtxo_map = ark_addresses
+            .iter()
+            .map(|(a, v)| (a.to_p2tr_script_pubkey(), v.clone()))
+            .collect::<HashMap<_, _>>();
+
+        let request = GetVtxosRequest::new_for_outpoints(&outpoints);
+        let virtual_tx_outpoints = self.fetch_all_vtxos(request).await?;
+
+        // Filter out outpoints for which we don't have spend info.
+        let virtual_tx_outpoints = virtual_tx_outpoints
+            .into_iter()
+            .filter(|v| match script_pubkey_to_vtxo_map.get(&v.script) {
+                Some(_) => true,
+                None => {
+                    tracing::debug!(outpoint = %v.outpoint, "Missing spend info for VTXO");
+
+                    false
+                }
+            })
+            .collect();
+
+        let vtxo_list = VtxoList::new(self.server_info.dust, virtual_tx_outpoints);
+
+        Ok((vtxo_list, script_pubkey_to_vtxo_map))
+    }
+
     pub async fn get_vtxo_chain(
         &self,
         out_point: OutPoint,
@@ -820,11 +861,37 @@ where
             .recoverable()
             .fold(Amount::ZERO, |acc, x| acc + x.amount);
 
+        // Aggregate asset balances from all spendable VTXOs.
+        let mut asset_balances: HashMap<AssetId, u64> = HashMap::new();
+        for vtxo in vtxo_list.spendable_offchain() {
+            for asset in &vtxo.assets {
+                let total = asset_balances
+                    .get(&asset.asset_id)
+                    .copied()
+                    .unwrap_or(0)
+                    .checked_add(asset.amount)
+                    .ok_or_else(|| Error::ad_hoc("asset balance overflow"))?;
+                asset_balances.insert(asset.asset_id, total);
+            }
+        }
+
         Ok(OffChainBalance {
             pre_confirmed,
             confirmed,
             recoverable,
+            asset_balances,
         })
+    }
+
+    /// Get information about an asset by its ID.
+    pub async fn get_asset(&self, asset_id: AssetId) -> Result<server::AssetInfo, Error> {
+        timeout_op(
+            self.inner.timeout,
+            self.network_client().get_asset(asset_id),
+        )
+        .await
+        .context("Failed to get asset info")?
+        .map_err(Error::ark_server)
     }
 
     pub async fn transaction_history(&self) -> Result<Vec<history::Transaction>, Error> {
@@ -983,6 +1050,11 @@ where
             bitcoin::relative::LockTime::Time(time) => time.value() as u64 * 512,
             bitcoin::relative::LockTime::Blocks(_) => unreachable!(),
         }
+    }
+
+    /// The server's dust threshold amount.
+    pub fn dust(&self) -> Amount {
+        self.server_info.dust
     }
 
     pub fn network_client(&self) -> ark_grpc::Client {

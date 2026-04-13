@@ -2,6 +2,7 @@
 
 use crate::common::wait_until_balance;
 use ark_client::wallet::OnchainWallet;
+use ark_core::send::SendReceiver;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::key::Secp256k1;
 use bitcoin::Amount;
@@ -64,7 +65,10 @@ pub async fn send_onchain_vtxo_and_boarding_output() {
     let (alice_offchain_address, _) = alice.get_offchain_address().unwrap();
 
     alice
-        .send_vtxo(alice_offchain_address, Amount::from_sat(100_000))
+        .send(vec![SendReceiver::bitcoin(
+            alice_offchain_address,
+            Amount::from_sat(100_000),
+        )])
         .await
         .unwrap();
 

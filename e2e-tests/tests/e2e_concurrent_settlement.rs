@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use crate::common::wait_until_balance;
+use ark_core::send::SendReceiver;
 use bitcoin::key::Secp256k1;
 use bitcoin::Amount;
 use common::init_tracing;
@@ -96,7 +97,10 @@ pub async fn concurrent_boarding() {
     let claire_to_alice_send_amount = Amount::from_sat(10_000);
 
     alice
-        .send_vtxo(bob_offchain_address, alice_to_bob_send_amount)
+        .send(vec![SendReceiver::bitcoin(
+            bob_offchain_address,
+            alice_to_bob_send_amount,
+        )])
         .await
         .unwrap();
 
@@ -104,16 +108,22 @@ pub async fn concurrent_boarding() {
     // offchain transaction: the virtual TXID could not be found in the DB.
     tokio::time::sleep(Duration::from_secs(5)).await;
 
-    bob.send_vtxo(claire_offchain_address, bob_to_claire_send_amount)
-        .await
-        .unwrap();
+    bob.send(vec![SendReceiver::bitcoin(
+        claire_offchain_address,
+        bob_to_claire_send_amount,
+    )])
+    .await
+    .unwrap();
 
     // FIXME: We should not need to sleep here. We were running into an error when finalising the
     // offchain transaction: the virtual TXID could not be found in the DB.
     tokio::time::sleep(Duration::from_secs(5)).await;
 
     claire
-        .send_vtxo(alice_offchain_address, claire_to_alice_send_amount)
+        .send(vec![SendReceiver::bitcoin(
+            alice_offchain_address,
+            claire_to_alice_send_amount,
+        )])
         .await
         .unwrap();
 

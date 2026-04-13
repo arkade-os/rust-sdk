@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
+use ark_core::asset::ControlAssetConfig;
 use bitcoin::key::Keypair;
 use bitcoin::key::Secp256k1;
 use bitcoin::Amount;
@@ -41,16 +42,56 @@ pub async fn e2e_delegate() {
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     let alice_offchain_balance = alice.offchain_balance().await.unwrap();
+
+    tracing::info!(?alice_offchain_balance, "Alice got confirmed VTXO");
+
+    assert_eq!(alice_offchain_balance.confirmed(), alice_fund_amount);
+    assert_eq!(alice_offchain_balance.pre_confirmed(), Amount::ZERO);
+
+    let issue_amount: u64 = 1_000;
+    let control_amount: u64 = 1;
+
+    let issue_result = alice
+        .issue_asset(
+            issue_amount,
+            Some(ControlAssetConfig::new(control_amount).unwrap()),
+            Some(vec![("name".to_string(), "DelegateToken".to_string())]),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(issue_result.asset_ids.len(), 2);
+
+    let control_asset_id = issue_result.asset_ids[0];
+    let issued_asset_id = issue_result.asset_ids[1];
+
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    let alice_offchain_balance = alice.offchain_balance().await.unwrap();
     let (vtxos_before, _) = alice.list_vtxos().await.unwrap();
 
     tracing::info!(
         ?alice_offchain_balance,
         vtxos = ?vtxos_before,
-        "Alice got confirmed VTXO"
+        control_asset_id = %control_asset_id,
+        issued_asset_id = %issued_asset_id,
+        "Alice received issued assets before delegated settlement"
     );
 
-    assert_eq!(alice_offchain_balance.confirmed(), alice_fund_amount);
-    assert_eq!(alice_offchain_balance.pre_confirmed(), Amount::ZERO);
+    assert_eq!(
+        alice_offchain_balance
+            .asset_balances()
+            .get(&control_asset_id)
+            .copied(),
+        Some(control_amount)
+    );
+    assert_eq!(
+        alice_offchain_balance
+            .asset_balances()
+            .get(&issued_asset_id)
+            .copied(),
+        Some(issue_amount)
+    );
 
     // TODO: Not sure why we have to wait longer here.
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
@@ -88,20 +129,35 @@ pub async fn e2e_delegate() {
     );
 
     assert_eq!(alice_offchain_balance_after.confirmed(), alice_fund_amount);
-
-    let pre_settlement_outpoint = vtxos_before.all_unspent().next().unwrap().outpoint;
-    let settled_outpoint = vtxos_after.spent().next().unwrap();
-
     assert_eq!(
-        pre_settlement_outpoint, settled_outpoint.outpoint,
-        "original VTXO should be spent"
+        alice_offchain_balance_after
+            .asset_balances()
+            .get(&control_asset_id)
+            .copied(),
+        Some(control_amount),
+        "delegated settlement should preserve control asset balance"
+    );
+    assert_eq!(
+        alice_offchain_balance_after
+            .asset_balances()
+            .get(&issued_asset_id)
+            .copied(),
+        Some(issue_amount),
+        "delegated settlement should preserve issued asset balance"
     );
 
-    let old_vtxo_settlement_txid = settled_outpoint.settled_by.unwrap();
-    let new_vtxo_commitment_txid = vtxos_after.all_unspent().next().unwrap().commitment_txids[0];
+    let vtxos_pre_settlement = vtxos_before.all_unspent().collect::<Vec<_>>();
+    let vtxos_post_settlement = vtxos_after.spent().collect::<Vec<_>>();
 
-    assert_eq!(
-        old_vtxo_settlement_txid, new_vtxo_commitment_txid,
-        "VTXO should be settled"
-    );
+    // Verify that every pre-settlement VTXO was settled into one of the post-settlement VTXOs.
+    for pre in vtxos_pre_settlement {
+        assert!(
+            vtxos_post_settlement.iter().any(|post| {
+                post.outpoint == pre.outpoint && post.settled_by == Some(commitment_txid)
+            }),
+            "expected pre-settlement VTXO {} to be marked spent by delegated settlement {}",
+            pre.outpoint,
+            commitment_txid
+        );
+    }
 }

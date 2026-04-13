@@ -1,3 +1,4 @@
+use crate::Asset;
 use crate::Error;
 use crate::ErrorContext;
 use crate::VTXO_CONDITION_KEY;
@@ -47,6 +48,7 @@ pub struct Input {
     spend_info: (ScriptBuf, taproot::ControlBlock),
     is_onchain: bool,
     is_swept: bool,
+    assets: Vec<Asset>,
     /// Extra witness elements for spending (e.g., preimage for ArkNotes).
     /// When set, these are used instead of generating a signature.
     extra_witness: Option<Vec<Vec<u8>>>,
@@ -62,6 +64,7 @@ impl Input {
         spend_info: (ScriptBuf, taproot::ControlBlock),
         is_onchain: bool,
         is_swept: bool,
+        assets: Vec<Asset>,
     ) -> Self {
         Self {
             outpoint,
@@ -72,6 +75,7 @@ impl Input {
             spend_info,
             is_onchain,
             is_swept,
+            assets,
             extra_witness: None,
         }
     }
@@ -86,6 +90,7 @@ impl Input {
         spend_info: (ScriptBuf, taproot::ControlBlock),
         is_onchain: bool,
         is_swept: bool,
+        assets: Vec<Asset>,
         extra_witness: Vec<Vec<u8>>,
     ) -> Self {
         Self {
@@ -97,6 +102,7 @@ impl Input {
             spend_info,
             is_onchain,
             is_swept,
+            assets,
             extra_witness: Some(extra_witness),
         }
     }
@@ -125,6 +131,10 @@ impl Input {
         self.is_swept
     }
 
+    pub fn assets(&self) -> &[Asset] {
+        &self.assets
+    }
+
     pub fn extra_witness(&self) -> Option<&[Vec<u8>]> {
         self.extra_witness.as_deref()
     }
@@ -136,6 +146,9 @@ pub enum Output {
     Offchain(TxOut),
     /// An output created when offboarding.
     Onchain(TxOut),
+    /// An auxiliary output that should be copied into the target transaction but is neither an
+    /// offchain VTXO nor an onchain payout.
+    AssetPacket(TxOut),
 }
 
 #[derive(Debug, Clone)]
@@ -356,7 +369,9 @@ pub(crate) fn build_proof_psbt(
             _ => outputs
                 .iter()
                 .map(|o| match o {
-                    Output::Offchain(txout) | Output::Onchain(txout) => txout.clone(),
+                    Output::Offchain(txout)
+                    | Output::Onchain(txout)
+                    | Output::AssetPacket(txout) => txout.clone(),
                 })
                 .collect::<Vec<_>>(),
         };

@@ -22,7 +22,10 @@ use ark_client::SqliteSwapStorage;
 use ark_client::StaticKeyProvider;
 use ark_client::SwapAmount;
 use ark_client::TxStatus;
+use ark_core::asset::ControlAssetConfig;
 use ark_core::history;
+use ark_core::send::SendReceiver;
+use ark_core::send::VtxoInput;
 use ark_core::server::SubscriptionResponse;
 use ark_core::ArkAddress;
 use ark_core::ArkNote;
@@ -222,6 +225,48 @@ enum Commands {
         /// Admin API URL (default: http://localhost:7071).
         #[arg(long, default_value = "http://localhost:7071")]
         admin_url: String,
+    },
+    /// Get information about an asset by its ID.
+    GetAsset {
+        /// The asset ID to look up.
+        asset_id: String,
+    },
+    /// Send an asset to an Ark address (BTC amount is automatically set to dust).
+    SendAssets {
+        /// Destination Ark address.
+        address: ArkAddressCli,
+        /// The asset ID to send.
+        asset_id: String,
+        /// The amount of the asset to send.
+        amount: u64,
+    },
+    /// Burn a specific amount of an asset.
+    BurnAsset {
+        /// The asset ID to burn.
+        asset_id: String,
+        /// The amount of the asset to burn.
+        amount: u64,
+    },
+    /// Reissue additional units of an existing asset (requires control asset).
+    ReissueAsset {
+        /// The asset ID to reissue.
+        asset_id: String,
+        /// The amount of additional asset units to mint.
+        amount: u64,
+    },
+    /// Issue a new asset.
+    IssueAsset {
+        /// Number of asset units to issue.
+        amount: u64,
+        /// Create a new control asset with this amount (enables reissuance).
+        #[arg(long)]
+        control_amount: Option<u64>,
+        /// Use an existing control asset ID (68-char hex format).
+        #[arg(long)]
+        control_asset_id: Option<String>,
+        /// Metadata key-value pairs (format: key=value, comma-separated).
+        #[arg(long)]
+        metadata: Option<String>,
     },
 }
 
@@ -455,15 +500,18 @@ async fn run_command<K: KeyProvider>(
                 unspent.iter().map(|u| u.amount).sum::<Amount>()
             };
 
-            println!(
-                "{}",
-                serde_json::json!({
-                    "offchain_confirmed": offchain_balance.confirmed(),
-                    "offchain_pre_confirmed": offchain_balance.pre_confirmed(),
-                    "recoverable": offchain_balance.recoverable(),
-                    "boarding": boarding,
-                })
-            );
+            let mut balance_json = serde_json::json!({
+                "offchain_confirmed": offchain_balance.confirmed(),
+                "offchain_pre_confirmed": offchain_balance.pre_confirmed(),
+                "recoverable": offchain_balance.recoverable(),
+                "boarding": boarding,
+            });
+
+            if !offchain_balance.asset_balances().is_empty() {
+                balance_json["assets"] = serde_json::to_value(offchain_balance.asset_balances())?;
+            }
+
+            println!("{}", balance_json);
         }
         Commands::TransactionHistory => {
             let tx_history = client.transaction_history().await.map_err(|e| anyhow!(e))?;
@@ -534,13 +582,19 @@ async fn run_command<K: KeyProvider>(
         Commands::SendToArkAddresses {
             addresses_and_amounts,
         } => {
-            for (address, amount) in &addresses_and_amounts.0 {
-                let txid = client
-                    .send_vtxo(*address, *amount)
-                    .await
-                    .map_err(|e| anyhow!(e))?;
-                tracing::info!("Sent to address {address} amount {amount} in txid {txid}")
-            }
+            let receivers = addresses_and_amounts
+                .0
+                .iter()
+                .map(|(address, amount)| SendReceiver::bitcoin(*address, *amount))
+                .collect();
+
+            let txid = client.send(receivers).await.map_err(|e| anyhow!(e))?;
+
+            tracing::info!(
+                "Sent to {} address(es) in txid {}",
+                addresses_and_amounts.0.len(),
+                txid
+            );
         }
         Commands::SendToArkAddressWithVtxos {
             vtxos,
@@ -556,7 +610,10 @@ async fn run_command<K: KeyProvider>(
                 .collect::<Result<Vec<_>>>()?;
 
             let txid = client
-                .send_vtxo_selection(&vtxo_outpoints, address.0, Amount::from_sat(*amount))
+                .send_selection(
+                    &vtxo_outpoints,
+                    vec![SendReceiver::bitcoin(address.0, Amount::from_sat(*amount))],
+                )
                 .await
                 .map_err(|e| anyhow!(e))?;
             tracing::info!(
@@ -783,7 +840,10 @@ async fn run_command<K: KeyProvider>(
                     tracing::info!(swap_id = result.swap_id, "Funding ARK VHTLC...");
 
                     let fund_txid = client
-                        .send_vtxo(lockup_address, result.user_lockup_amount)
+                        .send(vec![SendReceiver::bitcoin(
+                            lockup_address,
+                            result.user_lockup_amount,
+                        )])
                         .await
                         .map_err(|e| anyhow!(e))?;
 
@@ -1131,6 +1191,7 @@ async fn run_command<K: KeyProvider>(
                     script_pubkey: vtxo.script.clone(),
                     expire_at: vtxo.expires_at,
                     amount: vtxo.amount,
+                    assets: Vec::new(),
                 })
                 .collect::<Vec<_>>();
 
@@ -1142,7 +1203,7 @@ async fn run_command<K: KeyProvider>(
             )
             .map_err(|e| anyhow!(e))?;
 
-            let vtxo_inputs: Vec<ark_core::send::VtxoInput> = selected
+            let vtxo_inputs: Vec<VtxoInput> = selected
                 .into_iter()
                 .map(|coin| {
                     let vtxo = script_pubkey_to_vtxo_map
@@ -1153,7 +1214,7 @@ async fn run_command<K: KeyProvider>(
                     let (forfeit_script, control_block) = vtxo
                         .forfeit_spend_info()
                         .context("failed to get forfeit spend info")?;
-                    Ok(ark_core::send::VtxoInput::new(
+                    Ok(VtxoInput::new(
                         forfeit_script,
                         None,
                         control_block,
@@ -1161,6 +1222,7 @@ async fn run_command<K: KeyProvider>(
                         vtxo.script_pubkey(),
                         coin.amount,
                         coin.outpoint,
+                        coin.assets,
                     ))
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -1259,6 +1321,124 @@ async fn run_command<K: KeyProvider>(
         Commands::CreateNote { .. } => {
             // Handled in main() before client setup
             unreachable!("CreateNote is handled before client initialization");
+        }
+        Commands::SendAssets {
+            address,
+            asset_id,
+            amount,
+        } => {
+            let asset_id = asset_id.parse()?;
+
+            let receiver = SendReceiver {
+                address: address.0,
+                amount: client.dust(),
+                assets: vec![ark_core::server::Asset {
+                    asset_id,
+                    amount: *amount,
+                }],
+            };
+
+            let txid = client.send(vec![receiver]).await.map_err(|e| anyhow!(e))?;
+
+            println!(
+                "{}",
+                serde_json::json!({
+                    "ark_txid": txid.to_string(),
+                })
+            );
+        }
+        Commands::BurnAsset { asset_id, amount } => {
+            let asset_id = asset_id.parse()?;
+
+            let txid = client
+                .burn_asset(asset_id, *amount)
+                .await
+                .map_err(|e| anyhow!(e))?;
+
+            println!(
+                "{}",
+                serde_json::json!({
+                    "ark_txid": txid.to_string(),
+                })
+            );
+        }
+        Commands::ReissueAsset { asset_id, amount } => {
+            let asset_id = asset_id.parse()?;
+
+            let txid = client
+                .reissue_asset(asset_id, *amount)
+                .await
+                .map_err(|e| anyhow!(e))?;
+
+            println!(
+                "{}",
+                serde_json::json!({
+                    "ark_txid": txid.to_string(),
+                })
+            );
+        }
+        Commands::GetAsset { asset_id } => {
+            let asset_id = asset_id.parse()?;
+
+            let asset_info = client.get_asset(asset_id).await.map_err(|e| anyhow!(e))?;
+
+            println!(
+                "{}",
+                serde_json::json!({
+                    "asset_id": asset_info.asset_id,
+                    "control_asset_id": asset_info.control_asset_id,
+                    "supply": asset_info.supply,
+                    "metadata": asset_info.metadata,
+                })
+            );
+        }
+        Commands::IssueAsset {
+            amount,
+            control_amount,
+            control_asset_id,
+            metadata,
+        } => {
+            let control_asset = match (control_amount, control_asset_id) {
+                (Some(_), Some(_)) => {
+                    bail!("specify either --control-amount or --control-asset-id, not both")
+                }
+                (Some(amt), None) => {
+                    let config = ControlAssetConfig::new(*amt)
+                        .context("control asset amount must be non-zero")?;
+
+                    Some(config)
+                }
+                (None, Some(id)) => {
+                    let control_asset_id = id.parse().context("invalid control asset ID")?;
+
+                    Some(ControlAssetConfig::existing(control_asset_id))
+                }
+                (None, None) => None,
+            };
+
+            let metadata = metadata.clone().map(|m| {
+                m.split(',')
+                    .filter_map(|pair| {
+                        let mut parts = pair.splitn(2, '=');
+                        let key = parts.next()?.trim().to_string();
+                        let value = parts.next()?.trim().to_string();
+                        Some((key, value))
+                    })
+                    .collect::<Vec<_>>()
+            });
+
+            let result = client
+                .issue_asset(*amount, control_asset, metadata)
+                .await
+                .map_err(|e| anyhow!(e))?;
+
+            println!(
+                "{}",
+                serde_json::json!({
+                    "ark_txid": result.ark_txid.to_string(),
+                    "asset_ids": result.asset_ids,
+                })
+            );
         }
     }
 

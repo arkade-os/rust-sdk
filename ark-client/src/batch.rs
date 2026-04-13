@@ -11,6 +11,7 @@ use ark_core::batch;
 use ark_core::batch::aggregate_nonces;
 use ark_core::batch::complete_delegate_forfeit_txs;
 use ark_core::batch::create_and_sign_forfeit_txs;
+use ark_core::batch::create_asset_preservation_packet;
 use ark_core::batch::generate_nonce_tree;
 use ark_core::batch::sign_batch_tree_tx;
 use ark_core::batch::sign_commitment_psbt;
@@ -376,6 +377,7 @@ where
                     spend_info,
                     false,
                     v.is_swept,
+                    v.assets.clone(),
                 ))
             })
             .collect::<Result<Vec<_>, Error>>()?;
@@ -481,10 +483,14 @@ where
 
         let server_info = &self.server_info;
 
-        let outputs = vec![intent::Output::Offchain(TxOut {
+        let mut outputs = vec![intent::Output::Offchain(TxOut {
             value: total_amount,
             script_pubkey: to_address.to_p2tr_script_pubkey(),
         })];
+
+        if let Some(packet) = create_asset_preservation_packet(&vtxo_inputs, &outputs)? {
+            outputs.push(intent::Output::AssetPacket(packet.to_txout()));
+        }
 
         let delegate = batch::prepare_delegate_psbts(
             vtxo_inputs,
@@ -1074,6 +1080,7 @@ where
                     spend_info,
                     false,
                     virtual_tx_outpoint.is_swept,
+                    virtual_tx_outpoint.assets.clone(),
                 ))
             })
             .collect::<Result<Vec<_>, ark_core::Error>>()?;
@@ -1119,6 +1126,7 @@ where
                     o.boarding_output().forfeit_spend_info(),
                     true,
                     false,
+                    Vec::new(),
                 )
             });
 
@@ -1240,6 +1248,10 @@ where
             .context("failed to compute now timestamp")?;
         let now = now.as_secs();
         let expire_at = now + (2 * 60);
+
+        if let Some(packet) = create_asset_preservation_packet(&vtxo_inputs, &outputs)? {
+            outputs.push(intent::Output::AssetPacket(packet.to_txout()));
+        }
 
         let mut onchain_output_indexes = Vec::new();
         for (i, output) in outputs.iter().enumerate() {
