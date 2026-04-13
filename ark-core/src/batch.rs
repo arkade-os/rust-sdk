@@ -1,4 +1,5 @@
 use crate::anchor_output;
+use crate::asset::packet;
 use crate::conversions::from_musig_xonly;
 use crate::conversions::to_musig_pk;
 use crate::intent;
@@ -734,6 +735,81 @@ pub fn prepare_delegate_psbts(
 }
 
 /// Complete the delegated forfeit transactions by adding connector inputs and finalizing them.
+pub fn create_asset_preservation_packet(
+    inputs: &[intent::Input],
+    outputs: &[intent::Output],
+) -> Result<Option<packet::Packet>, Error> {
+    const INTENT_PROOF_FAKE_INPUT_INDEX_OFFSET: u16 = 1;
+
+    let mut groups: Vec<packet::AssetGroup> = Vec::new();
+
+    let preserved_output_index =
+        outputs
+            .iter()
+            .enumerate()
+            .find_map(|(index, output)| match output {
+                intent::Output::Offchain(_) => Some(index as u16),
+                intent::Output::Onchain(_) | intent::Output::AssetPacket(_) => None,
+            });
+
+    for (input_index, input) in inputs.iter().enumerate() {
+        for asset in input.assets() {
+            if let Some(group) = groups
+                .iter_mut()
+                .find(|group| group.asset_id == Some(asset.asset_id))
+            {
+                group.inputs.push(packet::AssetInput {
+                    input_index: input_index as u16 + INTENT_PROOF_FAKE_INPUT_INDEX_OFFSET,
+                    amount: asset.amount,
+                });
+
+                if let Some(output) = group.outputs.first_mut() {
+                    output.amount = output.amount.checked_add(asset.amount).ok_or_else(|| {
+                        Error::ad_hoc("asset amount overflow while preserving assets in settlement")
+                    })?;
+                }
+            } else {
+                let mut asset_outputs = Vec::new();
+                match preserved_output_index {
+                    Some(output_index) => asset_outputs.push(packet::AssetOutput {
+                        output_index,
+                        amount: asset.amount,
+                    }),
+                    None => {
+                        return Err(Error::ad_hoc(
+                            "cannot preserve assets in settlement without an offchain output",
+                        ))
+                    }
+                }
+
+                groups.push(packet::AssetGroup {
+                    asset_id: Some(asset.asset_id),
+                    control_asset: None,
+                    metadata: None,
+                    inputs: vec![packet::AssetInput {
+                        input_index: input_index as u16 + INTENT_PROOF_FAKE_INPUT_INDEX_OFFSET,
+                        amount: asset.amount,
+                    }],
+                    outputs: asset_outputs,
+                });
+            }
+        }
+    }
+
+    if groups.is_empty() {
+        return Ok(None);
+    }
+
+    groups.sort_by_key(|group| {
+        let asset_id = group
+            .asset_id
+            .expect("asset-preservation groups always have asset ids");
+        (*asset_id.txid.as_byte_array(), asset_id.group_index)
+    });
+
+    Ok(Some(packet::Packet { groups }))
+}
+
 pub fn complete_delegate_forfeit_txs(
     forfeit_psbts: &[Psbt],
     connectors_leaves: &[&Psbt],
