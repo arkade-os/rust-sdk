@@ -399,18 +399,12 @@ where
     fn validate_selected_inputs_cover_receivers(
         vtxo_inputs: &[VtxoInput],
         receivers: &[SendReceiver],
+        dust: Amount,
     ) -> Result<(), Error> {
         let selected_amount = vtxo_inputs
             .iter()
             .fold(Amount::ZERO, |acc, v| acc + v.amount());
         let requested_amount = receivers.iter().fold(Amount::ZERO, |acc, r| acc + r.amount);
-
-        if selected_amount < requested_amount {
-            return Err(Error::coin_select(format!(
-                "insufficient VTXO amount: {} < {}",
-                selected_amount, requested_amount
-            )));
-        }
 
         let mut selected_assets = HashMap::<AssetId, u64>::new();
         for vtxo_input in vtxo_inputs {
@@ -436,14 +430,44 @@ where
             }
         }
 
-        for (asset_id, requested_amount) in requested_assets {
-            let selected_amount = selected_assets.get(&asset_id).copied().unwrap_or(0);
-            if selected_amount < requested_amount {
+        for (asset_id, requested_asset_amount) in &requested_assets {
+            let selected_asset_amount = selected_assets.get(asset_id).copied().unwrap_or(0);
+            if selected_asset_amount < *requested_asset_amount {
                 return Err(Error::coin_select(format!(
                     "insufficient asset amount for {}: {} < {}",
-                    asset_id, selected_amount, requested_amount
+                    asset_id, selected_asset_amount, requested_asset_amount
                 )));
             }
+        }
+
+        let mut has_asset_change = false;
+        for (asset_id, selected_asset_amount) in &selected_assets {
+            let requested_asset_amount = requested_assets.get(asset_id).copied().unwrap_or(0);
+
+            if *selected_asset_amount < requested_asset_amount {
+                return Err(Error::coin_select(format!(
+                    "insufficient asset amount for {}: {} < {}",
+                    asset_id, selected_asset_amount, requested_asset_amount
+                )));
+            }
+
+            if *selected_asset_amount > requested_asset_amount {
+                has_asset_change = true;
+            }
+        }
+
+        let required_amount = match has_asset_change {
+            true => requested_amount
+                .checked_add(dust)
+                .ok_or_else(|| Error::ad_hoc("required BTC amount overflow"))?,
+            false => requested_amount,
+        };
+
+        if selected_amount < required_amount {
+            return Err(Error::coin_select(format!(
+                "insufficient VTXO amount: {} < {}",
+                selected_amount, required_amount
+            )));
         }
 
         Ok(())
@@ -454,7 +478,11 @@ where
         vtxo_inputs: Vec<VtxoInput>,
         receivers: Vec<SendReceiver>,
     ) -> Result<Txid, Error> {
-        Self::validate_selected_inputs_cover_receivers(&vtxo_inputs, &receivers)?;
+        Self::validate_selected_inputs_cover_receivers(
+            &vtxo_inputs,
+            &receivers,
+            self.server_info.dust,
+        )?;
 
         let pending_tx = self.build_and_submit(vtxo_inputs, receivers).await?;
         let ark_txid = pending_tx.ark_txid;

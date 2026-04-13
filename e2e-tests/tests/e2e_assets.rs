@@ -76,7 +76,36 @@ pub async fn e2e_assets() {
         "issued asset balance"
     );
 
-    tracing::info!("=== Step 2: Settle asset ===");
+    tracing::info!("=== Step 2: Manual selection rejects missing asset-change dust ===");
+
+    let (vtxos_after_issuance, _) = alice.list_vtxos().await.unwrap();
+    let asset_vtxo = vtxos_after_issuance
+        .all_unspent()
+        .find(|vtxo| !vtxo.assets.is_empty())
+        .unwrap();
+
+    let (bob_address, _) = bob.get_offchain_address().unwrap();
+
+    let err = alice
+        .send_selection(
+            &[asset_vtxo.outpoint],
+            vec![SendReceiver {
+                address: bob_address,
+                amount: asset_vtxo.amount,
+                assets: Vec::new(),
+            }],
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        err.to_string().contains("insufficient VTXO amount"),
+        "manual selection should fail early when asset change requires extra BTC dust: {err}"
+    );
+
+    tracing::info!(?err, "Manual selection correctly rejected");
+
+    tracing::info!("=== Step 3: Settle asset ===");
 
     alice.settle(&mut rng).await.unwrap();
 
@@ -96,10 +125,9 @@ pub async fn e2e_assets() {
         "issued asset balance"
     );
 
-    tracing::info!("=== Step 3: Send asset to Bob ===");
+    tracing::info!("=== Step 4: Send asset to Bob ===");
 
     let send_amount: u64 = 200;
-    let (bob_address, _) = bob.get_offchain_address().unwrap();
 
     let send_txid = alice
         .send(vec![SendReceiver {
@@ -136,7 +164,7 @@ pub async fn e2e_assets() {
         "bob asset balance after send"
     );
 
-    tracing::info!("=== Step 4: Reissue asset ===");
+    tracing::info!("=== Step 5: Reissue asset ===");
 
     let reissue_amount: u64 = 500;
 
@@ -171,7 +199,7 @@ pub async fn e2e_assets() {
         "control asset preserved after reissue"
     );
 
-    tracing::info!("=== Step 5: Burn asset ===");
+    tracing::info!("=== Step 6: Burn asset ===");
 
     let burn_amount: u64 = 300;
 
