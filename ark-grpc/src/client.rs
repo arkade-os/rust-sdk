@@ -616,7 +616,7 @@ impl Client {
 
         let inner = response.into_inner();
 
-        let supply = inner.supply.parse::<u64>().unwrap_or(0);
+        let supply = inner.supply.parse::<u64>().map_err(Error::conversion)?;
 
         let asset_id = inner.asset_id.parse().map_err(Error::conversion)?;
         let control_asset_id = if inner.control_asset.is_empty() {
