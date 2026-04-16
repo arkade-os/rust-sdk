@@ -1,6 +1,6 @@
 use crate::ark_address::ArkAddress;
 use crate::script::csv_sig_script;
-use crate::script::multisig_3of3_script;
+use crate::script::multisig_3_of_3_script;
 use crate::script::multisig_script;
 use crate::script::tr_script_pubkey;
 use crate::Error;
@@ -141,7 +141,7 @@ impl Vtxo {
     {
         let forfeit_script = multisig_script(server_signer, owner);
         let redeem_script = csv_sig_script(exit_delay, owner);
-        let delegate_script = multisig_3of3_script(owner, delegator, server_signer);
+        let delegate_script = multisig_3_of_3_script(owner, delegator, server_signer);
 
         let mut vtxo = Self::new_with_custom_scripts(
             secp,
@@ -237,7 +237,7 @@ impl Vtxo {
             .delegator
             .ok_or(Error::ad_hoc("VTXO has no delegate path"))?;
 
-        let delegate_script = multisig_3of3_script(self.owner, delegator, self.server_forfeit);
+        let delegate_script = multisig_3_of_3_script(self.owner, delegator, self.server_forfeit);
 
         let control_block = self
             .get_spend_info(delegate_script.clone())

@@ -33,7 +33,7 @@ pub fn multisig_script(pk_0: XOnlyPublicKey, pk_1: XOnlyPublicKey) -> ScriptBuf 
 ///
 /// All three parties must sign to spend: `<pk_0> CHECKSIGVERIFY <pk_1> CHECKSIGVERIFY <pk_2>
 /// CHECKSIG`.
-pub fn multisig_3of3_script(
+pub fn multisig_3_of_3_script(
     pk_0: XOnlyPublicKey,
     pk_1: XOnlyPublicKey,
     pk_2: XOnlyPublicKey,
@@ -183,7 +183,7 @@ mod tests {
     }
 
     #[test]
-    fn test_multisig_3of3_script() {
+    fn test_multisig_3_of_3_script() {
         let pk_0 = XOnlyPublicKey::from_str(
             "18845781f631c48f1c9709e23092067d06837f30aa0cd0544ac887fe91ddd166",
         )
@@ -197,7 +197,7 @@ mod tests {
         )
         .unwrap();
 
-        let script = multisig_3of3_script(pk_0, pk_1, pk_2);
+        let script = multisig_3_of_3_script(pk_0, pk_1, pk_2);
         let pubkeys = extract_checksig_pubkeys(&script);
 
         assert_eq!(pubkeys.len(), 3);
