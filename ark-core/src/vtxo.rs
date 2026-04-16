@@ -37,12 +37,6 @@ pub struct Vtxo {
 }
 
 impl Vtxo {
-    /// 64 bytes per signature in a 2-of-2 multisig witness.
-    pub const FORFEIT_WITNESS_SIZE: usize = 64 * 2;
-
-    /// 64 bytes per signature in a 3-of-3 multisig witness (delegate path).
-    pub const DELEGATE_WITNESS_SIZE: usize = 64 * 3;
-
     /// Build a VTXO, by providing all the scripts to be included in the Taproot tree.
     ///
     /// The provided `scripts` must follow the following rules:
