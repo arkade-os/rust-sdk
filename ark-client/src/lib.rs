@@ -808,12 +808,12 @@ where
             // Cache keypairs for used addresses (match by script)
             let mut found_any = false;
             for (index, kp, addrs) in batch {
-                let is_used = addrs.iter().any(|addr| {
+                let used_addr = addrs.iter().find(|addr| {
                     let script = addr.to_p2tr_script_pubkey();
                     used_scripts.contains(&script)
                 });
-                if is_used {
-                    tracing::debug!(index, addr = %addrs[0], "Found used address");
+                if let Some(addr) = used_addr {
+                    tracing::debug!(index, addr = %addr, "Found used address");
                     self.inner
                         .key_provider
                         .cache_discovered_keypair(index, kp)?;
