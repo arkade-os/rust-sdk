@@ -307,9 +307,12 @@ async fn fetch_delegator_state(
     })
 }
 
+/// Number of seconds in a UTC day.
+const SECONDS_PER_DAY: i64 = 86_400;
+
 /// Normalize a unix timestamp (seconds) to UTC midnight of that day.
 fn day_timestamp(ts: i64) -> i64 {
-    (ts / 86400) * 86400
+    ts - ts.rem_euclid(SECONDS_PER_DAY)
 }
 
 /// Group VTXOs by their expiry day (UTC midnight), returning groups sorted by expiry.
