@@ -663,19 +663,122 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bitcoin::hashes::Hash;
+    use bitcoin::key::Secp256k1;
+    use bitcoin::Network;
+    use bitcoin::Sequence;
+    use bitcoin::Txid;
+    use bitcoin::XOnlyPublicKey;
+    use std::str::FromStr;
+
+    fn test_keys() -> (XOnlyPublicKey, XOnlyPublicKey, XOnlyPublicKey) {
+        let server = XOnlyPublicKey::from_str(
+            "18845781f631c48f1c9709e23092067d06837f30aa0cd0544ac887fe91ddd166",
+        )
+        .unwrap();
+        let owner = XOnlyPublicKey::from_str(
+            "28845781f631c48f1c9709e23092067d06837f30aa0cd0544ac887fe91ddd166",
+        )
+        .unwrap();
+        let delegator = XOnlyPublicKey::from_str(
+            "38845781f631c48f1c9709e23092067d06837f30aa0cd0544ac887fe91ddd166",
+        )
+        .unwrap();
+        (server, owner, delegator)
+    }
+
+    fn delegated_vtxo() -> (ArkAddress, Vtxo) {
+        let secp = Secp256k1::new();
+        let (server, owner, delegator) = test_keys();
+        let vtxo = Vtxo::new_with_delegator(
+            &secp,
+            server,
+            owner,
+            delegator,
+            Sequence::from_seconds_ceil(86400).unwrap(),
+            Network::Regtest,
+        )
+        .unwrap();
+        (vtxo.to_ark_address(), vtxo)
+    }
+
+    fn mk_vtp(script: ScriptBuf, amount_sat: u64, expires_at: i64, vout: u32) -> VirtualTxOutPoint {
+        VirtualTxOutPoint {
+            outpoint: OutPoint::new(Txid::all_zeros(), vout),
+            created_at: expires_at - 1000,
+            expires_at,
+            amount: Amount::from_sat(amount_sat),
+            script,
+            is_preconfirmed: false,
+            is_swept: false,
+            is_unrolled: false,
+            is_spent: false,
+            spent_by: None,
+            commitment_txids: vec![],
+            settled_by: None,
+            ark_txid: None,
+            assets: vec![],
+        }
+    }
 
     #[test]
     fn day_timestamp_normalizes_to_midnight() {
         let ts = 1705322700; // 2024-01-15 13:45:00 UTC
         let day = day_timestamp(ts);
-        assert_eq!(day % 86400, 0);
+        assert_eq!(day % SECONDS_PER_DAY, 0);
         assert!(day <= ts);
-        assert!(ts - day < 86400);
+        assert!(ts - day < SECONDS_PER_DAY);
     }
 
     #[test]
     fn day_timestamp_already_midnight() {
-        let ts = 86400 * 19738;
+        let ts = SECONDS_PER_DAY * 19738;
         assert_eq!(day_timestamp(ts), ts);
+    }
+
+    #[test]
+    fn group_by_expiry_day_merges_recoverable_into_earliest_group() {
+        let (addr, vtxo) = delegated_vtxo();
+        let script = addr.to_p2tr_script_pubkey();
+        let script_map = ScriptMap::from_addresses(&[(addr, vtxo)]);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let day1_midnight = day_timestamp(now) + SECONDS_PER_DAY;
+        let day2_midnight = day1_midnight + SECONDS_PER_DAY;
+
+        let recoverable = mk_vtp(script.clone(), 100, day1_midnight + 500, 0); // sub-dust
+        let non_recoverable_day1 = mk_vtp(script.clone(), 10_000, day1_midnight + 800, 1);
+        let non_recoverable_day2 = mk_vtp(script, 10_000, day2_midnight + 800, 2);
+
+        let vtxos = [non_recoverable_day2, recoverable, non_recoverable_day1];
+        let groups = group_by_expiry_day(&vtxos, &script_map, Amount::from_sat(500));
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].0, day_timestamp(day1_midnight + 800));
+        assert_eq!(groups[1].0, day_timestamp(day2_midnight + 800));
+        assert_eq!(groups[0].1.len(), 2);
+        assert_eq!(groups[1].1.len(), 1);
+    }
+
+    #[test]
+    fn calculate_valid_at_for_non_recoverable_group_is_before_expiry() {
+        let (_addr, vtxo) = delegated_vtxo();
+        let script = ScriptBuf::new();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let later = mk_vtp(script, 10_000, now + 10_000, 1);
+        let group = vec![(&later, &vtxo)];
+
+        let valid_at = calculate_valid_at(&group);
+
+        assert!(valid_at > now as u64);
+        assert!(valid_at < later.expires_at as u64);
     }
 }
