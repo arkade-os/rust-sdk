@@ -673,7 +673,7 @@ async fn delegate_group<B, W, S, K>(
 }
 
 /// Fraction of VTXO lifetime remaining at which we self-renew as a safety net.
-const SELF_RENEW_REMAINING_FRACTION: f64 = 0.05;
+const SELF_RENEW_REMAINING_FRACTION: f64 = 0.10;
 
 /// Self-renew VTXOs that are close to expiry.
 ///
