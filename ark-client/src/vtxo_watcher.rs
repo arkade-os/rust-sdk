@@ -5,12 +5,14 @@
 //! - On new VTXOs received: self-renew VTXOs that are close to expiry (safety net)
 //! - On stream error: reconnect with exponential backoff
 
+use crate::error::ErrorContext;
 use crate::key_provider::KeyProvider;
 use crate::swap_storage::SwapStorage;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use crate::Blockchain;
 use crate::Client;
+use crate::Error;
 use ark_core::intent;
 use ark_core::server::SubscriptionResponse;
 use ark_core::server::VirtualTxOutPoint;
@@ -272,52 +274,36 @@ struct DelegatorState {
 async fn fetch_delegator_state(
     delegator: &DelegatorClient,
     network: bitcoin::Network,
-) -> Option<DelegatorState> {
-    let info = match delegator.info().await {
-        Ok(info) => info,
-        Err(e) => {
-            tracing::error!("Failed to get delegator info: {e}");
-            return None;
-        }
-    };
+) -> Result<DelegatorState, Error> {
+    let info = delegator
+        .info()
+        .await
+        .context(Error::ad_hoc("failed to get delegator info"))?;
 
-    let cosigner_pk: PublicKey = match info.pubkey.parse() {
-        Ok(pk) => pk,
-        Err(e) => {
-            tracing::error!("Failed to parse delegator pubkey: {e}");
-            return None;
-        }
-    };
+    let cosigner_pk: PublicKey = info
+        .pubkey
+        .parse::<PublicKey>()
+        .context("failed to parse delegator PK")?;
 
-    let fee = match info.fee.parse::<u64>() {
-        Ok(f) => Amount::from_sat(f),
-        Err(e) => {
-            tracing::error!("Failed to parse delegator fee: {e}");
-            return None;
-        }
-    };
+    let fee = info
+        .fee
+        .parse::<u64>()
+        .map(Amount::from_sat)
+        .context("failed to parse delegator fee")?;
 
-    let fee_address: bitcoin::Address<bitcoin::address::NetworkUnchecked> =
-        match info.delegator_address.parse() {
-            Ok(a) => a,
-            Err(e) => {
-                tracing::error!("Failed to parse delegator address: {e}");
-                return None;
-            }
-        };
-    let fee_address = match fee_address.require_network(network) {
-        Ok(a) => a,
-        Err(e) => {
-            tracing::error!("Delegator fee address network mismatch: {e}");
-            return None;
-        }
-    };
-    let fee_address_script = fee_address.script_pubkey();
+    let fee_address: bitcoin::Address<bitcoin::address::NetworkUnchecked> = info
+        .delegator_address
+        .parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
+        .context("failed to parse delegator fee address")?;
 
-    Some(DelegatorState {
+    let fee_address = fee_address
+        .require_network(network)
+        .context("wrong network for delegator fee address")?;
+
+    Ok(DelegatorState {
         cosigner_pk,
         fee,
-        fee_address_script,
+        fee_address_script: fee_address.script_pubkey(),
     })
 }
 
@@ -443,8 +429,11 @@ async fn delegate_vtxos<B, W, S, K>(
     }
 
     let delegator_state = match fetch_delegator_state(delegator, client.server_info.network).await {
-        Some(s) => Arc::new(s),
-        None => return,
+        Ok(s) => Arc::new(s),
+        Err(e) => {
+            tracing::error!("{e}");
+            return;
+        }
     };
 
     let (to_address, _) = match client.get_offchain_address() {
