@@ -421,12 +421,17 @@ where
 
         let network_client = ark_grpc::Client::new(ark_server_url);
 
-        // Ensure the current delegator pk is always in the historical list.
-        let mut historical_delegator_pks = historical_delegator_pks;
+        // Normalize historical delegator keys once (preserve order, remove duplicates), then
+        // ensure the current delegator key is present at the front.
+        let mut seen = HashSet::new();
+        let mut historical_delegator_pks: Vec<_> = historical_delegator_pks
+            .into_iter()
+            .filter(|pk| seen.insert(*pk))
+            .collect();
+
         if let Some(pk) = delegator_pk {
-            if !historical_delegator_pks.contains(&pk) {
-                historical_delegator_pks.insert(0, pk);
-            }
+            historical_delegator_pks.retain(|k| *k != pk);
+            historical_delegator_pks.insert(0, pk);
         }
 
         Self {
