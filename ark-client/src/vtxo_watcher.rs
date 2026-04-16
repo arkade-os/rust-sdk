@@ -32,6 +32,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
+use tokio::sync::Mutex;
 
 /// Handle to stop the background VTXO watcher.
 ///
@@ -187,6 +188,7 @@ async fn run_watcher_loop<B, W, S, K>(
         backoff = INITIAL_BACKOFF;
         let mut known_key_count = addresses.len();
         let mut script_map = script_map;
+        let processing_lock = Arc::new(Mutex::new(()));
 
         loop {
             tokio::select! {
@@ -233,7 +235,9 @@ async fn run_watcher_loop<B, W, S, K>(
                                 let delegator = Arc::clone(&delegator);
                                 let script_map = Arc::clone(&script_map);
                                 let new_vtxos = event.new_vtxos;
+                                let processing_lock = Arc::clone(&processing_lock);
                                 tokio::spawn(async move {
+                                    let _guard = processing_lock.lock().await;
                                     delegate_vtxos(&client, &delegator, &new_vtxos, &script_map).await;
                                     renew_expiring_vtxos(&client).await;
                                 });
