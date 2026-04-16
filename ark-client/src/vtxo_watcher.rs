@@ -318,7 +318,7 @@ fn day_timestamp(ts: i64) -> i64 {
 /// Group VTXOs by their expiry day (UTC midnight), returning groups sorted by expiry.
 ///
 /// Recoverable VTXOs (expired or sub-dust) are collected separately and merged into the earliest
-/// group, matching the ts-sdk behaviour.
+/// non-recoverable group.
 fn group_by_expiry_day<'a>(
     vtxos: &'a [VirtualTxOutPoint],
     script_map: &'a ScriptMap,
@@ -362,7 +362,7 @@ fn group_by_expiry_day<'a>(
 
 /// Calculate the `valid_at` timestamp for a delegation group.
 ///
-/// `valid_at` is set to 90% through the VTXO lifetime (10% before expiry), matching the ts-sdk.
+/// `valid_at` is set to 90% through the VTXO lifetime (10% before expiry).
 /// For recoverable/expired VTXOs (group day = 0 or expiry in the past), returns `now + 60s`.
 fn calculate_valid_at(group_vtxos: &[(&VirtualTxOutPoint, &Vtxo)]) -> u64 {
     let now_secs = std::time::SystemTime::now()
