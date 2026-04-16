@@ -663,8 +663,17 @@ pub fn prepare_delegate_psbts_at(
         None => (now, now + (2 * 60)),
     };
 
+    let onchain_output_indexes = outputs
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, output)| match output {
+            intent::Output::Onchain(_) => Some(idx),
+            intent::Output::Offchain(_) | intent::Output::AssetPacket(_) => None,
+        })
+        .collect();
+
     let intent_message = intent::IntentMessage::Register {
-        onchain_output_indexes: Vec::new(),
+        onchain_output_indexes,
         valid_at,
         expire_at,
         own_cosigner_pks: vec![delegate_cosigner_pk],
