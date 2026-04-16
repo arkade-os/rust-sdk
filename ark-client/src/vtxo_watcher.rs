@@ -362,8 +362,10 @@ fn group_by_expiry_day<'a>(
 
 /// Calculate the `valid_at` timestamp for a delegation group.
 ///
-/// `valid_at` is set to 90% through the VTXO lifetime (10% before expiry).
-/// For recoverable/expired VTXOs (group day = 0 or expiry in the past), returns `now + 60s`.
+/// Uses the earliest non-recoverable expiry in the group as a reference and schedules renewal at
+/// 90% of the remaining lifetime (i.e. roughly 10% before expiry).
+///
+/// If the group only contains recoverable/expired VTXOs, schedule soon (`now + 60s`).
 fn calculate_valid_at(group_vtxos: &[(&VirtualTxOutPoint, &Vtxo)], dust: Amount) -> u64 {
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -377,10 +379,13 @@ fn calculate_valid_at(group_vtxos: &[(&VirtualTxOutPoint, &Vtxo)], dust: Amount)
         .min();
 
     match earliest_expiry {
+        // Schedule roughly 10% before expiry based on remaining lifetime.
         Some(expiry) if expiry > now_secs => {
-            let remaining = expiry - now_secs;
-            expiry - remaining / 10
+            let remaining_lifetime = expiry - now_secs;
+            let renewal_lead_time = remaining_lifetime / 10;
+            expiry.saturating_sub(renewal_lead_time)
         }
+        // Recoverable-only or already-expired groups: renew quickly.
         _ => now_secs + 60,
     }
 }
@@ -780,5 +785,32 @@ mod tests {
 
         assert!(valid_at > now as u64);
         assert!(valid_at < later.expires_at as u64);
+    }
+
+    #[test]
+    fn calculate_valid_at_for_recoverable_only_group_is_soon() {
+        let (_addr, vtxo) = delegated_vtxo();
+        let script = ScriptBuf::new();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let recoverable = mk_vtp(script, 100, now + 5_000, 0); // sub-dust at dust=500
+        let group = vec![(&recoverable, &vtxo)];
+
+        let start = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let valid_at = calculate_valid_at(&group, Amount::from_sat(500));
+        let end = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        assert!(valid_at >= start + 60);
+        assert!(valid_at <= end + 61);
     }
 }
