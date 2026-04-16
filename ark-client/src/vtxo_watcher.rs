@@ -31,8 +31,8 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio::sync::watch;
-use tokio::sync::Mutex;
 
 /// Handle to stop the background VTXO watcher.
 ///
@@ -95,6 +95,14 @@ impl ScriptMap {
         }
         result
     }
+}
+
+enum WatcherWork {
+    NewVtxos {
+        vtxos: Vec<VirtualTxOutPoint>,
+        script_map: Arc<ScriptMap>,
+    },
+    RenewTick,
 }
 
 impl<B, W, S, K> Client<B, W, S, K>
@@ -188,12 +196,61 @@ async fn run_watcher_loop<B, W, S, K>(
         backoff = INITIAL_BACKOFF;
         let mut known_key_count = addresses.len();
         let mut script_map = script_map;
-        let processing_lock = Arc::new(Mutex::new(()));
+        let mut renew_interval = tokio::time::interval(Duration::from_secs(60));
+        let (work_tx, mut work_rx) = mpsc::channel::<WatcherWork>(128);
+
+        let worker_handle = tokio::spawn({
+            let client = client.clone();
+            let delegator = delegator.clone();
+            async move {
+                while let Some(first) = work_rx.recv().await {
+                    // Handle one guaranteed message to start the batch.
+                    let (mut pending_vtxos, mut latest_script_map, mut should_renew) = match first {
+                        WatcherWork::NewVtxos { vtxos, script_map } => {
+                            (vtxos, Some(script_map), true)
+                        }
+                        WatcherWork::RenewTick => (Vec::new(), None, true),
+                    };
+
+                    // Drain whatever else is already queued without waiting.
+                    while let Ok(work) = work_rx.try_recv() {
+                        match work {
+                            WatcherWork::NewVtxos { vtxos, script_map } => {
+                                pending_vtxos.extend(vtxos);
+                                latest_script_map = Some(script_map);
+                                should_renew = true;
+                            }
+                            WatcherWork::RenewTick => {
+                                should_renew = true;
+                            }
+                        }
+                    }
+
+                    if !pending_vtxos.is_empty() {
+                        if let Some(script_map) = latest_script_map {
+                            delegate_vtxos(&client, &delegator, &pending_vtxos, &script_map).await;
+                        }
+                    }
+
+                    if should_renew {
+                        renew_expiring_vtxos(&client).await;
+                    }
+                }
+            }
+        });
 
         loop {
             tokio::select! {
                 _ = stop_rx.changed() => {
+                    drop(work_tx);
+                    let _ = worker_handle.await;
                     return;
+                }
+                _ = renew_interval.tick() => {
+                    if work_tx.send(WatcherWork::RenewTick).await.is_err() {
+                        tracing::warn!("VTXO worker channel closed, reconnecting in {backoff:?}");
+                        break;
+                    }
                 }
                 event = stream.next() => {
                     match event {
@@ -229,19 +286,19 @@ async fn run_watcher_loop<B, W, S, K>(
                                 }
                             }
                         }
-                        Some(Ok(SubscriptionResponse::Event(event))) => {
-                            if !event.new_vtxos.is_empty() {
-                                let client = Arc::clone(&client);
-                                let delegator = Arc::clone(&delegator);
-                                let script_map = Arc::clone(&script_map);
-                                let new_vtxos = event.new_vtxos;
-                                let processing_lock = Arc::clone(&processing_lock);
-                                tokio::spawn(async move {
-                                    let _guard = processing_lock.lock().await;
-                                    delegate_vtxos(&client, &delegator, &new_vtxos, &script_map).await;
-                                    renew_expiring_vtxos(&client).await;
-                                });
+                        Some(Ok(SubscriptionResponse::Event(event))) if !event.new_vtxos.is_empty() => {
+                            if work_tx.send(WatcherWork::NewVtxos {
+                                vtxos: event.new_vtxos,
+                                script_map: Arc::clone(&script_map),
+                            })
+                            .await.is_err()
+                            {
+                                tracing::warn!("VTXO worker channel closed. Reconnecting in {backoff:?}");
+                                break;
                             }
+                        }
+                        Some(Ok(SubscriptionResponse::Event(_))) => {
+                            // No new VTXOs to handle.
                         }
                         Some(Err(e)) => {
                             tracing::warn!("VTXO subscription error: {e}, reconnecting in {backoff:?}");
@@ -255,6 +312,9 @@ async fn run_watcher_loop<B, W, S, K>(
                 }
             }
         }
+
+        drop(work_tx);
+        let _ = worker_handle.await;
 
         if wait_or_stop(&mut stop_rx, backoff).await {
             return;
