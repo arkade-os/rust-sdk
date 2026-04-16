@@ -273,7 +273,7 @@ async fn run_watcher_loop<B, W, S, K>(
                                         )
                                         .await
                                     {
-                                        Ok(()) => {
+                                        Ok(_) => {
                                             script_map = Arc::new(ScriptMap::from_addresses(&addrs));
                                             known_key_count = addrs.len();
                                         }
