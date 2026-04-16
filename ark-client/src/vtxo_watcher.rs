@@ -364,7 +364,7 @@ fn group_by_expiry_day<'a>(
 ///
 /// `valid_at` is set to 90% through the VTXO lifetime (10% before expiry).
 /// For recoverable/expired VTXOs (group day = 0 or expiry in the past), returns `now + 60s`.
-fn calculate_valid_at(group_vtxos: &[(&VirtualTxOutPoint, &Vtxo)]) -> u64 {
+fn calculate_valid_at(group_vtxos: &[(&VirtualTxOutPoint, &Vtxo)], dust: Amount) -> u64 {
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -372,7 +372,7 @@ fn calculate_valid_at(group_vtxos: &[(&VirtualTxOutPoint, &Vtxo)]) -> u64 {
 
     let earliest_expiry = group_vtxos
         .iter()
-        .filter(|(vtp, _)| !vtp.is_recoverable(Amount::ZERO) && vtp.expires_at > 0)
+        .filter(|(vtp, _)| !vtp.is_recoverable(dust) && vtp.expires_at > 0)
         .map(|(vtp, _)| vtp.expires_at as u64)
         .min();
 
@@ -451,7 +451,7 @@ async fn delegate_vtxos<B, W, S, K>(
     let mut handles = Vec::new();
 
     for (_day, group_vtxos) in groups {
-        let valid_at = calculate_valid_at(&group_vtxos);
+        let valid_at = calculate_valid_at(&group_vtxos, client.server_info.dust);
 
         let mut vtxo_inputs = Vec::new();
         let mut total_amount = Amount::ZERO;
@@ -776,7 +776,7 @@ mod tests {
         let later = mk_vtp(script, 10_000, now + 10_000, 1);
         let group = vec![(&later, &vtxo)];
 
-        let valid_at = calculate_valid_at(&group);
+        let valid_at = calculate_valid_at(&group, Amount::from_sat(500));
 
         assert!(valid_at > now as u64);
         assert!(valid_at < later.expires_at as u64);
