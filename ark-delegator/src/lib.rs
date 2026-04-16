@@ -35,6 +35,7 @@ use bitcoin::Psbt;
 pub use error::Error;
 use serde::Deserialize;
 use serde::Serialize;
+use std::time::Duration;
 
 /// Information about a delegator service.
 #[derive(Debug, Clone, Deserialize)]
@@ -76,6 +77,8 @@ pub struct DelegatorClient {
     http: reqwest::Client,
 }
 
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
 impl DelegatorClient {
     pub fn new(url: String) -> Self {
         Self {
@@ -88,7 +91,13 @@ impl DelegatorClient {
     pub async fn info(&self) -> Result<DelegatorInfo, Error> {
         let url = format!("{}/v1/delegator/info", self.url);
 
-        let response = self.http.get(&url).send().await.map_err(Error::Http)?;
+        let response = self
+            .http
+            .get(&url)
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map_err(Error::Http)?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -136,6 +145,7 @@ impl DelegatorClient {
             .http
             .post(&url)
             .json(&body)
+            .timeout(REQUEST_TIMEOUT)
             .send()
             .await
             .map_err(Error::Http)?;
