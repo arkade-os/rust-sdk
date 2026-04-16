@@ -430,30 +430,34 @@ fn group_by_expiry_day<'a>(
 
 /// Calculate the `valid_at` timestamp for a delegation group.
 ///
-/// Uses the earliest non-recoverable expiry in the group as a reference and schedules renewal at
-/// 90% of the remaining lifetime (i.e. roughly 10% before expiry).
+/// For each non-recoverable VTXO, compute activation at 90% of its full lifetime:
+/// `created_at + (expires_at - created_at) * 0.9`. The earliest of those activations is used.
 ///
-/// If the group only contains recoverable/expired VTXOs, schedule soon (`now + 60s`).
+/// If the group only contains recoverable/expired VTXOs (or activation is already in the past),
+/// schedule soon (`now + 60s`).
 fn calculate_valid_at(group_vtxos: &[(&VirtualTxOutPoint, &Vtxo)], dust: Amount) -> u64 {
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
 
-    let earliest_expiry = group_vtxos
+    let earliest_activation = group_vtxos
         .iter()
-        .filter(|(vtp, _)| !vtp.is_recoverable(dust) && vtp.expires_at > 0)
-        .map(|(vtp, _)| vtp.expires_at as u64)
+        .filter(|(vtp, _)| {
+            !vtp.is_recoverable(dust)
+                && vtp.created_at > 0
+                && vtp.expires_at > 0
+                && vtp.expires_at > vtp.created_at
+        })
+        .map(|(vtp, _)| {
+            let created_at = vtp.created_at as u64;
+            let lifetime = (vtp.expires_at - vtp.created_at) as u64;
+            created_at + (lifetime * 9 / 10)
+        })
         .min();
 
-    match earliest_expiry {
-        // Schedule roughly 10% before expiry based on remaining lifetime.
-        Some(expiry) if expiry > now_secs => {
-            let remaining_lifetime = expiry - now_secs;
-            let renewal_lead_time = remaining_lifetime / 10;
-            expiry.saturating_sub(renewal_lead_time)
-        }
-        // Recoverable-only or already-expired groups: renew quickly.
+    match earliest_activation {
+        Some(valid_at) if valid_at > now_secs => valid_at,
         _ => now_secs + 60,
     }
 }
