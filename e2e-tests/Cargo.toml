@@ -12,6 +12,7 @@ anyhow = "1"
 ark-bdk-wallet = { path = "../ark-bdk-wallet" }
 ark-client = { path = "../ark-client", features = ["test-utils"] }
 ark-core = { path = "../ark-core" }
+ark-delegator = { path = "../ark-delegator" }
 ark-grpc = { path = "../ark-grpc", features = ["test-utils"] }
 ark-rest = { path = "../ark-rest" }
 async-stream = "0.3"
