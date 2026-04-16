@@ -207,19 +207,23 @@ async fn run_watcher_loop<B, W, S, K>(
                                         count = new_addrs.len(),
                                         "Adding newly derived addresses to subscription"
                                     );
-                                    if let Err(e) = client
+                                    match client
                                         .subscribe_to_scripts(
                                             new_addrs,
                                             Some(subscription_id.clone()),
                                         )
                                         .await
                                     {
-                                        tracing::warn!(
-                                            "Failed to add scripts to subscription: {e}"
-                                        );
+                                        Ok(()) => {
+                                            script_map = Arc::new(ScriptMap::from_addresses(&addrs));
+                                            known_key_count = addrs.len();
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "Failed to add scripts to subscription: {e}"
+                                            );
+                                        }
                                     }
-                                    script_map = Arc::new(ScriptMap::from_addresses(&addrs));
-                                    known_key_count = addrs.len();
                                 }
                             }
                         }
