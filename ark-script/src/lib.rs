@@ -14,6 +14,7 @@
 
 pub mod opcodes;
 pub mod script;
+pub mod tweak;
 
 pub use opcodes::op;
 pub use opcodes::opcode_from_name;
@@ -23,3 +24,9 @@ pub use script::bytes_to_asm;
 pub use script::from_asm;
 pub use script::to_asm;
 pub use script::AsmError;
+pub use tweak::arkade_script_hash;
+pub use tweak::arkade_witness_hash;
+pub use tweak::compute_arkade_script_public_key;
+pub use tweak::ArkadeScriptHash;
+pub use tweak::ArkadeWitnessHash;
+pub use tweak::TweakError;
