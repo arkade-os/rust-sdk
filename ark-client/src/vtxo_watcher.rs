@@ -200,7 +200,8 @@ async fn run_watcher_loop<B, W, S, K>(
 
         tracing::info!("VTXO watcher connected");
         backoff = INITIAL_BACKOFF;
-        let mut known_key_count = addresses.len();
+        let mut subscribed_addrs: HashSet<ArkAddress> =
+            addresses.iter().map(|(addr, _)| *addr).collect();
         let mut script_map = script_map;
         let mut renew_interval = tokio::time::interval(Duration::from_secs(60));
         let mut discovery_interval = tokio::time::interval(KEY_DISCOVERY_INTERVAL);
@@ -308,13 +309,12 @@ async fn run_watcher_loop<B, W, S, K>(
                     match refresh_subscription_scripts(
                         client.as_ref(),
                         &subscription_id,
-                        known_key_count,
+                        &mut subscribed_addrs,
                     )
                     .await
                     {
-                        Ok(Some((new_script_map, new_known_key_count))) => {
+                        Ok(Some(new_script_map)) => {
                             script_map = new_script_map;
-                            known_key_count = new_known_key_count;
                         }
                         Ok(None) => {}
                         Err(e) => {
@@ -379,8 +379,8 @@ async fn wait_or_stop(stop_rx: &mut watch::Receiver<bool>, duration: Duration) -
 async fn refresh_subscription_scripts<B, W, S, K>(
     client: &Client<B, W, S, K>,
     subscription_id: &str,
-    known_key_count: usize,
-) -> Result<Option<(Arc<ScriptMap>, usize)>, Error>
+    subscribed_addrs: &mut HashSet<ArkAddress>,
+) -> Result<Option<Arc<ScriptMap>>, Error>
 where
     B: Blockchain + Send + Sync + 'static,
     W: BoardingWallet + OnchainWallet + Send + Sync + 'static,
@@ -390,26 +390,28 @@ where
     let _discovered = client.discover_keys(KEY_DISCOVERY_GAP_LIMIT).await?;
 
     let addrs = client.get_offchain_addresses()?;
-    if addrs.len() <= known_key_count {
+    let new_addrs: Vec<_> = addrs
+        .iter()
+        .map(|(addr, _)| *addr)
+        .filter(|addr| !subscribed_addrs.contains(addr))
+        .collect();
+
+    if new_addrs.is_empty() {
         return Ok(None);
     }
 
-    let new_addrs: Vec<_> = addrs[known_key_count..]
-        .iter()
-        .map(|(addr, _)| *addr)
-        .collect();
-
     client
-        .subscribe_to_scripts(new_addrs, Some(subscription_id.to_string()))
+        .subscribe_to_scripts(new_addrs.clone(), Some(subscription_id.to_string()))
         .await?;
 
-    let added = addrs.len() - known_key_count;
+    let added = new_addrs.len();
+    subscribed_addrs.extend(new_addrs);
     tracing::info!(
         added,
         "Updated watcher subscription with newly derived addresses"
     );
 
-    Ok(Some((Arc::new(ScriptMap::from_addresses(&addrs)), addrs.len())))
+    Ok(Some(Arc::new(ScriptMap::from_addresses(&addrs))))
 }
 
 /// Enumerate newly seen unspent delegate-eligible VTXOs from wallet state.
