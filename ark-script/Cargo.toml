@@ -1,0 +1,16 @@
+[package]
+name = "ark-script"
+version = "0.1.0"
+edition = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+rust-version = "1.86"
+description = "Arkade script extension: opcodes, key tweaking, and taproot leaf helpers"
+
+[lints]
+workspace = true
+
+[dependencies]
+bitcoin = { version = "0.32.7", features = ["serde"] }
+hex = "0.4"
+thiserror = "1.0"
