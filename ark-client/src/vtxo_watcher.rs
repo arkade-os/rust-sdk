@@ -339,10 +339,7 @@ struct DelegatorState {
 }
 
 /// Fetch and parse delegator info into a usable form.
-async fn fetch_delegator_state(
-    delegator: &DelegatorClient,
-    network: bitcoin::Network,
-) -> Result<DelegatorState, Error> {
+async fn fetch_delegator_state(delegator: &DelegatorClient) -> Result<DelegatorState, Error> {
     let info = delegator
         .info()
         .await
@@ -359,19 +356,16 @@ async fn fetch_delegator_state(
         .map(Amount::from_sat)
         .context("failed to parse delegator fee")?;
 
-    let fee_address: bitcoin::Address<bitcoin::address::NetworkUnchecked> = info
+    let fee_address_script = info
         .delegator_address
-        .parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
-        .context("failed to parse delegator fee address")?;
-
-    let fee_address = fee_address
-        .require_network(network)
-        .context("wrong network for delegator fee address")?;
+        .parse::<ArkAddress>()
+        .context("failed to parse delegator fee address")?
+        .to_p2tr_script_pubkey();
 
     Ok(DelegatorState {
         cosigner_pk,
         fee,
-        fee_address_script: fee_address.script_pubkey(),
+        fee_address_script,
     })
 }
 
@@ -508,7 +502,7 @@ async fn delegate_vtxos<B, W, S, K>(
         return;
     }
 
-    let delegator_state = match fetch_delegator_state(delegator, client.server_info.network).await {
+    let delegator_state = match fetch_delegator_state(delegator).await {
         Ok(s) => Arc::new(s),
         Err(e) => {
             tracing::error!("{e}");
