@@ -649,9 +649,8 @@ async fn run_command<K: KeyProvider>(
             while let Some(result) = subscription_stream.next().await {
                 match result {
                     Ok(SubscriptionResponse::Event(e)) => {
-                        if let Some(psbt) = e.tx {
-                            let tx = &psbt.unsigned_tx;
-                            let output = tx.output.to_vec().iter().find_map(|out| {
+                        if let Some(tx) = e.tx {
+                            let output = tx.output.iter().find_map(|out| {
                                 if out.script_pubkey == address.0.to_p2tr_script_pubkey() {
                                     Some(out.clone())
                                 } else {
