@@ -254,7 +254,7 @@ async fn run_watcher_loop<B, W, S, K>(
                         {
                             Ok(new_candidates) => {
                                 if !new_candidates.is_empty() {
-                                    tracing::info!(
+                                    tracing::debug!(
                                         count = new_candidates.len(),
                                         "Found new delegatable VTXOs from failsafe polling"
                                     );
@@ -276,7 +276,7 @@ async fn run_watcher_loop<B, W, S, K>(
                             }
                         }
 
-                        tracing::info!(count = deduped.len(), "Processing VTXOs for delegation");
+                        tracing::debug!(count = deduped.len(), "Processing VTXOs for delegation");
                         if let Some(script_map) = latest_script_map {
                             delegate_vtxos(&client, &delegator, &deduped, &script_map).await;
                         }
@@ -324,20 +324,15 @@ async fn run_watcher_loop<B, W, S, K>(
                 }
                 event = stream.next() => {
                     match event {
-                        Some(Ok(SubscriptionResponse::Heartbeat)) => {
-                            tracing::debug!("Received subscription heartbeat");
-                        }
+                        Some(Ok(SubscriptionResponse::Heartbeat)) => {}
                         Some(Ok(SubscriptionResponse::Event(event))) => {
-                            let new_count = event.new_vtxos.len();
-                            let spent_count = event.spent_vtxos.len();
-                            tracing::info!(
-                                txid = %event.txid,
-                                new_vtxos = new_count,
-                                spent_vtxos = spent_count,
-                                "Received subscription event"
-                            );
+                            if !event.new_vtxos.is_empty() {
+                                tracing::debug!(
+                                    txid = %event.txid,
+                                    new_vtxos = event.new_vtxos.len(),
+                                    "Received subscription event with new VTXOs"
+                                );
 
-                            if new_count > 0 {
                                 if work_tx.send(WatcherWork::NewVtxos {
                                     vtxos: event.new_vtxos,
                                     script_map: Arc::clone(&script_map),
@@ -392,14 +387,7 @@ where
     S: SwapStorage + 'static,
     K: KeyProvider + Send + Sync + 'static,
 {
-    let discovered = client.discover_keys(KEY_DISCOVERY_GAP_LIMIT).await?;
-    if discovered > 0 {
-        tracing::debug!(
-            discovered,
-            gap_limit = KEY_DISCOVERY_GAP_LIMIT,
-            "Periodic watcher key discovery found used keys"
-        );
-    }
+    let _discovered = client.discover_keys(KEY_DISCOVERY_GAP_LIMIT).await?;
 
     let addrs = client.get_offchain_addresses()?;
     if addrs.len() <= known_key_count {
@@ -410,11 +398,6 @@ where
         .iter()
         .map(|(addr, _)| *addr)
         .collect();
-
-    tracing::debug!(
-        count = new_addrs.len(),
-        "Adding newly derived addresses to subscription"
-    );
 
     client
         .subscribe_to_scripts(new_addrs, Some(subscription_id.to_string()))
@@ -611,13 +594,8 @@ async fn delegate_vtxos<B, W, S, K>(
 {
     // Query only the addresses that appear in the event, not all wallet addresses.
     let affected_addresses = script_map.addresses_for(new_vtxos);
-    tracing::info!(
-        event_new_vtxos = new_vtxos.len(),
-        affected_addresses = affected_addresses.len(),
-        "Preparing delegation from subscription event"
-    );
     if affected_addresses.is_empty() {
-        tracing::warn!("No affected addresses resolved from new VTXOs; skipping delegation");
+        tracing::debug!("No affected addresses resolved from new VTXOs; skipping delegation");
         return;
     }
 
@@ -642,13 +620,8 @@ async fn delegate_vtxos<B, W, S, K>(
         .collect();
 
     let groups = group_by_expiry_day(&enriched, script_map, client.server_info.dust);
-    tracing::info!(
-        enriched_vtxos = enriched.len(),
-        groups = groups.len(),
-        "Grouped VTXOs for delegation"
-    );
     if groups.is_empty() {
-        tracing::warn!("No delegate-eligible VTXOs after enrichment/grouping; skipping");
+        tracing::debug!("No delegate-eligible VTXOs after enrichment/grouping; skipping");
         return;
     }
 
