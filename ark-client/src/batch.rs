@@ -1249,7 +1249,7 @@ where
         let now = now.as_secs();
         let expire_at = now + (2 * 60);
 
-        if let Some(packet) = create_asset_preservation_packet(&vtxo_inputs, &outputs)? {
+        if let Some(packet) = create_asset_preservation_packet(&inputs, &outputs)? {
             outputs.push(intent::Output::AssetPacket(packet.to_txout()));
         }
 
