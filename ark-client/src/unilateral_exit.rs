@@ -68,7 +68,7 @@ where
             )?;
 
             // We don't want to fetch transactions more than once.
-            let txs = HashSet::<Txid>::from_iter(paths.concat().into_iter());
+            let txs = HashSet::<Txid>::from_iter(paths.concat());
 
             let virtual_txs_response = timeout_op(
                 self.inner.timeout,

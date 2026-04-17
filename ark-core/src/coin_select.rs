@@ -27,7 +27,7 @@ pub fn select_vtxos(
 
     if sort_by_expiration_time {
         // Sort vtxos by expiration (older first)
-        virtual_tx_outpoints.sort_by(|a, b| a.expire_at.cmp(&b.expire_at));
+        virtual_tx_outpoints.sort_by_key(|a| a.expire_at);
     }
 
     // Process VTXOs
@@ -73,7 +73,7 @@ pub fn select_vtxos_for_asset(
         .collect();
 
     // Sort by expiration (older first).
-    candidates.sort_by(|a, b| a.expire_at.cmp(&b.expire_at));
+    candidates.sort_by_key(|a| a.expire_at);
 
     let mut selected = Vec::new();
     let mut selected_amount: u64 = 0;
