@@ -30,3 +30,13 @@ pub use tweak::compute_arkade_script_public_key;
 pub use tweak::ArkadeScriptHash;
 pub use tweak::ArkadeWitnessHash;
 pub use tweak::TweakError;
+
+pub mod tapscript;
+pub mod vtxo_script;
+
+pub use tapscript::ArkadeTapscript;
+pub use tapscript::TapscriptError;
+pub use vtxo_script::ArkadeLeaf;
+pub use vtxo_script::ArkadeVtxoInput;
+pub use vtxo_script::ArkadeVtxoScript;
+pub use vtxo_script::VtxoScriptError;
