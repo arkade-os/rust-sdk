@@ -23,6 +23,7 @@ use ark_client::StaticKeyProvider;
 use ark_client::SwapAmount;
 use ark_client::TxStatus;
 use ark_core::asset::ControlAssetConfig;
+use ark_delegator::DelegatorClient;
 use ark_core::history;
 use ark_core::send::SendReceiver;
 use ark_core::send::VtxoInput;
@@ -112,6 +113,12 @@ enum Commands {
     Subscribe {
         /// The Ark address to subscribe to.
         address: ArkAddressCli,
+    },
+    /// Run the delegated VTXO watcher in the foreground.
+    WatchDelegated {
+        /// Delegator API base URL (e.g. https://delegator.example.com).
+        #[arg(long)]
+        delegator_url: String,
     },
     /// Send on-chain to address
     SendOnchain {
@@ -480,11 +487,12 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run_command<K: KeyProvider>(
+async fn run_command<K: KeyProvider + 'static>(
     command: Commands,
     client: ark_client::Client<EsploraClient, Wallet<InMemoryDb>, SqliteSwapStorage, K>,
     esplora_client: Arc<EsploraClient>,
 ) -> Result<()> {
+    let client = Arc::new(client);
     client.discover_keys(20).await.map_err(|e| anyhow!(e))?;
 
     match &command {
@@ -685,6 +693,24 @@ async fn run_command<K: KeyProvider>(
             }
 
             println!("Subscription stream ended");
+        }
+        Commands::WatchDelegated { delegator_url } => {
+            let delegator = Arc::new(DelegatorClient::new(delegator_url.clone()));
+            let info = delegator.info().await.map_err(|e| anyhow!(e))?;
+            tracing::info!(
+                pubkey = %info.pubkey,
+                fee = %info.fee,
+                delegator_address = %info.delegator_address,
+                "Starting delegated VTXO watcher"
+            );
+
+            let _watcher = client.start_vtxo_watcher(delegator);
+            tracing::info!(
+                "Watcher running. Keep this process open and run other commands in parallel."
+            );
+
+            futures::future::pending::<()>().await;
+            unreachable!("pending future never resolves");
         }
         Commands::SendOnchain { address, amount } => {
             let network = client.server_info.network;
