@@ -227,6 +227,7 @@ async fn run_watcher_loop<B, W, S, K>(
                     }
 
                     if !pending_vtxos.is_empty() {
+                        tracing::info!(count = pending_vtxos.len(), "Processing new VTXOs from subscription");
                         if let Some(script_map) = latest_script_map {
                             delegate_vtxos(&client, &delegator, &pending_vtxos, &script_map).await;
                         }
@@ -286,19 +287,27 @@ async fn run_watcher_loop<B, W, S, K>(
                                 }
                             }
                         }
-                        Some(Ok(SubscriptionResponse::Event(event))) if !event.new_vtxos.is_empty() => {
-                            if work_tx.send(WatcherWork::NewVtxos {
-                                vtxos: event.new_vtxos,
-                                script_map: Arc::clone(&script_map),
-                            })
-                            .await.is_err()
-                            {
-                                tracing::warn!("VTXO worker channel closed. Reconnecting in {backoff:?}");
-                                break;
+                        Some(Ok(SubscriptionResponse::Event(event))) => {
+                            let new_count = event.new_vtxos.len();
+                            let spent_count = event.spent_vtxos.len();
+                            tracing::info!(
+                                txid = %event.txid,
+                                new_vtxos = new_count,
+                                spent_vtxos = spent_count,
+                                "Received subscription event"
+                            );
+
+                            if new_count > 0 {
+                                if work_tx.send(WatcherWork::NewVtxos {
+                                    vtxos: event.new_vtxos,
+                                    script_map: Arc::clone(&script_map),
+                                })
+                                .await.is_err()
+                                {
+                                    tracing::warn!("VTXO worker channel closed. Reconnecting in {backoff:?}");
+                                    break;
+                                }
                             }
-                        }
-                        Some(Ok(SubscriptionResponse::Event(_))) => {
-                            // No new VTXOs to handle.
                         }
                         Some(Err(e)) => {
                             tracing::warn!("VTXO subscription error: {e}, reconnecting in {backoff:?}");
@@ -473,7 +482,13 @@ async fn delegate_vtxos<B, W, S, K>(
 {
     // Query only the addresses that appear in the event, not all wallet addresses.
     let affected_addresses = script_map.addresses_for(new_vtxos);
+    tracing::info!(
+        event_new_vtxos = new_vtxos.len(),
+        affected_addresses = affected_addresses.len(),
+        "Preparing delegation from subscription event"
+    );
     if affected_addresses.is_empty() {
+        tracing::warn!("No affected addresses resolved from new VTXOs; skipping delegation");
         return;
     }
 
@@ -498,7 +513,13 @@ async fn delegate_vtxos<B, W, S, K>(
         .collect();
 
     let groups = group_by_expiry_day(&enriched, script_map, client.server_info.dust);
+    tracing::info!(
+        enriched_vtxos = enriched.len(),
+        groups = groups.len(),
+        "Grouped VTXOs for delegation"
+    );
     if groups.is_empty() {
+        tracing::warn!("No delegate-eligible VTXOs after enrichment/grouping; skipping");
         return;
     }
 
