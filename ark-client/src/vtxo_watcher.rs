@@ -256,6 +256,8 @@ async fn run_watcher_loop<B, W, S, K>(
                 event = stream.next() => {
                     match event {
                         Some(Ok(SubscriptionResponse::Heartbeat)) => {
+                            tracing::debug!("Received subscription heartbeat");
+
                             // Check if new keys have been derived since we subscribed.
                             if let Ok(addrs) = client.get_offchain_addresses() {
                                 if addrs.len() > known_key_count {
@@ -267,6 +269,7 @@ async fn run_watcher_loop<B, W, S, K>(
                                         count = new_addrs.len(),
                                         "Adding newly derived addresses to subscription"
                                     );
+                                    let added = new_addrs.len();
                                     match client
                                         .subscribe_to_scripts(
                                             new_addrs,
@@ -275,6 +278,10 @@ async fn run_watcher_loop<B, W, S, K>(
                                         .await
                                     {
                                         Ok(_) => {
+                                            tracing::info!(
+                                                added,
+                                                "Updated watcher subscription with newly derived addresses"
+                                            );
                                             script_map = Arc::new(ScriptMap::from_addresses(&addrs));
                                             known_key_count = addrs.len();
                                         }
