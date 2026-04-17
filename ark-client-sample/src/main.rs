@@ -23,7 +23,6 @@ use ark_client::StaticKeyProvider;
 use ark_client::SwapAmount;
 use ark_client::TxStatus;
 use ark_core::asset::ControlAssetConfig;
-use ark_delegator::DelegatorClient;
 use ark_core::history;
 use ark_core::send::SendReceiver;
 use ark_core::send::VtxoInput;
@@ -31,6 +30,7 @@ use ark_core::server::SubscriptionResponse;
 use ark_core::ArkAddress;
 use ark_core::ArkNote;
 use ark_core::ExplorerUtxo;
+use ark_delegator::DelegatorClient;
 use ark_grpc::test_utils as grpc_test_utils;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::bip32::Xpriv;
@@ -703,6 +703,18 @@ async fn run_command<K: KeyProvider + 'static>(
                 delegator_address = %info.delegator_address,
                 "Starting delegated VTXO watcher"
             );
+
+            if client
+                .get_offchain_addresses()
+                .map_err(|e| anyhow!(e))?
+                .is_empty()
+            {
+                let (addr, _) = client.get_offchain_address().map_err(|e| anyhow!(e))?;
+                tracing::info!(
+                    address = %addr,
+                    "Derived first offchain address so watcher has scripts to subscribe to"
+                );
+            }
 
             let _watcher = client.start_vtxo_watcher(delegator);
             tracing::info!(
