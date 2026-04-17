@@ -11,3 +11,15 @@
 //!
 //! The crate depends on `ark-core` for types but is opt-in — consumers
 //! who only need standard Ark functionality don't pay for it.
+
+pub mod opcodes;
+pub mod script;
+
+pub use opcodes::op;
+pub use opcodes::opcode_from_name;
+pub use opcodes::opcode_name;
+pub use opcodes::ARKADE_OPCODES;
+pub use script::bytes_to_asm;
+pub use script::from_asm;
+pub use script::to_asm;
+pub use script::AsmError;
