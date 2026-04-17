@@ -323,6 +323,8 @@ struct Config {
     esplora_url: String,
     swap_storage_path: String,
     boltz_url: String,
+    delegator_pubkey: Option<String>,
+    historical_delegator_pubkeys: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -364,6 +366,17 @@ struct ListPendingTxsOutput {
 fn format_timestamp(unix_secs: i64) -> Result<String> {
     let ts = Timestamp::from_second(unix_secs)?;
     Ok(ts.to_string())
+}
+
+fn parse_delegator_pubkey(pk: &str) -> Result<bitcoin::XOnlyPublicKey> {
+    if let Ok(xonly) = pk.parse::<bitcoin::XOnlyPublicKey>() {
+        return Ok(xonly);
+    }
+
+    let full = pk
+        .parse::<bitcoin::PublicKey>()
+        .map_err(|e| anyhow!("invalid delegator_pubkey '{pk}': {e}"))?;
+    Ok(full.into())
 }
 
 #[tokio::main]
@@ -416,6 +429,20 @@ async fn main() -> Result<()> {
             .map_err(|e| anyhow!(e))?,
     );
 
+    let delegator_pk = config
+        .delegator_pubkey
+        .as_deref()
+        .map(parse_delegator_pubkey)
+        .transpose()?;
+
+    let historical_delegator_pks = config
+        .historical_delegator_pubkeys
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|pk| parse_delegator_pubkey(pk.as_str()))
+        .collect::<Result<Vec<_>>>()?;
+
     match (cli.mnemonic, cli.seed) {
         (Some(_), Some(_)) => bail!("specify either --mnemonic or --seed, not both"),
         (None, None) => bail!("specify either --mnemonic or --seed"),
@@ -446,8 +473,8 @@ async fn main() -> Result<()> {
                 storage,
                 config.boltz_url,
                 Duration::from_secs(30),
-                None,
-                vec![],
+                delegator_pk,
+                historical_delegator_pks.clone(),
             )
             .connect()
             .await
@@ -473,8 +500,8 @@ async fn main() -> Result<()> {
                 storage,
                 config.boltz_url,
                 Duration::from_secs(30),
-                None,
-                vec![],
+                delegator_pk,
+                historical_delegator_pks.clone(),
             )
             .connect()
             .await
