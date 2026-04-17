@@ -58,6 +58,10 @@ impl Drop for VtxoWatcherHandle {
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
+/// Periodic key discovery settings for keeping script subscriptions fresh.
+const KEY_DISCOVERY_INTERVAL: Duration = Duration::from_secs(10);
+const KEY_DISCOVERY_GAP_LIMIT: u32 = 20;
+
 /// Pre-computed mapping from script pubkeys to their Vtxo metadata and ArkAddress.
 ///
 /// Built once per (re)connection from `get_offchain_addresses()`. Used both for the subscription
@@ -197,6 +201,7 @@ async fn run_watcher_loop<B, W, S, K>(
         let mut known_key_count = addresses.len();
         let mut script_map = script_map;
         let mut renew_interval = tokio::time::interval(Duration::from_secs(60));
+        let mut discovery_interval = tokio::time::interval(KEY_DISCOVERY_INTERVAL);
         let (work_tx, mut work_rx) = mpsc::channel::<WatcherWork>(128);
 
         let worker_handle = tokio::spawn({
@@ -253,46 +258,28 @@ async fn run_watcher_loop<B, W, S, K>(
                         break;
                     }
                 }
+                _ = discovery_interval.tick() => {
+                    match refresh_subscription_scripts(
+                        client.as_ref(),
+                        &subscription_id,
+                        known_key_count,
+                    )
+                    .await
+                    {
+                        Ok(Some((new_script_map, new_known_key_count))) => {
+                            script_map = new_script_map;
+                            known_key_count = new_known_key_count;
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            tracing::warn!("Failed to refresh script subscription: {e}");
+                        }
+                    }
+                }
                 event = stream.next() => {
                     match event {
                         Some(Ok(SubscriptionResponse::Heartbeat)) => {
                             tracing::debug!("Received subscription heartbeat");
-
-                            // Check if new keys have been derived since we subscribed.
-                            if let Ok(addrs) = client.get_offchain_addresses() {
-                                if addrs.len() > known_key_count {
-                                    let new_addrs: Vec<_> = addrs[known_key_count..]
-                                        .iter()
-                                        .map(|(addr, _)| *addr)
-                                        .collect();
-                                    tracing::debug!(
-                                        count = new_addrs.len(),
-                                        "Adding newly derived addresses to subscription"
-                                    );
-                                    let added = new_addrs.len();
-                                    match client
-                                        .subscribe_to_scripts(
-                                            new_addrs,
-                                            Some(subscription_id.clone()),
-                                        )
-                                        .await
-                                    {
-                                        Ok(_) => {
-                                            tracing::info!(
-                                                added,
-                                                "Updated watcher subscription with newly derived addresses"
-                                            );
-                                            script_map = Arc::new(ScriptMap::from_addresses(&addrs));
-                                            known_key_count = addrs.len();
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                "Failed to add scripts to subscription: {e}"
-                                            );
-                                        }
-                                    }
-                                }
-                            }
                         }
                         Some(Ok(SubscriptionResponse::Event(event))) => {
                             let new_count = event.new_vtxos.len();
@@ -345,6 +332,55 @@ async fn wait_or_stop(stop_rx: &mut watch::Receiver<bool>, duration: Duration) -
         _ = stop_rx.changed() => true,
         _ = tokio::time::sleep(duration) => false,
     }
+}
+
+/// Discover keys and add newly derived scripts to an existing subscription.
+async fn refresh_subscription_scripts<B, W, S, K>(
+    client: &Client<B, W, S, K>,
+    subscription_id: &str,
+    known_key_count: usize,
+) -> Result<Option<(Arc<ScriptMap>, usize)>, Error>
+where
+    B: Blockchain + Send + Sync + 'static,
+    W: BoardingWallet + OnchainWallet + Send + Sync + 'static,
+    S: SwapStorage + 'static,
+    K: KeyProvider + Send + Sync + 'static,
+{
+    let discovered = client.discover_keys(KEY_DISCOVERY_GAP_LIMIT).await?;
+    if discovered > 0 {
+        tracing::debug!(
+            discovered,
+            gap_limit = KEY_DISCOVERY_GAP_LIMIT,
+            "Periodic watcher key discovery found used keys"
+        );
+    }
+
+    let addrs = client.get_offchain_addresses()?;
+    if addrs.len() <= known_key_count {
+        return Ok(None);
+    }
+
+    let new_addrs: Vec<_> = addrs[known_key_count..]
+        .iter()
+        .map(|(addr, _)| *addr)
+        .collect();
+
+    tracing::debug!(
+        count = new_addrs.len(),
+        "Adding newly derived addresses to subscription"
+    );
+
+    client
+        .subscribe_to_scripts(new_addrs, Some(subscription_id.to_string()))
+        .await?;
+
+    let added = addrs.len() - known_key_count;
+    tracing::info!(
+        added,
+        "Updated watcher subscription with newly derived addresses"
+    );
+
+    Ok(Some((Arc::new(ScriptMap::from_addresses(&addrs)), addrs.len())))
 }
 
 /// Delegator info cached per delegation batch.
