@@ -106,7 +106,9 @@ enum WatcherWork {
         vtxos: Vec<VirtualTxOutPoint>,
         script_map: Arc<ScriptMap>,
     },
-    RenewTick,
+    RenewTick {
+        script_map: Arc<ScriptMap>,
+    },
 }
 
 impl<B, W, S, K> Client<B, W, S, K>
@@ -208,13 +210,22 @@ async fn run_watcher_loop<B, W, S, K>(
             let client = client.clone();
             let delegator = delegator.clone();
             async move {
+                let mut seen_unspent_outpoints = HashSet::<OutPoint>::new();
+
                 while let Some(first) = work_rx.recv().await {
                     // Handle one guaranteed message to start the batch.
-                    let (mut pending_vtxos, mut latest_script_map, mut should_renew) = match first {
+                    let (
+                        mut pending_vtxos,
+                        mut latest_script_map,
+                        mut should_renew,
+                        mut should_sync,
+                    ) = match first {
                         WatcherWork::NewVtxos { vtxos, script_map } => {
-                            (vtxos, Some(script_map), true)
+                            (vtxos, Some(script_map), true, false)
                         }
-                        WatcherWork::RenewTick => (Vec::new(), None, true),
+                        WatcherWork::RenewTick { script_map } => {
+                            (Vec::new(), Some(script_map), true, true)
+                        }
                     };
 
                     // Drain whatever else is already queued without waiting.
@@ -225,16 +236,49 @@ async fn run_watcher_loop<B, W, S, K>(
                                 latest_script_map = Some(script_map);
                                 should_renew = true;
                             }
-                            WatcherWork::RenewTick => {
+                            WatcherWork::RenewTick { script_map } => {
+                                latest_script_map = Some(script_map);
                                 should_renew = true;
+                                should_sync = true;
+                            }
+                        }
+                    }
+
+                    if let (true, Some(script_map)) = (should_sync, latest_script_map.as_deref()) {
+                        match collect_new_delegation_candidates(
+                            &client,
+                            script_map,
+                            &mut seen_unspent_outpoints,
+                        )
+                        .await
+                        {
+                            Ok(new_candidates) => {
+                                if !new_candidates.is_empty() {
+                                    tracing::info!(
+                                        count = new_candidates.len(),
+                                        "Found new delegatable VTXOs from failsafe polling"
+                                    );
+                                    pending_vtxos.extend(new_candidates);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failsafe delegation poll failed: {e}");
                             }
                         }
                     }
 
                     if !pending_vtxos.is_empty() {
-                        tracing::info!(count = pending_vtxos.len(), "Processing new VTXOs from subscription");
+                        let mut deduped = Vec::new();
+                        let mut seen = HashSet::new();
+                        for vtxo in pending_vtxos {
+                            if seen.insert(vtxo.outpoint) {
+                                deduped.push(vtxo);
+                            }
+                        }
+
+                        tracing::info!(count = deduped.len(), "Processing VTXOs for delegation");
                         if let Some(script_map) = latest_script_map {
-                            delegate_vtxos(&client, &delegator, &pending_vtxos, &script_map).await;
+                            delegate_vtxos(&client, &delegator, &deduped, &script_map).await;
                         }
                     }
 
@@ -253,7 +297,9 @@ async fn run_watcher_loop<B, W, S, K>(
                     return;
                 }
                 _ = renew_interval.tick() => {
-                    if work_tx.send(WatcherWork::RenewTick).await.is_err() {
+                    if work_tx.send(WatcherWork::RenewTick {
+                        script_map: Arc::clone(&script_map),
+                    }).await.is_err() {
                         tracing::warn!("VTXO worker channel closed, reconnecting in {backoff:?}");
                         break;
                     }
@@ -381,6 +427,46 @@ where
     );
 
     Ok(Some((Arc::new(ScriptMap::from_addresses(&addrs)), addrs.len())))
+}
+
+/// Enumerate newly seen unspent delegate-eligible VTXOs from wallet state.
+///
+/// This is a failsafe path to catch outputs that may have been missed by subscription timing.
+async fn collect_new_delegation_candidates<B, W, S, K>(
+    client: &Client<B, W, S, K>,
+    script_map: &ScriptMap,
+    seen_unspent_outpoints: &mut HashSet<OutPoint>,
+) -> Result<Vec<VirtualTxOutPoint>, Error>
+where
+    B: Blockchain + Send + Sync + 'static,
+    W: BoardingWallet + OnchainWallet + Send + Sync + 'static,
+    S: SwapStorage + 'static,
+    K: KeyProvider + Send + Sync + 'static,
+{
+    let (vtxo_list, _) = client.list_vtxos().await?;
+
+    let mut current_outpoints = HashSet::new();
+    let mut newly_seen = Vec::new();
+
+    for vtp in vtxo_list.all_unspent() {
+        let Some(vtxo) = script_map.vtxo_by_script.get(&vtp.script) else {
+            continue;
+        };
+
+        if vtxo.delegator_pk().is_none() {
+            continue;
+        }
+
+        current_outpoints.insert(vtp.outpoint);
+
+        if !seen_unspent_outpoints.contains(&vtp.outpoint) {
+            newly_seen.push(vtp.clone());
+        }
+    }
+
+    *seen_unspent_outpoints = current_outpoints;
+
+    Ok(newly_seen)
 }
 
 /// Delegator info cached per delegation batch.
