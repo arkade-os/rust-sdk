@@ -537,6 +537,11 @@ where
         )
     }
 
+    /// Returns the currently configured delegator pubkey, if any.
+    pub fn delegator_pk(&self) -> Option<XOnlyPublicKey> {
+        self.delegator_pk
+    }
+
     /// Connects to the Ark server and retrieves server information.
     ///
     /// # Errors
@@ -630,6 +635,11 @@ where
     S: SwapStorage + 'static,
     K: KeyProvider,
 {
+    /// Returns the currently configured delegator pubkey, if any.
+    pub fn delegator_pk(&self) -> Option<XOnlyPublicKey> {
+        self.inner.delegator_pk()
+    }
+
     /// Get a new offchain receiving address.
     ///
     /// When a delegator is configured (via `delegator_pk` passed to [`OfflineClient::new`]),

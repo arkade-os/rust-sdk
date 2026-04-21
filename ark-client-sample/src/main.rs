@@ -724,6 +724,18 @@ async fn run_command<K: KeyProvider + 'static>(
         Commands::WatchDelegated { delegator_url } => {
             let delegator = Arc::new(DelegatorClient::new(delegator_url.clone()));
             let info = delegator.info().await.map_err(|e| anyhow!(e))?;
+            let expected_delegator = parse_delegator_pubkey(&info.pubkey)?;
+            let configured_delegator = client
+                .delegator_pk()
+                .ok_or_else(|| anyhow!("delegator_pubkey is not configured in ark.config.toml"))?;
+            if configured_delegator != expected_delegator {
+                bail!(
+                    "configured delegator_pubkey {} does not match {} returned by {}",
+                    configured_delegator,
+                    expected_delegator,
+                    delegator_url
+                );
+            }
             tracing::info!(
                 pubkey = %info.pubkey,
                 fee = %info.fee,
