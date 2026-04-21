@@ -7,6 +7,11 @@ on:
         description: 'Version of arkd to test against (git tag, version, hash)'
         required: true
         type: string
+      introspector-version:
+        description: 'Introspector image tag to test against'
+        required: false
+        default: 'latest'
+        type: string
 
 env:
   CARGO_INCREMENTAL: 0
@@ -120,11 +125,23 @@ jobs:
           # Wait for arkd to catch up with the chain
           sleep 10
 
+      - name: Run introspector
+        if: contains(matrix.test-binary, 'e2e_arkade_script')
+        env:
+          INTROSPECTOR_IMAGE: ghcr.io/arklabshq/introspector:${{ inputs.introspector-version }}
+        run: just introspector-docker-run
+
       - name: Run Test Binary
+        env:
+          INTROSPECTOR_URL: http://127.0.0.1:7073
         run: |
           test_name=$(basename ${{ matrix.test-binary }})
           echo "Running test: $test_name"
           ${{ matrix.test-binary }} --ignored --test-threads=1 --nocapture
+
+      - name: Cleanup introspector
+        if: always() && contains(matrix.test-binary, 'e2e_arkade_script')
+        run: just introspector-docker-kill
 
       - name: Cleanup Nigiri
         if: always()
@@ -150,4 +167,16 @@ jobs:
             echo "=== End of arkd.log ==="
           else
             echo "arkd.log file not found"
+          fi
+
+      - name: Print introspector logs on failure
+        if: failure() && contains(matrix.test-binary, 'e2e_arkade_script')
+        run: |
+          if [ -f introspector.log ]; then
+            echo "=== introspector.log contents ==="
+            cat introspector.log
+            echo "=== End of introspector.log ==="
+          else
+            echo "introspector.log file not found"
+            docker logs introspector || true
           fi
