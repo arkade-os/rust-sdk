@@ -12,6 +12,7 @@ pub mod coin_select;
 pub mod conversions;
 pub mod history;
 pub mod intent;
+pub mod introspector;
 pub mod script;
 pub mod send;
 pub mod server;
