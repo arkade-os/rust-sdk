@@ -81,6 +81,7 @@ pub async fn e2e_arkade_script_submit_tx_to_bob() {
     let custom_owner_pk = custom_owner_kp.public_key().x_only_public_key().0;
     let arkd_pk = server_info.signer_pk.x_only_public_key().0;
 
+    let (alice_offchain_address, _) = alice.get_offchain_address().unwrap();
     let (bob_address, _) = bob.get_offchain_address().unwrap();
     let receiver_amount = Amount::from_sat(100_000);
     let expected_receiver_script = bob_address.to_p2tr_script_pubkey();
@@ -144,50 +145,38 @@ pub async fn e2e_arkade_script_submit_tx_to_bob() {
         custom_vtxo_outpoint.assets.clone(),
     );
 
-    let offchain = build_offchain_transactions(
-        &[SendReceiver::bitcoin(bob_address, receiver_amount)],
-        &custom_vtxo.to_ark_address(),
-        &[custom_input],
+    let (invalid_ark_tx, invalid_checkpoint_txs) = build_signed_submit_txs(
+        &secp,
+        &custom_owner_kp,
+        custom_owner_pk,
+        &custom_vtxo,
+        &custom_input,
         &server_info,
-    )
-    .unwrap();
+        alice_offchain_address,
+        receiver_amount,
+        &arkade_script,
+    );
 
-    let mut ark_tx = offchain.ark_tx;
-    let mut checkpoint_txs = offchain.checkpoint_txs;
+    let err = introspector
+        .submit_tx(&invalid_ark_tx, &invalid_checkpoint_txs)
+        .await
+        .unwrap_err();
+    tracing::info!(error = %err, "invalid arkade spend to alice was rejected as expected");
 
-    add_packet_to_psbt(
-        &mut ark_tx,
-        &Packet::new(vec![IntrospectorEntry {
-            vin: 0,
-            script: arkade_script,
-            witness: Witness::default(),
-        }])
-        .unwrap(),
-    )
-    .unwrap();
+    let bob_balance = bob.offchain_balance().await.unwrap();
+    assert_eq!(bob_balance.total(), Amount::ZERO);
 
-    sign_ark_transaction(
-        |_,
-         msg: secp256k1::Message|
-         -> Result<Vec<(schnorr::Signature, bitcoin::XOnlyPublicKey)>, ark_core::Error> {
-            let sig = secp.sign_schnorr_no_aux_rand(&msg, &custom_owner_kp);
-            Ok(vec![(sig, custom_owner_pk)])
-        },
-        &mut ark_tx,
-        0,
-    )
-    .unwrap();
-
-    sign_checkpoint_transaction(
-        |_,
-         msg: secp256k1::Message|
-         -> Result<Vec<(schnorr::Signature, bitcoin::XOnlyPublicKey)>, ark_core::Error> {
-            let sig = secp.sign_schnorr_no_aux_rand(&msg, &custom_owner_kp);
-            Ok(vec![(sig, custom_owner_pk)])
-        },
-        &mut checkpoint_txs[0],
-    )
-    .unwrap();
+    let (ark_tx, checkpoint_txs) = build_signed_submit_txs(
+        &secp,
+        &custom_owner_kp,
+        custom_owner_pk,
+        &custom_vtxo,
+        &custom_input,
+        &server_info,
+        bob_address,
+        receiver_amount,
+        &arkade_script,
+    );
 
     let response = introspector
         .submit_tx(&ark_tx, &checkpoint_txs)
@@ -206,6 +195,65 @@ pub async fn e2e_arkade_script_submit_tx_to_bob() {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     wait_until_balance!(&bob, confirmed: receiver_amount, pre_confirmed: Amount::ZERO);
+}
+
+fn build_signed_submit_txs(
+    secp: &Secp256k1<secp256k1::All>,
+    custom_owner_kp: &Keypair,
+    custom_owner_pk: bitcoin::XOnlyPublicKey,
+    custom_vtxo: &Vtxo,
+    custom_input: &VtxoInput,
+    server_info: &ark_core::server::Info,
+    recipient: ark_core::ArkAddress,
+    amount: Amount,
+    arkade_script: &ScriptBuf,
+) -> (bitcoin::Psbt, Vec<bitcoin::Psbt>) {
+    let offchain = build_offchain_transactions(
+        &[SendReceiver::bitcoin(recipient, amount)],
+        &custom_vtxo.to_ark_address(),
+        std::slice::from_ref(custom_input),
+        server_info,
+    )
+    .unwrap();
+
+    let mut ark_tx = offchain.ark_tx;
+    let mut checkpoint_txs = offchain.checkpoint_txs;
+
+    add_packet_to_psbt(
+        &mut ark_tx,
+        &Packet::new(vec![IntrospectorEntry {
+            vin: 0,
+            script: arkade_script.clone(),
+            witness: Witness::default(),
+        }])
+        .unwrap(),
+    )
+    .unwrap();
+
+    sign_ark_transaction(
+        |_,
+         msg: secp256k1::Message|
+         -> Result<Vec<(schnorr::Signature, bitcoin::XOnlyPublicKey)>, ark_core::Error> {
+            let sig = secp.sign_schnorr_no_aux_rand(&msg, custom_owner_kp);
+            Ok(vec![(sig, custom_owner_pk)])
+        },
+        &mut ark_tx,
+        0,
+    )
+    .unwrap();
+
+    sign_checkpoint_transaction(
+        |_,
+         msg: secp256k1::Message|
+         -> Result<Vec<(schnorr::Signature, bitcoin::XOnlyPublicKey)>, ark_core::Error> {
+            let sig = secp.sign_schnorr_no_aux_rand(&msg, custom_owner_kp);
+            Ok(vec![(sig, custom_owner_pk)])
+        },
+        &mut checkpoint_txs[0],
+    )
+    .unwrap();
+
+    (ark_tx, checkpoint_txs)
 }
 
 async fn wait_for_vtxo(
