@@ -19,3 +19,4 @@ jobs:
     uses: ./.github/workflows/e2e-core.yml
     with:
       arkd-version: ${{ matrix.arkd-version }}
+      introspector-version: latest
