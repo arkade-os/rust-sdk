@@ -14,7 +14,7 @@ mod common;
 
 #[tokio::test]
 #[ignore]
-async fn e2e_fulmine_delegator_smoke() {
+async fn fulmine_delegator_smoke() {
     init_tracing();
 
     let nigiri = Arc::new(Nigiri::new());
