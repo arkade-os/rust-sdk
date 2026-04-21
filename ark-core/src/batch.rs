@@ -622,6 +622,32 @@ pub fn prepare_delegate_psbts(
     server_forfeit_address: &Address,
     dust: Amount,
 ) -> Result<Delegate, Error> {
+    prepare_delegate_psbts_at(
+        intent_inputs,
+        outputs,
+        delegate_cosigner_pk,
+        server_forfeit_address,
+        dust,
+        None,
+    )
+}
+
+/// Like [`prepare_delegate_psbts`], but with an explicit `valid_at` timestamp.
+///
+/// When delegating to a third-party service, `valid_at` is set to the time at which the delegator
+/// should execute the renewal (e.g. 90% through the VTXO's lifetime). In this case `expire_at` is
+/// set to `0` (no expiry), since the delegator holds the intent until `valid_at` arrives.
+///
+/// If `valid_at` is `None`, the current time is used and the intent expires in 2 minutes (same as
+/// [`prepare_delegate_psbts`]).
+pub fn prepare_delegate_psbts_at(
+    intent_inputs: Vec<intent::Input>,
+    outputs: Vec<intent::Output>,
+    delegate_cosigner_pk: PublicKey,
+    server_forfeit_address: &Address,
+    dust: Amount,
+    valid_at: Option<u64>,
+) -> Result<Delegate, Error> {
     // Create intent message
     let now = std::time::SystemTime::now();
     let now = now
@@ -629,11 +655,26 @@ pub fn prepare_delegate_psbts(
         .map_err(Error::ad_hoc)
         .context("failed to compute now timestamp")?;
     let now = now.as_secs();
-    let expire_at = now + (2 * 60);
+
+    // When valid_at is explicit (delegator flow), the intent is held for future use — no expiry.
+    // When valid_at is None (P2P flow), expire after 2 minutes.
+    let (valid_at, expire_at) = match valid_at {
+        Some(vat) => (vat, 0),
+        None => (now, now + (2 * 60)),
+    };
+
+    let onchain_output_indexes = outputs
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, output)| match output {
+            intent::Output::Onchain(_) => Some(idx),
+            intent::Output::Offchain(_) | intent::Output::AssetPacket(_) => None,
+        })
+        .collect();
 
     let intent_message = intent::IntentMessage::Register {
-        onchain_output_indexes: Vec::new(),
-        valid_at: now,
+        onchain_output_indexes,
+        valid_at,
         expire_at,
         own_cosigner_pks: vec![delegate_cosigner_pk],
     };

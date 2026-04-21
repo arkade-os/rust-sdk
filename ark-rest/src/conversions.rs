@@ -6,11 +6,13 @@ use crate::models::IndexerAsset;
 use crate::models::IndexerVtxo;
 use bitcoin::base64;
 use bitcoin::base64::Engine;
+use bitcoin::hex::FromHex;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
 use bitcoin::Psbt;
 use bitcoin::ScriptBuf;
+use bitcoin::Transaction;
 use bitcoin::Txid;
 use std::collections::HashMap;
 use std::error::Error as StdError;
@@ -520,19 +522,26 @@ impl TryFrom<crate::models::IndexerSubscriptionEvent> for ark_core::server::Subs
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| ConversionError(format!("Invalid spent_vtxos: {e}")))?;
 
-        // Parse tx (PSBT)
+        // Parse tx (raw tx hex or base64 PSBT)
         let tx = if let Some(tx_str) = event.tx.filter(|s| !s.is_empty()) {
-            let base64 = base64::engine::GeneralPurpose::new(
-                &base64::alphabet::STANDARD,
-                base64::engine::GeneralPurposeConfig::new(),
-            );
-            let bytes = base64
-                .decode(&tx_str)
-                .map_err(|e| ConversionError(format!("Invalid tx base64: {e}")))?;
-            Some(
-                Psbt::deserialize(&bytes)
-                    .map_err(|e| ConversionError(format!("Invalid tx psbt: {e}")))?,
-            )
+            match Vec::from_hex(&tx_str)
+                .ok()
+                .and_then(|bytes| bitcoin::consensus::deserialize::<Transaction>(&bytes).ok())
+            {
+                Some(raw_tx) => Some(raw_tx),
+                None => {
+                    let base64 = base64::engine::GeneralPurpose::new(
+                        &base64::alphabet::STANDARD,
+                        base64::engine::GeneralPurposeConfig::new(),
+                    );
+                    let bytes = base64
+                        .decode(&tx_str)
+                        .map_err(|e| ConversionError(format!("Invalid tx payload: {e}")))?;
+                    let psbt = Psbt::deserialize(&bytes)
+                        .map_err(|e| ConversionError(format!("Invalid tx psbt: {e}")))?;
+                    Some(psbt.unsigned_tx)
+                }
+            }
         } else {
             None
         };

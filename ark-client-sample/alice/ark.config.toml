@@ -2,6 +2,9 @@ ark_server_url = "http://localhost:7070"
 esplora_url = "http://localhost:3000"
 swap_storage_path = "./alice/swap_storage.sqlite"
 boltz_url = "http://localhost:9001"
+# Optional: delegate-aware wallet addresses (required for watcher delegation tests)
+# delegator_pubkey = "03f458d498611caee1e9f07141f3fba3e64dfd0ee0111187e634740592f10415eb"
+# historical_delegator_pubkeys = ["03f458d498611caee1e9f07141f3fba3e64dfd0ee0111187e634740592f10415eb"]
 
 # ark_server_url = "http://localhost:7070"
 # esplora_url = "https://mutinynet.com/api"

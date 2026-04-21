@@ -19,7 +19,6 @@ use ark_core::send::OffchainTransactions;
 use ark_core::send::SendReceiver;
 use ark_core::send::VtxoInput;
 use ark_core::server::PendingTx;
-use ark_core::ErrorContext as _;
 use bitcoin::key::Secp256k1;
 use bitcoin::psbt;
 use bitcoin::secp256k1;

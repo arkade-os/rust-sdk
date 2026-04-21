@@ -66,6 +66,7 @@ use bitcoin::OutPoint;
 use bitcoin::Psbt;
 use bitcoin::ScriptBuf;
 use bitcoin::SignedAmount;
+use bitcoin::Transaction;
 use bitcoin::Txid;
 use futures::Stream;
 use futures::StreamExt;
@@ -1159,12 +1160,35 @@ impl TryFrom<generated::ark::v1::GetSubscriptionResponse> for SubscriptionRespon
         let tx = if value.tx.is_empty() {
             None
         } else {
-            let base64 = base64::engine::GeneralPurpose::new(
-                &base64::alphabet::STANDARD,
-                base64::engine::GeneralPurposeConfig::new(),
-            );
-            let bytes = base64.decode(&value.tx).map_err(Error::conversion)?;
-            Some(Psbt::deserialize(&bytes).map_err(Error::conversion)?)
+            match Vec::from_hex(&value.tx)
+                .ok()
+                .and_then(|bytes| bitcoin::consensus::deserialize::<Transaction>(&bytes).ok())
+            {
+                Some(raw_tx) => Some(raw_tx),
+                None => {
+                    let base64 = base64::engine::GeneralPurpose::new(
+                        &base64::alphabet::STANDARD,
+                        base64::engine::GeneralPurposeConfig::new(),
+                    );
+                    let bytes = base64.decode(&value.tx).map_err(|e| {
+                        let tx_prefix = value.tx.chars().take(24).collect::<String>();
+                        Error::conversion(format!(
+                            "invalid subscription tx payload (not hex tx or base64 psbt) (len={}, tx_prefix='{}'): {e}",
+                            value.tx.len(),
+                            tx_prefix
+                        ))
+                    })?;
+                    let psbt = Psbt::deserialize(&bytes).map_err(|e| {
+                        let tx_prefix = value.tx.chars().take(24).collect::<String>();
+                        Error::conversion(format!(
+                            "invalid subscription tx payload (base64 but not psbt) (len={}, tx_prefix='{}'): {e}",
+                            value.tx.len(),
+                            tx_prefix
+                        ))
+                    })?;
+                    Some(psbt.unsigned_tx)
+                }
+            }
         };
 
         let checkpoint_txs = value

@@ -2,3 +2,6 @@ ark_server_url = "https://mutinynet.arkade.sh"
 esplora_url = "https://mutinynet.com/api"
 swap_storage_path = "./mutinynet/swap_storage.sqlite"
 boltz_url = "https://api.boltz.mutinynet.arkade.sh"
+# Optional: delegate-aware wallet addresses
+# delegator_pubkey = "02c7f08d57d07f4924444db42848aac7d03a918d8d68157953639121d0ecbbbb8a"
+# historical_delegator_pubkeys = ["02c7f08d57d07f4924444db42848aac7d03a918d8d68157953639121d0ecbbbb8a"]

@@ -198,6 +198,8 @@ impl IntoError for String {
 ///
 /// This trick was borrowed from `jiff`, which borrowed it from `anyhow`.
 pub trait ErrorContext {
+    type Output;
+
     /// Contextualize the given consequent error with this (`self`) error as
     /// the cause.
     ///
@@ -206,7 +208,7 @@ pub trait ErrorContext {
     /// Note that if an `Error` is given for `kind`, then this panics if it has
     /// a cause. (Because the cause would otherwise be dropped. An error causal
     /// chain is just a linked list, not a tree.)
-    fn context(self, consequent: impl IntoError) -> Self;
+    fn context(self, consequent: impl IntoError) -> Self::Output;
 
     /// Like `context`, but hides error construction within a closure.
     ///
@@ -214,13 +216,12 @@ pub trait ErrorContext {
     /// guarded and when error construction is potentially "costly" (i.e., it
     /// allocates). The closure avoids paying the cost of contextual error
     /// creation in the happy path.
-    ///
-    /// Usually this only makes sense to use on a `Result<T, Error>`, otherwise
-    /// the closure is just executed immediately anyway.
-    fn with_context<E: IntoError>(self, consequent: impl FnOnce() -> E) -> Self;
+    fn with_context<E: IntoError>(self, consequent: impl FnOnce() -> E) -> Self::Output;
 }
 
 impl ErrorContext for Error {
+    type Output = Error;
+
     fn context(self, consequent: impl IntoError) -> Error {
         let mut err = consequent.into_error();
         assert!(
@@ -244,13 +245,30 @@ impl ErrorContext for Error {
     }
 }
 
-impl<T> ErrorContext for Result<T, Error> {
+impl<T, E> ErrorContext for Result<T, E>
+where
+    E: StdError + Send + Sync + 'static,
+{
+    type Output = Result<T, Error>;
+
     fn context(self, consequent: impl IntoError) -> Result<T, Error> {
-        self.map_err(|err| err.context(consequent))
+        self.map_err(|err| {
+            let err: Box<dyn StdError + Send + Sync + 'static> = Box::new(err);
+            match err.downcast::<Error>() {
+                Ok(err) => (*err).context(consequent),
+                Err(err) => Error::ad_hoc(err).context(consequent),
+            }
+        })
     }
 
-    fn with_context<E: IntoError>(self, consequent: impl FnOnce() -> E) -> Result<T, Error> {
-        self.map_err(|err| err.with_context(consequent))
+    fn with_context<C: IntoError>(self, consequent: impl FnOnce() -> C) -> Result<T, Error> {
+        self.map_err(|err| {
+            let err: Box<dyn StdError + Send + Sync + 'static> = Box::new(err);
+            match err.downcast::<Error>() {
+                Ok(err) => (*err).with_context(consequent),
+                Err(err) => Error::ad_hoc(err).with_context(consequent),
+            }
+        })
     }
 }
 

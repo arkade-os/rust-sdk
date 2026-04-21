@@ -45,6 +45,7 @@ use std::time::Duration;
 pub mod error;
 pub mod key_provider;
 pub mod swap_storage;
+pub mod vtxo_watcher;
 pub mod wallet;
 
 mod asset;
@@ -237,7 +238,9 @@ pub const DEFAULT_GAP_LIMIT: u32 = 20;
 ///         "https://ark-server.example.com".to_string(),
 ///         Arc::new(InMemorySwapStorage::default()),
 ///         "http://boltz.example.com".to_string(),
-///         timeout
+///         timeout,
+///         None,
+///         vec![],
 ///     );
 ///
 ///     // Connect to the Ark server and get server info
@@ -269,7 +272,9 @@ pub const DEFAULT_GAP_LIMIT: u32 = 20;
 ///         "https://ark-server.example.com".to_string(),
 ///         Arc::new(InMemorySwapStorage::default()),
 ///         "http://boltz.example.com".to_string(),
-///         timeout
+///         timeout,
+///         None,
+///         vec![],
 ///     );
 ///
 ///     // Connect to the Ark server and get server info
@@ -290,6 +295,8 @@ pub struct OfflineClient<B, W, S, K> {
     swap_storage: Arc<S>,
     boltz_url: String,
     timeout: Duration,
+    delegator_pk: Option<XOnlyPublicKey>,
+    historical_delegator_pks: Vec<XOnlyPublicKey>,
 }
 
 /// A client to interact with Ark server
@@ -407,10 +414,25 @@ where
         swap_storage: Arc<S>,
         boltz_url: String,
         timeout: Duration,
+        delegator_pk: Option<XOnlyPublicKey>,
+        historical_delegator_pks: Vec<XOnlyPublicKey>,
     ) -> Self {
         let secp = Secp256k1::new();
 
         let network_client = ark_grpc::Client::new(ark_server_url);
+
+        // Normalize historical delegator keys once (preserve order, remove duplicates), then
+        // ensure the current delegator key is present at the front.
+        let mut seen = HashSet::new();
+        let mut historical_delegator_pks: Vec<_> = historical_delegator_pks
+            .into_iter()
+            .filter(|pk| seen.insert(*pk))
+            .collect();
+
+        if let Some(pk) = delegator_pk {
+            historical_delegator_pks.retain(|k| *k != pk);
+            historical_delegator_pks.insert(0, pk);
+        }
 
         Self {
             network_client,
@@ -422,6 +444,8 @@ where
             swap_storage,
             boltz_url,
             timeout,
+            delegator_pk,
+            historical_delegator_pks,
         }
     }
 
@@ -449,6 +473,8 @@ where
         swap_storage: Arc<S>,
         boltz_url: String,
         timeout: Duration,
+        delegator_pk: Option<XOnlyPublicKey>,
+        historical_delegator_pks: Vec<XOnlyPublicKey>,
     ) -> OfflineClient<B, W, S, StaticKeyProvider> {
         let key_provider = Arc::new(StaticKeyProvider::new(kp));
 
@@ -461,6 +487,8 @@ where
             swap_storage,
             boltz_url,
             timeout,
+            delegator_pk,
+            historical_delegator_pks,
         )
     }
 
@@ -487,6 +515,8 @@ where
         swap_storage: Arc<S>,
         boltz_url: String,
         timeout: Duration,
+        delegator_pk: Option<XOnlyPublicKey>,
+        historical_delegator_pks: Vec<XOnlyPublicKey>,
     ) -> OfflineClient<B, W, S, Bip32KeyProvider> {
         let path = path.unwrap_or(
             DerivationPath::from_str(DEFAULT_DERIVATION_PATH).expect("valid derivation path"),
@@ -502,7 +532,14 @@ where
             swap_storage,
             boltz_url,
             timeout,
+            delegator_pk,
+            historical_delegator_pks,
         )
+    }
+
+    /// Returns the currently configured delegator pubkey, if any.
+    pub fn delegator_pk(&self) -> Option<XOnlyPublicKey> {
+        self.delegator_pk
     }
 
     /// Connects to the Ark server and retrieves server information.
@@ -598,7 +635,15 @@ where
     S: SwapStorage + 'static,
     K: KeyProvider,
 {
-    /// Get a new offchain receiving address
+    /// Returns the currently configured delegator pubkey, if any.
+    pub fn delegator_pk(&self) -> Option<XOnlyPublicKey> {
+        self.inner.delegator_pk()
+    }
+
+    /// Get a new offchain receiving address.
+    ///
+    /// When a delegator is configured (via `delegator_pk` passed to [`OfflineClient::new`]),
+    /// returns a 3-leaf delegate address. Otherwise returns a standard 2-leaf address.
     ///
     /// For HD wallets, this will derive a new address each time it's called.
     /// For static key providers, this will always return the same address.
@@ -611,40 +656,86 @@ where
             .public_key()
             .into();
 
-        let vtxo = Vtxo::new_default(
-            self.secp(),
-            server_signer,
-            owner,
-            server_info.unilateral_exit_delay,
-            server_info.network,
-        )?;
+        let vtxo = self.make_vtxo(server_signer, owner)?;
 
         let ark_address = vtxo.to_ark_address();
 
         Ok((ark_address, vtxo))
     }
 
+    /// Get all known offchain addresses for this wallet.
+    ///
+    /// When a delegator is configured, this returns **both** the default (2-leaf) and delegate
+    /// (3-leaf) addresses for each key, so that VTXOs at either address are visible. If
+    /// historical delegator keys are set via `historical_delegator_pks` passed to
+    /// [`OfflineClient::new`], addresses for those are included too.
     pub fn get_offchain_addresses(&self) -> Result<Vec<(ArkAddress, Vtxo)>, Error> {
         let server_info = &self.server_info;
         let server_signer = server_info.signer_pk.into();
 
         let pks = self.inner.key_provider.get_cached_pks()?;
 
-        pks.into_iter()
-            .map(|owner_pk| {
-                let vtxo = Vtxo::new_default(
+        let mut results = Vec::new();
+
+        for owner_pk in &pks {
+            // Always include the default (2-leaf) address.
+            let default_vtxo = Vtxo::new_default(
+                self.secp(),
+                server_signer,
+                *owner_pk,
+                server_info.unilateral_exit_delay,
+                server_info.network,
+            )?;
+            results.push((default_vtxo.to_ark_address(), default_vtxo));
+
+            // Include delegate addresses for all known delegator keys.
+            let mut seen = HashSet::new();
+            for dpk in &self.inner.historical_delegator_pks {
+                if !seen.insert(dpk) {
+                    continue;
+                }
+                let delegate_vtxo = Vtxo::new_with_delegator(
                     self.secp(),
                     server_signer,
-                    owner_pk,
+                    *owner_pk,
+                    *dpk,
                     server_info.unilateral_exit_delay,
                     server_info.network,
                 )?;
+                results.push((delegate_vtxo.to_ark_address(), delegate_vtxo));
+            }
+        }
 
-                let ark_address = vtxo.to_ark_address();
+        Ok(results)
+    }
 
-                Ok((ark_address, vtxo))
-            })
-            .collect::<Result<Vec<_>, _>>()
+    /// Build a [`Vtxo`] for the given owner key, using a 3-leaf delegate VTXO if a delegator is
+    /// configured, otherwise a standard 2-leaf default VTXO.
+    fn make_vtxo(
+        &self,
+        server_signer: XOnlyPublicKey,
+        owner: XOnlyPublicKey,
+    ) -> Result<Vtxo, Error> {
+        let server_info = &self.server_info;
+        match self.inner.delegator_pk {
+            Some(delegator) => Vtxo::new_with_delegator(
+                self.secp(),
+                server_signer,
+                owner,
+                delegator,
+                server_info.unilateral_exit_delay,
+                server_info.network,
+            )
+            .map_err(Into::into),
+            None => Vtxo::new_default(
+                self.secp(),
+                server_signer,
+                owner,
+                server_info.unilateral_exit_delay,
+                server_info.network,
+            )
+            .map_err(Into::into),
+        }
     }
 
     /// Discover and cache used keys using BIP44-style gap limit
@@ -673,7 +764,8 @@ where
 
         loop {
             // Generate a batch of gap_limit keys
-            let mut batch: Vec<(u32, Keypair, ArkAddress)> = Vec::with_capacity(gap_limit as usize);
+            let mut batch: Vec<(u32, Keypair, Vec<ArkAddress>)> =
+                Vec::with_capacity(gap_limit as usize);
 
             for i in 0..gap_limit {
                 let index = start_index
@@ -685,15 +777,35 @@ where
                     None => break,
                 };
 
-                let vtxo = Vtxo::new_default(
+                let owner_pk = kp.x_only_public_key().0;
+
+                let mut addresses =
+                    Vec::with_capacity(1 + self.inner.historical_delegator_pks.len());
+
+                // Default (2-leaf) address.
+                let default_vtxo = Vtxo::new_default(
                     self.secp(),
                     server_signer,
-                    kp.x_only_public_key().0,
+                    owner_pk,
                     server_info.unilateral_exit_delay,
                     server_info.network,
                 )?;
+                addresses.push(default_vtxo.to_ark_address());
 
-                batch.push((index, kp, vtxo.to_ark_address()));
+                // Delegate (3-leaf) addresses for each known delegator.
+                for dpk in &self.inner.historical_delegator_pks {
+                    let delegate_vtxo = Vtxo::new_with_delegator(
+                        self.secp(),
+                        server_signer,
+                        owner_pk,
+                        *dpk,
+                        server_info.unilateral_exit_delay,
+                        server_info.network,
+                    )?;
+                    addresses.push(delegate_vtxo.to_ark_address());
+                }
+
+                batch.push((index, kp, addresses));
             }
 
             if batch.is_empty() {
@@ -701,7 +813,7 @@ where
             }
 
             // Query all addresses in batch at once
-            let addresses = batch.iter().map(|(_, _, a)| *a);
+            let addresses = batch.iter().flat_map(|(_, _, addrs)| addrs.iter().copied());
 
             let vtxo_list = self.list_vtxos_for_addresses(addresses).await?;
 
@@ -710,10 +822,13 @@ where
 
             // Cache keypairs for used addresses (match by script)
             let mut found_any = false;
-            for (index, kp, addr) in batch {
-                let script = addr.to_p2tr_script_pubkey();
-                if used_scripts.contains(&script) {
-                    tracing::debug!(index, %addr, "Found used address");
+            for (index, kp, addrs) in batch {
+                let used_addr = addrs.iter().find(|addr| {
+                    let script = addr.to_p2tr_script_pubkey();
+                    used_scripts.contains(&script)
+                });
+                if let Some(addr) = used_addr {
+                    tracing::debug!(index, addr = %addr, "Found used address");
                     self.inner
                         .key_provider
                         .cache_discovered_keypair(index, kp)?;

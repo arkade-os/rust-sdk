@@ -48,6 +48,10 @@ settle-notes actor notes:
 subscribe actor address:
     cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic subscribe {{ address }}
 
+# Run delegated VTXO watcher in foreground (use another terminal to trigger activity)
+watch-delegated actor delegator_url:
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic watch-delegated --delegator-url {{ delegator_url }}
+
 # Send coins to an Onchain address from a given actor, e.g. just send-onchain bob bc1... 1234
 send-onchain actor address amount:
     cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic send-onchain {{ address }} {{ amount }}

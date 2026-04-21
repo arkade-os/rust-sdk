@@ -30,6 +30,7 @@ use ark_core::server::SubscriptionResponse;
 use ark_core::ArkAddress;
 use ark_core::ArkNote;
 use ark_core::ExplorerUtxo;
+use ark_delegator::DelegatorClient;
 use ark_grpc::test_utils as grpc_test_utils;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::bip32::Xpriv;
@@ -112,6 +113,12 @@ enum Commands {
     Subscribe {
         /// The Ark address to subscribe to.
         address: ArkAddressCli,
+    },
+    /// Run the delegated VTXO watcher in the foreground.
+    WatchDelegated {
+        /// Delegator API base URL (e.g. https://delegator.example.com).
+        #[arg(long)]
+        delegator_url: String,
     },
     /// Send on-chain to address
     SendOnchain {
@@ -316,6 +323,8 @@ struct Config {
     esplora_url: String,
     swap_storage_path: String,
     boltz_url: String,
+    delegator_pubkey: Option<String>,
+    historical_delegator_pubkeys: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -357,6 +366,17 @@ struct ListPendingTxsOutput {
 fn format_timestamp(unix_secs: i64) -> Result<String> {
     let ts = Timestamp::from_second(unix_secs)?;
     Ok(ts.to_string())
+}
+
+fn parse_delegator_pubkey(pk: &str) -> Result<bitcoin::XOnlyPublicKey> {
+    if let Ok(xonly) = pk.parse::<bitcoin::XOnlyPublicKey>() {
+        return Ok(xonly);
+    }
+
+    let full = pk
+        .parse::<bitcoin::PublicKey>()
+        .map_err(|e| anyhow!("invalid delegator_pubkey '{pk}': {e}"))?;
+    Ok(full.into())
 }
 
 #[tokio::main]
@@ -409,6 +429,20 @@ async fn main() -> Result<()> {
             .map_err(|e| anyhow!(e))?,
     );
 
+    let delegator_pk = config
+        .delegator_pubkey
+        .as_deref()
+        .map(parse_delegator_pubkey)
+        .transpose()?;
+
+    let historical_delegator_pks = config
+        .historical_delegator_pubkeys
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|pk| parse_delegator_pubkey(pk.as_str()))
+        .collect::<Result<Vec<_>>>()?;
+
     match (cli.mnemonic, cli.seed) {
         (Some(_), Some(_)) => bail!("specify either --mnemonic or --seed, not both"),
         (None, None) => bail!("specify either --mnemonic or --seed"),
@@ -439,6 +473,8 @@ async fn main() -> Result<()> {
                 storage,
                 config.boltz_url,
                 Duration::from_secs(30),
+                delegator_pk,
+                historical_delegator_pks.clone(),
             )
             .connect()
             .await
@@ -464,6 +500,8 @@ async fn main() -> Result<()> {
                 storage,
                 config.boltz_url,
                 Duration::from_secs(30),
+                delegator_pk,
+                historical_delegator_pks.clone(),
             )
             .connect()
             .await
@@ -476,11 +514,12 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run_command<K: KeyProvider>(
+async fn run_command<K: KeyProvider + 'static>(
     command: Commands,
     client: ark_client::Client<EsploraClient, Wallet<InMemoryDb>, SqliteSwapStorage, K>,
     esplora_client: Arc<EsploraClient>,
 ) -> Result<()> {
+    let client = Arc::new(client);
     client.discover_keys(20).await.map_err(|e| anyhow!(e))?;
 
     match &command {
@@ -645,9 +684,8 @@ async fn run_command<K: KeyProvider>(
             while let Some(result) = subscription_stream.next().await {
                 match result {
                     Ok(SubscriptionResponse::Event(e)) => {
-                        if let Some(psbt) = e.tx {
-                            let tx = &psbt.unsigned_tx;
-                            let output = tx.output.to_vec().iter().find_map(|out| {
+                        if let Some(tx) = e.tx {
+                            let output = tx.output.iter().find_map(|out| {
                                 if out.script_pubkey == address.0.to_p2tr_script_pubkey() {
                                     Some(out.clone())
                                 } else {
@@ -682,6 +720,48 @@ async fn run_command<K: KeyProvider>(
             }
 
             println!("Subscription stream ended");
+        }
+        Commands::WatchDelegated { delegator_url } => {
+            let delegator = Arc::new(DelegatorClient::new(delegator_url.clone()));
+            let info = delegator.info().await.map_err(|e| anyhow!(e))?;
+            let expected_delegator = parse_delegator_pubkey(&info.pubkey)?;
+            let configured_delegator = client
+                .delegator_pk()
+                .ok_or_else(|| anyhow!("delegator_pubkey is not configured in ark.config.toml"))?;
+            if configured_delegator != expected_delegator {
+                bail!(
+                    "configured delegator_pubkey {} does not match {} returned by {}",
+                    configured_delegator,
+                    expected_delegator,
+                    delegator_url
+                );
+            }
+            tracing::info!(
+                pubkey = %info.pubkey,
+                fee = %info.fee,
+                delegator_address = %info.delegator_address,
+                "Starting delegated VTXO watcher"
+            );
+
+            if client
+                .get_offchain_addresses()
+                .map_err(|e| anyhow!(e))?
+                .is_empty()
+            {
+                let (addr, _) = client.get_offchain_address().map_err(|e| anyhow!(e))?;
+                tracing::info!(
+                    address = %addr,
+                    "Derived first offchain address so watcher has scripts to subscribe to"
+                );
+            }
+
+            let _watcher = client.start_vtxo_watcher(delegator);
+            tracing::info!(
+                "Watcher running. Keep this process open and run other commands in parallel."
+            );
+
+            futures::future::pending::<()>().await;
+            unreachable!("pending future never resolves");
         }
         Commands::SendOnchain { address, amount } => {
             let network = client.server_info.network;
