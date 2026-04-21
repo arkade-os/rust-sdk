@@ -91,13 +91,7 @@ impl DelegatorClient {
     pub async fn info(&self) -> Result<DelegatorInfo, Error> {
         let url = format!("{}/v1/delegator/info", self.url);
 
-        let response = self
-            .http
-            .get(&url)
-            .timeout(REQUEST_TIMEOUT)
-            .send()
-            .await
-            .map_err(Error::Http)?;
+        let response = self.http.get(&url).timeout(REQUEST_TIMEOUT).send().await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -108,7 +102,7 @@ impl DelegatorClient {
             });
         }
 
-        response.json().await.map_err(Error::Http)
+        response.json().await.map_err(Into::into)
     }
 
     /// Submit signed intent and forfeit PSBTs to the delegator for renewal.
@@ -131,7 +125,7 @@ impl DelegatorClient {
 
         let body = DelegateRequestBody {
             intent: DelegateRequestIntent {
-                message: intent.serialize_message().map_err(Error::Intent)?,
+                message: intent.serialize_message()?,
                 proof: intent.serialize_proof(),
             },
             forfeit_txs: forfeit_psbts
@@ -147,8 +141,7 @@ impl DelegatorClient {
             .json(&body)
             .timeout(REQUEST_TIMEOUT)
             .send()
-            .await
-            .map_err(Error::Http)?;
+            .await?;
 
         if !response.status().is_success() {
             let status = response.status();
