@@ -10,6 +10,13 @@ use serde::Serialize;
 pub enum Error {
     #[error(transparent)]
     Http(#[from] reqwest::Error),
+    #[error("http {status}: {body}")]
+    HttpStatus {
+        status: reqwest::StatusCode,
+        body: String,
+    },
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
     #[error(transparent)]
     Base64(#[from] base64::DecodeError),
     #[error("invalid signer public key: {0}")]
@@ -76,14 +83,13 @@ impl IntrospectorClient {
     }
 
     pub async fn get_info(&self) -> Result<Info, Error> {
-        let response: GetInfoResponse = self
-            .http
-            .get(format!("{}/v1/info", self.base_url))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let response: GetInfoResponse = send_json(
+            self.http
+                .get(format!("{}/v1/info", self.base_url))
+                .send()
+                .await?,
+        )
+        .await?;
 
         Ok(Info {
             version: response.version,
@@ -99,18 +105,17 @@ impl IntrospectorClient {
         ark_tx: &Psbt,
         checkpoint_txs: &[Psbt],
     ) -> Result<SubmitTxResponse, Error> {
-        let response: SubmitTxResponseWire = self
-            .http
-            .post(format!("{}/v1/tx", self.base_url))
-            .json(&SubmitTxRequest {
-                ark_tx: encode_psbt(ark_tx),
-                checkpoint_txs: checkpoint_txs.iter().map(encode_psbt).collect(),
-            })
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let response: SubmitTxResponseWire = send_json(
+            self.http
+                .post(format!("{}/v1/tx", self.base_url))
+                .json(&SubmitTxRequest {
+                    ark_tx: encode_psbt(ark_tx),
+                    checkpoint_txs: checkpoint_txs.iter().map(encode_psbt).collect(),
+                })
+                .send()
+                .await?,
+        )
+        .await?;
 
         Ok(SubmitTxResponse {
             signed_ark_tx: decode_psbt(&response.signed_ark_tx)?,
@@ -123,20 +128,19 @@ impl IntrospectorClient {
     }
 
     pub async fn submit_intent(&self, intent: &Intent) -> Result<String, Error> {
-        let response: SubmitIntentResponse = self
-            .http
-            .post(format!("{}/v1/intent", self.base_url))
-            .json(&SubmitIntentRequest {
-                intent: IntentWire {
-                    proof: intent.proof.clone(),
-                    message: intent.message.clone(),
-                },
-            })
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let response: SubmitIntentResponse = send_json(
+            self.http
+                .post(format!("{}/v1/intent", self.base_url))
+                .json(&SubmitIntentRequest {
+                    intent: IntentWire {
+                        proof: intent.proof.clone(),
+                        message: intent.message.clone(),
+                    },
+                })
+                .send()
+                .await?,
+        )
+        .await?;
 
         Ok(response.signed_proof)
     }
@@ -148,51 +152,62 @@ impl IntrospectorClient {
         connector_tree: &[TxTreeNode],
         commitment_tx: &str,
     ) -> Result<SubmitFinalizationResponse, Error> {
-        let response: SubmitFinalizationResponse = self
-            .http
-            .post(format!("{}/v1/finalization", self.base_url))
-            .json(&SubmitFinalizationRequest {
-                signed_intent: IntentWire {
-                    proof: signed_intent.proof.clone(),
-                    message: signed_intent.message.clone(),
-                },
-                forfeits: forfeits.to_vec(),
-                connector_tree: connector_tree
-                    .iter()
-                    .map(|node| TxTreeNodeWire {
-                        txid: node.txid.clone(),
-                        tx: node.tx.clone(),
-                        children: node.children.clone(),
-                    })
-                    .collect(),
-                commitment_tx: commitment_tx.to_owned(),
-            })
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let response: SubmitFinalizationResponse = send_json(
+            self.http
+                .post(format!("{}/v1/finalization", self.base_url))
+                .json(&SubmitFinalizationRequest {
+                    signed_intent: IntentWire {
+                        proof: signed_intent.proof.clone(),
+                        message: signed_intent.message.clone(),
+                    },
+                    forfeits: forfeits.to_vec(),
+                    connector_tree: connector_tree
+                        .iter()
+                        .map(|node| TxTreeNodeWire {
+                            txid: node.txid.clone(),
+                            tx: node.tx.clone(),
+                            children: node.children.clone(),
+                        })
+                        .collect(),
+                    commitment_tx: commitment_tx.to_owned(),
+                })
+                .send()
+                .await?,
+        )
+        .await?;
 
         Ok(response)
     }
 
     pub async fn submit_onchain_tx(&self, tx: &Psbt) -> Result<SubmitOnchainTxResponse, Error> {
-        let response: SubmitOnchainTxResponseWire = self
-            .http
-            .post(format!("{}/v1/onchain-tx", self.base_url))
-            .json(&SubmitOnchainTxRequest {
-                tx: encode_psbt(tx),
-            })
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let response: SubmitOnchainTxResponseWire = send_json(
+            self.http
+                .post(format!("{}/v1/onchain-tx", self.base_url))
+                .json(&SubmitOnchainTxRequest {
+                    tx: encode_psbt(tx),
+                })
+                .send()
+                .await?,
+        )
+        .await?;
 
         Ok(SubmitOnchainTxResponse {
             signed_tx: decode_psbt(&response.signed_tx)?,
         })
     }
+}
+
+async fn send_json<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+) -> Result<T, Error> {
+    let status = response.status();
+    let body = response.text().await?;
+
+    if !status.is_success() {
+        return Err(Error::HttpStatus { status, body });
+    }
+
+    Ok(serde_json::from_str(&body)?)
 }
 
 fn base64_engine() -> base64::engine::GeneralPurpose {
@@ -295,6 +310,6 @@ mod tests {
     #[ignore]
     async fn get_info() {
         let client = IntrospectorClient::new("http://localhost:7073");
-        let info = client.get_info().await.unwrap();
+        let _info = client.get_info().await.unwrap();
     }
 }
