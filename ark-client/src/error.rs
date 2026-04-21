@@ -252,11 +252,23 @@ where
     type Output = Result<T, Error>;
 
     fn context(self, consequent: impl IntoError) -> Result<T, Error> {
-        self.map_err(|err| Error::ad_hoc(err).context(consequent))
+        self.map_err(|err| {
+            let err: Box<dyn StdError + Send + Sync + 'static> = Box::new(err);
+            match err.downcast::<Error>() {
+                Ok(err) => (*err).context(consequent),
+                Err(err) => Error::ad_hoc(err).context(consequent),
+            }
+        })
     }
 
     fn with_context<C: IntoError>(self, consequent: impl FnOnce() -> C) -> Result<T, Error> {
-        self.map_err(|err| Error::ad_hoc(err).with_context(consequent))
+        self.map_err(|err| {
+            let err: Box<dyn StdError + Send + Sync + 'static> = Box::new(err);
+            match err.downcast::<Error>() {
+                Ok(err) => (*err).with_context(consequent),
+                Err(err) => Error::ad_hoc(err).with_context(consequent),
+            }
+        })
     }
 }
 
