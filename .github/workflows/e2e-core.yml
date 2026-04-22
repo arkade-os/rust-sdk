@@ -8,9 +8,9 @@ on:
         required: true
         type: string
       introspector-version:
-        description: 'Introspector image tag to test against'
+        description: 'Version of introspector to test against (git tag, version, hash)'
         required: false
-        default: 'latest'
+        default: 'master'
         type: string
 
 env:
@@ -18,6 +18,8 @@ env:
   CARGO_TERM_COLOR: always
   ARK_GO_DIR: ./ark-go/
   ARKD_DIR: ./ark-go/arkd/
+  INTROSPECTOR_GO_DIR: ./introspector-go/
+  INTROSPECTOR_DIR: ./introspector-go/introspector/
   ARKD_LIVE_STORE_TYPE: inmemory
   ARKD_DB_TYPE: sqlite
   ARKD_EVENT_DB_TYPE: badger
@@ -125,10 +127,16 @@ jobs:
           # Wait for arkd to catch up with the chain
           sleep 10
 
+      - name: Checkout introspector `${{ inputs.introspector-version }}`
+        if: contains(matrix.test-binary, 'e2e_arkade_script')
+        run: just introspector-checkout ${{ inputs.introspector-version }}
+
+      - name: Build introspector docker image
+        if: contains(matrix.test-binary, 'e2e_arkade_script')
+        run: just introspector-docker-build
+
       - name: Run introspector
         if: contains(matrix.test-binary, 'e2e_arkade_script')
-        env:
-          INTROSPECTOR_IMAGE: ghcr.io/arklabshq/introspector:${{ inputs.introspector-version }}
         run: just introspector-docker-run
 
       - name: Run Test Binary
