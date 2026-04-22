@@ -8,6 +8,7 @@ arkd_wallet_logs := "$PWD/arkd-wallet.log"
 introspector_port := "7073"
 introspector_url := "http://127.0.0.1:" + introspector_port
 introspector_logs := "$PWD/introspector.log"
+introspector_image := "ark-rs-introspector:local"
 introspector_container := "introspector"
 
 mod ark-rest
@@ -276,6 +277,14 @@ introspector-checkout tag:
         git stash pop
     fi
 
+# Build the introspector docker image from source.
+introspector-docker-build:
+    #!/usr/bin/env bash
+
+    set -euxo pipefail
+
+    docker build -t {{ introspector_image }} "$INTROSPECTOR_DIR"
+
 # Pull the introspector docker image.
 introspector-docker-pull:
     #!/usr/bin/env bash
@@ -291,11 +300,12 @@ introspector-docker-run:
 
     set -euxo pipefail
 
-    image="${INTROSPECTOR_IMAGE:-ghcr.io/arklabshq/introspector:latest}"
+    image="${INTROSPECTOR_IMAGE:-{{ introspector_image }}}"
 
     if ! docker image inspect "$image" > /dev/null 2>&1; then
-        echo "Docker image $image not found locally, pulling it first"
-        docker pull "$image"
+        echo "Docker image $image not found locally"
+        echo "Build it with 'just introspector-docker-build' or set INTROSPECTOR_IMAGE to a pulled image"
+        exit 1
     fi
 
     docker rm -f {{ introspector_container }} || true
@@ -314,9 +324,11 @@ introspector-docker-run:
     just _wait-for-http {{ introspector_url }}/v1/info 60
     docker logs {{ introspector_container }} &> {{ introspector_logs }} || true
 
-# Pull and run introspector in docker.
-introspector-docker-setup:
-    just introspector-docker-pull
+# Build and run introspector in docker from source.
+[positional-arguments]
+introspector-docker-setup tag='master':
+    just introspector-checkout {{ tag }}
+    just introspector-docker-build
     just introspector-docker-run
 
 # Stop introspector docker container and save logs.
