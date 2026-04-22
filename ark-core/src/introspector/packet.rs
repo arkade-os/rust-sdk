@@ -70,6 +70,7 @@ impl Packet {
         if self.entries.is_empty() {
             return Err(PacketError::EmptyPacket);
         }
+
         if self.entries.len() > MAX_ENTRY_COUNT {
             return Err(PacketError::EntryCountExceeded {
                 max: MAX_ENTRY_COUNT,
@@ -82,6 +83,15 @@ impl Packet {
             if entry.script.is_empty() {
                 return Err(PacketError::EmptyScript(index));
             }
+
+            let script_len = entry.script.as_bytes().len();
+            if script_len > MAX_SCRIPT_LENGTH {
+                return Err(PacketError::ScriptLengthExceeded {
+                    max: MAX_SCRIPT_LENGTH,
+                    got: script_len,
+                });
+            }
+
             if !seen.insert(entry.vin) {
                 return Err(PacketError::DuplicateVin {
                     vin: entry.vin,
