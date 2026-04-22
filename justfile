@@ -5,6 +5,11 @@ arkd_wallet_port := "6060"
 arkd_wallet_url := "http://localhost:" + arkd_wallet_port
 arkd_logs := "$PWD/arkd.log"
 arkd_wallet_logs := "$PWD/arkd-wallet.log"
+introspector_port := "7073"
+introspector_url := "http://127.0.0.1:" + introspector_port
+introspector_logs := "$PWD/introspector.log"
+introspector_image := "ark-rs-introspector:local"
+introspector_container := "introspector"
 
 mod ark-rest
 mod nix
@@ -236,6 +241,103 @@ arkd-wallet-kill:
     fi
     [ ! -e "{{ arkd_wallet_logs }}" ] || mv -f {{ arkd_wallet_logs }} {{ arkd_wallet_logs }}.old
 
+# Checkout introspector (https://github.com/ArkLabsHQ/introspector) in a local directory.
+[positional-arguments]
+introspector-checkout tag:
+    #!/usr/bin/env bash
+
+    set -euxo pipefail
+
+    mkdir -p $INTROSPECTOR_GO_DIR
+    cd $INTROSPECTOR_GO_DIR
+
+    CHANGES_STASHED=false
+
+    if [ -d "introspector" ]; then
+        cd introspector
+
+        if ! git diff --quiet || ! git diff --staged --quiet; then
+            git stash push -m "Automated stash before update"
+            CHANGES_STASHED=true
+        fi
+
+        git fetch --all
+    else
+        git clone https://github.com/ArkLabsHQ/introspector.git
+        cd introspector
+    fi
+
+    if [ ! -z "$1" ]; then
+        git checkout $1
+    else
+        git checkout master
+    fi
+
+    if [ "$CHANGES_STASHED" = true ]; then
+        git stash pop
+    fi
+
+# Build the introspector docker image from source.
+introspector-docker-build:
+    #!/usr/bin/env bash
+
+    set -euxo pipefail
+
+    docker build -t {{ introspector_image }} "$INTROSPECTOR_DIR"
+
+# Pull the introspector docker image.
+introspector-docker-pull:
+    #!/usr/bin/env bash
+
+    set -euxo pipefail
+
+    image="${INTROSPECTOR_IMAGE:-ghcr.io/arklabshq/introspector:latest}"
+    docker pull "$image"
+
+# Run introspector in docker against host arkd.
+introspector-docker-run:
+    #!/usr/bin/env bash
+
+    set -euxo pipefail
+
+    image="${INTROSPECTOR_IMAGE:-{{ introspector_image }}}"
+
+    if ! docker image inspect "$image" > /dev/null 2>&1; then
+        echo "Docker image $image not found locally"
+        echo "Build it with 'just introspector-docker-build' or set INTROSPECTOR_IMAGE to a pulled image"
+        exit 1
+    fi
+
+    docker rm -f {{ introspector_container }} || true
+
+    docker run -d \
+        --name {{ introspector_container }} \
+        --network nigiri \
+        --add-host=host.docker.internal:host-gateway \
+        -p {{ introspector_port }}:7073 \
+        -e INTROSPECTOR_SECRET_KEY=5646b2e23bbb82491fb4ef262079ff17594d5e873fc6bcea5f1453edbe1029b1 \
+        -e INTROSPECTOR_NO_TLS=true \
+        -e INTROSPECTOR_ARKD_URL=host.docker.internal:7070 \
+        -e INTROSPECTOR_LOG_LEVEL=6 \
+        "$image"
+
+    just _wait-for-http {{ introspector_url }}/v1/info 60
+    docker logs {{ introspector_container }} &> {{ introspector_logs }} || true
+
+# Build and run introspector in docker from source.
+[positional-arguments]
+introspector-docker-setup tag='master':
+    just introspector-checkout {{ tag }}
+    just introspector-docker-build
+    just introspector-docker-run
+
+# Stop introspector docker container and save logs.
+introspector-docker-kill:
+    #!/usr/bin/env bash
+
+    docker logs {{ introspector_container }} &> {{ introspector_logs }} || true
+    docker rm -f {{ introspector_container }} && echo "Stopped introspector" || echo "introspector not running, skipped"
+
 # Wipe docker containers set up from the `arkd` repo.
 docker-wipe:
     @echo Stopping arkd-related docker containers
@@ -288,6 +390,31 @@ _wait-until-arkd-is-initialized:
 
     echo "arkd wallet was not initialized in time"
 
+    exit 1
+
+# Wait for an HTTP endpoint to become available.
+
+# Usage: just _wait-for-http url timeout_seconds
+[positional-arguments]
+_wait-for-http url timeout:
+    #!/usr/bin/env bash
+
+    set -euo pipefail
+
+    URL="${1}"
+    TIMEOUT="${2}"
+
+    echo "Waiting for HTTP endpoint '${URL}' (timeout: ${TIMEOUT}s)..."
+
+    for ((i=0; i<${TIMEOUT}; i+=1)); do
+      if curl -fsS "${URL}" > /dev/null; then
+        echo "HTTP endpoint '${URL}' is ready!"
+        exit 0
+      fi
+      sleep 1
+    done
+
+    echo "HTTP endpoint '${URL}' was not ready within ${TIMEOUT} seconds"
     exit 1
 
 # Wait for a specific log pattern in a docker container
@@ -373,7 +500,7 @@ e2e-tests:
 # Restart e2e test environment (arkd master) and run all e2e tests.
 e2e-full:
     @echo running integration tests
-    nigiri stop --delete && just arkd-kill arkd-wipe arkd-wallet-kill arkd-wallet-wipe docker-wipe
+    nigiri stop --delete && just arkd-kill arkd-wipe arkd-wallet-kill arkd-wallet-wipe introspector-docker-kill docker-wipe
     nigiri start
     sleep 1
     just arkd-build
