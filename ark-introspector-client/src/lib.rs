@@ -5,6 +5,9 @@ use bitcoin::PublicKey;
 use bitcoin::XOnlyPublicKey;
 use serde::Deserialize;
 use serde::Serialize;
+use std::time::Duration;
+
+const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -71,7 +74,10 @@ impl IntrospectorClient {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_owned(),
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .timeout(DEFAULT_HTTP_TIMEOUT)
+                .build()
+                .expect("building reqwest client with default timeout"),
         }
     }
 
