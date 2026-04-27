@@ -180,8 +180,12 @@ impl Packet {
             reader
                 .read_exact(&mut witness_bytes)
                 .map_err(PacketError::Read)?;
-            let witness = Witness::consensus_decode(&mut witness_bytes.as_slice())
+            let mut witness_reader = witness_bytes.as_slice();
+            let witness = Witness::consensus_decode(&mut witness_reader)
                 .map_err(PacketError::WitnessDecode)?;
+            if !witness_reader.is_empty() {
+                return Err(PacketError::TrailingBytes(witness_reader.len()));
+            }
 
             entries.push(IntrospectorEntry {
                 vin,
@@ -335,6 +339,10 @@ mod tests {
         assert!(matches!(
             Packet::decode(&Vec::from_hex("010000fd1127").unwrap()),
             Err(PacketError::ScriptLengthExceeded { .. })
+        ));
+        assert!(matches!(
+            Packet::decode(&Vec::from_hex("01000001510200ff").unwrap()),
+            Err(PacketError::TrailingBytes(1))
         ));
     }
 
