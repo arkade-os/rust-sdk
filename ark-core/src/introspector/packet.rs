@@ -53,6 +53,10 @@ pub enum PacketError {
     Decode(encode::Error),
     #[error("failed to read packet: {0}")]
     Read(std::io::Error),
+    #[error("introspector payload length overflows")]
+    PayloadLengthOverflow,
+    #[error("truncated introspector payload, expected {expected} bytes got {got}")]
+    TruncatedPayload { expected: usize, got: usize },
     #[error("unexpected {0} trailing bytes")]
     TrailingBytes(usize),
     #[error("failed to build OP_RETURN script: {0}")]
@@ -263,10 +267,19 @@ pub fn find_packet(tx: &Transaction) -> Result<Option<Packet>, PacketError> {
             .map_err(PacketError::Decode)?
             .0 as usize;
         let offset = 4 + reader.position() as usize;
-        if bytes.len() < offset + payload_len {
-            return Err(PacketError::TrailingBytes(0));
+        let end = offset
+            .checked_add(payload_len)
+            .ok_or(PacketError::PayloadLengthOverflow)?;
+        if bytes.len() < end {
+            return Err(PacketError::TruncatedPayload {
+                expected: end,
+                got: bytes.len(),
+            });
         }
-        return Packet::decode(&bytes[offset..offset + payload_len]).map(Some);
+        if bytes.len() > end {
+            return Err(PacketError::TrailingBytes(bytes.len() - end));
+        }
+        return Packet::decode(&bytes[offset..end]).map(Some);
     }
 
     Ok(None)
@@ -288,6 +301,22 @@ mod tests {
                 .map(|item| Vec::from_hex(item).unwrap())
                 .collect::<Vec<_>>(),
         )
+    }
+
+    fn tx_with_op_return_payload(payload: Vec<u8>) -> Transaction {
+        let push_bytes = PushBytesBuf::try_from(payload).unwrap();
+        Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![],
+            output: vec![TxOut {
+                value: Amount::ZERO,
+                script_pubkey: ScriptBuf::builder()
+                    .push_opcode(bitcoin::opcodes::all::OP_RETURN)
+                    .push_slice(push_bytes)
+                    .into_script(),
+            }],
+        }
     }
 
     #[test]
@@ -343,6 +372,30 @@ mod tests {
         assert!(matches!(
             Packet::decode(&Vec::from_hex("01000001510200ff").unwrap()),
             Err(PacketError::TrailingBytes(1))
+        ));
+    }
+
+    #[test]
+    fn find_packet_rejects_invalid_payload_lengths() {
+        let tx = tx_with_op_return_payload(Vec::from_hex("41524b010200").unwrap());
+        assert!(matches!(
+            find_packet(&tx),
+            Err(PacketError::TruncatedPayload {
+                expected: 7,
+                got: 6,
+            })
+        ));
+
+        let tx = tx_with_op_return_payload(Vec::from_hex("41524b010100ff").unwrap());
+        assert!(matches!(
+            find_packet(&tx),
+            Err(PacketError::TrailingBytes(1))
+        ));
+
+        let tx = tx_with_op_return_payload(Vec::from_hex("41524b01ffffffffffffffffff").unwrap());
+        assert!(matches!(
+            find_packet(&tx),
+            Err(PacketError::PayloadLengthOverflow)
         ));
     }
 
