@@ -104,6 +104,18 @@ fn append_token(builder: Builder, token: &str) -> Result<Builder, AsmError> {
         return Ok(builder.push_opcode(Opcode::from(byte)));
     }
 
+    if let Some(rest) = token.strip_prefix("OP_UNKNOWN_") {
+        if rest.len() != 2 {
+            return Err(AsmError::InvalidToken(token.to_string()));
+        }
+        let byte =
+            u8::from_str_radix(rest, 16).map_err(|_| AsmError::InvalidToken(token.to_string()))?;
+        if (0x01..=0x4b).contains(&byte) {
+            return Err(AsmError::InvalidToken(token.to_string()));
+        }
+        return Ok(builder.push_opcode(Opcode::from(byte)));
+    }
+
     if is_hex(token) {
         let bytes = hex::decode(token).map_err(|e| AsmError::InvalidHex(token.to_string(), e))?;
         let push: &PushBytes = bytes
@@ -266,5 +278,28 @@ mod tests {
         let original = "OP_INSPECTNUMASSETGROUPS OP_ADD64 deadbeef OP_EQUAL";
         let script = from_asm(original).unwrap();
         assert_eq!(to_asm(&script).unwrap(), original);
+    }
+
+    #[test]
+    fn round_trip_unknown_opcode() {
+        let original = ScriptBuf::from_bytes(vec![0xff]);
+        let unknown = from_asm("OP_UNKNOWN_ff").unwrap();
+        assert_eq!(unknown, original);
+
+        let asm = to_asm(&unknown).unwrap();
+        assert_eq!(from_asm(&asm).unwrap(), original);
+    }
+
+    #[test]
+    fn from_asm_rejects_invalid_unknown_opcode_tokens() {
+        for token in [
+            "OP_UNKNOWN_f",
+            "OP_UNKNOWN_fff",
+            "OP_UNKNOWN_gg",
+            "OP_UNKNOWN_01",
+        ] {
+            let err = from_asm(token).unwrap_err();
+            assert!(matches!(err, AsmError::InvalidToken(_)));
+        }
     }
 }
