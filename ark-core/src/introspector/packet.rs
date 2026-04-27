@@ -229,6 +229,12 @@ impl Packet {
     }
 }
 
+/// Add an introspector packet OP_RETURN output to a PSBT.
+///
+/// If the PSBT already has outputs, this inserts the packet before the last
+/// output. Arkade transactions are expected to keep the anchor output last, so
+/// callers must only use this helper with PSBTs that either have no outputs or
+/// whose final output is the anchor.
 pub fn add_packet_to_psbt(psbt: &mut bitcoin::Psbt, packet: &Packet) -> Result<(), PacketError> {
     let txout = packet.to_txout()?;
     let len = psbt.unsigned_tx.output.len();
