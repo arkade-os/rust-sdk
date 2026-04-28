@@ -1,13 +1,13 @@
 //! Arkade extension opcode constants and name lookup.
 //!
-//! Arkade opcodes occupy byte values `0xb3` (repurposed NOP4) and `0xc4..=0xf3`,
+//! Arkade opcodes occupy byte values `0xb3` (repurposed NOP4) and `0xc4..=0xf5`,
 //! which overlap with Bitcoin's `OP_NOP4` and `OP_RETURN_*` opcodes. When these
 //! bytes appear in an arkade context they carry the extension semantics instead.
 
 use bitcoin::Opcode;
 
 /// Arkade extension opcodes, aliased to the matching `bitcoin` crate opcode
-/// by byte value (arkade repurposes `OP_NOP4` and `OP_RETURN_196..=OP_RETURN_243`).
+/// by byte value (arkade repurposes `OP_NOP4` and `OP_RETURN_196..=OP_RETURN_245`).
 ///
 /// Use these with [`bitcoin::script::Builder::push_opcode`] to build
 /// arkade-aware scripts.
@@ -48,21 +48,9 @@ pub mod op {
     pub const INSPECTNUMOUTPUTS: Opcode = OP_RETURN_213;
     pub const TXWEIGHT: Opcode = OP_RETURN_214;
 
-    // 64-bit arithmetic (0xd7..=0xdf).
-    pub const ADD64: Opcode = OP_RETURN_215;
-    pub const SUB64: Opcode = OP_RETURN_216;
-    pub const MUL64: Opcode = OP_RETURN_217;
-    pub const DIV64: Opcode = OP_RETURN_218;
-    pub const NEG64: Opcode = OP_RETURN_219;
-    pub const LESSTHAN64: Opcode = OP_RETURN_220;
-    pub const LESSTHANOREQUAL64: Opcode = OP_RETURN_221;
-    pub const GREATERTHAN64: Opcode = OP_RETURN_222;
-    pub const GREATERTHANOREQUAL64: Opcode = OP_RETURN_223;
-
-    // Conversion (0xe0..=0xe2).
-    pub const SCRIPTNUMTOLE64: Opcode = OP_RETURN_224;
-    pub const LE64TOSCRIPTNUM: Opcode = OP_RETURN_225;
-    pub const LE32TOLE64: Opcode = OP_RETURN_226;
+    // Conversion (0xd7..=0xd8).
+    pub const NUM2BIN: Opcode = OP_RETURN_215;
+    pub const BIN2NUM: Opcode = OP_RETURN_216;
 
     // EC operations (0xe3..=0xe4).
     pub const ECMULSCALARVERIFY: Opcode = OP_RETURN_227;
@@ -86,6 +74,10 @@ pub mod op {
 
     // Transaction ID (0xf3).
     pub const TXID: Opcode = OP_RETURN_243;
+
+    // Packet introspection (0xf4..=0xf5).
+    pub const INSPECTPACKET: Opcode = OP_RETURN_244;
+    pub const INSPECTINPUTPACKET: Opcode = OP_RETURN_245;
 }
 
 /// Arkade extension opcode byte → arkade-specific name (no `OP_` prefix).
@@ -113,18 +105,8 @@ const ARKADE_NAMES: &[(u8, &str)] = &[
     (0xd4, "INSPECTNUMINPUTS"),
     (0xd5, "INSPECTNUMOUTPUTS"),
     (0xd6, "TXWEIGHT"),
-    (0xd7, "ADD64"),
-    (0xd8, "SUB64"),
-    (0xd9, "MUL64"),
-    (0xda, "DIV64"),
-    (0xdb, "NEG64"),
-    (0xdc, "LESSTHAN64"),
-    (0xdd, "LESSTHANOREQUAL64"),
-    (0xde, "GREATERTHAN64"),
-    (0xdf, "GREATERTHANOREQUAL64"),
-    (0xe0, "SCRIPTNUMTOLE64"),
-    (0xe1, "LE64TOSCRIPTNUM"),
-    (0xe2, "LE32TOLE64"),
+    (0xd7, "NUM2BIN"),
+    (0xd8, "BIN2NUM"),
     (0xe3, "ECMULSCALARVERIFY"),
     (0xe4, "TWEAKVERIFY"),
     (0xe5, "INSPECTNUMASSETGROUPS"),
@@ -142,13 +124,15 @@ const ARKADE_NAMES: &[(u8, &str)] = &[
     (0xf1, "INSPECTINASSETAT"),
     (0xf2, "INSPECTINASSETLOOKUP"),
     (0xf3, "TXID"),
+    (0xf4, "INSPECTPACKET"),
+    (0xf5, "INSPECTINPUTPACKET"),
 ];
 
 /// All arkade extension opcode byte values.
 pub const ARKADE_OPCODES: &[u8] = &[
     0xb3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf, 0xd1, 0xd2, 0xd3,
-    0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf, 0xe0, 0xe1, 0xe2, 0xe3,
-    0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xeb, 0xec, 0xed, 0xee, 0xef, 0xf0, 0xf1, 0xf2, 0xf3,
+    0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xeb, 0xec, 0xed,
+    0xee, 0xef, 0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5,
 ];
 
 /// Returns the opcode name (with `OP_` prefix) for the given byte, preferring
@@ -248,10 +232,12 @@ mod tests {
     fn arkade_opcode_values() {
         assert_eq!(op::MERKLEBRANCHVERIFY.to_u8(), 0xb3);
         assert_eq!(op::SHA256INITIALIZE.to_u8(), 0xc4);
-        assert_eq!(op::ADD64.to_u8(), 0xd7);
+        assert_eq!(op::NUM2BIN.to_u8(), 0xd7);
         assert_eq!(op::TWEAKVERIFY.to_u8(), 0xe4);
         assert_eq!(op::INSPECTINASSETLOOKUP.to_u8(), 0xf2);
         assert_eq!(op::TXID.to_u8(), 0xf3);
+        assert_eq!(op::INSPECTPACKET.to_u8(), 0xf4);
+        assert_eq!(op::INSPECTINPUTPACKET.to_u8(), 0xf5);
     }
 
     #[test]
