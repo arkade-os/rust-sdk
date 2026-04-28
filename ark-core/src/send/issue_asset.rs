@@ -89,7 +89,7 @@ pub fn build_self_asset_issuance_transactions(
         control_asset_config.as_ref(),
         metadata.as_ref(),
     )?;
-    add_asset_packet_to_psbt(&mut ark_tx, &packet);
+    add_asset_packet_to_psbt(&mut ark_tx, &packet)?;
 
     let asset_ids = derive_issued_asset_ids(
         ark_tx.unsigned_tx.compute_txid(),

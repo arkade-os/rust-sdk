@@ -4,11 +4,8 @@
 //! The packet is embedded in a Bitcoin transaction via an OP_RETURN output.
 
 use crate::asset::AssetId;
-use bitcoin::ScriptBuf;
+use crate::Error;
 use bitcoin::TxOut;
-
-/// Magic bytes prefix: "ARK" (0x41524b).
-const MAGIC_BYTES: [u8; 3] = [0x41, 0x52, 0x4b];
 
 /// TLV type byte for the asset packet.
 const ASSET_PACKET_TYPE: u8 = 0x00;
@@ -39,27 +36,7 @@ impl Packet {
 
     /// Wrap this packet into an OP_RETURN TxOut with the ARK magic bytes and TLV envelope.
     pub fn to_txout(&self) -> TxOut {
-        let payload = self.encode();
-
-        let mut script_data = Vec::new();
-        // Magic bytes
-        script_data.extend_from_slice(&MAGIC_BYTES);
-        // TLV: Type
-        script_data.push(ASSET_PACKET_TYPE);
-        // TLV: Length (uvarint)
-        encode_uvarint(&mut script_data, payload.len() as u64);
-        // TLV: Value
-        script_data.extend_from_slice(&payload);
-
-        // Build OP_RETURN script
-        let mut script_bytes = Vec::new();
-        script_bytes.push(0x6a); // OP_RETURN
-        push_data(&mut script_bytes, &script_data);
-
-        TxOut {
-            value: bitcoin::Amount::ZERO,
-            script_pubkey: ScriptBuf::from_bytes(script_bytes),
-        }
+        crate::extension::packet_txout(ASSET_PACKET_TYPE, &self.encode())
     }
 }
 
@@ -191,49 +168,19 @@ fn encode_metadata(buf: &mut Vec<u8>, metadata: &[(String, String)]) {
     }
 }
 
-/// Push data onto a script with proper OP_PUSH prefix.
-fn push_data(script: &mut Vec<u8>, data: &[u8]) {
-    let len = data.len();
-    if len <= 75 {
-        script.push(len as u8);
-    } else if len <= 0xff {
-        script.push(0x4c); // OP_PUSHDATA1
-        script.push(len as u8);
-    } else if len <= 0xffff {
-        script.push(0x4d); // OP_PUSHDATA2
-        script.extend_from_slice(&(len as u16).to_le_bytes());
-    } else {
-        script.push(0x4e); // OP_PUSHDATA4
-        script.extend_from_slice(&(len as u32).to_le_bytes());
-    }
-    script.extend_from_slice(data);
-}
-
 /// Helper to add an asset packet as an OP_RETURN output to an existing PSBT.
 ///
 /// The P2A (anchor) output must remain the last output. This function inserts
 /// the asset packet output before it.
-pub fn add_asset_packet_to_psbt(psbt: &mut bitcoin::Psbt, packet: &Packet) {
+pub fn add_asset_packet_to_psbt(psbt: &mut bitcoin::Psbt, packet: &Packet) -> Result<(), Error> {
     if packet.groups.is_empty() {
-        return;
+        return Ok(());
     }
 
-    let op_return_txout = packet.to_txout();
+    crate::extension::add_packet_to_psbt(psbt, ASSET_PACKET_TYPE, &packet.encode())
+        .map_err(Error::ad_hoc)?;
 
-    let num_outputs = psbt.unsigned_tx.output.len();
-
-    // TODO: Is this actually possible?
-    if num_outputs == 0 {
-        psbt.unsigned_tx.output.push(op_return_txout);
-        psbt.outputs.push(bitcoin::psbt::Output::default());
-        return;
-    }
-
-    // Insert before the last output (P2A anchor).
-    let last_idx = num_outputs - 1;
-    psbt.unsigned_tx.output.insert(last_idx, op_return_txout);
-    psbt.outputs
-        .insert(last_idx, bitcoin::psbt::Output::default());
+    Ok(())
 }
 
 /// Encode a uvarint (LEB128 unsigned variable-length integer).
@@ -364,7 +311,10 @@ mod tests {
         // After push byte, should have ARK magic
         // push_len byte, then 0x41 0x52 0x4b
         let data_start = 2; // 0x6a + push_len
-        assert_eq!(&script_bytes[data_start..data_start + 3], &MAGIC_BYTES);
+        assert_eq!(
+            &script_bytes[data_start..data_start + 3],
+            &crate::extension::MAGIC_BYTES
+        );
     }
 
     #[test]

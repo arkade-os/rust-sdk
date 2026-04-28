@@ -1,9 +1,8 @@
+use crate::extension;
 use bitcoin::consensus::encode::Decodable;
 use bitcoin::consensus::encode::Encodable;
 use bitcoin::consensus::encode::{self};
 use bitcoin::io;
-use bitcoin::script::PushBytesBuf;
-use bitcoin::Amount;
 use bitcoin::ScriptBuf;
 use bitcoin::Transaction;
 use bitcoin::TxOut;
@@ -13,7 +12,6 @@ use std::collections::BTreeSet;
 use std::io::Cursor;
 use std::io::Read;
 
-const MAGIC_BYTES: [u8; 3] = [0x41, 0x52, 0x4b];
 const PACKET_TYPE: u8 = 0x01;
 const MAX_ENTRY_COUNT: usize = 1_000;
 const MAX_SCRIPT_LENGTH: usize = 10_000;
@@ -59,8 +57,8 @@ pub enum PacketError {
     TruncatedPayload { expected: usize, got: usize },
     #[error("unexpected {0} trailing bytes")]
     TrailingBytes(usize),
-    #[error("failed to build OP_RETURN script: {0}")]
-    Script(#[from] bitcoin::script::PushBytesError),
+    #[error("failed to process extension packet: {0}")]
+    Extension(#[from] extension::ExtensionError),
 }
 
 impl Packet {
@@ -207,25 +205,9 @@ impl Packet {
     }
 
     pub fn to_txout(&self) -> Result<TxOut, PacketError> {
-        let mut payload = Vec::new();
-        payload.extend_from_slice(&MAGIC_BYTES);
-        payload.push(PACKET_TYPE);
-        let encoded = self.encode()?;
-        VarInt(encoded.len() as u64)
-            .consensus_encode(&mut payload)
-            .map_err(PacketError::Encode)?;
-        payload.extend_from_slice(&encoded);
+        let packet = self.encode()?;
 
-        let push_bytes = PushBytesBuf::try_from(payload)?;
-        let script_pubkey = ScriptBuf::builder()
-            .push_opcode(bitcoin::opcodes::all::OP_RETURN)
-            .push_slice(push_bytes)
-            .into_script();
-
-        Ok(TxOut {
-            value: Amount::ZERO,
-            script_pubkey,
-        })
+        Ok(extension::packet_txout(PACKET_TYPE, &packet))
     }
 }
 
@@ -236,59 +218,19 @@ impl Packet {
 /// callers must only use this helper with PSBTs that either have no outputs or
 /// whose final output is the anchor.
 pub fn add_packet_to_psbt(psbt: &mut bitcoin::Psbt, packet: &Packet) -> Result<(), PacketError> {
-    let txout = packet.to_txout()?;
-    let len = psbt.unsigned_tx.output.len();
+    let packet = packet.encode()?;
 
-    if len == 0 {
-        psbt.unsigned_tx.output.push(txout);
-        psbt.outputs.push(bitcoin::psbt::Output::default());
-        return Ok(());
-    }
+    extension::add_packet_to_psbt(psbt, PACKET_TYPE, &packet)?;
 
-    let anchor_index = len - 1;
-    psbt.unsigned_tx.output.insert(anchor_index, txout);
-    psbt.outputs
-        .insert(anchor_index, bitcoin::psbt::Output::default());
     Ok(())
 }
 
 pub fn find_packet(tx: &Transaction) -> Result<Option<Packet>, PacketError> {
-    for output in &tx.output {
-        let mut instructions = output.script_pubkey.instructions();
-        let Some(Ok(bitcoin::script::Instruction::Op(bitcoin::opcodes::all::OP_RETURN))) =
-            instructions.next()
-        else {
-            continue;
-        };
-        let Some(Ok(bitcoin::script::Instruction::PushBytes(bytes))) = instructions.next() else {
-            continue;
-        };
-        let bytes = bytes.as_bytes();
-        if bytes.len() < 4 || bytes[..3] != MAGIC_BYTES || bytes[3] != PACKET_TYPE {
-            continue;
-        }
+    let Some(payload) = extension::find_packet_payload(tx, PACKET_TYPE)? else {
+        return Ok(None);
+    };
 
-        let mut reader = Cursor::new(&bytes[4..]);
-        let payload_len = VarInt::consensus_decode(&mut reader)
-            .map_err(PacketError::Decode)?
-            .0 as usize;
-        let offset = 4 + reader.position() as usize;
-        let end = offset
-            .checked_add(payload_len)
-            .ok_or(PacketError::PayloadLengthOverflow)?;
-        if bytes.len() < end {
-            return Err(PacketError::TruncatedPayload {
-                expected: end,
-                got: bytes.len(),
-            });
-        }
-        if bytes.len() > end {
-            return Err(PacketError::TrailingBytes(bytes.len() - end));
-        }
-        return Packet::decode(&bytes[offset..end]).map(Some);
-    }
-
-    Ok(None)
+    Packet::decode(payload).map(Some)
 }
 
 #[cfg(test)]
@@ -297,7 +239,9 @@ mod tests {
     use bitcoin::absolute;
     use bitcoin::hex::DisplayHex;
     use bitcoin::hex::FromHex;
+    use bitcoin::script::PushBytesBuf;
     use bitcoin::transaction;
+    use bitcoin::Amount;
     use bitcoin::TxIn;
 
     fn witness(items: &[&str]) -> Witness {
@@ -382,26 +326,32 @@ mod tests {
     }
 
     #[test]
-    fn find_packet_rejects_invalid_payload_lengths() {
+    fn find_packet_rejects_invalid_extension_payload_lengths() {
         let tx = tx_with_op_return_payload(Vec::from_hex("41524b010200").unwrap());
         assert!(matches!(
             find_packet(&tx),
-            Err(PacketError::TruncatedPayload {
-                expected: 7,
-                got: 6,
-            })
+            Err(PacketError::Extension(
+                extension::ExtensionError::TruncatedPacketPayload {
+                    expected: 7,
+                    got: 6,
+                }
+            ))
         ));
 
         let tx = tx_with_op_return_payload(Vec::from_hex("41524b010100ff").unwrap());
         assert!(matches!(
             find_packet(&tx),
-            Err(PacketError::TrailingBytes(1))
+            Err(PacketError::Extension(
+                extension::ExtensionError::TruncatedPacketLength
+            ))
         ));
 
         let tx = tx_with_op_return_payload(Vec::from_hex("41524b01ffffffffffffffffff").unwrap());
         assert!(matches!(
             find_packet(&tx),
-            Err(PacketError::PayloadLengthOverflow)
+            Err(PacketError::Extension(
+                extension::ExtensionError::TruncatedPacketLength
+            ))
         ));
     }
 

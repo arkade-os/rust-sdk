@@ -85,7 +85,7 @@ pub fn build_asset_reissuance_transactions(
         server_info,
     )?;
 
-    add_asset_packet_to_psbt(&mut ark_tx, &packet);
+    add_asset_packet_to_psbt(&mut ark_tx, &packet)?;
 
     Ok(AssetReissuanceTransactions {
         ark_tx,

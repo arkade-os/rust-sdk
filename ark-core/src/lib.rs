@@ -10,6 +10,7 @@ pub mod batch;
 pub mod boarding_output;
 pub mod coin_select;
 pub mod conversions;
+pub mod extension;
 pub mod history;
 pub mod intent;
 pub mod introspector;
