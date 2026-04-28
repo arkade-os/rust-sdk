@@ -154,12 +154,12 @@ mod tests {
     fn to_asm_arkade_opcodes() {
         let script = Builder::new()
             .push_opcode(op::SHA256INITIALIZE)
-            .push_opcode(op::ADD64)
+            .push_opcode(op::NUM2BIN)
             .push_opcode(op::TWEAKVERIFY)
             .into_script();
         assert_eq!(
             to_asm(&script).unwrap(),
-            "OP_SHA256INITIALIZE OP_ADD64 OP_TWEAKVERIFY"
+            "OP_SHA256INITIALIZE OP_NUM2BIN OP_TWEAKVERIFY"
         );
     }
 
@@ -235,12 +235,12 @@ mod tests {
 
     #[test]
     fn from_asm_arkade() {
-        let script = from_asm("OP_SHA256INITIALIZE OP_ADD64 OP_TWEAKVERIFY").unwrap();
+        let script = from_asm("OP_SHA256INITIALIZE OP_NUM2BIN OP_TWEAKVERIFY").unwrap();
         assert_eq!(
             script,
             Builder::new()
                 .push_opcode(op::SHA256INITIALIZE)
-                .push_opcode(op::ADD64)
+                .push_opcode(op::NUM2BIN)
                 .push_opcode(op::TWEAKVERIFY)
                 .into_script()
         );
@@ -275,7 +275,7 @@ mod tests {
 
     #[test]
     fn round_trip_arkade() {
-        let original = "OP_INSPECTNUMASSETGROUPS OP_ADD64 deadbeef OP_EQUAL";
+        let original = "OP_INSPECTNUMASSETGROUPS OP_NUM2BIN deadbeef OP_EQUAL";
         let script = from_asm(original).unwrap();
         assert_eq!(to_asm(&script).unwrap(), original);
     }
