@@ -106,12 +106,16 @@ impl BitcoinRpc {
 
 pub struct Nigiri {
     esplora_client: esplora_client::BlockingClient,
-    /// By how much we _reduce_ the block time of outpoints. A lower block time indicates that an
-    /// outpoint was confirmed longer ago.
+    /// By how much we _reduce_ the block time of outpoints.
     ///
     /// This can be used to ensure that certain outpoints are considered spendable, which is useful
     /// for testing scripts with opcodes such as `OP_CSV`.
     outpoint_blocktime_offset: RwLock<u64>,
+    /// By how much we _reduce_ the block height of outpoints.
+    ///
+    /// This can be used to ensure that certain outpoints are considered spendable, which is useful
+    /// for testing scripts with opcodes such as `OP_CSV`.
+    outpoint_block_height_offset: RwLock<u64>,
     /// Bitcoin RPC client for package submission
     bitcoin_rpc: BitcoinRpc,
 }
@@ -131,6 +135,7 @@ impl Nigiri {
         Self {
             esplora_client,
             outpoint_blocktime_offset: RwLock::new(0),
+            outpoint_block_height_offset: RwLock::new(0),
             bitcoin_rpc,
         }
     }
@@ -191,6 +196,12 @@ impl Nigiri {
     }
 
     #[allow(unused)]
+    pub fn set_outpoint_block_height_offset(&self, outpoint_block_height_offset: u64) {
+        let mut guard = self.outpoint_block_height_offset.write().unwrap();
+        *guard = outpoint_block_height_offset;
+    }
+
+    #[allow(unused)]
     pub async fn mine(&self, n: u32) {
         for i in 0..n {
             self.faucet_fund(
@@ -228,15 +239,38 @@ impl Nigiri {
             .scripthash_txs(&script_pubkey, None)
             .unwrap();
 
+        let current_block_height = self.get_height();
+
+        let outpoint_blocktime_offset = {
+            let guard = self.outpoint_blocktime_offset.read();
+            *guard.unwrap()
+        };
+
+        let outpoint_block_height_offset = {
+            let guard = self.outpoint_block_height_offset.read();
+            *guard.unwrap()
+        };
+
         let outputs = txs
             .into_iter()
             .flat_map(|tx| {
                 let txid = tx.txid;
 
-                let confirmation_blocktime = tx
-                    .status
-                    .block_time
-                    .map(|t| t - *self.outpoint_blocktime_offset.read().unwrap());
+                let confirmation_blocktime =
+                    tx.status.block_time.map(|t| t - outpoint_blocktime_offset);
+
+                let confirmations = match tx.status.block_height {
+                    Some(confirmation_block_height) => {
+                        match current_block_height.checked_sub(
+                            confirmation_block_height
+                                .saturating_sub(outpoint_block_height_offset as u32),
+                        ) {
+                            Some(x) => x + 1,
+                            None => 0,
+                        }
+                    }
+                    None => 0,
+                };
 
                 tx.vout
                     .iter()
@@ -249,6 +283,7 @@ impl Nigiri {
                         },
                         amount: Amount::from_sat(v.value),
                         confirmation_blocktime,
+                        confirmations: confirmations as u64,
                         // Assume the output is unspent until we dig deeper, further down.
                         is_spent: false,
                     })

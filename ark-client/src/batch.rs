@@ -1022,6 +1022,7 @@ where
                     outpoint,
                     amount,
                     confirmation_blocktime: Some(confirmation_blocktime),
+                    confirmations,
                     is_spent: false,
                 } = o
                 {
@@ -1034,6 +1035,7 @@ where
                     if !boarding_output.can_be_claimed_unilaterally_by_owner(
                         now.as_duration().try_into().map_err(Error::ad_hoc)?,
                         std::time::Duration::from_secs(*confirmation_blocktime),
+                        *confirmations,
                     ) {
                         // Mark this outpoint as seen
                         seen_outpoints.insert(*outpoint);

@@ -1125,48 +1125,6 @@ where
         Ok(txs)
     }
 
-    /// Get the boarding exit delay defined by the Ark server, in seconds.
-    ///
-    /// # Panics
-    ///
-    /// This will panic if the boarding exit delay corresponds to a relative locktime specified in
-    /// blocks. We expect the Ark server to use a relative locktime in seconds.
-    ///
-    /// This will also panic if the sequence number returned by the server is not a valid relative
-    /// locktime.
-    pub fn boarding_exit_delay_seconds(&self) -> u64 {
-        match self
-            .server_info
-            .boarding_exit_delay
-            .to_relative_lock_time()
-            .expect("relative locktime")
-        {
-            bitcoin::relative::LockTime::Time(time) => time.value() as u64 * 512,
-            bitcoin::relative::LockTime::Blocks(_) => unreachable!(),
-        }
-    }
-
-    /// Get the unilateral exit delay for VTXOs defined by the Ark server, in seconds.
-    ///
-    /// # Panics
-    ///
-    /// This will panic if the unilateral exit delay corresponds to a relative locktime specified in
-    /// blocks. We expect the Ark server to use a relative locktime in seconds.
-    ///
-    /// This will also panic if the sequence number returned by the server is not a valid relative
-    /// locktime.
-    pub fn unilateral_vtxo_exit_delay_seconds(&self) -> u64 {
-        match self
-            .server_info
-            .unilateral_exit_delay
-            .to_relative_lock_time()
-            .expect("relative locktime")
-        {
-            bitcoin::relative::LockTime::Time(time) => time.value() as u64 * 512,
-            bitcoin::relative::LockTime::Blocks(_) => unreachable!(),
-        }
-    }
-
     /// The server's dust threshold amount.
     pub fn dust(&self) -> Amount {
         self.server_info.dust

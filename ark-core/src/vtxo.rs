@@ -5,11 +5,11 @@ use crate::script::multisig_script;
 use crate::script::tr_script_pubkey;
 use crate::Error;
 use crate::ErrorContext;
+use crate::ExitDelayKind;
 use crate::UNSPENDABLE_KEY;
 use bitcoin::key::PublicKey;
 use bitcoin::key::Secp256k1;
 use bitcoin::key::Verification;
-use bitcoin::relative;
 use bitcoin::taproot;
 use bitcoin::taproot::LeafVersion;
 use bitcoin::taproot::TaprootBuilder;
@@ -32,7 +32,7 @@ pub struct Vtxo {
     tapscripts: Vec<ScriptBuf>,
     address: Address,
     exit_delay: bitcoin::Sequence,
-    exit_delay_seconds: u64,
+    exit_delay_kind: ExitDelayKind,
     network: Network,
 }
 
@@ -73,10 +73,7 @@ impl Vtxo {
             .finalize(secp, unspendable_key)
             .map_err(|_| Error::ad_hoc("failed to finalize Taproot tree"))?;
 
-        let exit_delay_seconds = match exit_delay.to_relative_lock_time() {
-            Some(relative::LockTime::Time(time)) => time.value() as u64 * 512,
-            _ => unreachable!("VTXO redeem script must use relative lock time in seconds"),
-        };
+        let exit_delay_kind = ExitDelayKind::from_sequence(exit_delay)?;
 
         let script_pubkey = tr_script_pubkey(&spend_info);
         let address = Address::from_script(&script_pubkey, network)
@@ -90,7 +87,7 @@ impl Vtxo {
             tapscripts: scripts,
             address,
             exit_delay,
-            exit_delay_seconds,
+            exit_delay_kind,
             network,
         })
     }
@@ -181,10 +178,6 @@ impl Vtxo {
         self.exit_delay
     }
 
-    pub fn exit_delay_duration(&self) -> Duration {
-        Duration::from_secs(self.exit_delay_seconds)
-    }
-
     pub fn to_ark_address(&self) -> ArkAddress {
         let vtxo_tap_key = self.spend_info.output_key();
         ArkAddress::new(self.network, self.server_forfeit, vtxo_tap_key)
@@ -256,10 +249,18 @@ impl Vtxo {
         &self,
         now: Duration,
         confirmation_blocktime: Duration,
+        confirmations: u64,
     ) -> bool {
-        let exit_path_time = confirmation_blocktime + self.exit_delay_duration();
+        match self.exit_delay_kind {
+            ExitDelayKind::Time(seconds) => {
+                let exit_path_time = confirmation_blocktime + seconds;
 
-        now > exit_path_time
+                now > exit_path_time
+            }
+            ExitDelayKind::Blocks(confirmations_required) => {
+                confirmations >= confirmations_required
+            }
+        }
     }
 }
 

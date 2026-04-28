@@ -1,7 +1,9 @@
+use bitcoin::relative;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
 use bitcoin::ScriptBuf;
 use bitcoin::TxOut;
+use std::time::Duration;
 
 pub mod arknote;
 pub mod asset;
@@ -72,6 +74,7 @@ pub struct ExplorerUtxo {
     pub outpoint: OutPoint,
     pub amount: Amount,
     pub confirmation_blocktime: Option<u64>,
+    pub confirmations: u64,
     pub is_spent: bool,
 }
 
@@ -81,5 +84,27 @@ pub fn anchor_output() -> TxOut {
     TxOut {
         value: Amount::ZERO,
         script_pubkey,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ExitDelayKind {
+    Time(Duration),
+    Blocks(u64),
+}
+
+impl ExitDelayKind {
+    pub(crate) fn from_sequence(sequence: bitcoin::Sequence) -> Result<Self, Error> {
+        let kind = match sequence
+            .to_relative_lock_time()
+            .ok_or_else(|| Error::ad_hoc("exit delay is not a relative locktime"))?
+        {
+            relative::LockTime::Time(time) => {
+                Self::Time(Duration::from_secs(time.value() as u64 * 512))
+            }
+            relative::LockTime::Blocks(height) => Self::Blocks(height.value() as u64),
+        };
+
+        Ok(kind)
     }
 }
