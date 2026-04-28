@@ -2,6 +2,7 @@ use bitcoin::Amount;
 use bitcoin::OutPoint;
 use bitcoin::ScriptBuf;
 use bitcoin::TxOut;
+use std::time::Duration;
 
 pub mod arknote;
 pub mod asset;
@@ -72,6 +73,7 @@ pub struct ExplorerUtxo {
     pub outpoint: OutPoint,
     pub amount: Amount,
     pub confirmation_blocktime: Option<u64>,
+    pub confirmations: u64,
     pub is_spent: bool,
 }
 
@@ -82,4 +84,10 @@ pub fn anchor_output() -> TxOut {
         value: Amount::ZERO,
         script_pubkey,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ExitDelayKind {
+    Time(Duration),
+    Blocks(u64),
 }
