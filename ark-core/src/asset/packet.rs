@@ -174,7 +174,9 @@ fn encode_metadata(buf: &mut Vec<u8>, metadata: &[(String, String)]) {
 /// the asset packet output before it.
 pub fn add_asset_packet_to_psbt(psbt: &mut bitcoin::Psbt, packet: &Packet) -> Result<(), Error> {
     if packet.groups.is_empty() {
-        return Ok(());
+        return Err(Error::ad_hoc(
+            "asset packet must contain at least one group",
+        ));
     }
 
     crate::extension::add_packet_to_psbt(psbt, ASSET_PACKET_TYPE, &packet.encode())
