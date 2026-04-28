@@ -7,12 +7,19 @@ on:
         description: 'Version of arkd to test against (git tag, version, hash)'
         required: true
         type: string
+      introspector-version:
+        description: 'Version of introspector to test against (git tag, version, hash)'
+        required: false
+        default: 'master'
+        type: string
 
 env:
   CARGO_INCREMENTAL: 0
   CARGO_TERM_COLOR: always
   ARK_GO_DIR: ./ark-go/
   ARKD_DIR: ./ark-go/arkd/
+  INTROSPECTOR_GO_DIR: ./introspector-go/
+  INTROSPECTOR_DIR: ./introspector-go/introspector/
   ARKD_LIVE_STORE_TYPE: inmemory
   ARKD_DB_TYPE: sqlite
   ARKD_EVENT_DB_TYPE: badger
@@ -120,11 +127,29 @@ jobs:
           # Wait for arkd to catch up with the chain
           sleep 10
 
+      - name: Checkout introspector `${{ inputs.introspector-version }}`
+        if: contains(matrix.test-binary, 'e2e_arkade_script')
+        run: just introspector-checkout ${{ inputs.introspector-version }}
+
+      - name: Build introspector docker image
+        if: contains(matrix.test-binary, 'e2e_arkade_script')
+        run: just introspector-docker-build
+
+      - name: Run introspector
+        if: contains(matrix.test-binary, 'e2e_arkade_script')
+        run: just introspector-docker-run
+
       - name: Run Test Binary
+        env:
+          INTROSPECTOR_URL: http://127.0.0.1:7073
         run: |
           test_name=$(basename ${{ matrix.test-binary }})
           echo "Running test: $test_name"
           ${{ matrix.test-binary }} --ignored --test-threads=1 --nocapture
+
+      - name: Cleanup introspector
+        if: always() && contains(matrix.test-binary, 'e2e_arkade_script')
+        run: just introspector-docker-kill
 
       - name: Cleanup Nigiri
         if: always()
@@ -150,4 +175,16 @@ jobs:
             echo "=== End of arkd.log ==="
           else
             echo "arkd.log file not found"
+          fi
+
+      - name: Print introspector logs on failure
+        if: failure() && contains(matrix.test-binary, 'e2e_arkade_script')
+        run: |
+          if [ -f introspector.log ]; then
+            echo "=== introspector.log contents ==="
+            cat introspector.log
+            echo "=== End of introspector.log ==="
+          else
+            echo "introspector.log file not found"
+            docker logs introspector || true
           fi

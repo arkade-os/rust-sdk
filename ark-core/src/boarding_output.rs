@@ -2,6 +2,7 @@ use crate::script::csv_sig_script;
 use crate::script::multisig_script;
 use crate::script::tr_script_pubkey;
 use crate::Error;
+use crate::ExitDelayKind;
 use crate::ExplorerUtxo;
 use crate::UNSPENDABLE_KEY;
 use bitcoin::key::PublicKey;
@@ -27,6 +28,7 @@ pub struct BoardingOutput {
     spend_info: TaprootSpendInfo,
     address: Address,
     exit_delay: bitcoin::Sequence,
+    exit_delay_kind: ExitDelayKind,
 }
 
 impl BoardingOutput {
@@ -56,6 +58,16 @@ impl BoardingOutput {
             .finalize(secp, unspendable_key)
             .map_err(|_| Error::ad_hoc("failed to finalize taproot builder"))?;
 
+        let exit_delay_kind = match exit_delay
+            .to_relative_lock_time()
+            .ok_or_else(|| Error::ad_hoc("exit delay is not a relative locktime"))?
+        {
+            relative::LockTime::Time(time) => {
+                ExitDelayKind::Time(Duration::from_secs(time.value() as u64 * 512))
+            }
+            relative::LockTime::Blocks(height) => ExitDelayKind::Blocks(height.value() as u64),
+        };
+
         let script_pubkey = tr_script_pubkey(&spend_info);
         let address = Address::from_script(&script_pubkey, network)
             .map_err(|e| Error::ad_hoc(format!("invalid script: {e}")))?;
@@ -66,6 +78,7 @@ impl BoardingOutput {
             spend_info,
             address,
             exit_delay,
+            exit_delay_kind,
         })
     }
 
@@ -119,20 +132,6 @@ impl BoardingOutput {
         crate::ArkAddress::new(network, server, self.output_key())
     }
 
-    pub fn exit_delay_duration(&self) -> Duration {
-        let exit_delay = self
-            .exit_delay
-            .to_relative_lock_time()
-            .expect("relative lock time");
-
-        match exit_delay {
-            relative::LockTime::Time(time) => Duration::from_secs(time.value() as u64 * 512),
-            relative::LockTime::Blocks(_) => {
-                unreachable!("Only seconds timelock is supported");
-            }
-        }
-    }
-
     pub fn tapscripts(&self) -> Vec<ScriptBuf> {
         let (exit_script, _) = self.exit_spend_info();
         let (forfeit_script, _) = self.forfeit_spend_info();
@@ -146,10 +145,18 @@ impl BoardingOutput {
         &self,
         now: Duration,
         confirmation_blocktime: Duration,
+        confirmations: u64,
     ) -> bool {
-        let exit_path_time = confirmation_blocktime + self.exit_delay_duration();
+        match self.exit_delay_kind {
+            ExitDelayKind::Time(seconds) => {
+                let exit_path_time = confirmation_blocktime + seconds;
 
-        now > exit_path_time
+                now > exit_path_time
+            }
+            ExitDelayKind::Blocks(confirmations_required) => {
+                confirmations >= confirmations_required
+            }
+        }
     }
 
     fn forfeit_script(&self) -> ScriptBuf {
@@ -211,6 +218,7 @@ where
                 // The boarding output can be found on-chain.
                 ExplorerUtxo {
                     confirmation_blocktime: Some(confirmation_blocktime),
+                    confirmations,
                     outpoint,
                     amount,
                     is_spent: false,
@@ -221,6 +229,7 @@ where
                     if boarding_output.can_be_claimed_unilaterally_by_owner(
                         now,
                         Duration::from_secs(confirmation_blocktime),
+                        confirmations,
                     ) {
                         expired.push((outpoint, amount, boarding_output.clone()));
                     }
@@ -236,6 +245,7 @@ where
                     outpoint,
                     amount,
                     is_spent: false,
+                    ..
                 } => {
                     pending.push((outpoint, amount, boarding_output.clone()));
                 }

@@ -603,7 +603,7 @@ pub fn build_asset_send_transactions(
         build_offchain_transactions(receivers, change_address, vtxo_inputs, server_info)?;
 
     if let Some(packet) = create_send_packet(vtxo_inputs, receivers, &offchain.ark_tx)? {
-        add_asset_packet_to_psbt(&mut offchain.ark_tx, &packet);
+        add_asset_packet_to_psbt(&mut offchain.ark_tx, &packet)?;
     }
 
     Ok(offchain)
@@ -642,7 +642,7 @@ pub fn build_asset_burn_transactions(
     if let Some(packet) =
         create_burn_packet(vtxo_inputs, burn_asset_id, burn_amount, &offchain.ark_tx)?
     {
-        add_asset_packet_to_psbt(&mut offchain.ark_tx, &packet);
+        add_asset_packet_to_psbt(&mut offchain.ark_tx, &packet)?;
     }
 
     Ok(offchain)
