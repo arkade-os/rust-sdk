@@ -5,6 +5,7 @@ use ark_client::wallet::OnchainWallet;
 use ark_core::send::SendReceiver;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::key::Secp256k1;
+use bitcoin::relative;
 use bitcoin::Amount;
 use common::init_tracing;
 use common::set_up_client;
@@ -123,18 +124,39 @@ pub async fn send_onchain_vtxo_and_boarding_output() {
     assert_eq!(offchain_balance.confirmed(), Amount::ZERO);
     assert_eq!(offchain_balance.pre_confirmed(), Amount::ZERO);
 
-    // To be able to spend a VTXO it needs to have been confirmed for at least
-    // `unilateral_exit_delay` seconds.
-    //
-    // And to be able to spend a boarding output it needs to have been confirmed for at least
-    // `boarding_exit_delay` seconds.
-    //
-    // We take the larger value of the two here.
-    let boarding_exit_delay = alice.boarding_exit_delay_seconds();
-    let unilateral_vtxo_exit_delay = alice.unilateral_vtxo_exit_delay_seconds();
-    let blocktime_offset = boarding_exit_delay.max(unilateral_vtxo_exit_delay);
+    let mut max_block_height_offset = 0;
+    let mut max_blocktime_offset = 0;
 
-    nigiri.set_outpoint_blocktime_offset(blocktime_offset);
+    match alice
+        .server_info
+        .unilateral_exit_delay
+        .to_relative_lock_time()
+        .expect("unilateral VTXO exit delay should be relative")
+    {
+        relative::LockTime::Blocks(height) => {
+            max_block_height_offset = height.value();
+        }
+        relative::LockTime::Time(time) => {
+            max_blocktime_offset = time.value();
+        }
+    };
+
+    match alice
+        .server_info
+        .boarding_exit_delay
+        .to_relative_lock_time()
+        .expect("boarding exit delay should be relative")
+    {
+        relative::LockTime::Blocks(height) => {
+            max_block_height_offset = height.value().max(max_block_height_offset);
+        }
+        relative::LockTime::Time(time) => {
+            max_blocktime_offset = time.value().max(max_blocktime_offset);
+        }
+    };
+
+    nigiri.set_outpoint_block_height_offset(max_block_height_offset as u64);
+    nigiri.set_outpoint_blocktime_offset(max_blocktime_offset as u64);
 
     let (tx, prevouts) = alice
         .create_send_on_chain_transaction(

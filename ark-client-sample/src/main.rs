@@ -1531,6 +1531,12 @@ pub struct EsploraClient {
 
 impl Blockchain for EsploraClient {
     async fn find_outpoints(&self, address: &Address) -> Result<Vec<ExplorerUtxo>, Error> {
+        let current_block_height = self
+            .esplora_client
+            .get_height()
+            .await
+            .map_err(Error::consumer)?;
+
         let script_pubkey = address.script_pubkey();
         let txs = self
             .esplora_client
@@ -1546,15 +1552,28 @@ impl Blockchain for EsploraClient {
                     .iter()
                     .enumerate()
                     .filter(|(_, v)| v.scriptpubkey == script_pubkey)
-                    .map(|(i, v)| ExplorerUtxo {
-                        outpoint: OutPoint {
-                            txid,
-                            vout: i as u32,
-                        },
-                        amount: Amount::from_sat(v.value),
-                        confirmation_blocktime: tx.status.block_time,
-                        // Assume the output is unspent until we dig deeper, further down.
-                        is_spent: false,
+                    .map(|(i, v)| {
+                        let confirmations = match tx.status.block_height {
+                            Some(confirmation_block_height) => {
+                                match current_block_height.checked_sub(confirmation_block_height) {
+                                    Some(x) => x + 1,
+                                    None => 0,
+                                }
+                            }
+                            None => 0,
+                        };
+
+                        ExplorerUtxo {
+                            outpoint: OutPoint {
+                                txid,
+                                vout: i as u32,
+                            },
+                            amount: Amount::from_sat(v.value),
+                            confirmation_blocktime: tx.status.block_time,
+                            confirmations: confirmations as u64,
+                            // Assume the output is unspent until we dig deeper, further down.
+                            is_spent: false,
+                        }
                     })
                     .collect::<Vec<_>>()
             })
