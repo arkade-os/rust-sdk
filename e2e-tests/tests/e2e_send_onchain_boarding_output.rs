@@ -2,6 +2,7 @@
 
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::key::Secp256k1;
+use bitcoin::relative;
 use bitcoin::Amount;
 use common::init_tracing;
 use common::set_up_client;
@@ -23,10 +24,20 @@ pub async fn send_onchain_boarding_output() {
     let (alice, _) = set_up_client("alice".to_string(), nigiri.clone(), secp.clone()).await;
 
     // To be able to spend a boarding output it needs to have been confirmed for at least
-    // `boarding_exit_delay` seconds.
-    let boarding_exit_delay = alice.boarding_exit_delay_seconds();
-
-    nigiri.set_outpoint_blocktime_offset(boarding_exit_delay);
+    // `boarding_exit_delay`.
+    match alice
+        .server_info
+        .boarding_exit_delay
+        .to_relative_lock_time()
+        .expect("boarding exit delay should be relative")
+    {
+        relative::LockTime::Blocks(height) => {
+            nigiri.set_outpoint_block_height_offset(height.value() as u64);
+        }
+        relative::LockTime::Time(time) => {
+            nigiri.set_outpoint_blocktime_offset(time.value() as u64);
+        }
+    };
 
     let alice_boarding_address = alice.get_boarding_address().unwrap();
 
