@@ -25,6 +25,7 @@ use std::time::Duration;
 pub struct Vtxo {
     server_forfeit: XOnlyPublicKey,
     owner: XOnlyPublicKey,
+    owner_unilateral_exit: XOnlyPublicKey,
     /// The delegator's public key, if this VTXO has a delegate spending path.
     delegator: Option<XOnlyPublicKey>,
     spend_info: TaprootSpendInfo,
@@ -48,6 +49,31 @@ impl Vtxo {
         server_forfeit: XOnlyPublicKey,
         owner: XOnlyPublicKey,
         // TODO: Verify the validity of these scripts before constructing the `Vtxo`.
+        scripts: Vec<ScriptBuf>,
+        exit_delay: bitcoin::Sequence,
+        network: Network,
+    ) -> Result<Self, Error>
+    where
+        C: Verification,
+    {
+        let vtxo = Self::new_with_custom_scripts_and_split_owner_keys(
+            secp,
+            server_forfeit,
+            owner,
+            owner,
+            scripts,
+            exit_delay,
+            network,
+        )?;
+
+        Ok(vtxo)
+    }
+
+    pub fn new_with_custom_scripts_and_split_owner_keys<C>(
+        secp: &Secp256k1<C>,
+        server_forfeit: XOnlyPublicKey,
+        owner: XOnlyPublicKey,
+        owner_unilateral_exit: XOnlyPublicKey,
         scripts: Vec<ScriptBuf>,
         exit_delay: bitcoin::Sequence,
         network: Network,
@@ -82,6 +108,7 @@ impl Vtxo {
         Ok(Self {
             server_forfeit,
             owner,
+            owner_unilateral_exit,
             delegator: None,
             spend_info,
             tapscripts: scripts,
@@ -212,7 +239,7 @@ impl Vtxo {
     /// This method can fail because [`Vtxo`]s constructed with the method
     /// [`Vtxo::new_with_custom_scripts`] may not contain this script exactly.
     pub fn exit_spend_info(&self) -> Result<(ScriptBuf, taproot::ControlBlock), Error> {
-        let exit_script = csv_sig_script(self.exit_delay, self.owner);
+        let exit_script = csv_sig_script(self.exit_delay, self.owner_unilateral_exit);
 
         let control_block = self
             .get_spend_info(exit_script.clone())
