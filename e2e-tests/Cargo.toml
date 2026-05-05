@@ -14,7 +14,9 @@ ark-client = { path = "../ark-client", features = ["test-utils"] }
 ark-core = { path = "../ark-core" }
 ark-delegator = { path = "../ark-delegator" }
 ark-grpc = { path = "../ark-grpc", features = ["test-utils"] }
+ark-introspector-client = { path = "../ark-introspector-client" }
 ark-rest = { path = "../ark-rest" }
+ark-script = { path = "../ark-script" }
 async-stream = "0.3"
 bdk_esplora = "0.19.0"
 bdk_wallet = "1.0.0-beta.5"

@@ -7,6 +7,8 @@ members = [
   "ark-grpc",
   "ark-rest",
   "ark-bdk-wallet",
+  "ark-script",
+  "ark-introspector-client",
   "e2e-tests",
   "ark-client-sample",
   "ark-rs",
