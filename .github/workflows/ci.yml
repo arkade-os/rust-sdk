@@ -71,7 +71,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arkd-version: [ 'v0.9.2' ]
+        arkd-version: [ 'v0.9.4' ]
     uses: ./.github/workflows/e2e-core.yml
     with:
       arkd-version: ${{ matrix.arkd-version }}
