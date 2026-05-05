@@ -538,6 +538,8 @@ mod tests {
             },
             created_at: 1234567890,
             key_derivation_index: None,
+            bolt11: "lnbc100u1ptest".to_string(),
+            invoice_expiry: 3600,
         }
     }
 
