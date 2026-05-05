@@ -150,7 +150,13 @@ arkd-wallet-run:
 
     just _wait-for-docker-log nbxplorer "Now listening on: http://0.0.0.0:32838" 30
 
-    make run-wallet -C $ARKD_DIR run &> {{ arkd_wallet_logs }} &
+    # Pass env vars as make overrides so they take precedence over envs/*.env
+    _make_overrides=()
+    while IFS='=' read -r key value; do
+        _make_overrides+=("$key=$value")
+    done < <(env | grep -E '^(ARKD_|ARK_)' || true)
+
+    make "${_make_overrides[@]}" run-wallet -C "$ARKD_DIR" &> {{ arkd_wallet_logs }} &
 
     just _wait-for-log-file {{ arkd_wallet_logs }} "arkd wallet listens on: 6060" 30
 
@@ -164,7 +170,13 @@ arkd-run:
 
     echo "Creating arkd wallet with logs in {{ arkd_logs }}"
 
-    make -C $ARKD_DIR run-light &> {{ arkd_logs }} &
+    # Pass env vars as make overrides so they take precedence over envs/*.env
+    _make_overrides=()
+    while IFS='=' read -r key value; do
+        _make_overrides+=("$key=$value")
+    done < <(env | grep -E '^(ARKD_|ARK_)' || true)
+
+    make "${_make_overrides[@]}" -C "$ARKD_DIR" run-light &> {{ arkd_logs }} &
 
     just _wait-for-log-file {{ arkd_logs }} "started listening at :7070" 300
     just _wait-for-log-file {{ arkd_logs }} "started admin listening at :7071" 30

@@ -110,6 +110,7 @@ impl VtxoList {
                 // VTXOs that have been confirmed on the blockchain.
                 Some(ExplorerUtxo {
                     confirmation_blocktime: Some(confirmation_blocktime),
+                    confirmations,
                     ..
                 }) => {
                     // VTXOs with an _active_ exit path. These should be claimed unilaterally.
@@ -117,6 +118,7 @@ impl VtxoList {
                         vtxo.can_be_claimed_unilaterally_by_owner(
                             now,
                             Duration::from_secs(*confirmation_blocktime),
+                            *confirmations,
                         )
                     } else {
                         false

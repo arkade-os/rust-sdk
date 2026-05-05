@@ -1,3 +1,4 @@
+use crate::error::ErrorContext;
 use crate::swap_storage::SwapStorage;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
@@ -8,9 +9,9 @@ use ark_core::unilateral_exit;
 use ark_core::ExplorerUtxo;
 use bitcoin::Amount;
 use bitcoin::TxOut;
-use jiff::SignedDuration;
 use jiff::Timestamp;
 use std::collections::HashSet;
+use std::time::Duration;
 
 /// Select boarding outputs and VTXOs to be used as inputs in on-chain transactions, exiting the Ark
 /// ecosystem.
@@ -61,20 +62,17 @@ where
                 outpoint,
                 amount,
                 confirmation_blocktime: Some(confirmation_blocktime),
+                confirmations,
                 is_spent: false,
             } = o
             {
-                let exit_delay_duration: SignedDuration = boarding_output
-                    .exit_delay_duration()
-                    .try_into()
-                    .map_err(Error::ad_hoc)?;
-                let spendable_at = Timestamp::new(*confirmation_blocktime as i64, 0)
-                    .map_err(Error::ad_hoc)?
-                    + exit_delay_duration;
-
                 // For each confirmed outpoint, check if they can already be spent unilaterally
                 // using the exit path.
-                if spendable_at <= now {
+                if boarding_output.can_be_claimed_unilaterally_by_owner(
+                    now.as_duration().try_into().context("invalid now")?,
+                    Duration::from_secs(*confirmation_blocktime),
+                    *confirmations,
+                ) {
                     tracing::debug!(?outpoint, %amount, ?boarding_output, "Selected boarding output");
 
                     if selected_boarding_outputs.insert(unilateral_exit::OnChainInput::new(
@@ -106,6 +104,7 @@ where
                 outpoint,
                 amount,
                 confirmation_blocktime: Some(confirmation_blocktime),
+                confirmations,
                 is_spent: false,
             } = o
             {
@@ -113,7 +112,8 @@ where
                 // using the exit path.
                 if vtxo.can_be_claimed_unilaterally_by_owner(
                     now.as_duration().try_into().map_err(Error::ad_hoc)?,
-                    std::time::Duration::from_secs(*confirmation_blocktime),
+                    Duration::from_secs(*confirmation_blocktime),
+                    *confirmations,
                 ) {
                     tracing::debug!(?outpoint, %amount, ?vtxo, "Selected VTXO");
 
