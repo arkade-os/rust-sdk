@@ -114,11 +114,14 @@ pub async fn run_dlc_scenario(nigiri: &Nigiri, run_refund_scenario: bool) -> Res
     // the oracle attests to the outcome of a relevant event, but _before_ the batch ends. Thus,
     // choosing the timelock correctly is very important.
     //
-    // Use a locktime a couple of blocks behind the current tip so the refund path is already
-    // spendable on-chain. Not realistic for production, but proves the contract's refund path
-    // works end-to-end.
-    let current_height = nigiri.get_height();
-    let refund_locktime = bitcoin::absolute::LockTime::from_height(current_height - 2)?;
+    // Use a locktime some minutes behind the current time so the refund path is already spendable
+    // on-chain. Not realistic for production, but proves the contract's refund path works
+    // end-to-end.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("valid duration")
+        .as_secs() as u32;
+    let refund_locktime = bitcoin::absolute::LockTime::from_time(now - 3600)?;
     let dlc_refund_script = ScriptBuf::builder()
         .push_int(refund_locktime.to_consensus_u32() as i64)
         .push_opcode(OP_CLTV)
