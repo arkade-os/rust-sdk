@@ -1119,6 +1119,8 @@ where
             timeout_block_heights: response.timeout_block_heights,
             created_at: created_at.as_secs(),
             key_derivation_index,
+            bolt11: response.invoice.to_string(),
+            invoice_expiry: response.invoice.expiry_time().as_secs(),
         };
 
         self.swap_storage()
@@ -1230,6 +1232,8 @@ where
             timeout_block_heights: response.timeout_block_heights,
             created_at: created_at.as_secs(),
             key_derivation_index,
+            bolt11: response.invoice.to_string(),
+            invoice_expiry: response.invoice.expiry_time().as_secs(),
         };
 
         self.swap_storage()
@@ -3858,6 +3862,10 @@ pub struct ReverseSwapData {
     /// `None` for legacy swap data created before this field was added.
     #[serde(default)]
     pub key_derivation_index: Option<u32>,
+    /// BOLT11 invoice string for this swap.
+    pub bolt11: String,
+    /// Invoice expiry in seconds, derived from the BOLT11 invoice itself.
+    pub invoice_expiry: u64,
 }
 
 /// All possible states of a Boltz swap.
