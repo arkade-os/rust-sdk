@@ -1,7 +1,9 @@
 [package]
 name = "ark-delegator"
-version = "0.8.0"
+version = "0.9.0"
+categories = { workspace = true }
 edition = { workspace = true }
+keywords = { workspace = true }
 license = { workspace = true }
 repository = { workspace = true }
 rust-version = "1.86"
@@ -11,7 +13,7 @@ description = "REST client for Ark delegator services"
 workspace = true
 
 [dependencies]
-ark-core = { path = "../ark-core", version = "0.8.0" }
+ark-core = { path = "../ark-core", version = "0.9.0" }
 bitcoin = { version = "0.32.7", features = ["base64"] }
 reqwest = { version = "^0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "^1.0", features = ["derive"] }

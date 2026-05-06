@@ -20,6 +20,8 @@ resolver = "2"
 license = "MIT"
 edition = "2021"
 repository = "https://github.com/arkade-os/rust-sdk"
+keywords = ["ark", "arkade", "bitcoin", "wallet"]
+categories = ["cryptography::cryptocurrencies"]
 
 [workspace.lints.rust]
 unused-import-braces = "warn"

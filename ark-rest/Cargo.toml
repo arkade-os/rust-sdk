@@ -1,7 +1,9 @@
 [package]
 name = "ark-rest"
-version = "0.8.0"
+version = "0.9.0"
+categories = { workspace = true }
 edition = { workspace = true }
+keywords = { workspace = true }
 license = { workspace = true }
 repository = { workspace = true }
 rust-version = "1.86"
@@ -11,7 +13,7 @@ description = "REST client for Ark server communication"
 workspace = true
 
 [dependencies]
-ark-core = { path = "../ark-core", version = "0.8.0" }
+ark-core = { path = "../ark-core", version = "0.9.0" }
 base64 = "0.22.1"
 bitcoin = { version = "0.32.7", default-features = false }
 futures = { version = "0.3" }

@@ -1,7 +1,9 @@
 [package]
 name = "ark-script"
-version = "0.1.0"
+version = "0.9.0"
+categories = { workspace = true }
 edition = { workspace = true }
+keywords = { workspace = true }
 license = { workspace = true }
 repository = { workspace = true }
 rust-version = "1.86"

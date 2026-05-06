@@ -2,6 +2,13 @@
 
 Fee estimation library using CEL (Common Expression Language) for calculating Arkade transaction fees.
 
+## Install
+
+```toml
+[dependencies]
+ark-fees = "0.9"
+```
+
 > **Note:** This is a Rust port of the Go implementation at
 > [`arkd/pkg/ark-lib/arkfee`](https://github.com/arkade-os/arkd/tree/master/pkg/ark-lib/arkfee).
 
