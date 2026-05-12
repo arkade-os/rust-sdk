@@ -189,6 +189,7 @@ where
             to: Asset::Btc,
             invoice,
             refund_public_key: refund_public_key.into(),
+            referral_id: self.inner.boltz_referral_id.clone(),
         };
         let url = format!("{}/v2/swap/submarine", self.inner.boltz_url);
 
@@ -281,6 +282,7 @@ where
             to: Asset::Btc,
             invoice,
             refund_public_key: refund_public_key.into(),
+            referral_id: self.inner.boltz_referral_id.clone(),
         };
         let url = format!("{}/v2/swap/submarine", self.inner.boltz_url);
 
@@ -1067,6 +1069,7 @@ where
             claim_public_key: claim_public_key.into(),
             preimage_hash: preimage_hash_sha256,
             invoice_expiry: expiry_secs,
+            referral_id: self.inner.boltz_referral_id.clone(),
         };
 
         let url = format!("{}/v2/swap/reverse", self.inner.boltz_url);
@@ -1180,6 +1183,7 @@ where
             claim_public_key: claim_public_key.into(),
             preimage_hash: preimage_hash_sha256,
             invoice_expiry: expiry_secs,
+            referral_id: self.inner.boltz_referral_id.clone(),
         };
 
         let url = format!("{}/v2/swap/reverse", self.inner.boltz_url);
@@ -1822,6 +1826,7 @@ where
             claim_public_key: claim_public_key.into(),
             refund_public_key: refund_public_key.into(),
             preimage_hash,
+            referral_id: self.inner.boltz_referral_id.clone(),
         };
 
         let url = format!("{}/v2/swap/chain", self.inner.boltz_url);
@@ -3976,6 +3981,8 @@ struct CreateReverseSwapRequest {
     /// If not provided, the generated invoice will have the default expiry set by Boltz.
     #[serde(skip_serializing_if = "Option::is_none")]
     invoice_expiry: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    referral_id: Option<String>,
 }
 
 #[serde_as]
@@ -3998,6 +4005,8 @@ struct CreateSubmarineSwapRequest {
     invoice: Bolt11Invoice,
     #[serde(rename = "refundPublicKey")]
     refund_public_key: PublicKey,
+    #[serde(rename = "referralId", skip_serializing_if = "Option::is_none")]
+    referral_id: Option<String>,
 }
 
 #[serde_as]
@@ -4266,6 +4275,8 @@ struct CreateChainSwapRequest {
     claim_public_key: PublicKey,
     refund_public_key: PublicKey,
     preimage_hash: sha256::Hash,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    referral_id: Option<String>,
 }
 
 #[serde_as]
@@ -4375,6 +4386,135 @@ mod tests {
             addr.to_string(),
             "tb1ptf632fkczflsjn4356ra4x2s6qp6vvk8e7pplprpwnkvcsd8tpwqkw92c7"
         );
+    }
+
+    #[test]
+    fn submarine_swap_request_serializes_referral_id_when_set() {
+        let request = CreateSubmarineSwapRequest {
+            from: Asset::Ark,
+            to: Asset::Btc,
+            invoice: Bolt11Invoice::from_str(
+                "lntbs10u1p5wmeeepp56ms94rkev7tdrwqyus5a63lny2mqzq9vh2rq3u4ym3v4lxv6xl4qdql2djkuepqw3hjqs2jfvsxzerywfjhxuccqz95xqztfsp5ckaskagag554na8d56tlrfdxasstqrmmpkvswqqqx6y386jcfq9s9qxpqysgqt7z0vkdwkqamydae7ctgkh7l8q75w7q9394ce3lda2mkfxrpfdtj5gmltuctav7jdgatkflhztrjjzutdla5e4xp0uhxxy7sluzll4qpkkh6wv",
+            )
+            .unwrap(),
+            refund_public_key: PublicKey::from_str(
+                "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+            )
+            .unwrap(),
+            referral_id: Some("partner-xyz".to_string()),
+        };
+
+        let json: serde_json::Value = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["referralId"], "partner-xyz");
+    }
+
+    #[test]
+    fn submarine_swap_request_omits_referral_id_when_none() {
+        let request = CreateSubmarineSwapRequest {
+            from: Asset::Ark,
+            to: Asset::Btc,
+            invoice: Bolt11Invoice::from_str(
+                "lntbs10u1p5wmeeepp56ms94rkev7tdrwqyus5a63lny2mqzq9vh2rq3u4ym3v4lxv6xl4qdql2djkuepqw3hjqs2jfvsxzerywfjhxuccqz95xqztfsp5ckaskagag554na8d56tlrfdxasstqrmmpkvswqqqx6y386jcfq9s9qxpqysgqt7z0vkdwkqamydae7ctgkh7l8q75w7q9394ce3lda2mkfxrpfdtj5gmltuctav7jdgatkflhztrjjzutdla5e4xp0uhxxy7sluzll4qpkkh6wv",
+            )
+            .unwrap(),
+            refund_public_key: PublicKey::from_str(
+                "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+            )
+            .unwrap(),
+            referral_id: None,
+        };
+
+        let json: serde_json::Value = serde_json::to_value(&request).unwrap();
+        assert!(json.get("referralId").is_none());
+        assert!(json.get("referral_id").is_none());
+    }
+
+    #[test]
+    fn reverse_swap_request_serializes_referral_id_when_set() {
+        let request = CreateReverseSwapRequest {
+            from: Asset::Btc,
+            to: Asset::Ark,
+            invoice_amount: Some(Amount::from_sat(1000)),
+            onchain_amount: None,
+            claim_public_key: PublicKey::from_str(
+                "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+            )
+            .unwrap(),
+            preimage_hash: sha256::Hash::from_byte_array([1u8; 32]),
+            invoice_expiry: Some(3600),
+            referral_id: Some("partner-xyz".to_string()),
+        };
+
+        let json: serde_json::Value = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["referralId"], "partner-xyz");
+    }
+
+    #[test]
+    fn reverse_swap_request_omits_referral_id_when_none() {
+        let request = CreateReverseSwapRequest {
+            from: Asset::Btc,
+            to: Asset::Ark,
+            invoice_amount: Some(Amount::from_sat(1000)),
+            onchain_amount: None,
+            claim_public_key: PublicKey::from_str(
+                "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+            )
+            .unwrap(),
+            preimage_hash: sha256::Hash::from_byte_array([1u8; 32]),
+            invoice_expiry: Some(3600),
+            referral_id: None,
+        };
+
+        let json: serde_json::Value = serde_json::to_value(&request).unwrap();
+        assert!(json.get("referralId").is_none());
+        assert!(json.get("referral_id").is_none());
+    }
+
+    #[test]
+    fn chain_swap_request_serializes_referral_id_when_set() {
+        let request = CreateChainSwapRequest {
+            from: Asset::Ark,
+            to: Asset::Btc,
+            user_lock_amount: Some(Amount::from_sat(1000)),
+            server_lock_amount: None,
+            claim_public_key: PublicKey::from_str(
+                "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+            )
+            .unwrap(),
+            refund_public_key: PublicKey::from_str(
+                "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+            )
+            .unwrap(),
+            preimage_hash: sha256::Hash::from_byte_array([1u8; 32]),
+            referral_id: Some("partner-xyz".to_string()),
+        };
+
+        let json: serde_json::Value = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["referralId"], "partner-xyz");
+    }
+
+    #[test]
+    fn chain_swap_request_omits_referral_id_when_none() {
+        let request = CreateChainSwapRequest {
+            from: Asset::Ark,
+            to: Asset::Btc,
+            user_lock_amount: Some(Amount::from_sat(1000)),
+            server_lock_amount: None,
+            claim_public_key: PublicKey::from_str(
+                "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+            )
+            .unwrap(),
+            refund_public_key: PublicKey::from_str(
+                "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+            )
+            .unwrap(),
+            preimage_hash: sha256::Hash::from_byte_array([1u8; 32]),
+            referral_id: None,
+        };
+
+        let json: serde_json::Value = serde_json::to_value(&request).unwrap();
+        assert!(json.get("referralId").is_none());
+        assert!(json.get("referral_id").is_none());
     }
 
     #[test]

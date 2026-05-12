@@ -87,6 +87,10 @@ pub use swap_storage::SwapStorage;
 /// assuming all used addresses have been found.
 pub const DEFAULT_GAP_LIMIT: u32 = 20;
 
+/// Default Boltz `referralId` sent with swap creation requests when the caller does not
+/// provide one. Identifies traffic originating from this SDK.
+pub const DEFAULT_BOLTZ_REFERRAL_ID: &str = "arkade-rs-SDK";
+
 /// A client to interact with Ark Server
 ///
 /// ## Example
@@ -239,6 +243,7 @@ pub const DEFAULT_GAP_LIMIT: u32 = 20;
 ///         "https://ark-server.example.com".to_string(),
 ///         Arc::new(InMemorySwapStorage::default()),
 ///         "http://boltz.example.com".to_string(),
+///         None,
 ///         timeout,
 ///         None,
 ///         vec![],
@@ -273,6 +278,7 @@ pub const DEFAULT_GAP_LIMIT: u32 = 20;
 ///         "https://ark-server.example.com".to_string(),
 ///         Arc::new(InMemorySwapStorage::default()),
 ///         "http://boltz.example.com".to_string(),
+///         None,
 ///         timeout,
 ///         None,
 ///         vec![],
@@ -295,6 +301,7 @@ pub struct OfflineClient<B, W, S, K> {
     wallet: Arc<W>,
     swap_storage: Arc<S>,
     boltz_url: String,
+    boltz_referral_id: Option<String>,
     timeout: Duration,
     delegator_pk: Option<XOnlyPublicKey>,
     historical_delegator_pks: Vec<XOnlyPublicKey>,
@@ -404,6 +411,10 @@ where
     /// * `ark_server_url` - URL of the Ark server
     /// * `swap_storage` - Storage implementation for swap data
     /// * `boltz_url` - URL of the Boltz server
+    /// * `boltz_referral_id` - Boltz referral ID to be included in all swap creation requests as
+    ///   the `referralId` field. When `None`, defaults to [`DEFAULT_BOLTZ_REFERRAL_ID`]. To send no
+    ///   referral ID at all, call [`OfflineClient::with_boltz_referral_id`] with `None` after
+    ///   construction.
     /// * `timeout` - Timeout duration for network operations
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -414,6 +425,7 @@ where
         ark_server_url: String,
         swap_storage: Arc<S>,
         boltz_url: String,
+        boltz_referral_id: Option<String>,
         timeout: Duration,
         delegator_pk: Option<XOnlyPublicKey>,
         historical_delegator_pks: Vec<XOnlyPublicKey>,
@@ -435,6 +447,9 @@ where
             historical_delegator_pks.insert(0, pk);
         }
 
+        let boltz_referral_id =
+            boltz_referral_id.or_else(|| Some(DEFAULT_BOLTZ_REFERRAL_ID.to_string()));
+
         Self {
             network_client,
             name,
@@ -444,10 +459,20 @@ where
             wallet,
             swap_storage,
             boltz_url,
+            boltz_referral_id,
             timeout,
             delegator_pk,
             historical_delegator_pks,
         }
+    }
+
+    /// Override the Boltz referral ID after construction.
+    ///
+    /// Pass `Some(...)` to set a custom value, or `None` to send no `referralId` field with
+    /// swap creation requests (this opts out of the SDK default).
+    pub fn with_boltz_referral_id(mut self, boltz_referral_id: Option<String>) -> Self {
+        self.boltz_referral_id = boltz_referral_id;
+        self
     }
 
     /// Create a new offline client with a static keypair (backward compatible)
@@ -473,6 +498,7 @@ where
         ark_server_url: String,
         swap_storage: Arc<S>,
         boltz_url: String,
+        boltz_referral_id: Option<String>,
         timeout: Duration,
         delegator_pk: Option<XOnlyPublicKey>,
         historical_delegator_pks: Vec<XOnlyPublicKey>,
@@ -487,6 +513,7 @@ where
             ark_server_url,
             swap_storage,
             boltz_url,
+            boltz_referral_id,
             timeout,
             delegator_pk,
             historical_delegator_pks,
@@ -515,6 +542,7 @@ where
         ark_server_url: String,
         swap_storage: Arc<S>,
         boltz_url: String,
+        boltz_referral_id: Option<String>,
         timeout: Duration,
         delegator_pk: Option<XOnlyPublicKey>,
         historical_delegator_pks: Vec<XOnlyPublicKey>,
@@ -532,6 +560,7 @@ where
             ark_server_url,
             swap_storage,
             boltz_url,
+            boltz_referral_id,
             timeout,
             delegator_pk,
             historical_delegator_pks,
@@ -541,6 +570,11 @@ where
     /// Returns the currently configured delegator pubkey, if any.
     pub fn delegator_pk(&self) -> Option<XOnlyPublicKey> {
         self.delegator_pk
+    }
+
+    /// Returns the Boltz referral ID sent with all swap creation requests, if any.
+    pub fn boltz_referral_id(&self) -> Option<&str> {
+        self.boltz_referral_id.as_deref()
     }
 
     /// Connects to the Ark server and retrieves server information.
@@ -639,6 +673,11 @@ where
     /// Returns the currently configured delegator pubkey, if any.
     pub fn delegator_pk(&self) -> Option<XOnlyPublicKey> {
         self.inner.delegator_pk()
+    }
+
+    /// Returns the Boltz referral ID sent with all swap creation requests, if any.
+    pub fn boltz_referral_id(&self) -> Option<&str> {
+        self.inner.boltz_referral_id()
     }
 
     /// Get a new offchain receiving address.
