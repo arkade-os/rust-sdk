@@ -58,10 +58,13 @@ mod unilateral_exit;
 mod utils;
 
 pub use asset::IssueAssetResult;
+pub use boltz::Bolt12SubmarineSwapResult;
 pub use boltz::ChainSwapAmount;
 pub use boltz::ChainSwapData;
 pub use boltz::ChainSwapDirection;
 pub use boltz::ChainSwapResult;
+pub use boltz::LnInvoice;
+pub use boltz::ParsedBolt12Invoice;
 pub use boltz::PendingVhtlcSpendTx;
 pub use boltz::PendingVhtlcSpendType;
 pub use boltz::ReverseSwapData;
@@ -301,6 +304,7 @@ pub struct OfflineClient<B, W, S, K> {
     wallet: Arc<W>,
     swap_storage: Arc<S>,
     boltz_url: String,
+    boltz_bolt12_url: Option<String>,
     boltz_referral_id: Option<String>,
     timeout: Duration,
     delegator_pk: Option<XOnlyPublicKey>,
@@ -459,6 +463,7 @@ where
             wallet,
             swap_storage,
             boltz_url,
+            boltz_bolt12_url: None,
             boltz_referral_id,
             timeout,
             delegator_pk,
@@ -472,6 +477,14 @@ where
     /// swap creation requests (this opts out of the SDK default).
     pub fn with_boltz_referral_id(mut self, boltz_referral_id: Option<String>) -> Self {
         self.boltz_referral_id = boltz_referral_id;
+        self
+    }
+
+    /// Override the Boltz BOLT12 API URL after construction.
+    ///
+    /// When unset, BOLT12-specific endpoints use the regular Boltz URL.
+    pub fn with_boltz_bolt12_url(mut self, boltz_bolt12_url: Option<String>) -> Self {
+        self.boltz_bolt12_url = boltz_bolt12_url;
         self
     }
 
@@ -575,6 +588,11 @@ where
     /// Returns the Boltz referral ID sent with all swap creation requests, if any.
     pub fn boltz_referral_id(&self) -> Option<&str> {
         self.boltz_referral_id.as_deref()
+    }
+
+    /// Returns the Boltz BOLT12 API URL, falling back to the regular Boltz URL.
+    pub fn boltz_bolt12_url(&self) -> &str {
+        self.boltz_bolt12_url.as_deref().unwrap_or(&self.boltz_url)
     }
 
     /// Connects to the Ark server and retrieves server information.

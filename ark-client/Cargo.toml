@@ -23,7 +23,8 @@ bech32 = "0.11"
 bitcoin = { version = "0.32.7", features = ["rand", "serde"] }
 futures = "0.3.31"
 jiff = "0.2.1"
-lightning-invoice = { version = "0.33.2", features = ["serde"] }
+lightning = "0.2.2"
+lightning-invoice = { version = "0.34.0", features = ["serde"] }
 musig = { package = "secp256k1", version = "0.32.0-beta.2", features = ["serde"] }
 prost = "0.13.3"
 prost-types = "0.13.3"
