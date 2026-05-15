@@ -58,10 +58,13 @@ mod unilateral_exit;
 mod utils;
 
 pub use asset::IssueAssetResult;
+pub use boltz::Bolt12SubmarineSwapResult;
 pub use boltz::ChainSwapAmount;
 pub use boltz::ChainSwapData;
 pub use boltz::ChainSwapDirection;
 pub use boltz::ChainSwapResult;
+pub use boltz::LnInvoice;
+pub use boltz::ParsedBolt12Invoice;
 pub use boltz::PendingVhtlcSpendTx;
 pub use boltz::PendingVhtlcSpendType;
 pub use boltz::ReverseSwapData;
