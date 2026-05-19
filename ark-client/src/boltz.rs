@@ -318,6 +318,22 @@ where
             .map_err(Error::ad_hoc)
             .context("failed to compute created_at")?;
 
+        let vhtlc = self
+            .build_vhtlc_script(
+                swap_response.claim_public_key,
+                refund_public_key.into(),
+                preimage_hash,
+                &swap_response.timeout_block_heights,
+            )
+            .context("failed to build Boltz VHTLC script")?;
+        let expected_vhtlc_address = vhtlc.address();
+        if expected_vhtlc_address != swap_response.address {
+            return Err(Error::ad_hoc(format!(
+                "Boltz VHTLC address ({}) does not match VHTLC parameters ({expected_vhtlc_address})",
+                swap_response.address
+            )));
+        }
+
         let data = SubmarineSwapData {
             id: swap_response.id.clone(),
             status: SwapStatus::Created,
@@ -413,6 +429,22 @@ where
             .duration_since(UNIX_EPOCH)
             .map_err(Error::ad_hoc)
             .context("failed to compute created_at")?;
+
+        let vhtlc = self
+            .build_vhtlc_script(
+                swap_response.claim_public_key,
+                refund_public_key.into(),
+                preimage_hash,
+                &swap_response.timeout_block_heights,
+            )
+            .context("failed to build Boltz VHTLC script")?;
+        let expected_vhtlc_address = vhtlc.address();
+        if expected_vhtlc_address != swap_response.address {
+            return Err(Error::ad_hoc(format!(
+                "Boltz VHTLC address ({}) does not match VHTLC parameters ({expected_vhtlc_address})",
+                swap_response.address
+            )));
+        }
 
         self.swap_storage()
             .insert_submarine(

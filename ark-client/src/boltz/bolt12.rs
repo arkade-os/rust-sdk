@@ -120,9 +120,9 @@ where
     /// # Trust Model
     ///
     /// This method fetches the BOLT12 invoice via the Boltz API (`bolt12_fetch`). The invoice
-    /// is not locally verified against the offer's signing key. This is the same trust model as
-    /// BOLT11 submarine swaps, where the VHTLC address and claim keys are provided by Boltz. The
-    /// invoice is parsed locally, but its signature is not verified against the original offer.
+    /// is not locally verified against the offer's signing key. The invoice is parsed locally,
+    /// but its signature is not verified against the original offer. The returned VHTLC address
+    /// is verified against the VHTLC parameters before it is persisted or funded.
     ///
     /// # Arguments
     ///
@@ -155,9 +155,9 @@ where
     /// # Trust Model
     ///
     /// This method fetches the BOLT12 invoice via the Boltz API (`bolt12_fetch`). The invoice
-    /// is not locally verified against the offer's signing key. This is the same trust model as
-    /// BOLT11 submarine swaps, where the VHTLC address and claim keys are provided by Boltz. The
-    /// invoice is parsed locally, but its signature is not verified against the original offer.
+    /// is not locally verified against the offer's signing key. The invoice is parsed locally,
+    /// but its signature is not verified against the original offer. The returned VHTLC address
+    /// is verified against the VHTLC parameters before it is persisted or funded.
     ///
     /// # Arguments
     ///
@@ -251,6 +251,22 @@ where
             .duration_since(UNIX_EPOCH)
             .map_err(Error::ad_hoc)
             .context("failed to compute created_at")?;
+
+        let vhtlc = self
+            .build_vhtlc_script(
+                swap_response.claim_public_key,
+                refund_public_key.into(),
+                preimage_hash,
+                &swap_response.timeout_block_heights,
+            )
+            .context("failed to build Boltz VHTLC script")?;
+        let expected_vhtlc_address = vhtlc.address();
+        if expected_vhtlc_address != swap_response.address {
+            return Err(Error::ad_hoc(format!(
+                "Boltz VHTLC address ({}) does not match VHTLC parameters ({expected_vhtlc_address})",
+                swap_response.address
+            )));
+        }
 
         let data = SubmarineSwapData {
             id: swap_response.id.clone(),
