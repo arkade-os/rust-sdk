@@ -819,7 +819,7 @@ async fn run_command<K: KeyProvider + 'static>(
         Commands::LightningInvoice { amount } => {
             let invoice_amount = SwapAmount::invoice(Amount::from_sat(*amount));
             let res = client
-                .get_ln_invoice(invoice_amount, None)
+                .get_ln_invoice(invoice_amount, None, None)
                 .await
                 .map_err(|e| anyhow!(e))?;
 

@@ -52,6 +52,25 @@ use std::str::FromStr;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+/// Maximum byte length of a BOLT11 invoice description (`d` field).
+///
+/// BOLT11 tagged fields use a 10-bit length in 5-bit groups, capping the payload at
+/// `floor(1023 * 5 / 8) = 639` UTF-8 bytes.
+const MAX_BOLT11_DESCRIPTION_BYTES: usize = 639;
+
+fn validate_invoice_description(description: Option<&str>) -> Result<(), Error> {
+    if let Some(d) = description {
+        if d.len() > MAX_BOLT11_DESCRIPTION_BYTES {
+            return Err(Error::consumer(format!(
+                "invoice description is {} bytes (> {} bytes).",
+                d.len(),
+                MAX_BOLT11_DESCRIPTION_BYTES,
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// The type of a Boltz swap.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum SwapType {
@@ -1037,6 +1056,10 @@ where
     /// # Arguments
     ///
     /// - `amount`: the expected [`Amount`] to be received.
+    /// - `expiry_secs`: optional invoice expiry, in seconds from now. If `None`, Boltz's default is
+    ///   used.
+    /// - `description`: optional memo embedded in the BOLT11 invoice's `d` field (visible to the
+    ///   payer).
     ///
     /// # Returns
     ///
@@ -1046,7 +1069,10 @@ where
         &self,
         amount: SwapAmount,
         expiry_secs: Option<u64>,
+        description: Option<String>,
     ) -> Result<ReverseSwapResult, Error> {
+        validate_invoice_description(description.as_deref())?;
+
         let preimage: [u8; 32] = rand::random();
         let preimage_hash_sha256 = sha256::Hash::hash(&preimage);
         let preimage_hash = ripemd160::Hash::hash(preimage_hash_sha256.as_byte_array());
@@ -1070,6 +1096,7 @@ where
             preimage_hash: preimage_hash_sha256,
             invoice_expiry: expiry_secs,
             referral_id: self.inner.boltz_referral_id.clone(),
+            description,
         };
 
         let url = format!("{}/v2/swap/reverse", self.inner.boltz_url);
@@ -1145,8 +1172,12 @@ where
     /// # Arguments
     ///
     /// - `amount`: the expected [`Amount`] to be received.
+    /// - `expiry_secs`: optional invoice expiry, in seconds from now. If `None`, Boltz's default is
+    ///   used.
     /// - `preimage_hash_sha256`: the SHA256 hash of the preimage. The preimage itself is not stored
     ///   and must be provided later when claiming via [`Self::claim_vhtlc`].
+    /// - `description`: optional memo embedded in the BOLT11 invoice's `d` field (visible to the
+    ///   payer).
     ///
     /// # Returns
     ///
@@ -1162,7 +1193,10 @@ where
         amount: SwapAmount,
         expiry_secs: Option<u64>,
         preimage_hash_sha256: sha256::Hash,
+        description: Option<String>,
     ) -> Result<ReverseSwapResult, Error> {
+        validate_invoice_description(description.as_deref())?;
+
         let preimage_hash = ripemd160::Hash::hash(preimage_hash_sha256.as_byte_array());
 
         let claim_keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
@@ -1184,6 +1218,7 @@ where
             preimage_hash: preimage_hash_sha256,
             invoice_expiry: expiry_secs,
             referral_id: self.inner.boltz_referral_id.clone(),
+            description,
         };
 
         let url = format!("{}/v2/swap/reverse", self.inner.boltz_url);
@@ -3983,6 +4018,8 @@ struct CreateReverseSwapRequest {
     invoice_expiry: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     referral_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
 }
 
 #[serde_as]
@@ -4443,6 +4480,7 @@ mod tests {
             preimage_hash: sha256::Hash::from_byte_array([1u8; 32]),
             invoice_expiry: Some(3600),
             referral_id: Some("partner-xyz".to_string()),
+            description: None,
         };
 
         let json: serde_json::Value = serde_json::to_value(&request).unwrap();
@@ -4463,6 +4501,7 @@ mod tests {
             preimage_hash: sha256::Hash::from_byte_array([1u8; 32]),
             invoice_expiry: Some(3600),
             referral_id: None,
+            description: None,
         };
 
         let json: serde_json::Value = serde_json::to_value(&request).unwrap();
@@ -4551,5 +4590,22 @@ mod tests {
             addr.to_string(),
             "tb1pxa78pf55g0aaurrd8c76fyax4df9e8y38fzps8sw2vkrecf9k3ss36a78m"
         );
+    }
+
+    #[test]
+    fn validate_invoice_description_accepts_none_empty_and_max_length() {
+        assert!(validate_invoice_description(None).is_ok());
+        assert!(validate_invoice_description(Some("")).is_ok());
+        let at_limit = "a".repeat(MAX_BOLT11_DESCRIPTION_BYTES);
+        assert!(validate_invoice_description(Some(&at_limit)).is_ok());
+    }
+
+    #[test]
+    fn validate_invoice_description_rejects_over_limit() {
+        let too_long = "a".repeat(MAX_BOLT11_DESCRIPTION_BYTES + 1);
+        let err = validate_invoice_description(Some(&too_long)).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("640"), "unexpected error message: {msg}");
+        assert!(msg.contains("639"), "unexpected error message: {msg}");
     }
 }
