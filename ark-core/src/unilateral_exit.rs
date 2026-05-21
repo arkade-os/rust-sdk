@@ -366,6 +366,122 @@ pub fn build_unilateral_exit_tree_txids(
     Ok(vec![sorted])
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn txid(n: u8) -> Txid {
+        Txid::from_byte_array([n; 32])
+    }
+
+    fn chain(
+        txid: Txid,
+        tx_type: server::ChainedTxType,
+        spends: impl Into<Vec<Txid>>,
+    ) -> server::VtxoChain {
+        server::VtxoChain {
+            txid,
+            tx_type,
+            spends: spends.into(),
+            expires_at: 0,
+        }
+    }
+
+    fn exit_branch(chains: Vec<server::VtxoChain>, ark_txid: Txid) -> Vec<Txid> {
+        build_unilateral_exit_tree_txids(&server::VtxoChains { inner: chains }, ark_txid)
+            .expect("valid unilateral exit branch")
+            .pop()
+            .expect("one topological branch")
+    }
+
+    #[test]
+    fn unilateral_exit_txids_for_linear_chain_are_parent_first() {
+        let commitment = txid(1);
+        let tree = txid(2);
+        let ark = txid(3);
+
+        let branch = exit_branch(
+            vec![
+                chain(commitment, server::ChainedTxType::Commitment, []),
+                chain(tree, server::ChainedTxType::Tree, [commitment]),
+                chain(ark, server::ChainedTxType::Ark, [tree]),
+            ],
+            ark,
+        );
+
+        assert_eq!(branch, vec![tree, ark]);
+    }
+
+    #[test]
+    fn unilateral_exit_txids_deduplicate_merged_ancestor_dag() {
+        let commitment = txid(1);
+        let left = txid(2);
+        let right = txid(3);
+        let merge = txid(4);
+        let ark = txid(5);
+
+        let branch = exit_branch(
+            vec![
+                chain(commitment, server::ChainedTxType::Commitment, []),
+                chain(left, server::ChainedTxType::Tree, [commitment]),
+                chain(right, server::ChainedTxType::Tree, [commitment]),
+                chain(merge, server::ChainedTxType::Checkpoint, [left, right]),
+                chain(ark, server::ChainedTxType::Ark, [merge]),
+            ],
+            ark,
+        );
+
+        assert_eq!(branch, vec![left, right, merge, ark]);
+    }
+
+    #[test]
+    fn unilateral_exit_txids_avoid_exponential_path_enumeration() {
+        let commitment = txid(1);
+        let a1 = txid(2);
+        let b1 = txid(3);
+        let m1 = txid(4);
+        let a2 = txid(5);
+        let b2 = txid(6);
+        let m2 = txid(7);
+        let ark = txid(8);
+
+        let branch = exit_branch(
+            vec![
+                chain(commitment, server::ChainedTxType::Commitment, []),
+                chain(a1, server::ChainedTxType::Tree, [commitment]),
+                chain(b1, server::ChainedTxType::Tree, [commitment]),
+                chain(m1, server::ChainedTxType::Checkpoint, [a1, b1]),
+                chain(a2, server::ChainedTxType::Tree, [m1]),
+                chain(b2, server::ChainedTxType::Tree, [m1]),
+                chain(m2, server::ChainedTxType::Checkpoint, [a2, b2]),
+                chain(ark, server::ChainedTxType::Ark, [m2]),
+            ],
+            ark,
+        );
+
+        assert_eq!(branch, vec![a1, b1, m1, a2, b2, m2, ark]);
+    }
+
+    #[test]
+    fn unilateral_exit_txids_reject_cycles() {
+        let a = txid(1);
+        let b = txid(2);
+
+        let err = build_unilateral_exit_tree_txids(
+            &server::VtxoChains {
+                inner: vec![
+                    chain(a, server::ChainedTxType::Ark, [b]),
+                    chain(b, server::ChainedTxType::Checkpoint, [a]),
+                ],
+            },
+            a,
+        )
+        .expect_err("cycle should be rejected");
+
+        assert!(err.to_string().contains("cycle"));
+    }
+}
+
 /// The full path from a commitment transaction to a VTXO. The entire path must be published
 /// on-chain to execute a unilateral exit with this VTXO.
 ///
