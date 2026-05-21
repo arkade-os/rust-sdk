@@ -1,14 +1,16 @@
 use crate::anchor_output;
+use crate::script::extract_checksig_pubkeys;
 use crate::server;
 use crate::BoardingOutput;
 use crate::Error;
 use crate::ErrorContext;
+use crate::VTXO_CONDITION_KEY;
 use crate::VTXO_INPUT_INDEX;
 use bitcoin::absolute::LockTime;
+use bitcoin::consensus::Decodable;
 use bitcoin::hashes::Hash;
 use bitcoin::hex::DisplayHex;
 use bitcoin::key::Secp256k1;
-use bitcoin::opcodes::all::*;
 use bitcoin::psbt;
 use bitcoin::secp256k1;
 use bitcoin::secp256k1::schnorr;
@@ -28,6 +30,7 @@ use bitcoin::Transaction;
 use bitcoin::TxIn;
 use bitcoin::TxOut;
 use bitcoin::Txid;
+use bitcoin::VarInt;
 use bitcoin::Weight;
 use bitcoin::Witness;
 use bitcoin::XOnlyPublicKey;
@@ -429,6 +432,126 @@ impl UnilateralExitTree {
     }
 }
 
+/// Finalize a virtual transaction input using only the authorization data already present in the
+/// PSBT input.
+///
+/// This is intended for historical virtual transactions in a unilateral-exit branch. The caller
+/// provides the `witness_utxo` for the input being finalized, and this function materializes either
+/// the taproot key-spend witness or a satisfiable taproot script-spend witness.
+pub fn finalize_virtual_tx_input(
+    mut psbt: Psbt,
+    input_index: usize,
+    witness_utxo: TxOut,
+) -> Result<Transaction, Error> {
+    let input = psbt
+        .inputs
+        .get_mut(input_index)
+        .ok_or_else(|| Error::transaction(format!("missing PSBT input {input_index}")))?;
+
+    input.witness_utxo = Some(witness_utxo);
+
+    let txid = psbt.unsigned_tx.compute_txid();
+
+    if let Some(tap_key_sig) = input.tap_key_sig {
+        tracing::debug!(%txid, "Finalizing key spend for confirmed VTXO");
+
+        input.final_script_witness = Some(Witness::p2tr_key_spend(&tap_key_sig));
+    } else {
+        tracing::debug!(%txid, "Finalizing script spend for pre-confirmed VTXO");
+
+        input.final_script_witness = Some(finalize_taproot_script_spend_witness(input)?);
+    }
+
+    psbt.extract_tx().map_err(Error::transaction)
+}
+
+/// Build the final witness for a taproot script-spend input from its PSBT data.
+///
+/// The selected tapleaf is the first tap script for which signatures are available for every
+/// `CHECKSIG`/`CHECKSIGVERIFY` pubkey in the script. Signatures are pushed in reverse script order.
+/// Extra condition witness elements, such as VHTLC preimages, are read from the
+/// `VTXO_CONDITION_KEY` unknown input field and pushed after signatures.
+pub fn finalize_taproot_script_spend_witness(input: &psbt::Input) -> Result<Witness, Error> {
+    for (control_block, (script, leaf_version)) in input.tap_scripts.iter() {
+        let leaf_hash = TapLeafHash::from_script(script, *leaf_version);
+        let pubkeys = extract_checksig_pubkeys(script);
+
+        if pubkeys.is_empty() {
+            continue;
+        }
+
+        let signatures = pubkeys
+            .iter()
+            .map(|pk| {
+                input
+                    .tap_script_sigs
+                    .get(&(*pk, leaf_hash))
+                    .map(|sig| sig.to_vec())
+            })
+            .collect::<Option<Vec<_>>>();
+
+        let Some(signatures) = signatures else {
+            continue;
+        };
+
+        let mut witness = Witness::new();
+
+        for signature in signatures.into_iter().rev() {
+            witness.push(signature);
+        }
+
+        for element in condition_witness_elements(input)? {
+            witness.push(element);
+        }
+
+        witness.push(script.as_bytes());
+        witness.push(control_block.serialize());
+
+        return Ok(witness);
+    }
+
+    Err(Error::transaction(
+        "no satisfiable taproot script-spend leaf found in PSBT input",
+    ))
+}
+
+fn condition_witness_elements(input: &psbt::Input) -> Result<Vec<Vec<u8>>, Error> {
+    let condition_key = psbt::raw::Key {
+        type_value: 222,
+        key: VTXO_CONDITION_KEY.to_vec(),
+    };
+
+    let Some(condition_data) = input.unknown.get(&condition_key) else {
+        return Ok(Vec::new());
+    };
+
+    let mut cursor = std::io::Cursor::new(condition_data);
+    let element_count = VarInt::consensus_decode(&mut cursor)
+        .map_err(|e| Error::transaction(format!("failed to decode condition count: {e}")))?
+        .0;
+
+    let mut elements = Vec::with_capacity(element_count as usize);
+    for _ in 0..element_count {
+        let element_len = VarInt::consensus_decode(&mut cursor)
+            .map_err(|e| Error::transaction(format!("failed to decode condition length: {e}")))?
+            .0 as usize;
+        let start = cursor.position() as usize;
+        let end = start + element_len;
+
+        if condition_data.len() < end {
+            return Err(Error::transaction(format!(
+                "condition witness element too short: expected {element_len} bytes, got {}",
+                condition_data.len().saturating_sub(start)
+            )));
+        }
+
+        elements.push(condition_data[start..end].to_vec());
+        cursor.set_position(end as u64);
+    }
+
+    Ok(elements)
+}
+
 /// Sign all the transactions needed to commit a VTXO on-chain.
 pub fn sign_unilateral_exit_tree(
     unilateral_exit_tree: &UnilateralExitTree,
@@ -438,8 +561,7 @@ pub fn sign_unilateral_exit_tree(
     for unilateral_exit_branch in unilateral_exit_tree.inner.iter() {
         let mut signed_unilateral_exit_branch = Vec::new();
         for virtual_tx in unilateral_exit_branch.iter() {
-            let txid = virtual_tx.unsigned_tx.compute_txid();
-            let mut psbt = virtual_tx.clone();
+            let psbt = virtual_tx.clone();
 
             let vtxo_previous_output = psbt.unsigned_tx.input[VTXO_INPUT_INDEX].previous_output;
 
@@ -456,59 +578,7 @@ pub fn sign_unilateral_exit_tree(
             }
             .expect("witness UTXO in path");
 
-            psbt.inputs[VTXO_INPUT_INDEX].witness_utxo = Some(witness_utxo);
-
-            if let Some(tap_key_sig) = psbt.inputs[VTXO_INPUT_INDEX].tap_key_sig {
-                tracing::debug!(%txid, "Signing key spend for confirmed VTXO");
-
-                psbt.inputs[VTXO_INPUT_INDEX].final_script_witness =
-                    Some(Witness::p2tr_key_spend(&tap_key_sig));
-            } else if !psbt.inputs[VTXO_INPUT_INDEX].tap_script_sigs.is_empty() {
-                tracing::debug!(%txid, "Signing script spend for pre-confirmed VTXO");
-
-                // We always take the first script.
-                let tap_script = psbt.inputs[VTXO_INPUT_INDEX].tap_scripts.iter().next();
-                let tap_script_sigs = &psbt.inputs[VTXO_INPUT_INDEX].tap_script_sigs;
-
-                let (control_block, (script, _)) = tap_script.ok_or_else(|| {
-                    Error::transaction(format!("missing tapscripts in virtual TX {txid}"))
-                })?;
-
-                // Extract pubkeys from the 2-of-2 multisig script to determine signature order.
-                let (pk_0, pk_1) = extract_pubkeys_from_2of2_script(script)?;
-
-                // Compute the TapLeafHash for the script to look up signatures.
-                let leaf_hash = TapLeafHash::from_script(script, control_block.leaf_version);
-
-                // Look up signatures in the correct order based on the pubkeys in the script.
-                let sig_0 = tap_script_sigs.get(&(pk_0, leaf_hash)).ok_or_else(|| {
-                    Error::transaction(format!(
-                        "missing signature for first pubkey {} in virtual TX {txid}",
-                        pk_0
-                    ))
-                })?;
-                let sig_1 = tap_script_sigs.get(&(pk_1, leaf_hash)).ok_or_else(|| {
-                    Error::transaction(format!(
-                        "missing signature for second pubkey {} in virtual TX {txid}",
-                        pk_1
-                    ))
-                })?;
-
-                // Construct witness: [sig_1, sig_0, script, control_block].
-                let mut witness = Witness::new();
-                witness.push(sig_1.to_vec());
-                witness.push(sig_0.to_vec());
-                witness.push(script.as_bytes());
-                witness.push(control_block.serialize());
-
-                psbt.inputs[VTXO_INPUT_INDEX].final_script_witness = Some(witness);
-            } else {
-                return Err(Error::transaction(format!(
-                    "missing taproot key spend or script spend data in virtual TX {txid}"
-                )));
-            };
-
-            let tx = psbt.clone().extract_tx().map_err(Error::transaction)?;
+            let tx = finalize_virtual_tx_input(psbt, VTXO_INPUT_INDEX, witness_utxo)?;
 
             signed_unilateral_exit_branch.push(tx);
         }
@@ -636,70 +706,4 @@ fn find_anchor_outpoint(tx: &Transaction) -> Result<OutPoint, Error> {
     }
 
     Err(Error::transaction("anchor output not found in transaction"))
-}
-
-/// Extract the two [`XOnlyPublicKey`]s from a 2-of-2 multisig tapscript.
-///
-/// The script format is: <pk_0> CHECKSIGVERIFY <pk_1> CHECKSIG
-fn extract_pubkeys_from_2of2_script(
-    script: &ScriptBuf,
-) -> Result<(XOnlyPublicKey, XOnlyPublicKey), Error> {
-    let bytes = script.as_bytes();
-
-    // Expected format: [0x20] [32 bytes pk_0] [CHECKSIGVERIFY] [0x20] [32 bytes pk_1] [CHECKSIG]
-    // Minimum length: 1 + 32 + 1 + 1 + 32 + 1 = 68 bytes
-    if bytes.len() < 68 {
-        return Err(Error::transaction(format!(
-            "script too short to be 2-of-2 multisig: {} bytes",
-            bytes.len()
-        )));
-    }
-
-    // Check first push is 32 bytes
-    if bytes[0] != 0x20 {
-        return Err(Error::transaction(format!(
-            "expected OP_PUSHBYTES_32 (0x20) at position 0, got 0x{:02x}",
-            bytes[0]
-        )));
-    }
-
-    // Extract first pubkey (bytes 1-32)
-    let pk_0_bytes: [u8; 32] = bytes[1..33]
-        .try_into()
-        .map_err(|_| Error::transaction("failed to extract first pubkey bytes"))?;
-    let pk_0 = XOnlyPublicKey::from_slice(&pk_0_bytes)
-        .map_err(|e| Error::transaction(format!("invalid first pubkey: {e}")))?;
-
-    // Check CHECKSIGVERIFY at position 33
-    if bytes[33] != OP_CHECKSIGVERIFY.to_u8() {
-        return Err(Error::transaction(format!(
-            "expected OP_CHECKSIGVERIFY (0xad) at position 33, got 0x{:02x}",
-            bytes[33]
-        )));
-    }
-
-    // Check second push is 32 bytes at position 34
-    if bytes[34] != 0x20 {
-        return Err(Error::transaction(format!(
-            "expected OP_PUSHBYTES_32 (0x20) at position 34, got 0x{:02x}",
-            bytes[34]
-        )));
-    }
-
-    // Extract second pubkey (bytes 35-66)
-    let pk_1_bytes: [u8; 32] = bytes[35..67]
-        .try_into()
-        .map_err(|_| Error::transaction("failed to extract second pubkey bytes"))?;
-    let pk_1 = XOnlyPublicKey::from_slice(&pk_1_bytes)
-        .map_err(|e| Error::transaction(format!("invalid second pubkey: {e}")))?;
-
-    // Check CHECKSIG at position 67
-    if bytes[67] != OP_CHECKSIG.to_u8() {
-        return Err(Error::transaction(format!(
-            "expected OP_CHECKSIG (0xac) at position 67, got 0x{:02x}",
-            bytes[67]
-        )));
-    }
-
-    Ok((pk_0, pk_1))
 }
