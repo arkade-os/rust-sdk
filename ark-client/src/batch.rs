@@ -120,6 +120,12 @@ where
     /// periodically renewing their wallet: healthy VTXOs do not need to be touched, and including
     /// them would only inflate batch fees. Boarding outputs are always included because callers
     /// generally want freshly funded coins to enter the Ark.
+    ///
+    /// NOTE: sub-dust recoverable VTXOs can only be rescued when their combined value exceeds the
+    /// server's dust threshold; otherwise the batch protocol rejects the settlement with a
+    /// `cannot settle into sub-dust VTXO` error. When the wallet holds isolated sub-dust amounts,
+    /// fall back to [`Self::settle_all`], which can roll them in alongside healthy VTXOs that
+    /// act as carrier value.
     pub async fn settle<R>(&self, rng: &mut R) -> Result<Option<Txid>, Error>
     where
         R: Rng + CryptoRng + Clone,

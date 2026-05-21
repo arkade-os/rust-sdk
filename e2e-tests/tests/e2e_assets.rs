@@ -107,7 +107,7 @@ pub async fn e2e_assets() {
 
     tracing::info!("=== Step 3: Settle asset ===");
 
-    alice.settle(&mut rng).await.unwrap();
+    alice.settle_all(&mut rng).await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     let balance = alice.offchain_balance().await.unwrap();
