@@ -113,31 +113,37 @@ where
         Ok(Some(commitment_txid))
     }
 
-    /// Settle prior VTXOs that have expired or are recoverable into the next batch, generating new
-    /// confirmed VTXOs.
+    /// Settle prior VTXOs that have expired or are recoverable, together with all available
+    /// boarding outputs, into the next batch, generating new confirmed VTXOs.
     ///
-    /// Boarding outputs and healthy VTXOs are left untouched. This is the path callers typically
-    /// want when periodically renewing their wallet: healthy VTXOs do not need to be touched, and
-    /// including them would only inflate batch fees.
+    /// Healthy (unexpired) VTXOs are left untouched. This is the path callers typically want when
+    /// periodically renewing their wallet: healthy VTXOs do not need to be touched, and including
+    /// them would only inflate batch fees. Boarding outputs are always included because callers
+    /// generally want freshly funded coins to enter the Ark.
     pub async fn settle<R>(&self, rng: &mut R) -> Result<Option<Txid>, Error>
     where
         R: Rng + CryptoRng + Clone,
     {
         let (vtxo_list, _) = self.list_vtxos().await?;
+        let vtxo_outpoints: Vec<OutPoint> = vtxo_list.recoverable().map(|v| v.outpoint).collect();
 
-        let outpoints: Vec<OutPoint> = vtxo_list.recoverable().map(|v| v.outpoint).collect();
+        let (boarding_inputs, _, _) = self.fetch_commitment_transaction_inputs().await?;
+        let boarding_outpoints: Vec<OutPoint> =
+            boarding_inputs.iter().map(|i| i.outpoint()).collect();
 
-        if outpoints.is_empty() {
-            tracing::debug!("No expired or recoverable VTXOs to settle");
+        if vtxo_outpoints.is_empty() && boarding_outpoints.is_empty() {
+            tracing::debug!("No expired/recoverable VTXOs or boarding outputs to settle");
             return Ok(None);
         }
 
         tracing::debug!(
-            num_to_settle = outpoints.len(),
-            "Attempting to settle expired and recoverable VTXOs"
+            num_vtxos = vtxo_outpoints.len(),
+            num_boarding = boarding_outpoints.len(),
+            "Attempting to settle expired/recoverable VTXOs and boarding outputs"
         );
 
-        self.settle_vtxos(rng, &outpoints, &[]).await
+        self.settle_vtxos(rng, &vtxo_outpoints, &boarding_outpoints)
+            .await
     }
 
     /// Settle _all_ prior VTXOs, boarding outputs, and the provided ArkNotes into the next batch.
