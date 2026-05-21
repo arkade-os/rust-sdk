@@ -48,7 +48,7 @@ pub use issue_asset::SelfAssetIssuanceTransactions;
 pub use reissue_asset::build_asset_reissuance_transactions;
 pub use reissue_asset::AssetReissuanceTransactions;
 
-/// A VTXO to be spent into an unconfirmed VTXO.
+/// A VTXO to be spent into a pre-confirmed VTXO.
 #[derive(Debug, Clone)]
 pub struct VtxoInput {
     /// The script path that will be used to spend the [`Vtxo`].

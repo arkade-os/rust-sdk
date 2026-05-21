@@ -398,11 +398,13 @@ pub fn build_unilateral_exit_tree_txids(
     Ok(all_paths)
 }
 
-/// The full path from commitment transaction to VTXO. The entire path will need to be published
+/// The full path from a commitment transaction to a VTXO. The entire path must be published
 /// on-chain to execute a unilateral exit with this VTXO.
 ///
-/// We use the word "tree" because a VTXO may come from more than one path i.e. if its corresponding
-/// Ark transaction has more than one input!
+/// A branch may contain both batch-tree internal node transactions, which spend their parent via
+/// key path, and VTXO spend transactions, which spend a confirmed or pre-confirmed VTXO via script
+/// path. We use the word "tree" because a VTXO may come from more than one path, e.g. if its
+/// corresponding Ark transaction has more than one input.
 pub struct UnilateralExitTree {
     /// The commitment transactions from which this VTXO comes from.
     ///
@@ -437,7 +439,8 @@ impl UnilateralExitTree {
 ///
 /// This is intended for historical virtual transactions in a unilateral-exit branch. The caller
 /// provides the `witness_utxo` for the input being finalized, and this function materializes either
-/// the taproot key-spend witness or a satisfiable taproot script-spend witness.
+/// the taproot key-spend witness used by batch-tree internal nodes or a satisfiable taproot
+/// script-spend witness used when spending VTXOs.
 pub fn finalize_virtual_tx_input(
     mut psbt: Psbt,
     input_index: usize,
@@ -453,11 +456,11 @@ pub fn finalize_virtual_tx_input(
     let txid = psbt.unsigned_tx.compute_txid();
 
     if let Some(tap_key_sig) = input.tap_key_sig {
-        tracing::debug!(%txid, "Finalizing key spend for confirmed VTXO");
+        tracing::debug!(%txid, "Finalizing batch-tree internal node key spend");
 
         input.final_script_witness = Some(Witness::p2tr_key_spend(&tap_key_sig));
     } else {
-        tracing::debug!(%txid, "Finalizing script spend for pre-confirmed VTXO");
+        tracing::debug!(%txid, "Finalizing VTXO script spend");
 
         input.final_script_witness = Some(finalize_taproot_script_spend_witness(input)?);
     }
@@ -552,18 +555,19 @@ fn condition_witness_elements(input: &psbt::Input) -> Result<Vec<Vec<u8>>, Error
     Ok(elements)
 }
 
-/// Sign all the transactions needed to commit a VTXO on-chain.
-pub fn sign_unilateral_exit_tree(
+/// Finalize all virtual transactions needed to commit a VTXO on-chain.
+pub fn finalize_unilateral_exit_tree(
     unilateral_exit_tree: &UnilateralExitTree,
     commitment_txs: &[Transaction],
 ) -> Result<Vec<Vec<Transaction>>, Error> {
-    let mut signed_virtual_tx_branches = Vec::new();
+    let mut finalized_virtual_tx_branches = Vec::new();
     for unilateral_exit_branch in unilateral_exit_tree.inner.iter() {
-        let mut signed_unilateral_exit_branch = Vec::new();
+        let mut finalized_unilateral_exit_branch = Vec::new();
         for virtual_tx in unilateral_exit_branch.iter() {
             let psbt = virtual_tx.clone();
 
-            let vtxo_previous_output = psbt.unsigned_tx.input[VTXO_INPUT_INDEX].previous_output;
+            let virtual_tx_previous_output =
+                psbt.unsigned_tx.input[VTXO_INPUT_INDEX].previous_output;
 
             let witness_utxo = {
                 unilateral_exit_branch
@@ -571,8 +575,8 @@ pub fn sign_unilateral_exit_tree(
                     .map(|p| &p.unsigned_tx)
                     .chain(commitment_txs.iter())
                     .find_map(|other_psbt| {
-                        (other_psbt.compute_txid() == vtxo_previous_output.txid).then_some(
-                            other_psbt.output[vtxo_previous_output.vout as usize].clone(),
+                        (other_psbt.compute_txid() == virtual_tx_previous_output.txid).then_some(
+                            other_psbt.output[virtual_tx_previous_output.vout as usize].clone(),
                         )
                     })
             }
@@ -580,12 +584,12 @@ pub fn sign_unilateral_exit_tree(
 
             let tx = finalize_virtual_tx_input(psbt, VTXO_INPUT_INDEX, witness_utxo)?;
 
-            signed_unilateral_exit_branch.push(tx);
+            finalized_unilateral_exit_branch.push(tx);
         }
-        signed_virtual_tx_branches.push(signed_unilateral_exit_branch);
+        finalized_virtual_tx_branches.push(finalized_unilateral_exit_branch);
     }
 
-    Ok(signed_virtual_tx_branches)
+    Ok(finalized_virtual_tx_branches)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

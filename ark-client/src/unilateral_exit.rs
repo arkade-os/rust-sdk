@@ -12,7 +12,7 @@ use ark_core::build_unilateral_exit_tree_txids;
 use ark_core::script::extract_checksig_pubkeys;
 use ark_core::unilateral_exit;
 use ark_core::unilateral_exit::create_unilateral_exit_transaction;
-use ark_core::unilateral_exit::sign_unilateral_exit_tree;
+use ark_core::unilateral_exit::finalize_unilateral_exit_tree;
 use ark_core::unilateral_exit::UnilateralExitTree;
 use backon::ExponentialBuilder;
 use backon::Retryable;
@@ -38,9 +38,9 @@ where
     ///
     /// ### Returns
     ///
-    /// The tree as a `Vec<Vec<Transaction>>`, where each branch represents a path from
-    /// commitment transaction output to a spendable VTXO. Every transaction is fully signed,
-    /// but requires fee bumping through a P2A output.
+    /// The tree as a `Vec<Vec<Transaction>>`, where each branch represents a path from a
+    /// commitment transaction output to a spendable VTXO. Every transaction is finalized, but
+    /// requires fee bumping through a P2A output.
     pub async fn build_unilateral_exit_trees(&self) -> Result<Vec<Vec<Transaction>>, Error> {
         let (vtxo_list, _) = self
             .list_vtxos()
@@ -120,9 +120,9 @@ where
                 commitment_txs.push(commitment_tx);
             }
 
-            let signed_unilateral_exit_tree =
-                sign_unilateral_exit_tree(&unilateral_exit_tree, commitment_txs.as_slice())?;
-            branches.extend(signed_unilateral_exit_tree);
+            let finalized_unilateral_exit_tree =
+                finalize_unilateral_exit_tree(&unilateral_exit_tree, commitment_txs.as_slice())?;
+            branches.extend(finalized_unilateral_exit_tree);
         }
 
         Ok(branches)

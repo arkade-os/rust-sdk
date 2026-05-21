@@ -79,11 +79,11 @@ impl OnChainInput {
     }
 }
 
-/// A nonce key pair per tree transaction output that we are a part of in the batch.
+/// A nonce key pair per batch-tree transaction output that we are a part of in the batch.
 ///
 /// The [`musig::SecretNonce`] element of the tuple is an [`Option`] because it cannot be cloned or
-/// copied. When we are ready to sign a tree transaction, we call the method `take_sk` to move out
-/// of the [`Option`].
+/// copied. When we are ready to sign a batch-tree transaction, we call the method `take_sk` to move
+/// out of the [`Option`].
 #[allow(clippy::type_complexity)]
 pub struct NonceKps(HashMap<Txid, (Option<musig::SecretNonce>, musig::PublicNonce)>);
 
@@ -108,7 +108,8 @@ impl NonceKps {
     }
 }
 
-/// Generate a nonce key pair for each tree transaction output that we are a part of in the batch.
+/// Generate a nonce key pair for each batch-tree transaction output that we are a part of in the
+/// batch.
 pub fn generate_nonce_tree<R>(
     rng: &mut R,
     batch_tree_tx_graph: &TxGraph,
@@ -195,7 +196,7 @@ fn tree_tx_sighash(
     let prevouts = [previous_output];
     let prevouts = Prevouts::All(&prevouts);
 
-    // Here we are generating a key spend sighash, because batch tree outputs are signed by parties
+    // Here we are generating a key spend sighash, because batch-tree outputs are signed by parties
     // with VTXOs in this new batch. We use a musig key spend to efficiently coordinate with all the
     // parties.
     let tap_sighash = SighashCache::new(tx)
@@ -205,16 +206,17 @@ fn tree_tx_sighash(
     Ok(tap_sighash.to_raw_hash().to_byte_array())
 }
 
-/// Compute the aggregated nonce public key for a transaction in the VTXO tree.
+/// Compute the aggregated nonce public key for a transaction in the batch-tree.
 ///
-/// The [`TreeTxNoncePks`] holds the public nonces of all the cosigners of this transaction.
+/// The [`TreeTxNoncePks`] holds the public nonces of all the cosigners of this batch-tree
+/// transaction.
 pub fn aggregate_nonces(tree_tx_nonce_pks: TreeTxNoncePks) -> musig::AggregatedNonce {
     let pks = tree_tx_nonce_pks.to_pks();
     let ref_pks = pks.iter().collect::<Vec<_>>();
     musig::AggregatedNonce::new(&ref_pks)
 }
 
-/// Use `own_cosigner_kp` to sign each batch tree transaction output that we are a part, using
+/// Use `own_cosigner_kp` to sign each batch-tree transaction output that we are a part of, using
 /// `our_nonce_kps` to provide our share of each aggregate nonce.
 pub fn sign_batch_tree_tx(
     tree_txid: Txid,
@@ -241,14 +243,14 @@ pub fn sign_batch_tree_tx(
 
     let psbt = batch_tree_tx_map
         .get(&tree_txid)
-        .ok_or_else(|| Error::ad_hoc(format!("TXID {tree_txid} not found in batch tree map")))?;
+        .ok_or_else(|| Error::ad_hoc(format!("TXID {tree_txid} not found in batch-tree map")))?;
 
     let mut cosigner_pks = extract_cosigner_pks_from_vtxo_psbt(psbt)?;
     cosigner_pks.sort_by_key(|k| k.serialize());
 
     if !cosigner_pks.contains(&own_cosigner_pk) {
         return Err(Error::ad_hoc(
-            "own cosigner PK not found among tree transaction cosigner PKs",
+            "own cosigner PK not found among batch-tree transaction cosigner PKs",
         ));
     }
 
