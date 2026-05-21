@@ -533,13 +533,32 @@ fn condition_witness_elements(input: &psbt::Input) -> Result<Vec<Vec<u8>>, Error
         .map_err(|e| Error::transaction(format!("failed to decode condition count: {e}")))?
         .0;
 
-    let mut elements = Vec::with_capacity(element_count as usize);
+    let count_end = usize::try_from(cursor.position())
+        .map_err(|_| Error::transaction("condition cursor position overflow"))?;
+    let remaining_after_count = condition_data.len().saturating_sub(count_end);
+    let element_count = usize::try_from(element_count)
+        .map_err(|_| Error::transaction("condition witness element count overflow"))?;
+
+    // Each element needs at least a compact-size length byte, even when the element itself is
+    // empty.
+    if element_count > remaining_after_count {
+        return Err(Error::transaction(format!(
+            "condition witness element count {element_count} exceeds remaining buffer size {remaining_after_count}"
+        )));
+    }
+
+    let mut elements = Vec::with_capacity(element_count);
     for _ in 0..element_count {
         let element_len = VarInt::consensus_decode(&mut cursor)
             .map_err(|e| Error::transaction(format!("failed to decode condition length: {e}")))?
-            .0 as usize;
-        let start = cursor.position() as usize;
-        let end = start + element_len;
+            .0;
+        let element_len = usize::try_from(element_len)
+            .map_err(|_| Error::transaction("condition witness element length overflow"))?;
+        let start = usize::try_from(cursor.position())
+            .map_err(|_| Error::transaction("condition cursor position overflow"))?;
+        let end = start
+            .checked_add(element_len)
+            .ok_or_else(|| Error::transaction("condition witness element end overflow"))?;
 
         if condition_data.len() < end {
             return Err(Error::transaction(format!(
