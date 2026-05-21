@@ -267,52 +267,50 @@ where
     Ok(tx)
 }
 
-/// Build the unilateral exit tree of TXIDs for a VTXO from a [`server::VtxoChains`].
+/// Build a topologically sorted unilateral exit branch of TXIDs for a VTXO from a
+/// [`server::VtxoChains`].
+///
+/// The returned branch contains every virtual transaction in the ancestor sub-DAG exactly once,
+/// ordered so every transaction appears after its virtual parents. This avoids enumerating every
+/// distinct root-to-leaf path, which can be exponential when a VTXO has many merged ancestors.
 pub fn build_unilateral_exit_tree_txids(
     vtxo_chains: &server::VtxoChains,
     // The TXID of the VTXO we want to commit on-chain.
     ark_txid: Txid,
 ) -> Result<Vec<Vec<Txid>>, Error> {
-    // Create a hash-map for quick lookups: TXID -> `VtxoChain`.
-    let mut chain_map: HashMap<Txid, &server::VtxoChain> = HashMap::new();
-    for vtxo_chain in &vtxo_chains.inner {
-        chain_map.insert(vtxo_chain.txid, vtxo_chain);
-    }
+    let chain_map = vtxo_chains
+        .inner
+        .iter()
+        .map(|vtxo_chain| (vtxo_chain.txid, vtxo_chain))
+        .collect::<HashMap<_, _>>();
 
-    /// Find all the paths from a virtual transaction to the root commitment transaction,
-    /// recursively.
-    fn find_paths_to_commitment(
+    fn visit_virtual_ancestors(
         current_txid: Txid,
         chain_map: &HashMap<Txid, &server::VtxoChain>,
-        current_path: &mut Vec<Txid>,
-        all_paths: &mut Vec<Vec<Txid>>,
+        visiting: &mut HashSet<Txid>,
         visited: &mut HashSet<Txid>,
-    ) -> Result<(), Error> {
-        // Safety check to prevent an infinite loop.
-        if current_path.len() > 1_000 {
-            return Err(Error::ad_hoc(
-                "chain traversal exceeded maximum depth of 1000",
-            ));
+        sorted: &mut Vec<Txid>,
+    ) -> Result<bool, Error> {
+        if visited.contains(&current_txid) {
+            return Ok(true);
         }
 
-        // Safety check to reject cycles.
-        if visited.contains(&current_txid) {
+        if !visiting.insert(current_txid) {
             return Err(Error::ad_hoc("chain traversal led to cycle"));
         }
-        visited.insert(current_txid);
 
-        // Add current TXID to path.
-        current_path.push(current_txid);
-
-        // Look through parent transactions to continue building up the chain(s).
         let chain = chain_map.get(&current_txid).ok_or_else(|| {
-            Error::ad_hoc(format!("could not find VtxoChain for TXID: {current_txid}",))
+            Error::ad_hoc(format!("could not find VtxoChain for TXID: {current_txid}"))
         })?;
-        // Check if any of the transactions spent by this virtual TX are the commitment transaction.
-        let mut reached_commitment = false;
 
+        if chain.spends.is_empty() {
+            return Err(Error::ad_hoc(format!(
+                "dead end reached at TXID {current_txid} with no commitment transaction"
+            )));
+        }
+
+        let mut reached_commitment = false;
         for &parent_txid in &chain.spends {
-            // Look up the parent transaction's chain to get its type
             let parent_chain = chain_map.get(&parent_txid).ok_or_else(|| {
                 Error::ad_hoc(format!(
                     "could not find VtxoChain for parent TXID: {parent_txid}",
@@ -321,22 +319,13 @@ pub fn build_unilateral_exit_tree_txids(
 
             match parent_chain.tx_type {
                 server::ChainedTxType::Commitment => {
-                    // We've reached our destination.
-                    all_paths.push(current_path.clone());
-
                     reached_commitment = true;
                 }
                 server::ChainedTxType::Ark
                 | server::ChainedTxType::Checkpoint
                 | server::ChainedTxType::Tree => {
-                    // Continue traversing virtual transactions up the tree.
-                    find_paths_to_commitment(
-                        parent_txid,
-                        chain_map,
-                        current_path,
-                        all_paths,
-                        visited,
-                    )?;
+                    reached_commitment |=
+                        visit_virtual_ancestors(parent_txid, chain_map, visiting, visited, sorted)?;
                 }
                 server::ChainedTxType::Unspecified => {
                     tracing::warn!(
@@ -345,57 +334,36 @@ pub fn build_unilateral_exit_tree_txids(
                          Treating it like a virtual TX"
                     );
 
-                    // Continue traversing virtual transactions up the tree.
-                    find_paths_to_commitment(
-                        parent_txid,
-                        chain_map,
-                        current_path,
-                        all_paths,
-                        visited,
-                    )?;
+                    reached_commitment |=
+                        visit_virtual_ancestors(parent_txid, chain_map, visiting, visited, sorted)?;
                 }
             }
         }
 
-        if !reached_commitment && chain.spends.is_empty() {
-            return Err(Error::ad_hoc(format!(
-                "dead end reached at TXID {current_txid} with no commitment transaction"
-            )));
-        }
+        visiting.remove(&current_txid);
+        visited.insert(current_txid);
+        sorted.push(current_txid);
 
-        visited.remove(&current_txid);
-        current_path.pop();
-        Ok(())
+        Ok(reached_commitment)
     }
 
-    let mut all_paths = Vec::new();
-    let mut current_path = Vec::new();
+    let mut visiting = HashSet::new();
     let mut visited = HashSet::new();
+    let mut sorted = Vec::new();
 
-    find_paths_to_commitment(
+    if !visit_virtual_ancestors(
         ark_txid,
         &chain_map,
-        &mut current_path,
-        &mut all_paths,
+        &mut visiting,
         &mut visited,
-    )?;
-
-    if all_paths.is_empty() {
+        &mut sorted,
+    )? {
         return Err(Error::ad_hoc(format!(
-            "no paths found from Ark TX {ark_txid} to commitment transaction",
+            "no path found from Ark TX {ark_txid} to commitment transaction",
         )));
     }
 
-    // Reverse each path so they go from root commitment TX to VTXO.
-    let all_paths: Vec<Vec<Txid>> = all_paths
-        .into_iter()
-        .map(|mut path| {
-            path.reverse();
-            path
-        })
-        .collect();
-
-    Ok(all_paths)
+    Ok(vec![sorted])
 }
 
 /// The full path from a commitment transaction to a VTXO. The entire path must be published
