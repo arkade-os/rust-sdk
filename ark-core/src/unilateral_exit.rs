@@ -592,6 +592,14 @@ pub fn finalize_unilateral_exit_tree(
     Ok(finalized_virtual_tx_branches)
 }
 
+#[deprecated(note = "use finalize_unilateral_exit_tree")]
+pub fn sign_unilateral_exit_tree(
+    unilateral_exit_tree: &UnilateralExitTree,
+    commitment_txs: &[Transaction],
+) -> Result<Vec<Vec<Transaction>>, Error> {
+    finalize_unilateral_exit_tree(unilateral_exit_tree, commitment_txs)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectedUtxo {
     pub outpoint: OutPoint,
