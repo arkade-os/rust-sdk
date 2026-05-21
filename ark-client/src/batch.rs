@@ -59,7 +59,10 @@ where
 {
     /// Settle _all_ prior VTXOs and boarding outputs into the next batch, generating new confirmed
     /// VTXOs.
-    pub async fn settle<R>(&self, rng: &mut R) -> Result<Option<Txid>, Error>
+    ///
+    /// Most callers should prefer [`Self::settle`], which only renews VTXOs that have actually
+    /// expired. Settling unexpired VTXOs is rarely necessary.
+    pub async fn settle_all<R>(&self, rng: &mut R) -> Result<Option<Txid>, Error>
     where
         R: Rng + CryptoRng + Clone,
     {
@@ -108,6 +111,33 @@ where
         tracing::info!(%commitment_txid, "Settlement success");
 
         Ok(Some(commitment_txid))
+    }
+
+    /// Settle prior VTXOs that have expired or are recoverable into the next batch, generating new
+    /// confirmed VTXOs.
+    ///
+    /// Boarding outputs and healthy VTXOs are left untouched. This is the path callers typically
+    /// want when periodically renewing their wallet: healthy VTXOs do not need to be touched, and
+    /// including them would only inflate batch fees.
+    pub async fn settle<R>(&self, rng: &mut R) -> Result<Option<Txid>, Error>
+    where
+        R: Rng + CryptoRng + Clone,
+    {
+        let (vtxo_list, _) = self.list_vtxos().await?;
+
+        let outpoints: Vec<OutPoint> = vtxo_list.recoverable().map(|v| v.outpoint).collect();
+
+        if outpoints.is_empty() {
+            tracing::debug!("No expired or recoverable VTXOs to settle");
+            return Ok(None);
+        }
+
+        tracing::debug!(
+            num_to_settle = outpoints.len(),
+            "Attempting to settle expired and recoverable VTXOs"
+        );
+
+        self.settle_vtxos(rng, &outpoints, &[]).await
     }
 
     /// Settle _all_ prior VTXOs, boarding outputs, and the provided ArkNotes into the next batch.
