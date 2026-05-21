@@ -138,20 +138,20 @@ pub async fn concurrent_boarding() {
     let alice_task = tokio::spawn({
         async move {
             let mut rng = StdRng::from_entropy();
-            alice.settle(&mut rng).await.unwrap();
+            alice.settle_all(&mut rng).await.unwrap();
             alice
         }
     });
 
     let bob_task = tokio::spawn(async move {
         let mut rng = StdRng::from_entropy();
-        bob.settle(&mut rng).await.unwrap();
+        bob.settle_all(&mut rng).await.unwrap();
         bob
     });
 
     let claire_task = tokio::spawn(async move {
         let mut rng = StdRng::from_entropy();
-        claire.settle(&mut rng).await.unwrap();
+        claire.settle_all(&mut rng).await.unwrap();
         claire
     });
 
