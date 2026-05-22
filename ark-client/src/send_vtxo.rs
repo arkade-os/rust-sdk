@@ -10,6 +10,7 @@ use ark_core::asset::AssetId;
 use ark_core::coin_select::select_vtxos;
 use ark_core::coin_select::select_vtxos_for_asset;
 use ark_core::coin_select::VirtualTxOutPoint;
+use ark_core::extension;
 use ark_core::intent;
 use ark_core::script::extract_checksig_pubkeys;
 use ark_core::send::build_asset_send_transactions;
@@ -31,6 +32,8 @@ use bitcoin::XOnlyPublicKey;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::time::Duration;
+
+pub type ExtensionPacket = (u8, Vec<u8>);
 
 impl<B, W, S, K> Client<B, W, S, K>
 where
@@ -62,7 +65,26 @@ where
             .context("failed to auto-select send inputs")?;
 
         let txid = self
-            .send_with_selected_inputs(selected, receivers)
+            .send_with_selected_inputs(selected, receivers, None)
+            .await
+            .context("failed to send with selected inputs")?;
+
+        Ok(txid)
+    }
+
+    /// Send bitcoin and/or Arkade assets offchain and attach additional Ark extension packets.
+    pub async fn send_with_extension_packets(
+        &self,
+        receivers: Vec<SendReceiver>,
+        extension_packets: Vec<ExtensionPacket>,
+    ) -> Result<Txid, Error> {
+        let selected = self
+            .auto_select_send_inputs(&receivers)
+            .await
+            .context("failed to auto-select send inputs")?;
+
+        let txid = self
+            .send_with_selected_inputs(selected, receivers, Some(extension_packets))
             .await
             .context("failed to send with selected inputs")?;
 
@@ -102,7 +124,27 @@ where
             .context("failed to resolve selected send inputs")?;
 
         let txid = self
-            .send_with_selected_inputs(selected, receivers)
+            .send_with_selected_inputs(selected, receivers, None)
+            .await
+            .context("failed to send with selected inputs")?;
+
+        Ok(txid)
+    }
+
+    /// Spend specific VTXOs and attach additional Ark extension packets.
+    pub async fn send_selection_with_extension_packets(
+        &self,
+        vtxo_outpoints: &[OutPoint],
+        receivers: Vec<SendReceiver>,
+        extension_packets: Vec<ExtensionPacket>,
+    ) -> Result<Txid, Error> {
+        let selected = self
+            .resolve_selected_send_inputs(vtxo_outpoints)
+            .await
+            .context("failed to resolve selected send inputs")?;
+
+        let txid = self
+            .send_with_selected_inputs(selected, receivers, Some(extension_packets))
             .await
             .context("failed to send with selected inputs")?;
 
@@ -173,7 +215,7 @@ where
             amount,
             assets: Vec::new(),
         }];
-        let pending_tx = self.build_and_submit(vtxo_inputs, receivers).await?;
+        let pending_tx = self.build_and_submit(vtxo_inputs, receivers, None).await?;
         Ok(pending_tx.ark_txid)
     }
 
@@ -476,6 +518,7 @@ where
         &self,
         vtxo_inputs: Vec<VtxoInput>,
         receivers: Vec<SendReceiver>,
+        extension_packets: Option<Vec<ExtensionPacket>>,
     ) -> Result<Txid, Error> {
         Self::validate_selected_inputs_cover_receivers(
             &vtxo_inputs,
@@ -483,7 +526,9 @@ where
             self.server_info.dust,
         )?;
 
-        let pending_tx = self.build_and_submit(vtxo_inputs, receivers).await?;
+        let pending_tx = self
+            .build_and_submit(vtxo_inputs, receivers, extension_packets)
+            .await?;
         let ark_txid = pending_tx.ark_txid;
 
         self.sign_and_finalize_pending_tx(pending_tx).await?;
@@ -533,15 +578,23 @@ where
         &self,
         inputs: Vec<VtxoInput>,
         receivers: Vec<SendReceiver>,
+        extension_packets: Option<Vec<ExtensionPacket>>,
     ) -> Result<PendingTx, Error> {
         let (change_address, change_address_vtxo) = self.get_offchain_address()?;
 
         let OffchainTransactions {
-            ark_tx,
+            mut ark_tx,
             checkpoint_txs,
         } = build_asset_send_transactions(&receivers, &change_address, &inputs, &self.server_info)
             .map_err(Error::from)
             .context("failed to build offchain asset-send transactions")?;
+
+        if let Some(extension_packets) = extension_packets {
+            for (packet_type, packet_payload) in extension_packets {
+                extension::add_packet_to_psbt(&mut ark_tx, packet_type, &packet_payload)
+                    .context("failed to add extension packet to offchain transaction")?;
+            }
+        }
 
         self.submit_built_offchain_send(ark_tx, checkpoint_txs, change_address_vtxo.owner_pk())
             .await
