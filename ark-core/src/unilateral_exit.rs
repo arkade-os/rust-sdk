@@ -683,7 +683,11 @@ pub fn finalize_unilateral_exit_tree(
                         )
                     })
             }
-            .expect("witness UTXO in path");
+            .ok_or_else(|| {
+                Error::ad_hoc(format!(
+                    "no witness UTXO found for virtual TX outpoint {virtual_tx_previous_output}"
+                ))
+            })?;
 
             let tx = finalize_virtual_tx_input(psbt, VTXO_INPUT_INDEX, witness_utxo)?;
 
