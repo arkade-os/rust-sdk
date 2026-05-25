@@ -11,7 +11,7 @@ mod common;
 async fn can_get_info_from_ark_server() {
     common::init_tracing();
 
-    let client = Client::new("http://localhost:7070".to_string());
+    let client = Client::new("http://localhost:7070".to_string()).unwrap();
 
     let mut n_retries = 0;
     while n_retries < 5 {
@@ -39,7 +39,7 @@ async fn can_get_info_from_ark_server() {
 async fn can_receive_events_from_event_stream() {
     common::init_tracing();
 
-    let client = Client::new("http://localhost:7070".to_string());
+    let client = Client::new("http://localhost:7070".to_string()).unwrap();
 
     // First verify the server is reachable.
     let info = client.get_info().await.unwrap();
