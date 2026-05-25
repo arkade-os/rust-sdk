@@ -1,14 +1,16 @@
 use crate::anchor_output;
+use crate::script::extract_checksig_pubkeys;
 use crate::server;
 use crate::BoardingOutput;
 use crate::Error;
 use crate::ErrorContext;
+use crate::VTXO_CONDITION_KEY;
 use crate::VTXO_INPUT_INDEX;
 use bitcoin::absolute::LockTime;
+use bitcoin::consensus::Decodable;
 use bitcoin::hashes::Hash;
 use bitcoin::hex::DisplayHex;
 use bitcoin::key::Secp256k1;
-use bitcoin::opcodes::all::*;
 use bitcoin::psbt;
 use bitcoin::secp256k1;
 use bitcoin::secp256k1::schnorr;
@@ -28,6 +30,7 @@ use bitcoin::Transaction;
 use bitcoin::TxIn;
 use bitcoin::TxOut;
 use bitcoin::Txid;
+use bitcoin::VarInt;
 use bitcoin::Weight;
 use bitcoin::Witness;
 use bitcoin::XOnlyPublicKey;
@@ -264,52 +267,50 @@ where
     Ok(tx)
 }
 
-/// Build the unilateral exit tree of TXIDs for a VTXO from a [`server::VtxoChains`].
+/// Build a topologically sorted unilateral exit branch of TXIDs for a VTXO from a
+/// [`server::VtxoChains`].
+///
+/// The returned branch contains every virtual transaction in the ancestor sub-DAG exactly once,
+/// ordered so every transaction appears after its virtual parents. This avoids enumerating every
+/// distinct root-to-leaf path, which can be exponential when a VTXO has many merged ancestors.
 pub fn build_unilateral_exit_tree_txids(
     vtxo_chains: &server::VtxoChains,
     // The TXID of the VTXO we want to commit on-chain.
     ark_txid: Txid,
 ) -> Result<Vec<Vec<Txid>>, Error> {
-    // Create a hash-map for quick lookups: TXID -> `VtxoChain`.
-    let mut chain_map: HashMap<Txid, &server::VtxoChain> = HashMap::new();
-    for vtxo_chain in &vtxo_chains.inner {
-        chain_map.insert(vtxo_chain.txid, vtxo_chain);
-    }
+    let chain_map = vtxo_chains
+        .inner
+        .iter()
+        .map(|vtxo_chain| (vtxo_chain.txid, vtxo_chain))
+        .collect::<HashMap<_, _>>();
 
-    /// Find all the paths from a virtual transaction to the root commitment transaction,
-    /// recursively.
-    fn find_paths_to_commitment(
+    fn visit_virtual_ancestors(
         current_txid: Txid,
         chain_map: &HashMap<Txid, &server::VtxoChain>,
-        current_path: &mut Vec<Txid>,
-        all_paths: &mut Vec<Vec<Txid>>,
+        visiting: &mut HashSet<Txid>,
         visited: &mut HashSet<Txid>,
-    ) -> Result<(), Error> {
-        // Safety check to prevent an infinite loop.
-        if current_path.len() > 1_000 {
-            return Err(Error::ad_hoc(
-                "chain traversal exceeded maximum depth of 1000",
-            ));
+        sorted: &mut Vec<Txid>,
+    ) -> Result<bool, Error> {
+        if visited.contains(&current_txid) {
+            return Ok(true);
         }
 
-        // Safety check to reject cycles.
-        if visited.contains(&current_txid) {
+        if !visiting.insert(current_txid) {
             return Err(Error::ad_hoc("chain traversal led to cycle"));
         }
-        visited.insert(current_txid);
 
-        // Add current TXID to path.
-        current_path.push(current_txid);
-
-        // Look through parent transactions to continue building up the chain(s).
         let chain = chain_map.get(&current_txid).ok_or_else(|| {
-            Error::ad_hoc(format!("could not find VtxoChain for TXID: {current_txid}",))
+            Error::ad_hoc(format!("could not find VtxoChain for TXID: {current_txid}"))
         })?;
-        // Check if any of the transactions spent by this virtual TX are the commitment transaction.
-        let mut reached_commitment = false;
 
+        if chain.spends.is_empty() {
+            return Err(Error::ad_hoc(format!(
+                "dead end reached at TXID {current_txid} with no commitment transaction"
+            )));
+        }
+
+        let mut reached_commitment = false;
         for &parent_txid in &chain.spends {
-            // Look up the parent transaction's chain to get its type
             let parent_chain = chain_map.get(&parent_txid).ok_or_else(|| {
                 Error::ad_hoc(format!(
                     "could not find VtxoChain for parent TXID: {parent_txid}",
@@ -318,22 +319,13 @@ pub fn build_unilateral_exit_tree_txids(
 
             match parent_chain.tx_type {
                 server::ChainedTxType::Commitment => {
-                    // We've reached our destination.
-                    all_paths.push(current_path.clone());
-
                     reached_commitment = true;
                 }
                 server::ChainedTxType::Ark
                 | server::ChainedTxType::Checkpoint
                 | server::ChainedTxType::Tree => {
-                    // Continue traversing virtual transactions up the tree.
-                    find_paths_to_commitment(
-                        parent_txid,
-                        chain_map,
-                        current_path,
-                        all_paths,
-                        visited,
-                    )?;
+                    reached_commitment |=
+                        visit_virtual_ancestors(parent_txid, chain_map, visiting, visited, sorted)?;
                 }
                 server::ChainedTxType::Unspecified => {
                     tracing::warn!(
@@ -342,64 +334,182 @@ pub fn build_unilateral_exit_tree_txids(
                          Treating it like a virtual TX"
                     );
 
-                    // Continue traversing virtual transactions up the tree.
-                    find_paths_to_commitment(
-                        parent_txid,
-                        chain_map,
-                        current_path,
-                        all_paths,
-                        visited,
-                    )?;
+                    reached_commitment |=
+                        visit_virtual_ancestors(parent_txid, chain_map, visiting, visited, sorted)?;
                 }
             }
         }
 
-        if !reached_commitment && chain.spends.is_empty() {
-            return Err(Error::ad_hoc(format!(
-                "dead end reached at TXID {current_txid} with no commitment transaction"
-            )));
-        }
+        visiting.remove(&current_txid);
+        visited.insert(current_txid);
+        sorted.push(current_txid);
 
-        visited.remove(&current_txid);
-        current_path.pop();
-        Ok(())
+        Ok(reached_commitment)
     }
 
-    let mut all_paths = Vec::new();
-    let mut current_path = Vec::new();
+    let mut visiting = HashSet::new();
     let mut visited = HashSet::new();
+    let mut sorted = Vec::new();
 
-    find_paths_to_commitment(
+    if !visit_virtual_ancestors(
         ark_txid,
         &chain_map,
-        &mut current_path,
-        &mut all_paths,
+        &mut visiting,
         &mut visited,
-    )?;
-
-    if all_paths.is_empty() {
+        &mut sorted,
+    )? {
         return Err(Error::ad_hoc(format!(
-            "no paths found from Ark TX {ark_txid} to commitment transaction",
+            "no path found from Ark TX {ark_txid} to commitment transaction",
         )));
     }
 
-    // Reverse each path so they go from root commitment TX to VTXO.
-    let all_paths: Vec<Vec<Txid>> = all_paths
-        .into_iter()
-        .map(|mut path| {
-            path.reverse();
-            path
-        })
-        .collect();
-
-    Ok(all_paths)
+    Ok(vec![sorted])
 }
 
-/// The full path from commitment transaction to VTXO. The entire path will need to be published
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn txid(n: u8) -> Txid {
+        Txid::from_byte_array([n; 32])
+    }
+
+    fn chain(
+        txid: Txid,
+        tx_type: server::ChainedTxType,
+        spends: impl Into<Vec<Txid>>,
+    ) -> server::VtxoChain {
+        server::VtxoChain {
+            txid,
+            tx_type,
+            spends: spends.into(),
+            expires_at: 0,
+        }
+    }
+
+    fn exit_branch(chains: Vec<server::VtxoChain>, ark_txid: Txid) -> Vec<Txid> {
+        build_unilateral_exit_tree_txids(&server::VtxoChains { inner: chains }, ark_txid)
+            .expect("valid unilateral exit branch")
+            .pop()
+            .expect("one topological branch")
+    }
+
+    #[test]
+    fn condition_witness_elements_decode_encoded_witness() {
+        let elements = vec![
+            b"preimage".to_vec(),
+            Vec::new(),
+            vec![0; 253],
+            vec![1, 2, 3, 4],
+        ];
+        let mut input = psbt::Input::default();
+
+        input.unknown.insert(
+            psbt::raw::Key {
+                type_value: 222,
+                key: VTXO_CONDITION_KEY.to_vec(),
+            },
+            crate::intent::encode_witness(&elements),
+        );
+
+        assert_eq!(condition_witness_elements(&input).unwrap(), elements);
+    }
+
+    #[test]
+    fn unilateral_exit_txids_for_linear_chain_are_parent_first() {
+        let commitment = txid(1);
+        let tree = txid(2);
+        let ark = txid(3);
+
+        let branch = exit_branch(
+            vec![
+                chain(commitment, server::ChainedTxType::Commitment, []),
+                chain(tree, server::ChainedTxType::Tree, [commitment]),
+                chain(ark, server::ChainedTxType::Ark, [tree]),
+            ],
+            ark,
+        );
+
+        assert_eq!(branch, vec![tree, ark]);
+    }
+
+    #[test]
+    fn unilateral_exit_txids_deduplicate_merged_ancestor_dag() {
+        let commitment = txid(1);
+        let left = txid(2);
+        let right = txid(3);
+        let merge = txid(4);
+        let ark = txid(5);
+
+        let branch = exit_branch(
+            vec![
+                chain(commitment, server::ChainedTxType::Commitment, []),
+                chain(left, server::ChainedTxType::Tree, [commitment]),
+                chain(right, server::ChainedTxType::Tree, [commitment]),
+                chain(merge, server::ChainedTxType::Checkpoint, [left, right]),
+                chain(ark, server::ChainedTxType::Ark, [merge]),
+            ],
+            ark,
+        );
+
+        assert_eq!(branch, vec![left, right, merge, ark]);
+    }
+
+    #[test]
+    fn unilateral_exit_txids_avoid_exponential_path_enumeration() {
+        let commitment = txid(1);
+        let a1 = txid(2);
+        let b1 = txid(3);
+        let m1 = txid(4);
+        let a2 = txid(5);
+        let b2 = txid(6);
+        let m2 = txid(7);
+        let ark = txid(8);
+
+        let branch = exit_branch(
+            vec![
+                chain(commitment, server::ChainedTxType::Commitment, []),
+                chain(a1, server::ChainedTxType::Tree, [commitment]),
+                chain(b1, server::ChainedTxType::Tree, [commitment]),
+                chain(m1, server::ChainedTxType::Checkpoint, [a1, b1]),
+                chain(a2, server::ChainedTxType::Tree, [m1]),
+                chain(b2, server::ChainedTxType::Tree, [m1]),
+                chain(m2, server::ChainedTxType::Checkpoint, [a2, b2]),
+                chain(ark, server::ChainedTxType::Ark, [m2]),
+            ],
+            ark,
+        );
+
+        assert_eq!(branch, vec![a1, b1, m1, a2, b2, m2, ark]);
+    }
+
+    #[test]
+    fn unilateral_exit_txids_reject_cycles() {
+        let a = txid(1);
+        let b = txid(2);
+
+        let err = build_unilateral_exit_tree_txids(
+            &server::VtxoChains {
+                inner: vec![
+                    chain(a, server::ChainedTxType::Ark, [b]),
+                    chain(b, server::ChainedTxType::Checkpoint, [a]),
+                ],
+            },
+            a,
+        )
+        .expect_err("cycle should be rejected");
+
+        assert!(err.to_string().contains("cycle"));
+    }
+}
+
+/// The full path from a commitment transaction to a VTXO. The entire path must be published
 /// on-chain to execute a unilateral exit with this VTXO.
 ///
-/// We use the word "tree" because a VTXO may come from more than one path i.e. if its corresponding
-/// Ark transaction has more than one input!
+/// A branch may contain both batch-tree internal node transactions, which spend their parent via
+/// key path, and VTXO spend transactions, which spend a confirmed or pre-confirmed VTXO via script
+/// path. We use the word "tree" because a VTXO may come from more than one path, e.g. if its
+/// corresponding Ark transaction has more than one input.
 pub struct UnilateralExitTree {
     /// The commitment transactions from which this VTXO comes from.
     ///
@@ -429,19 +539,163 @@ impl UnilateralExitTree {
     }
 }
 
-/// Sign all the transactions needed to commit a VTXO on-chain.
-pub fn sign_unilateral_exit_tree(
+/// Finalize a virtual transaction input using only the authorization data already present in the
+/// PSBT input.
+///
+/// This is intended for historical virtual transactions in a unilateral-exit branch. The caller
+/// provides the `witness_utxo` for the input being finalized, and this function materializes either
+/// the taproot key-spend witness used by batch-tree internal nodes or a satisfiable taproot
+/// script-spend witness used when spending VTXOs.
+pub fn finalize_virtual_tx_input(
+    mut psbt: Psbt,
+    input_index: usize,
+    witness_utxo: TxOut,
+) -> Result<Transaction, Error> {
+    let input = psbt
+        .inputs
+        .get_mut(input_index)
+        .ok_or_else(|| Error::transaction(format!("missing PSBT input {input_index}")))?;
+
+    input.witness_utxo = Some(witness_utxo);
+
+    let txid = psbt.unsigned_tx.compute_txid();
+
+    if let Some(tap_key_sig) = input.tap_key_sig {
+        tracing::debug!(%txid, "Finalizing batch-tree internal node key spend");
+
+        input.final_script_witness = Some(Witness::p2tr_key_spend(&tap_key_sig));
+    } else {
+        tracing::debug!(%txid, "Finalizing VTXO script spend");
+
+        input.final_script_witness = Some(finalize_taproot_script_spend_witness(input)?);
+    }
+
+    psbt.extract_tx().map_err(Error::transaction)
+}
+
+/// Build the final witness for a taproot script-spend input from its PSBT data.
+///
+/// The selected tapleaf is the first tap script for which signatures are available for every
+/// `CHECKSIG`/`CHECKSIGVERIFY` pubkey in the script. Signatures are pushed in reverse script order.
+/// Extra condition witness elements, such as VHTLC preimages, are read from the
+/// `VTXO_CONDITION_KEY` unknown input field and pushed after signatures.
+///
+/// Condition witness elements are therefore placed at the top of the initial script stack. This
+/// requires condition-checking opcodes, such as `OP_HASH160` or `OP_SIZE`, to appear before any
+/// `CHECKSIG`/`CHECKSIGVERIFY` opcode in the tapleaf script.
+pub fn finalize_taproot_script_spend_witness(input: &psbt::Input) -> Result<Witness, Error> {
+    for (control_block, (script, leaf_version)) in input.tap_scripts.iter() {
+        let leaf_hash = TapLeafHash::from_script(script, *leaf_version);
+        let pubkeys = extract_checksig_pubkeys(script);
+
+        if pubkeys.is_empty() {
+            continue;
+        }
+
+        let signatures = pubkeys
+            .iter()
+            .map(|pk| {
+                input
+                    .tap_script_sigs
+                    .get(&(*pk, leaf_hash))
+                    .map(|sig| sig.to_vec())
+            })
+            .collect::<Option<Vec<_>>>();
+
+        let Some(signatures) = signatures else {
+            continue;
+        };
+
+        let mut witness = Witness::new();
+
+        for signature in signatures.into_iter().rev() {
+            witness.push(signature);
+        }
+
+        for element in condition_witness_elements(input)? {
+            witness.push(element);
+        }
+
+        witness.push(script.as_bytes());
+        witness.push(control_block.serialize());
+
+        return Ok(witness);
+    }
+
+    Err(Error::transaction(
+        "no satisfiable taproot script-spend leaf found in PSBT input",
+    ))
+}
+
+fn condition_witness_elements(input: &psbt::Input) -> Result<Vec<Vec<u8>>, Error> {
+    let condition_key = psbt::raw::Key {
+        type_value: 222,
+        key: VTXO_CONDITION_KEY.to_vec(),
+    };
+
+    let Some(condition_data) = input.unknown.get(&condition_key) else {
+        return Ok(Vec::new());
+    };
+
+    let mut cursor = std::io::Cursor::new(condition_data);
+    let element_count = VarInt::consensus_decode(&mut cursor)
+        .map_err(|e| Error::transaction(format!("failed to decode condition count: {e}")))?
+        .0;
+
+    let count_end = usize::try_from(cursor.position())
+        .map_err(|_| Error::transaction("condition cursor position overflow"))?;
+    let remaining_after_count = condition_data.len().saturating_sub(count_end);
+    let element_count = usize::try_from(element_count)
+        .map_err(|_| Error::transaction("condition witness element count overflow"))?;
+
+    // Each element needs at least a compact-size length byte, even when the element itself is
+    // empty.
+    if element_count > remaining_after_count {
+        return Err(Error::transaction(format!(
+            "condition witness element count {element_count} exceeds remaining buffer size {remaining_after_count}"
+        )));
+    }
+
+    let mut elements = Vec::with_capacity(element_count);
+    for _ in 0..element_count {
+        let element_len = VarInt::consensus_decode(&mut cursor)
+            .map_err(|e| Error::transaction(format!("failed to decode condition length: {e}")))?
+            .0;
+        let element_len = usize::try_from(element_len)
+            .map_err(|_| Error::transaction("condition witness element length overflow"))?;
+        let start = usize::try_from(cursor.position())
+            .map_err(|_| Error::transaction("condition cursor position overflow"))?;
+        let end = start
+            .checked_add(element_len)
+            .ok_or_else(|| Error::transaction("condition witness element end overflow"))?;
+
+        if condition_data.len() < end {
+            return Err(Error::transaction(format!(
+                "condition witness element too short: expected {element_len} bytes, got {}",
+                condition_data.len().saturating_sub(start)
+            )));
+        }
+
+        elements.push(condition_data[start..end].to_vec());
+        cursor.set_position(end as u64);
+    }
+
+    Ok(elements)
+}
+
+/// Finalize all virtual transactions needed to commit a VTXO on-chain.
+pub fn finalize_unilateral_exit_tree(
     unilateral_exit_tree: &UnilateralExitTree,
     commitment_txs: &[Transaction],
 ) -> Result<Vec<Vec<Transaction>>, Error> {
-    let mut signed_virtual_tx_branches = Vec::new();
+    let mut finalized_virtual_tx_branches = Vec::new();
     for unilateral_exit_branch in unilateral_exit_tree.inner.iter() {
-        let mut signed_unilateral_exit_branch = Vec::new();
+        let mut finalized_unilateral_exit_branch = Vec::new();
         for virtual_tx in unilateral_exit_branch.iter() {
-            let txid = virtual_tx.unsigned_tx.compute_txid();
-            let mut psbt = virtual_tx.clone();
+            let psbt = virtual_tx.clone();
 
-            let vtxo_previous_output = psbt.unsigned_tx.input[VTXO_INPUT_INDEX].previous_output;
+            let virtual_tx_previous_output =
+                psbt.unsigned_tx.input[VTXO_INPUT_INDEX].previous_output;
 
             let witness_utxo = {
                 unilateral_exit_branch
@@ -449,73 +703,33 @@ pub fn sign_unilateral_exit_tree(
                     .map(|p| &p.unsigned_tx)
                     .chain(commitment_txs.iter())
                     .find_map(|other_psbt| {
-                        (other_psbt.compute_txid() == vtxo_previous_output.txid).then_some(
-                            other_psbt.output[vtxo_previous_output.vout as usize].clone(),
+                        (other_psbt.compute_txid() == virtual_tx_previous_output.txid).then_some(
+                            other_psbt.output[virtual_tx_previous_output.vout as usize].clone(),
                         )
                     })
             }
-            .expect("witness UTXO in path");
+            .ok_or_else(|| {
+                Error::ad_hoc(format!(
+                    "no witness UTXO found for virtual TX outpoint {virtual_tx_previous_output}"
+                ))
+            })?;
 
-            psbt.inputs[VTXO_INPUT_INDEX].witness_utxo = Some(witness_utxo);
+            let tx = finalize_virtual_tx_input(psbt, VTXO_INPUT_INDEX, witness_utxo)?;
 
-            if let Some(tap_key_sig) = psbt.inputs[VTXO_INPUT_INDEX].tap_key_sig {
-                tracing::debug!(%txid, "Signing key spend for confirmed VTXO");
-
-                psbt.inputs[VTXO_INPUT_INDEX].final_script_witness =
-                    Some(Witness::p2tr_key_spend(&tap_key_sig));
-            } else if !psbt.inputs[VTXO_INPUT_INDEX].tap_script_sigs.is_empty() {
-                tracing::debug!(%txid, "Signing script spend for pre-confirmed VTXO");
-
-                // We always take the first script.
-                let tap_script = psbt.inputs[VTXO_INPUT_INDEX].tap_scripts.iter().next();
-                let tap_script_sigs = &psbt.inputs[VTXO_INPUT_INDEX].tap_script_sigs;
-
-                let (control_block, (script, _)) = tap_script.ok_or_else(|| {
-                    Error::transaction(format!("missing tapscripts in virtual TX {txid}"))
-                })?;
-
-                // Extract pubkeys from the 2-of-2 multisig script to determine signature order.
-                let (pk_0, pk_1) = extract_pubkeys_from_2of2_script(script)?;
-
-                // Compute the TapLeafHash for the script to look up signatures.
-                let leaf_hash = TapLeafHash::from_script(script, control_block.leaf_version);
-
-                // Look up signatures in the correct order based on the pubkeys in the script.
-                let sig_0 = tap_script_sigs.get(&(pk_0, leaf_hash)).ok_or_else(|| {
-                    Error::transaction(format!(
-                        "missing signature for first pubkey {} in virtual TX {txid}",
-                        pk_0
-                    ))
-                })?;
-                let sig_1 = tap_script_sigs.get(&(pk_1, leaf_hash)).ok_or_else(|| {
-                    Error::transaction(format!(
-                        "missing signature for second pubkey {} in virtual TX {txid}",
-                        pk_1
-                    ))
-                })?;
-
-                // Construct witness: [sig_1, sig_0, script, control_block].
-                let mut witness = Witness::new();
-                witness.push(sig_1.to_vec());
-                witness.push(sig_0.to_vec());
-                witness.push(script.as_bytes());
-                witness.push(control_block.serialize());
-
-                psbt.inputs[VTXO_INPUT_INDEX].final_script_witness = Some(witness);
-            } else {
-                return Err(Error::transaction(format!(
-                    "missing taproot key spend or script spend data in virtual TX {txid}"
-                )));
-            };
-
-            let tx = psbt.clone().extract_tx().map_err(Error::transaction)?;
-
-            signed_unilateral_exit_branch.push(tx);
+            finalized_unilateral_exit_branch.push(tx);
         }
-        signed_virtual_tx_branches.push(signed_unilateral_exit_branch);
+        finalized_virtual_tx_branches.push(finalized_unilateral_exit_branch);
     }
 
-    Ok(signed_virtual_tx_branches)
+    Ok(finalized_virtual_tx_branches)
+}
+
+#[deprecated(note = "use finalize_unilateral_exit_tree")]
+pub fn sign_unilateral_exit_tree(
+    unilateral_exit_tree: &UnilateralExitTree,
+    commitment_txs: &[Transaction],
+) -> Result<Vec<Vec<Transaction>>, Error> {
+    finalize_unilateral_exit_tree(unilateral_exit_tree, commitment_txs)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -636,70 +850,4 @@ fn find_anchor_outpoint(tx: &Transaction) -> Result<OutPoint, Error> {
     }
 
     Err(Error::transaction("anchor output not found in transaction"))
-}
-
-/// Extract the two [`XOnlyPublicKey`]s from a 2-of-2 multisig tapscript.
-///
-/// The script format is: <pk_0> CHECKSIGVERIFY <pk_1> CHECKSIG
-fn extract_pubkeys_from_2of2_script(
-    script: &ScriptBuf,
-) -> Result<(XOnlyPublicKey, XOnlyPublicKey), Error> {
-    let bytes = script.as_bytes();
-
-    // Expected format: [0x20] [32 bytes pk_0] [CHECKSIGVERIFY] [0x20] [32 bytes pk_1] [CHECKSIG]
-    // Minimum length: 1 + 32 + 1 + 1 + 32 + 1 = 68 bytes
-    if bytes.len() < 68 {
-        return Err(Error::transaction(format!(
-            "script too short to be 2-of-2 multisig: {} bytes",
-            bytes.len()
-        )));
-    }
-
-    // Check first push is 32 bytes
-    if bytes[0] != 0x20 {
-        return Err(Error::transaction(format!(
-            "expected OP_PUSHBYTES_32 (0x20) at position 0, got 0x{:02x}",
-            bytes[0]
-        )));
-    }
-
-    // Extract first pubkey (bytes 1-32)
-    let pk_0_bytes: [u8; 32] = bytes[1..33]
-        .try_into()
-        .map_err(|_| Error::transaction("failed to extract first pubkey bytes"))?;
-    let pk_0 = XOnlyPublicKey::from_slice(&pk_0_bytes)
-        .map_err(|e| Error::transaction(format!("invalid first pubkey: {e}")))?;
-
-    // Check CHECKSIGVERIFY at position 33
-    if bytes[33] != OP_CHECKSIGVERIFY.to_u8() {
-        return Err(Error::transaction(format!(
-            "expected OP_CHECKSIGVERIFY (0xad) at position 33, got 0x{:02x}",
-            bytes[33]
-        )));
-    }
-
-    // Check second push is 32 bytes at position 34
-    if bytes[34] != 0x20 {
-        return Err(Error::transaction(format!(
-            "expected OP_PUSHBYTES_32 (0x20) at position 34, got 0x{:02x}",
-            bytes[34]
-        )));
-    }
-
-    // Extract second pubkey (bytes 35-66)
-    let pk_1_bytes: [u8; 32] = bytes[35..67]
-        .try_into()
-        .map_err(|_| Error::transaction("failed to extract second pubkey bytes"))?;
-    let pk_1 = XOnlyPublicKey::from_slice(&pk_1_bytes)
-        .map_err(|e| Error::transaction(format!("invalid second pubkey: {e}")))?;
-
-    // Check CHECKSIG at position 67
-    if bytes[67] != OP_CHECKSIG.to_u8() {
-        return Err(Error::transaction(format!(
-            "expected OP_CHECKSIG (0xac) at position 67, got 0x{:02x}",
-            bytes[67]
-        )));
-    }
-
-    Ok((pk_0, pk_1))
 }

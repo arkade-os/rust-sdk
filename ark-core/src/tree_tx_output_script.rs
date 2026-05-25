@@ -7,7 +7,7 @@ use bitcoin::taproot::TaprootSpendInfo;
 use bitcoin::ScriptBuf;
 use bitcoin::XOnlyPublicKey;
 
-/// The script of an _internal_ node of the batch tree. By internal node we mean a non-leaf node.
+/// The script of an _internal_ node of the batch-tree. By internal node we mean a non-leaf node.
 ///
 /// This script allows the Ark server to sweep the entire output after the `vtxo_tree_expiry`
 /// seconds have passed from the time the output was included in a block.

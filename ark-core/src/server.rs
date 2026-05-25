@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::str::FromStr;
 
-/// An aggregate public nonce per shared internal (non-leaf) node in the VTXO tree.
+/// An aggregate public nonce per shared internal (non-leaf) node in the batch-tree.
 #[derive(Debug, Clone)]
 pub struct NoncePks(HashMap<Txid, musig::PublicNonce>);
 
@@ -68,7 +68,7 @@ impl NoncePks {
 }
 
 /// A public nonce per public key, where each public key corresponds to a party signing a
-/// transaction in the VTXO tree.
+/// transaction in the batch-tree.
 #[derive(Debug, Clone)]
 pub struct TreeTxNoncePks(pub HashMap<XOnlyPublicKey, musig::PublicNonce>);
 
@@ -114,7 +114,7 @@ impl TreeTxNoncePks {
     }
 }
 
-/// A Musig partial signature per shared internal (non-leaf) node in the VTXO tree.
+/// A Musig partial signature per shared internal (non-leaf) node in the batch-tree.
 #[derive(Debug, Clone, Default)]
 pub struct PartialSigTree(pub HashMap<Txid, musig::PartialSignature>);
 
@@ -370,8 +370,7 @@ pub struct VirtualTxOutPoint {
     pub expires_at: i64,
     pub amount: Amount,
     pub script: ScriptBuf,
-    /// A pre-confirmed VTXO spends from another VTXO and is not a leaf of the original VTXO tree
-    /// in a batch.
+    /// A pre-confirmed VTXO spends from another VTXO and is not a leaf of a batch-tree.
     pub is_preconfirmed: bool,
     pub is_swept: bool,
     pub is_unrolled: bool,
