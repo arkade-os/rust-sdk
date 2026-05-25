@@ -53,13 +53,24 @@ pub struct ListVtxosResponse {
 }
 
 impl Client {
-    pub fn new(ark_server_url: String) -> Self {
+    pub fn new(ark_server_url: String) -> Result<Self, Error> {
+        let mut default_headers = reqwest::header::HeaderMap::new();
+        default_headers.insert(
+            "X-Build-Version",
+            reqwest::header::HeaderValue::from_static(env!("CARGO_PKG_VERSION")),
+        );
+        let client = reqwest::Client::builder()
+            .default_headers(default_headers)
+            .build()
+            .map_err(Error::request)?;
+
         let configuration = apis::configuration::Configuration {
             base_path: ark_server_url,
+            client,
             ..Default::default()
         };
 
-        Self { configuration }
+        Ok(Self { configuration })
     }
 
     pub async fn get_info(&self) -> Result<ark_core::server::Info, Error> {

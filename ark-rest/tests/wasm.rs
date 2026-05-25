@@ -13,7 +13,7 @@ async fn test_get_info() {
 
     let server_url = "http://localhost:7070".to_string();
 
-    let client = Client::new(server_url);
+    let client = Client::new(server_url).expect("failed to create client");
 
     match client.get_info().await {
         Ok(info) => {
@@ -39,7 +39,7 @@ async fn test_get_offchain_address() {
 
     let server_url = "http://localhost:7070".to_string();
 
-    let client = Client::new(server_url);
+    let client = Client::new(server_url).expect("failed to create client");
 
     let server_info = client
         .get_info()
