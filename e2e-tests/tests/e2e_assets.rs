@@ -29,6 +29,7 @@ pub async fn e2e_assets() {
         .faucet_fund(&alice_boarding_address, Amount::ONE_BTC)
         .await;
     alice.settle(&mut rng).await.unwrap();
+    nigiri.mine(1).await;
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     let balance = alice.offchain_balance().await.unwrap();
