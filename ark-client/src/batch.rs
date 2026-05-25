@@ -643,7 +643,10 @@ where
         let mut our_nonce_trees: Option<HashMap<Keypair, NonceKps>> = None;
 
         loop {
-            match stream.next().await {
+            match timeout_op(self.inner.timeout, stream.next())
+                .await
+                .context("timed out waiting for batch event")?
+            {
                 Some(Ok(event)) => match event {
                     StreamEvent::BatchStarted(e) => {
                         if step != Step::Start {
@@ -1386,7 +1389,10 @@ where
 
         let mut our_nonce_trees: Option<HashMap<Keypair, NonceKps>> = None;
         loop {
-            match stream.next().await {
+            match timeout_op(self.inner.timeout, stream.next())
+                .await
+                .context("timed out waiting for batch event")?
+            {
                 Some(Ok(event)) => match event {
                     StreamEvent::BatchStarted(e) => {
                         if step != Step::Start {
