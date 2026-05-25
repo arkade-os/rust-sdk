@@ -18,9 +18,11 @@ use bitcoin::Amount;
 use bitcoin::PublicKey;
 use bitcoin::Txid;
 use lightning::offers::invoice::Bolt12Invoice;
+use lightning::offers::offer::Offer;
 use serde::Deserialize;
 use serde::Serialize;
 use std::fmt;
+use std::str::FromStr;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -120,9 +122,10 @@ where
     /// # Trust Model
     ///
     /// This method fetches the BOLT12 invoice via the Boltz API (`bolt12_fetch`). The invoice
-    /// is not locally verified against the offer's signing key. The invoice is parsed locally,
-    /// but its signature is not verified against the original offer. The returned VHTLC address
-    /// is verified against the VHTLC parameters before it is persisted or funded.
+    /// is locally verified against the offer: its signing public key must match the offer's
+    /// `issuer_signing_pubkey` (if set) or the final hop of one of the offer's blinded message
+    /// paths, and its `offer_id` (if present) must match the offer's identifier. The returned
+    /// VHTLC address is verified against the VHTLC parameters before it is persisted or funded.
     ///
     /// # Arguments
     ///
@@ -155,9 +158,10 @@ where
     /// # Trust Model
     ///
     /// This method fetches the BOLT12 invoice via the Boltz API (`bolt12_fetch`). The invoice
-    /// is not locally verified against the offer's signing key. The invoice is parsed locally,
-    /// but its signature is not verified against the original offer. The returned VHTLC address
-    /// is verified against the VHTLC parameters before it is persisted or funded.
+    /// is locally verified against the offer: its signing public key must match the offer's
+    /// `issuer_signing_pubkey` (if set) or the final hop of one of the offer's blinded message
+    /// paths, and its `offer_id` (if present) must match the offer's identifier. The returned
+    /// VHTLC address is verified against the VHTLC parameters before it is persisted or funded.
     ///
     /// # Arguments
     ///
@@ -295,11 +299,10 @@ where
     /// This calls `POST /v2/lightning/BTC/bolt12/fetch` to resolve a BOLT12 offer into an invoice
     /// that can be used to create a submarine swap.
     ///
-    /// # Security Note
-    ///
-    /// Callers that use the returned invoice outside of this SDK's submarine swap methods should
-    /// verify the invoice's signing key against the offer's signing key (or the public key of
-    /// the final hop in one of the offer's message paths).
+    /// The returned invoice is locally verified against the offer: the invoice's signing public key
+    /// must match the offer's `issuer_signing_pubkey` (if set) or the final hop of one of the
+    /// offer's blinded message paths, and the invoice's `offer_id` (if present) must match the
+    /// offer's identifier.
     ///
     /// # Arguments
     ///
@@ -355,10 +358,75 @@ where
         let invoice = ParsedBolt12Invoice::parse(response.invoice)
             .context("bolt12_fetch returned invalid BOLT12 invoice")?;
 
-        tracing::info!("Fetched BOLT12 invoice from offer");
+        // Verify the invoice matches the offer before using it.
+        verify_bolt12_invoice_against_offer(offer, &invoice)?;
+
+        tracing::info!("Fetched and verified BOLT12 invoice from offer");
 
         Ok(invoice)
     }
+}
+
+/// Verify that a BOLT12 invoice corresponds to the offer it claims to be for.
+///
+/// Checks:
+///
+/// 1. If the offer specifies an explicit `issuer_signing_pubkey`, the invoice's `signing_pubkey`
+///    must match it.
+/// 2. Otherwise, if the offer has blinded message paths, the invoice's `signing_pubkey` must match
+///    the `blinded_node_id` of the final hop in one of those paths.
+/// 3. If the invoice carries an `offer_id`, it must match the offer's own identifier.
+///
+/// This prevents a Boltz endpoint from returning an invoice for a different node than the
+/// one the user intended to pay — the central trust gap in the Boltz-resolves-offer flow.
+pub fn verify_bolt12_invoice_against_offer(
+    offer_str: &str,
+    invoice: &ParsedBolt12Invoice,
+) -> Result<(), Error> {
+    let offer = Offer::from_str(offer_str)
+        .map_err(|e| Error::ad_hoc(format!("invalid bolt12 offer: {e:?}")))?;
+    let invoice_signing_pk = invoice.invoice().signing_pubkey();
+
+    // Check 1: explicit issuer_signing_pubkey.
+    if let Some(issuer_pk) = offer.issuer_signing_pubkey() {
+        if invoice_signing_pk != issuer_pk {
+            return Err(Error::ad_hoc(format!(
+                "BOLT12 invoice signing pubkey ({invoice_signing_pk}) does not match \
+                 offer issuer_signing_pubkey ({issuer_pk})",
+            )));
+        }
+    } else {
+        // Check 2: offer has blinded paths — verify invoice signing key is the
+        // final hop in one of them.
+        let paths = offer.paths();
+        if !paths.is_empty() {
+            let matches = paths
+                .iter()
+                .filter_map(|path| path.blinded_hops().last())
+                .any(|last_hop| invoice_signing_pk == last_hop.blinded_node_id);
+            if !matches {
+                return Err(Error::ad_hoc(format!(
+                    "BOLT12 invoice signing pubkey ({invoice_signing_pk}) does not match \
+                     the final hop of any blinded message path in the offer",
+                )));
+            }
+        }
+        // If neither issuer_signing_pubkey nor paths are set, we cannot verify the
+        // invoice's signing key — the offer is unusually permissive. Accept it.
+    }
+
+    // Check 3: offer_id cross-check (if the invoice carries one).
+    if let Some(invoice_offer_id) = invoice.invoice().offer_id() {
+        if invoice_offer_id != offer.id() {
+            return Err(Error::ad_hoc(format!(
+                "BOLT12 invoice offer_id ({invoice_offer_id:?}) does not match \
+                 offer id ({:?})",
+                offer.id()
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 /// Request to the Boltz API to create a submarine swap with a string invoice (BOLT11 or BOLT12).
