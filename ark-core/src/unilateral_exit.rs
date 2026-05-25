@@ -558,6 +558,10 @@ pub fn finalize_virtual_tx_input(
 /// `CHECKSIG`/`CHECKSIGVERIFY` pubkey in the script. Signatures are pushed in reverse script order.
 /// Extra condition witness elements, such as VHTLC preimages, are read from the
 /// `VTXO_CONDITION_KEY` unknown input field and pushed after signatures.
+///
+/// Condition witness elements are therefore placed at the top of the initial script stack. This
+/// requires condition-checking opcodes, such as `OP_HASH160` or `OP_SIZE`, to appear before any
+/// `CHECKSIG`/`CHECKSIGVERIFY` opcode in the tapleaf script.
 pub fn finalize_taproot_script_spend_witness(input: &psbt::Input) -> Result<Witness, Error> {
     for (control_block, (script, leaf_version)) in input.tap_scripts.iter() {
         let leaf_hash = TapLeafHash::from_script(script, *leaf_version);
