@@ -395,6 +395,27 @@ mod tests {
     }
 
     #[test]
+    fn condition_witness_elements_decode_encoded_witness() {
+        let elements = vec![
+            b"preimage".to_vec(),
+            Vec::new(),
+            vec![0; 253],
+            vec![1, 2, 3, 4],
+        ];
+        let mut input = psbt::Input::default();
+
+        input.unknown.insert(
+            psbt::raw::Key {
+                type_value: 222,
+                key: VTXO_CONDITION_KEY.to_vec(),
+            },
+            crate::intent::encode_witness(&elements),
+        );
+
+        assert_eq!(condition_witness_elements(&input).unwrap(), elements);
+    }
+
+    #[test]
     fn unilateral_exit_txids_for_linear_chain_are_parent_first() {
         let commitment = txid(1);
         let tree = txid(2);

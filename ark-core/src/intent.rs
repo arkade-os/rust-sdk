@@ -459,7 +459,7 @@ impl IntentMessage {
 /// Encode witness elements in the format used by PSBT condition witness field.
 ///
 /// Format: [num_elements as varint] [len1 as varint] [elem1] [len2 as varint] [elem2] ...
-fn encode_witness(elements: &[Vec<u8>]) -> Vec<u8> {
+pub(crate) fn encode_witness(elements: &[Vec<u8>]) -> Vec<u8> {
     let mut result = Vec::new();
 
     // Write number of elements as compact size
