@@ -134,10 +134,10 @@ impl<'de> Deserialize<'de> for LnInvoice {
 
 impl LnInvoice {
     /// Extract the SHA256 payment hash from the invoice.
-    pub fn payment_hash(&self) -> Result<sha256::Hash, Error> {
+    pub fn payment_hash(&self) -> sha256::Hash {
         match self {
-            LnInvoice::Bolt11(invoice) => Ok(*invoice.payment_hash()),
-            LnInvoice::Bolt12(invoice) => Ok(invoice.payment_hash()),
+            LnInvoice::Bolt11(invoice) => *invoice.payment_hash(),
+            LnInvoice::Bolt12(invoice) => invoice.payment_hash(),
         }
     }
 }
