@@ -117,7 +117,7 @@ impl Client {
     }
 
     pub async fn connect(&mut self) -> Result<(), Error> {
-        let channel = tonic::transport::Endpoint::from_shared(self.url.clone())
+        let channel = tonic::transport::Endpoint::new(self.url.clone())
             .map_err(Error::connect)?
             .connect()
             .await
