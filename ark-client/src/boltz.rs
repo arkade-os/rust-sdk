@@ -3907,7 +3907,7 @@ pub struct SubmarineSwapData {
     pub id: String,
     /// Preimage for the swap (learned when Boltz claims the VHTLC).
     pub preimage: Option<[u8; 32]>,
-    /// The preimage hash of the BOLT11 invoice.
+    /// The preimage hash of the associated Lightning invoice (BOLT11 or BOLT12).
     pub preimage_hash: ripemd160::Hash,
     /// Public key of the receiving party.
     pub claim_public_key: PublicKey,
