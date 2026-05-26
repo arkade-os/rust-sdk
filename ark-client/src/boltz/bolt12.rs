@@ -1,5 +1,4 @@
-use crate::boltz::Asset;
-use crate::boltz::CreateSubmarineSwapResponse;
+use crate::boltz::CreateSubmarineSwapParams;
 use crate::error::ErrorContext;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
@@ -8,14 +7,12 @@ use crate::Client;
 use crate::Error;
 use crate::LnInvoice;
 use crate::SubmarineSwapData;
-use crate::SwapStatus;
 use crate::SwapStorage;
 use ark_core::send::SendReceiver;
 use bitcoin::hashes::ripemd160;
 use bitcoin::hashes::sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::Amount;
-use bitcoin::PublicKey;
 use bitcoin::Txid;
 use lightning::offers::invoice::Bolt12Invoice;
 use lightning::offers::offer::Offer;
@@ -23,8 +20,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::fmt;
 use std::str::FromStr;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 
 /// A BOLT12 invoice paired with its original encoded string.
 #[derive(Debug, Clone)]
@@ -212,83 +207,13 @@ where
         let key_derivation_index =
             self.derivation_index_for_pk(&refund_keypair.x_only_public_key().0);
 
-        let request = CreateStringInvoiceSubmarineSwapRequest {
-            from: Asset::Ark,
-            to: Asset::Btc,
-            invoice: invoice.encoded().to_string(),
-            refund_public_key: refund_public_key.into(),
-            referral_id: self.inner.boltz_referral_id.clone(),
-        };
-        let url = format!("{}/v2/swap/submarine", self.inner.boltz_url);
-
-        let client = reqwest::Client::builder()
-            .timeout(self.inner.timeout)
-            .build()
-            .map_err(|e| Error::ad_hoc(e.to_string()))?;
-        let response = client
-            .post(&url)
-            .json(&request)
-            .send()
-            .await
-            .map_err(|e| Error::ad_hoc(e.to_string()))
-            .context("failed to send submarine swap request")?;
-
-        if !response.status().is_success() {
-            let error_text = response
-                .text()
-                .await
-                .map_err(|e| Error::ad_hoc(e.to_string()))
-                .context("failed to read error text")?;
-
-            return Err(Error::ad_hoc(format!(
-                "failed to create submarine swap: {error_text}"
-            )));
-        }
-
-        let swap_response: CreateSubmarineSwapResponse = response
-            .json()
-            .await
-            .map_err(|e| Error::ad_hoc(e.to_string()))
-            .context("failed to deserialize submarine swap response")?;
-
-        let created_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(Error::ad_hoc)
-            .context("failed to compute created_at")?;
-
-        let vhtlc = self
-            .build_vhtlc_script(
-                swap_response.claim_public_key,
-                refund_public_key.into(),
+        let data = self
+            .create_submarine_swap(CreateSubmarineSwapParams {
+                invoice: LnInvoice::Bolt12(invoice.clone()),
+                refund_public_key: refund_public_key.into(),
+                key_derivation_index,
                 preimage_hash,
-                &swap_response.timeout_block_heights,
-            )
-            .context("failed to build Boltz VHTLC script")?;
-        let expected_vhtlc_address = vhtlc.address();
-        if expected_vhtlc_address != swap_response.address {
-            return Err(Error::ad_hoc(format!(
-                "Boltz VHTLC address ({}) does not match VHTLC parameters ({expected_vhtlc_address})",
-                swap_response.address
-            )));
-        }
-
-        let data = SubmarineSwapData {
-            id: swap_response.id.clone(),
-            status: SwapStatus::Created,
-            preimage: None,
-            preimage_hash,
-            refund_public_key: refund_public_key.into(),
-            claim_public_key: swap_response.claim_public_key,
-            vhtlc_address: swap_response.address,
-            timeout_block_heights: swap_response.timeout_block_heights,
-            amount: swap_response.expected_amount,
-            invoice: LnInvoice::Bolt12(invoice.clone()),
-            created_at: created_at.as_secs(),
-            key_derivation_index,
-        };
-
-        self.swap_storage()
-            .insert_submarine(swap_response.id.clone(), data.clone())
+            })
             .await?;
 
         Ok((data, invoice))
@@ -427,18 +352,6 @@ pub fn verify_bolt12_invoice_against_offer(
     }
 
     Ok(())
-}
-
-/// Request to the Boltz API to create a submarine swap with a string invoice (BOLT11 or BOLT12).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CreateStringInvoiceSubmarineSwapRequest {
-    from: Asset,
-    to: Asset,
-    invoice: String,
-    #[serde(rename = "refundPublicKey")]
-    refund_public_key: PublicKey,
-    #[serde(rename = "referralId", skip_serializing_if = "Option::is_none")]
-    referral_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

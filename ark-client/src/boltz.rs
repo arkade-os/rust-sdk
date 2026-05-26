@@ -178,6 +178,13 @@ pub struct SubmarineSwapResult {
     pub amount: Amount,
 }
 
+pub(crate) struct CreateSubmarineSwapParams {
+    pub(crate) invoice: LnInvoice,
+    pub(crate) refund_public_key: PublicKey,
+    pub(crate) key_derivation_index: Option<u32>,
+    pub(crate) preimage_hash: ripemd160::Hash,
+}
+
 #[derive(Clone, Debug)]
 pub struct ReverseSwapResult {
     pub swap_id: String,
@@ -247,38 +254,15 @@ where
 {
     // Submarine swap.
 
-    /// Prepare the payment of a BOLT11 invoice by setting up a submarine swap via Boltz.
-    ///
-    /// This function does not execute the payment itself. Once you are ready for payment you
-    /// will have to send the required `amount` to the `vhtlc_address`.
-    ///
-    /// If you are looking for a function which pays the invoice immediately, consider using
-    /// [`Client::pay_ln_invoice`] instead.
-    ///
-    /// # Arguments
-    ///
-    /// - `invoice`: a [`Bolt11Invoice`] to be paid.
-    ///
-    /// # Returns
-    ///
-    /// - A [`SubmarineSwapData`] object, including an identifier for the swap.
-    pub async fn prepare_ln_invoice_payment(
+    pub(crate) async fn create_submarine_swap(
         &self,
-        invoice: Bolt11Invoice,
+        params: CreateSubmarineSwapParams,
     ) -> Result<SubmarineSwapData, Error> {
-        let refund_keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
-        let refund_public_key = refund_keypair.public_key();
-        let key_derivation_index =
-            self.derivation_index_for_pk(&refund_keypair.x_only_public_key().0);
-
-        let preimage_hash = invoice.payment_hash();
-        let preimage_hash = ripemd160::Hash::hash(preimage_hash.as_byte_array());
-
         let request = CreateSubmarineSwapRequest {
             from: Asset::Ark,
             to: Asset::Btc,
-            invoice,
-            refund_public_key: refund_public_key.into(),
+            invoice: params.invoice.to_string(),
+            refund_public_key: params.refund_public_key,
             referral_id: self.inner.boltz_referral_id.clone(),
         };
         let url = format!("{}/v2/swap/submarine", self.inner.boltz_url);
@@ -321,8 +305,8 @@ where
         let vhtlc = self
             .build_vhtlc_script(
                 swap_response.claim_public_key,
-                refund_public_key.into(),
-                preimage_hash,
+                params.refund_public_key,
+                params.preimage_hash,
                 &swap_response.timeout_block_heights,
             )
             .context("failed to build Boltz VHTLC script")?;
@@ -338,23 +322,62 @@ where
             id: swap_response.id.clone(),
             status: SwapStatus::Created,
             preimage: None,
-            preimage_hash,
-            refund_public_key: refund_public_key.into(),
+            preimage_hash: params.preimage_hash,
+            refund_public_key: params.refund_public_key,
             claim_public_key: swap_response.claim_public_key,
             vhtlc_address: swap_response.address,
             timeout_block_heights: swap_response.timeout_block_heights,
             amount: swap_response.expected_amount,
-            invoice: LnInvoice::Bolt11(request.invoice.clone()),
+            invoice: params.invoice,
             created_at: created_at.as_secs(),
-            key_derivation_index,
+            key_derivation_index: params.key_derivation_index,
         };
 
         self.swap_storage()
             .insert_submarine(swap_response.id.clone(), data.clone())
             .await?;
 
+        Ok(data)
+    }
+
+    /// Prepare the payment of a BOLT11 invoice by setting up a submarine swap via Boltz.
+    ///
+    /// This function does not execute the payment itself. Once you are ready for payment you
+    /// will have to send the required `amount` to the `vhtlc_address`.
+    ///
+    /// If you are looking for a function which pays the invoice immediately, consider using
+    /// [`Client::pay_ln_invoice`] instead.
+    ///
+    /// # Arguments
+    ///
+    /// - `invoice`: a [`Bolt11Invoice`] to be paid.
+    ///
+    /// # Returns
+    ///
+    /// - A [`SubmarineSwapData`] object, including an identifier for the swap.
+    pub async fn prepare_ln_invoice_payment(
+        &self,
+        invoice: Bolt11Invoice,
+    ) -> Result<SubmarineSwapData, Error> {
+        let refund_keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
+        let refund_public_key = refund_keypair.public_key();
+        let key_derivation_index =
+            self.derivation_index_for_pk(&refund_keypair.x_only_public_key().0);
+
+        let preimage_hash = invoice.payment_hash();
+        let preimage_hash = ripemd160::Hash::hash(preimage_hash.as_byte_array());
+
+        let data = self
+            .create_submarine_swap(CreateSubmarineSwapParams {
+                invoice: LnInvoice::Bolt11(invoice),
+                refund_public_key: refund_public_key.into(),
+                key_derivation_index,
+                preimage_hash,
+            })
+            .await?;
+
         tracing::info!(
-            swap_id = swap_response.id,
+            swap_id = data.id,
             vhtlc_address = %data.vhtlc_address,
             expected_amount = %data.amount,
             "Prepared Lightning invoice payment"
@@ -386,97 +409,26 @@ where
         let preimage_hash = invoice.payment_hash();
         let preimage_hash = ripemd160::Hash::hash(preimage_hash.as_byte_array());
 
-        let request = CreateSubmarineSwapRequest {
-            from: Asset::Ark,
-            to: Asset::Btc,
-            invoice,
-            refund_public_key: refund_public_key.into(),
-            referral_id: self.inner.boltz_referral_id.clone(),
-        };
-        let url = format!("{}/v2/swap/submarine", self.inner.boltz_url);
-
-        let client = reqwest::Client::builder()
-            .timeout(self.inner.timeout)
-            .build()
-            .map_err(|e| Error::ad_hoc(e.to_string()))?;
-        let response = client
-            .post(&url)
-            .json(&request)
-            .send()
-            .await
-            .map_err(|e| Error::ad_hoc(e.to_string()))
-            .context("failed to send submarine swap request")?;
-
-        if !response.status().is_success() {
-            let error_text = response
-                .text()
-                .await
-                .map_err(|e| Error::ad_hoc(e.to_string()))
-                .context("failed to read error text")?;
-
-            return Err(Error::ad_hoc(format!(
-                "failed to create submarine swap: {error_text}"
-            )));
-        }
-
-        let swap_response: CreateSubmarineSwapResponse = response
-            .json()
-            .await
-            .map_err(|e| Error::ad_hoc(e.to_string()))
-            .context("failed to deserialize submarine swap response")?;
-
-        let created_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(Error::ad_hoc)
-            .context("failed to compute created_at")?;
-
-        let vhtlc = self
-            .build_vhtlc_script(
-                swap_response.claim_public_key,
-                refund_public_key.into(),
+        let data = self
+            .create_submarine_swap(CreateSubmarineSwapParams {
+                invoice: LnInvoice::Bolt11(invoice),
+                refund_public_key: refund_public_key.into(),
+                key_derivation_index,
                 preimage_hash,
-                &swap_response.timeout_block_heights,
-            )
-            .context("failed to build Boltz VHTLC script")?;
-        let expected_vhtlc_address = vhtlc.address();
-        if expected_vhtlc_address != swap_response.address {
-            return Err(Error::ad_hoc(format!(
-                "Boltz VHTLC address ({}) does not match VHTLC parameters ({expected_vhtlc_address})",
-                swap_response.address
-            )));
-        }
-
-        self.swap_storage()
-            .insert_submarine(
-                swap_response.id.clone(),
-                SubmarineSwapData {
-                    id: swap_response.id.clone(),
-                    status: SwapStatus::Created,
-                    preimage: None,
-                    preimage_hash,
-                    refund_public_key: refund_public_key.into(),
-                    claim_public_key: swap_response.claim_public_key,
-                    vhtlc_address: swap_response.address,
-                    timeout_block_heights: swap_response.timeout_block_heights,
-                    amount: swap_response.expected_amount,
-                    invoice: LnInvoice::Bolt11(request.invoice.clone()),
-                    created_at: created_at.as_secs(),
-                    key_derivation_index,
-                },
-            )
+            })
             .await?;
 
-        let vhtlc_address = swap_response.address;
-        let amount = swap_response.expected_amount;
-
+        let vhtlc_address = data.vhtlc_address;
+        let amount = data.amount;
+        let swap_id = data.id;
         let txid = self
             .send(vec![SendReceiver::bitcoin(vhtlc_address, amount)])
             .await?;
 
-        tracing::info!(swap_id = swap_response.id, %amount, "Funded VHTLC");
+        tracing::info!(%swap_id, %amount, "Funded VHTLC");
 
         Ok(SubmarineSwapResult {
-            swap_id: swap_response.id,
+            swap_id,
             txid,
             amount,
         })
@@ -4148,7 +4100,7 @@ struct CreateReverseSwapResponse {
 struct CreateSubmarineSwapRequest {
     from: Asset,
     to: Asset,
-    invoice: Bolt11Invoice,
+    invoice: String,
     #[serde(rename = "refundPublicKey")]
     refund_public_key: PublicKey,
     #[serde(rename = "referralId", skip_serializing_if = "Option::is_none")]
@@ -4562,10 +4514,8 @@ mod tests {
         let request = CreateSubmarineSwapRequest {
             from: Asset::Ark,
             to: Asset::Btc,
-            invoice: Bolt11Invoice::from_str(
-                "lntbs10u1p5wmeeepp56ms94rkev7tdrwqyus5a63lny2mqzq9vh2rq3u4ym3v4lxv6xl4qdql2djkuepqw3hjqs2jfvsxzerywfjhxuccqz95xqztfsp5ckaskagag554na8d56tlrfdxasstqrmmpkvswqqqx6y386jcfq9s9qxpqysgqt7z0vkdwkqamydae7ctgkh7l8q75w7q9394ce3lda2mkfxrpfdtj5gmltuctav7jdgatkflhztrjjzutdla5e4xp0uhxxy7sluzll4qpkkh6wv",
-            )
-            .unwrap(),
+            invoice: "lntbs10u1p5wmeeepp56ms94rkev7tdrwqyus5a63lny2mqzq9vh2rq3u4ym3v4lxv6xl4qdql2djkuepqw3hjqs2jfvsxzerywfjhxuccqz95xqztfsp5ckaskagag554na8d56tlrfdxasstqrmmpkvswqqqx6y386jcfq9s9qxpqysgqt7z0vkdwkqamydae7ctgkh7l8q75w7q9394ce3lda2mkfxrpfdtj5gmltuctav7jdgatkflhztrjjzutdla5e4xp0uhxxy7sluzll4qpkkh6wv"
+                .to_string(),
             refund_public_key: PublicKey::from_str(
                 "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
             )
@@ -4582,10 +4532,8 @@ mod tests {
         let request = CreateSubmarineSwapRequest {
             from: Asset::Ark,
             to: Asset::Btc,
-            invoice: Bolt11Invoice::from_str(
-                "lntbs10u1p5wmeeepp56ms94rkev7tdrwqyus5a63lny2mqzq9vh2rq3u4ym3v4lxv6xl4qdql2djkuepqw3hjqs2jfvsxzerywfjhxuccqz95xqztfsp5ckaskagag554na8d56tlrfdxasstqrmmpkvswqqqx6y386jcfq9s9qxpqysgqt7z0vkdwkqamydae7ctgkh7l8q75w7q9394ce3lda2mkfxrpfdtj5gmltuctav7jdgatkflhztrjjzutdla5e4xp0uhxxy7sluzll4qpkkh6wv",
-            )
-            .unwrap(),
+            invoice: "lntbs10u1p5wmeeepp56ms94rkev7tdrwqyus5a63lny2mqzq9vh2rq3u4ym3v4lxv6xl4qdql2djkuepqw3hjqs2jfvsxzerywfjhxuccqz95xqztfsp5ckaskagag554na8d56tlrfdxasstqrmmpkvswqqqx6y386jcfq9s9qxpqysgqt7z0vkdwkqamydae7ctgkh7l8q75w7q9394ce3lda2mkfxrpfdtj5gmltuctav7jdgatkflhztrjjzutdla5e4xp0uhxxy7sluzll4qpkkh6wv"
+                .to_string(),
             refund_public_key: PublicKey::from_str(
                 "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
             )
