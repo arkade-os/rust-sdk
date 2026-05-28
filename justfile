@@ -327,6 +327,10 @@ introspector-docker-run:
         --network nigiri \
         --add-host=host.docker.internal:host-gateway \
         -p {{ introspector_port }}:7073 \
+        -e EMULATOR_SECRET_KEY=5646b2e23bbb82491fb4ef262079ff17594d5e873fc6bcea5f1453edbe1029b1 \
+        -e EMULATOR_NO_TLS=true \
+        -e EMULATOR_ARKD_URL=host.docker.internal:7070 \
+        -e EMULATOR_LOG_LEVEL=6 \
         -e INTROSPECTOR_SECRET_KEY=5646b2e23bbb82491fb4ef262079ff17594d5e873fc6bcea5f1453edbe1029b1 \
         -e INTROSPECTOR_NO_TLS=true \
         -e INTROSPECTOR_ARKD_URL=host.docker.internal:7070 \
