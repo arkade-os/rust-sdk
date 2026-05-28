@@ -1,6 +1,6 @@
 [package]
 name = "ark-fees"
-version = "0.9.0"
+version = "0.9.1"
 categories = { workspace = true }
 edition = { workspace = true }
 keywords = { workspace = true }
