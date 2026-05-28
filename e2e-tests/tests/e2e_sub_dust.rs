@@ -83,7 +83,7 @@ pub async fn send_subdust_amount() {
     );
     wait_until_balance!(&bob, confirmed: Amount::ZERO, pre_confirmed: regular_amount, recoverable: sub_dust_amount);
 
-    bob.settle(&mut rng).await.unwrap();
+    bob.settle_all(&mut rng).await.unwrap();
 
     wait_until_balance!(&bob, confirmed: regular_amount + sub_dust_amount, pre_confirmed: Amount::ZERO, recoverable: Amount::ZERO);
 }
