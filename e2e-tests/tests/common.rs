@@ -449,6 +449,7 @@ pub async fn set_up_client(
         None,
         vec![],
     )
+    .with_boltz_bolt12_url(Some("http://localhost:9005".to_string()))
     .connect_with_retries(5)
     .await
     .unwrap();

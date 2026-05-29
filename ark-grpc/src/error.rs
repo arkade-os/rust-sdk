@@ -100,7 +100,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.description())?;
         if let Some(source) = self.source() {
-            f.write_str(&source.to_string())?;
+            write!(f, ": {}", source)?;
         }
 
         Ok(())
