@@ -1,0 +1,161 @@
+name: "Draft crates release"
+run-name: "Draft crates ${{ inputs.version != '' && inputs.version || inputs.bump }} release"
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Which part of the current version to bump"
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+      version:
+        description: "Explicit version to release, e.g. 0.9.2. Leave empty to use bump."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  draft:
+    name: "Draft crates release"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_GITHUB_TOKEN || github.token }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Compute release version
+        id: v
+        run: |
+          set -euo pipefail
+
+          if [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+            if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::Invalid version: $VERSION"
+              exit 1
+            fi
+          else
+            CURRENT=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "ark-core") | .version')
+            IFS=. read -r MAJOR MINOR PATCH <<< "${CURRENT%%-*}"
+
+            case "${{ inputs.bump }}" in
+              patch) PATCH=$((PATCH + 1)) ;;
+              minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+              major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+              *) echo "::error::Unknown bump: ${{ inputs.bump }}"; exit 1 ;;
+            esac
+
+            VERSION="$MAJOR.$MINOR.$PATCH"
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "branch=release/crates-$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Bump workspace crate versions
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          crates=(
+            ark-bdk-wallet
+            ark-client
+            ark-core
+            ark-delegator
+            ark-fees
+            ark-grpc
+            ark-rest
+            ark-script
+            ark-introspector-client
+            ark-rs
+          )
+
+          for crate in "${crates[@]}" ark-client-sample; do
+            perl -0pi -e 's/^version = "[^"]+"/version = "'"$VERSION"'"/m; s/(ark-[a-z-]+ = \{ path = "\.\.\/ark-[a-z-]+", version = ")[^"]+("[^}]*\})/${1}'"$VERSION"'$2/g' "$crate/Cargo.toml"
+          done
+
+          for file in README.md "${crates[@]/%//README.md}"; do
+            perl -0pi -e 's/(ark-[a-z-]+ = \{ version = ")[^"]+("[^}]*\})/${1}'"$VERSION"'$2/g; s/(ark-[a-z-]+ = ")[^"]+("\s*)/${1}'"$VERSION"'$2/g' "$file"
+          done
+
+          cargo metadata --format-version 1 --locked >/dev/null || cargo metadata --format-version 1 >/dev/null
+
+      - name: Validate release bump
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          cargo fmt --all
+          cargo check --workspace --all-features
+
+          cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.publish != []) | [.name, .version] | @tsv' \
+            | while IFS=$'\t' read -r name actual; do
+                if [ "$actual" != "$VERSION" ]; then
+                  echo "::error::$name is $actual, expected $VERSION"
+                  exit 1
+                fi
+              done
+
+      - name: Create release branch and commit
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          BRANCH: ${{ steps.v.outputs.branch }}
+        run: |
+          set -euo pipefail
+
+          git checkout -B "$BRANCH"
+          git add -A
+          git commit -m "chore: prepare $VERSION release"
+          git push origin "$BRANCH" --force
+
+      - name: Create pull request
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_GITHUB_TOKEN || github.token }}
+          VERSION: ${{ steps.v.outputs.version }}
+          BRANCH: ${{ steps.v.outputs.branch }}
+        run: |
+          set -euo pipefail
+
+          BODY=$(cat <<EOF
+          Release ark-rs crates v$VERSION.
+
+          Triggered by @${{ github.actor }} via ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}.
+
+          Merging this PR will trigger the crates release workflow, which will:
+          1. Run the workspace test suite
+          2. Publish all public crates to crates.io in dependency order
+          3. Create and push tag \`v$VERSION\`
+          4. Create the GitHub release \`v$VERSION\`
+          EOF
+          )
+
+          gh pr create \
+            --reviewer "${{ github.actor }}" \
+            --title "Release crates version $VERSION" \
+            --head "$BRANCH" \
+            --body "$BODY"
