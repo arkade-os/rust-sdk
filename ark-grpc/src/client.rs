@@ -117,8 +117,8 @@ impl Client {
     }
 
     pub async fn connect(&mut self) -> Result<(), Error> {
-        let endpoint = tonic::transport::Endpoint::from_shared(self.url.clone())
-            .map_err(Error::connect)?;
+        let endpoint =
+            tonic::transport::Endpoint::from_shared(self.url.clone()).map_err(Error::connect)?;
 
         #[cfg(any(feature = "tls-webpki-roots", feature = "tls-native-roots"))]
         let endpoint = {
