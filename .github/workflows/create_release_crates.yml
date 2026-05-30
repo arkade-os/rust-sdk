@@ -1,10 +1,21 @@
 name: "Create crates release"
-run-name: "Release ${{ github.event.pull_request.head.ref }}"
+run-name: "Release ${{ github.event.pull_request.head.ref || inputs.version }}"
 
 on:
   pull_request:
     types:
       - closed
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release/recover, e.g. 0.9.2"
+        required: true
+        type: string
+      ref:
+        description: "Git ref to release. Defaults to master."
+        required: false
+        type: string
+        default: master
 
 permissions:
   contents: write
@@ -18,7 +29,7 @@ env:
 jobs:
   release:
     name: "Publish crates and create release"
-    if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'release/crates-')
+    if: github.event_name == 'workflow_dispatch' || (github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'release/crates-'))
     runs-on: ubuntu-latest
     environment: release
     steps:
@@ -26,11 +37,15 @@ jobs:
         id: v
         run: |
           set -euo pipefail
-          BRANCH="${{ github.event.pull_request.head.ref }}"
-          VERSION="${BRANCH#release/crates-}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            BRANCH="${{ github.event.pull_request.head.ref }}"
+            VERSION="${BRANCH#release/crates-}"
+          fi
 
           if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::Invalid release branch/version: $BRANCH"
+            echo "::error::Invalid release version: $VERSION"
             exit 1
           fi
 
@@ -40,7 +55,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          ref: ${{ github.event.pull_request.merge_commit_sha || inputs.ref }}
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -84,7 +99,9 @@ jobs:
 
           crate_published() {
             local crate="$1"
-            curl -fsS "https://crates.io/api/v1/crates/$crate/$VERSION" >/dev/null 2>&1
+            curl -fsS \
+              -H "User-Agent: ark-rs-release-workflow (https://github.com/arkade-os/rust-sdk)" \
+              "https://crates.io/api/v1/crates/$crate/$VERSION" >/dev/null 2>&1
           }
 
           wait_until_published() {
@@ -112,9 +129,21 @@ jobs:
 
             echo "::group::Publishing $crate $VERSION"
             for attempt in {1..5}; do
+              if crate_published "$crate"; then
+                echo "$crate $VERSION became visible on crates.io; skipping remaining publish attempts"
+                echo "::endgroup::"
+                return 0
+              fi
+
               if cargo publish -p "$crate"; then
                 echo "::endgroup::"
                 wait_until_published "$crate"
+                return 0
+              fi
+
+              if crate_published "$crate"; then
+                echo "$crate $VERSION was published despite cargo publish returning non-zero; continuing"
+                echo "::endgroup::"
                 return 0
               fi
 
@@ -149,12 +178,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists locally"
-          else
-            git tag "$TAG" "${{ github.event.pull_request.merge_commit_sha }}"
+          TARGET=$(git rev-parse HEAD)
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists on origin; skipping"
+            exit 0
           fi
 
+          git tag "$TAG" "$TARGET"
           git push origin "$TAG"
 
       - name: Create GitHub release
@@ -169,6 +200,6 @@ jobs:
           else
             gh release create "$TAG" \
               --title "$TAG" \
-              --target "${{ github.event.pull_request.merge_commit_sha }}" \
+              --target "$(git rev-parse HEAD)" \
               --generate-notes
           fi
