@@ -8,13 +8,13 @@ High-level client library for interacting with Arkade servers.
 
 ```toml
 [dependencies]
-ark-client = "0.9.1"
+ark-client = "0.9.2"
 ```
 
 Enable optional SQLite storage support with:
 
 ```toml
-ark-client = { version = "0.9.1", features = ["sqlite"] }
+ark-client = { version = "0.9.2", features = ["sqlite"] }
 ```
 
 ## Documentation

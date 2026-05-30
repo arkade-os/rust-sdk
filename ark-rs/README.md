@@ -8,7 +8,7 @@ Convenience crate for the Arkade Rust SDK.
 
 ```toml
 [dependencies]
-ark-rs = "0.9.1"
+ark-rs = "0.9.2"
 ```
 
 By default this includes `ark-core` and enables native TLS roots for optional transport/client crates.
