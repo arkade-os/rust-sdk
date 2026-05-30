@@ -1,0 +1,174 @@
+name: "Create crates release"
+run-name: "Release ${{ github.event.pull_request.head.ref }}"
+
+on:
+  pull_request:
+    types:
+      - closed
+
+permissions:
+  contents: write
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  CARGO_TERM_COLOR: always
+  RUSTUP_MAX_RETRIES: 10
+
+jobs:
+  release:
+    name: "Publish crates and create release"
+    if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'release/crates-')
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - name: Extract version from branch name
+        id: v
+        run: |
+          set -euo pipefail
+          BRANCH="${{ github.event.pull_request.head.ref }}"
+          VERSION="${BRANCH#release/crates-}"
+
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid release branch/version: $BRANCH"
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Validate required secrets
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::error::CARGO_REGISTRY_TOKEN secret is not set."
+            exit 1
+          fi
+
+      - name: Verify crate versions
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.publish != []) | [.name, .version] | @tsv' \
+            | while IFS=$'\t' read -r name actual; do
+                if [ "$actual" != "$VERSION" ]; then
+                  echo "::error::$name is $actual, expected $VERSION"
+                  exit 1
+                fi
+              done
+
+      - name: Run tests
+        run: cargo test --workspace --all-features
+
+      - name: Publish crates to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          crate_published() {
+            local crate="$1"
+            curl -fsS "https://crates.io/api/v1/crates/$crate/$VERSION" >/dev/null 2>&1
+          }
+
+          wait_until_published() {
+            local crate="$1"
+            for attempt in {1..30}; do
+              if crate_published "$crate"; then
+                echo "$crate $VERSION is visible on crates.io"
+                return 0
+              fi
+              echo "Waiting for $crate $VERSION to appear on crates.io ($attempt/30)..."
+              sleep 10
+            done
+
+            echo "::error::$crate $VERSION did not appear on crates.io in time"
+            return 1
+          }
+
+          publish_crate() {
+            local crate="$1"
+
+            if crate_published "$crate"; then
+              echo "$crate $VERSION is already published; skipping"
+              return 0
+            fi
+
+            echo "::group::Publishing $crate $VERSION"
+            for attempt in {1..5}; do
+              if cargo publish -p "$crate"; then
+                echo "::endgroup::"
+                wait_until_published "$crate"
+                return 0
+              fi
+
+              echo "Publish attempt $attempt for $crate failed; retrying after crates.io index delay..."
+              sleep $((attempt * 30))
+            done
+
+            echo "::error::Failed to publish $crate $VERSION"
+            echo "::endgroup::"
+            return 1
+          }
+
+          # Leaf crates: no internal unpublished dependencies.
+          publish_crate ark-core
+          publish_crate ark-fees
+          publish_crate ark-script
+          publish_crate ark-introspector-client
+
+          # Mid-level crates.
+          publish_crate ark-grpc
+          publish_crate ark-rest
+          publish_crate ark-delegator
+
+          # Top-level crates.
+          publish_crate ark-client
+          publish_crate ark-bdk-wallet
+          publish_crate ark-rs
+
+      - name: Create tag
+        env:
+          TAG: ${{ steps.v.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists locally"
+          else
+            git tag "$TAG" "${{ github.event.pull_request.merge_commit_sha }}"
+          fi
+
+          git push origin "$TAG"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.v.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "GitHub release $TAG already exists"
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --target "${{ github.event.pull_request.merge_commit_sha }}" \
+              --generate-notes
+          fi
