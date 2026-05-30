@@ -117,11 +117,20 @@ impl Client {
     }
 
     pub async fn connect(&mut self) -> Result<(), Error> {
-        let channel = tonic::transport::Endpoint::from_shared(self.url.clone())
-            .map_err(Error::connect)?
-            .connect()
-            .await
-            .map_err(Error::connect)?;
+        let endpoint =
+            tonic::transport::Endpoint::from_shared(self.url.clone()).map_err(Error::connect)?;
+
+        #[cfg(any(feature = "tls-webpki-roots", feature = "tls-native-roots"))]
+        let endpoint = {
+            let tls = tonic::transport::ClientTlsConfig::new();
+            #[cfg(feature = "tls-webpki-roots")]
+            let tls = tls.with_webpki_roots();
+            #[cfg(feature = "tls-native-roots")]
+            let tls = tls.with_native_roots();
+            endpoint.tls_config(tls).map_err(Error::connect)?
+        };
+
+        let channel = endpoint.connect().await.map_err(Error::connect)?;
 
         let ark_service_client =
             ArkServiceClient::with_interceptor(channel.clone(), VersionInterceptor);
