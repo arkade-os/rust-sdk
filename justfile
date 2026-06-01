@@ -485,6 +485,13 @@ _wait-for-log-file file pattern timeout:
     echo "Log pattern '${PATTERN}' not found in file '${FILE}' within ${TIMEOUT} seconds"
     exit 1
 
+# MIGRATION NOTE (tracking: ArkLabsHQ/arkade-regtest#27):
+# arkade-regtest replaced nigiri/chopsticks with an in-house Docker Compose stack driven
+# by a Node CLI (`regtest.mjs`). This repo drives nigiri DIRECTLY (no arkade-regtest
+# submodule; arkd is built/run from Go source, not as a container), so adopting the new
+# stack is a rework, not a substitution. The nigiri recipes below, the `Nigiri` test
+# helper in `e2e-tests/tests/common.rs`, and the e2e CI workflow all need coordinated
+# changes. See the migration PR description for the open questions.
 nigiri-start:
     #!/usr/bin/env bash
     nigiri start
