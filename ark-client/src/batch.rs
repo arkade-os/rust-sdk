@@ -2,7 +2,6 @@ use crate::error::ErrorContext as _;
 use crate::swap_storage::SwapStorage;
 use crate::utils::sleep;
 use crate::utils::timeout_op;
-use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use crate::Blockchain;
 use crate::Client;
@@ -54,7 +53,7 @@ use std::collections::HashSet;
 impl<B, W, S> Client<B, W, S>
 where
     B: Blockchain,
-    W: BoardingWallet + OnchainWallet,
+    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     /// Settle _all_ prior VTXOs and boarding outputs into the next batch, generating new confirmed
@@ -1131,7 +1130,7 @@ where
         let now = u64::try_from(now).map_err(|_| Error::ad_hoc("negative timestamp"))?;
 
         // Get all known boarding outputs.
-        let boarding_outputs = self.inner.wallet.get_boarding_outputs()?;
+        let boarding_outputs = self.boarding_outputs()?;
 
         let mut boarding_inputs: Vec<batch::OnChainInput> = Vec::new();
         let mut total_amount = Amount::ZERO;
@@ -1386,8 +1385,6 @@ where
 
                 let owner_pk = onchain_input.boarding_output().owner_pk();
                 let sig = self
-                    .inner
-                    .wallet
                     .sign_for_pk(&owner_pk, &msg)
                     .map_err(|e| ark_core::Error::ad_hoc(e.to_string()))?;
 
@@ -1895,9 +1892,7 @@ where
                                 schnorr::Signature,
                                 ark_core::Error,
                             > {
-                                self.inner
-                                    .wallet
-                                    .sign_for_pk(pk, msg)
+                                self.sign_for_pk(pk, msg)
                                     .map_err(|e| ark_core::Error::ad_hoc(e.to_string()))
                             };
 

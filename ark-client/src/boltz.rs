@@ -6,7 +6,6 @@ use crate::batch::BatchOutputType;
 use crate::error::ErrorContext as _;
 use crate::swap_storage::SwapStorage;
 use crate::timeout_op;
-use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use crate::Blockchain;
 use crate::Client;
@@ -175,7 +174,7 @@ pub struct PendingVhtlcSpendTx {
 impl<B, W, S> Client<B, W, S>
 where
     B: Blockchain,
-    W: BoardingWallet + OnchainWallet,
+    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     // Submarine swap.

@@ -249,7 +249,7 @@ impl ContractSpec for BoardingContract {
 }
 
 impl BoardingContract {
-    fn boarding_output(&self, ctx: &ContractContext) -> Result<BoardingOutput, Error> {
+    pub fn boarding_output(&self, ctx: &ContractContext) -> Result<BoardingOutput, Error> {
         BoardingOutput::new(
             ctx.secp(),
             self.server,

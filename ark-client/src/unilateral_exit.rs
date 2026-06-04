@@ -4,7 +4,6 @@ use crate::error::ErrorContext;
 use crate::swap_storage::SwapStorage;
 use crate::utils::sleep;
 use crate::utils::timeout_op;
-use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use crate::Blockchain;
 use crate::Client;
@@ -30,7 +29,7 @@ use std::collections::HashSet;
 impl<B, W, S> Client<B, W, S>
 where
     B: Blockchain,
-    W: BoardingWallet + OnchainWallet,
+    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     /// Build the unilateral exit transaction tree for all spendable VTXOs.
@@ -273,10 +272,6 @@ where
                     if let Ok(keypair) = self.keypair_by_pk(&pk) {
                         let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &keypair);
                         let pk = keypair.x_only_public_key().0;
-                        res.push((sig, pk))
-                    }
-
-                    if let Ok(sig) = self.inner.wallet.sign_for_pk(&pk, &msg) {
                         res.push((sig, pk))
                     }
                 }

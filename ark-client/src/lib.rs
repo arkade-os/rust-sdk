@@ -3,10 +3,13 @@ use crate::key_provider::KeypairIndex;
 use crate::utils::sleep;
 use crate::utils::timeout_op;
 use crate::utils::unix_now;
-use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use ark_core::asset::AssetId;
 use ark_core::build_anchor_tx;
+use ark_core::contract::BoardingContract;
+use ark_core::contract::ContractContext;
+use ark_core::contract::ContractState;
+use ark_core::contract::ContractType;
 use ark_core::history;
 use ark_core::history::generate_incoming_vtxo_transaction_history;
 use ark_core::history::generate_outgoing_vtxo_transaction_history;
@@ -28,7 +31,9 @@ use bitcoin::bip32::DerivationPath;
 use bitcoin::bip32::Xpriv;
 use bitcoin::key::Keypair;
 use bitcoin::key::Secp256k1;
+use bitcoin::secp256k1::schnorr::Signature;
 use bitcoin::secp256k1::All;
+use bitcoin::secp256k1::Message;
 use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
@@ -42,6 +47,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::RwLock;
 use std::time::Duration;
 use std::time::Instant;
@@ -390,6 +396,7 @@ struct ServerState {
     server_info: server::Info,
     fee_estimator: ark_fees::Estimator,
     server_info_refreshed_at: Instant,
+    contract_manager: Mutex<ContractManager>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -481,7 +488,7 @@ pub trait Blockchain {
 impl<B, W, S> OfflineClient<B, W, S>
 where
     B: Blockchain,
-    W: BoardingWallet + OnchainWallet,
+    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     /// Create a new offline client with a generic key provider.
@@ -624,10 +631,13 @@ where
         tracing::debug!(ark_server_url = ?self.network_client, "Connected to Ark server");
 
         let fee_estimator = build_fee_estimator(&server_info)?;
+        let mut contract_manager = ContractManager::in_memory(server_info.network);
+        contract_manager.register_builtins()?;
         let state = Arc::new(RwLock::new(ServerState {
             server_info: server_info.clone(),
             fee_estimator,
             server_info_refreshed_at: Instant::now(),
+            contract_manager: Mutex::new(contract_manager),
         }));
         let hook_state = state.clone();
         self.network_client
@@ -690,7 +700,7 @@ fn update_server_state(
 impl<B, W, S> Client<B, W, S>
 where
     B: Blockchain,
-    W: BoardingWallet + OnchainWallet,
+    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     /// Returns Ark server info, refreshing the cached snapshot when its TTL has expired.
@@ -1024,14 +1034,29 @@ where
     // At the moment we are always generating the same address.
     pub async fn get_boarding_address(&self) -> Result<Address, Error> {
         let server_info = &self.server_info().await?;
+        let owner = self
+            .next_keypair(KeypairIndex::LastUnused)?
+            .x_only_public_key()
+            .0;
 
-        let boarding_output = self.inner.wallet.new_boarding_output(
-            server_info.signer_pk.into(),
-            server_info.boarding_exit_delay,
-            server_info.network,
-        )?;
+        let contract = BoardingContract {
+            server: server_info.signer_pk.into(),
+            owner,
+            exit_delay: server_info.boarding_exit_delay,
+        };
+        let key_index = self.derivation_index_for_pk(&owner);
+        let state = self
+            .state
+            .read()
+            .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+        let stored = state
+            .contract_manager
+            .lock()
+            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?
+            .insert_or_get(contract, ContractState::Active, key_index)?;
 
-        Ok(boarding_output.address().clone())
+        Address::from_script(&stored.script_pubkey, server_info.network)
+            .map_err(|e| Error::ad_hoc(format!("invalid boarding contract script: {e}")))
     }
 
     pub fn get_onchain_address(&self) -> Result<Address, Error> {
@@ -1434,6 +1459,34 @@ where
     }
     fn keypair_by_pk(&self, pk: &XOnlyPublicKey) -> Result<Keypair, Error> {
         self.inner.key_provider.get_keypair_for_pk(pk)
+    }
+
+    fn sign_for_pk(&self, pk: &XOnlyPublicKey, msg: &Message) -> Result<Signature, Error> {
+        let keypair = self.keypair_by_pk(pk)?;
+        Ok(self.secp().sign_schnorr_no_aux_rand(msg, &keypair))
+    }
+
+    fn boarding_outputs(&self) -> Result<Vec<BoardingOutput>, Error> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+        let ctx = ContractContext::new(state.server_info.network);
+        let manager = state
+            .contract_manager
+            .lock()
+            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?;
+        manager
+            .list_active_by_type(ContractType::boarding())?
+            .into_iter()
+            .map(|stored| {
+                manager
+                    .get_typed::<BoardingContract>(&stored.script_pubkey)?
+                    .ok_or_else(|| Error::ad_hoc("missing boarding contract"))?
+                    .boarding_output(&ctx)
+                    .map_err(Into::into)
+            })
+            .collect()
     }
 
     fn derivation_index_for_pk(&self, pk: &XOnlyPublicKey) -> Option<u32> {

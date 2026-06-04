@@ -1,6 +1,5 @@
 use crate::error::ErrorContext;
 use crate::swap_storage::SwapStorage;
-use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use crate::Blockchain;
 use crate::Client;
@@ -35,10 +34,10 @@ pub async fn coin_select_for_onchain<B, W, S>(
 >
 where
     B: Blockchain,
-    W: BoardingWallet + OnchainWallet,
+    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
-    let boarding_outputs = client.inner.wallet.get_boarding_outputs()?;
+    let boarding_outputs = client.boarding_outputs()?;
 
     let now = Timestamp::now();
 

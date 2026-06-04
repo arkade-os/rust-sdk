@@ -1,6 +1,5 @@
 use crate::error::ErrorContext;
 use crate::swap_storage::SwapStorage;
-use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use crate::Blockchain;
 use crate::Client;
@@ -33,7 +32,7 @@ pub struct IssueAssetResult {
 impl<B, W, S> Client<B, W, S>
 where
     B: Blockchain,
-    W: BoardingWallet + OnchainWallet,
+    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     /// Issue a new asset.

@@ -196,6 +196,39 @@ impl ContractManager {
         state: ContractState,
         key_index: Option<u32>,
     ) -> Result<StoredContract, Error> {
+        let stored = self.stored_contract(contract, state, key_index)?;
+        self.store.insert(stored.clone())?;
+        Ok(stored)
+    }
+
+    pub fn insert_or_get<T: ContractSpec>(
+        &mut self,
+        contract: T,
+        state: ContractState,
+        key_index: Option<u32>,
+    ) -> Result<StoredContract, Error> {
+        let stored = self.stored_contract(contract, state, key_index)?;
+        if let Some(existing) = self.store.get_by_script(&stored.script_pubkey)? {
+            if existing.contract_type != stored.contract_type
+                || existing.contract_version != stored.contract_version
+                || existing.data != stored.data
+            {
+                return Err(Error::ad_hoc(
+                    "contract script already exists with different data",
+                ));
+            }
+            return Ok(existing);
+        }
+        self.store.insert(stored.clone())?;
+        Ok(stored)
+    }
+
+    fn stored_contract<T: ContractSpec>(
+        &self,
+        contract: T,
+        state: ContractState,
+        key_index: Option<u32>,
+    ) -> Result<StoredContract, Error> {
         let ctx = ContractContext::new(self.network);
         let stored = StoredContract {
             contract_type: T::contract_type(),
@@ -210,7 +243,6 @@ impl ContractManager {
 
         let handler = self.registry.handler_for(&stored.contract_type)?;
         handler.validate(&stored, &ctx)?;
-        self.store.insert(stored.clone())?;
         Ok(stored)
     }
 
@@ -247,6 +279,26 @@ impl ContractManager {
 
     pub fn list(&self) -> Result<Vec<StoredContract>, Error> {
         self.store.list()
+    }
+
+    pub fn list_by_type(&self, contract_type: ContractType) -> Result<Vec<StoredContract>, Error> {
+        Ok(self
+            .store
+            .list()?
+            .into_iter()
+            .filter(|contract| contract.contract_type == contract_type)
+            .collect())
+    }
+
+    pub fn list_active_by_type(
+        &self,
+        contract_type: ContractType,
+    ) -> Result<Vec<StoredContract>, Error> {
+        Ok(self
+            .list_by_type(contract_type)?
+            .into_iter()
+            .filter(|contract| contract.state == ContractState::Active)
+            .collect())
     }
 
     pub fn list_views(&self) -> Result<Vec<ContractView>, Error> {

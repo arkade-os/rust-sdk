@@ -7,7 +7,6 @@
 
 use crate::error::ErrorContext;
 use crate::swap_storage::SwapStorage;
-use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use crate::Blockchain;
 use crate::Client;
@@ -144,7 +143,7 @@ enum WatcherWork {
 impl<B, W, S> Client<B, W, S>
 where
     B: Blockchain + Send + Sync + 'static,
-    W: BoardingWallet + OnchainWallet + Send + Sync + 'static,
+    W: OnchainWallet + Send + Sync + 'static,
     S: SwapStorage + 'static,
 {
     /// Start a background task that watches for new VTXOs and:
@@ -185,7 +184,7 @@ async fn run_watcher_loop<B, W, S>(
     mut stop_rx: watch::Receiver<bool>,
 ) where
     B: Blockchain + Send + Sync + 'static,
-    W: BoardingWallet + OnchainWallet + Send + Sync + 'static,
+    W: OnchainWallet + Send + Sync + 'static,
     S: SwapStorage + 'static,
 {
     let mut backoff = INITIAL_BACKOFF;
@@ -512,7 +511,7 @@ async fn refresh_subscription_scripts<B, W, S>(
 ) -> Result<Option<Arc<ScriptMap>>, Error>
 where
     B: Blockchain + Send + Sync + 'static,
-    W: BoardingWallet + OnchainWallet + Send + Sync + 'static,
+    W: OnchainWallet + Send + Sync + 'static,
     S: SwapStorage + 'static,
 {
     let _discovered = client.discover_keys(KEY_DISCOVERY_GAP_LIMIT).await?;
@@ -552,7 +551,7 @@ async fn collect_new_delegation_candidates<B, W, S>(
 ) -> Result<Vec<VirtualTxOutPoint>, Error>
 where
     B: Blockchain + Send + Sync + 'static,
-    W: BoardingWallet + OnchainWallet + Send + Sync + 'static,
+    W: OnchainWallet + Send + Sync + 'static,
     S: SwapStorage + 'static,
 {
     let (vtxo_list, _) = client.list_vtxos().await?;
@@ -717,7 +716,7 @@ async fn delegate_vtxos<B, W, S>(
     script_map: &ScriptMap,
 ) where
     B: Blockchain + Send + Sync + 'static,
-    W: BoardingWallet + OnchainWallet + Send + Sync + 'static,
+    W: OnchainWallet + Send + Sync + 'static,
     S: SwapStorage + 'static,
 {
     // Query only the addresses that appear in the event, not all wallet addresses.
@@ -882,7 +881,7 @@ async fn delegate_group<B, W, S>(
     valid_at: u64,
 ) where
     B: Blockchain + Send + Sync + 'static,
-    W: BoardingWallet + OnchainWallet + Send + Sync + 'static,
+    W: OnchainWallet + Send + Sync + 'static,
     S: SwapStorage + 'static,
 {
     let input_count = vtxo_inputs.len();
@@ -934,7 +933,7 @@ const SELF_RENEW_REMAINING_FRACTION: f64 = 0.10;
 async fn renew_expiring_vtxos<B, W, S>(client: &Client<B, W, S>)
 where
     B: Blockchain + Send + Sync + 'static,
-    W: BoardingWallet + OnchainWallet + Send + Sync + 'static,
+    W: OnchainWallet + Send + Sync + 'static,
     S: SwapStorage + 'static,
 {
     let (vtxo_list, _) = match client.list_vtxos().await {
