@@ -64,8 +64,6 @@ impl From<&'static str> for ContractType {
 pub enum ContractState {
     Active,
     Inactive,
-    Spent,
-    Archived,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
