@@ -44,9 +44,19 @@ pub struct StoredContract {
     pub key_index: Option<u32>,
     pub data: serde_json::Value,
 }
+
+pub enum ContractState {
+    Active,
+    Inactive,
+}
 ```
 
 `data` is serialized `T`. This keeps built-ins and custom contracts strongly typed at the API boundary while allowing one contract table / repository.
+
+`state` is intentionally small and mirrors the broad TS SDK / Go SDK concept: it controls whether the contract is part of the manager's normal active set. It is not a VTXO lifecycle status. VTXO/output state remains the source of truth for whether value is pre-confirmed, confirmed, recoverable, spent, swept, exit-ready, etc.
+
+- `Active`: include in normal watch/discovery/spend-reconstruction flows.
+- `Inactive`: keep the contract metadata, but do not treat it as a current active receive/spend contract unless an explicit flow includes inactive contracts. This is useful for retired rotated receive contracts or stale custom contracts that may still need historical/debug handling.
 
 `address` is intentionally not part of the canonical stored contract. It is derived from `script_pubkey + network`. The contract manager should be network-scoped, so stored contracts are never treated as portable between mainnet, signet, regtest, etc.
 
