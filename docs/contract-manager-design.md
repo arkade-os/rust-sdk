@@ -32,6 +32,18 @@ pub trait ContractSpec:
 
 A typed contract value is useful at construction time, in tests, or when a caller knows the expected concrete type. It should not become the primary representation flowing through the whole SDK.
 
+`SpendPath` should represent a path that is complete enough to spend through Taproot script path, not just a script fragment:
+
+```rust
+pub struct SpendPath {
+    pub name: String,
+    pub script: ScriptBuf,
+    pub control_block: ControlBlock,
+}
+```
+
+If a caller only needs script introspection/debugging, that should be modeled separately from `spendable_paths`, for example as a non-spendable `ContractPath` view. Keeping `control_block` required avoids treating script-only metadata as spend-ready.
+
 The store keeps one common representation:
 
 ```rust
@@ -292,7 +304,7 @@ Initial scope should be small:
 - persist and list `StoredContract`s
 - validate contracts derive their stored script
 - derive address views from `script_pubkey + network` for debugging/listing
-- dispatch spend path / tapscript reconstruction by script or contract type
+- dispatch complete spend path / tapscript reconstruction by script or contract type, including Taproot control blocks
 - support gap-limit discovery once the basic model is in place
 
 Avoid initially taking on the full TS-style repository sync/watcher design. That can be layered on later.
