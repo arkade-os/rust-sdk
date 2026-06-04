@@ -321,6 +321,29 @@ A built-in enum is ergonomic for SDK-owned contract types, but it makes user-pro
 
 A built-in enum may still be useful as a convenience layer for SDK-owned contract types, but it should not be the core storage or dispatch model.
 
+## Boarding output ownership migration
+
+The contract manager should also be used to remove the current `BoardingWallet` ownership pattern.
+
+Today boarding outputs are created and remembered by the caller-provided wallet implementation. That makes boarding outputs different from default/delegate VTXOs even though they are also Ark-owned scripts. The new design should make boarding outputs client-owned contracts:
+
+```text
+KeyProvider -> BoardingContract -> StoredContract -> ContractManager -> BoardingOutput/spend paths
+```
+
+The client should derive the boarding owner key from the same `KeyProvider` used for offchain VTXO owner keys. Creating a boarding address should:
+
+1. get an owner key from `KeyProvider`,
+2. build a typed `BoardingContract`,
+3. persist it as an `Active` `StoredContract`, using `key_index` when the key provider can report one,
+4. derive the address from the contract script and network.
+
+Settlement and unilateral-exit flows should load active boarding contracts from the contract manager and reconstruct `BoardingOutput`/spend metadata through the registered handler. Signing boarding spends should also use `KeyProvider::get_keypair_for_pk` instead of a wallet-specific `sign_for_pk` method.
+
+This intentionally makes `BoardingWallet` obsolete. The on-chain wallet interface may remain as an adapter for ordinary Bitcoin wallet operations, but it should not own Ark boarding keys or boarding output metadata.
+
+This is a hard breaking migration. Existing unresolved boarding outputs created by older SDK versions are not expected to be automatically imported. Users that need to preserve them should settle/lift those boarding outputs before upgrading to the new SDK version. After upgrading, newly created boarding outputs are managed by the client contract store and key provider.
+
 ## Intended integration points
 
 In the Rust SDK this should eventually replace ad-hoc reconstruction in places like:
