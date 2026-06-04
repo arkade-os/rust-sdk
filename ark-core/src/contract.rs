@@ -98,14 +98,6 @@ impl SpendPath {
             control_block: Some(control_block),
         }
     }
-
-    pub fn script_only(name: impl Into<String>, script: ScriptBuf) -> Self {
-        Self {
-            name: name.into(),
-            script,
-            control_block: None,
-        }
-    }
 }
 
 #[derive(Clone)]
