@@ -46,6 +46,7 @@ use std::sync::RwLock;
 use std::time::Duration;
 use std::time::Instant;
 
+pub mod contract;
 pub mod error;
 pub mod key_provider;
 pub mod swap_storage;
@@ -77,6 +78,10 @@ pub use boltz::SwapStatus;
 pub use boltz::SwapStatusInfo;
 pub use boltz::SwapType;
 pub use boltz::TimeoutBlockHeights;
+pub use contract::ContractManager;
+pub use contract::ContractRegistry;
+pub use contract::ContractStore;
+pub use contract::MemoryContractStore;
 pub use error::Error;
 pub use key_provider::Bip32KeyProvider;
 pub use key_provider::KeyProvider;
