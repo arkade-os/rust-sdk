@@ -141,6 +141,9 @@ enum Commands {
     LightningInvoice {
         /// How many sats to receive.
         amount: u64,
+        /// Optional Arkade address that receives the claimed funds.
+        #[arg(long)]
+        recipient_address: Option<ArkAddress>,
     },
     /// Pay a BOLT11 invoice via a Boltz submarine swap.
     PayInvoice {
@@ -816,12 +819,22 @@ async fn run_command<K: KeyProvider + 'static>(
                 "Sent funds on-chain using selected VTXOs"
             );
         }
-        Commands::LightningInvoice { amount } => {
+        Commands::LightningInvoice {
+            amount,
+            recipient_address,
+        } => {
             let invoice_amount = SwapAmount::invoice(Amount::from_sat(*amount));
-            let res = client
-                .get_ln_invoice(invoice_amount, None, None)
-                .await
-                .map_err(|e| anyhow!(e))?;
+            let res = if let Some(recipient_address) = recipient_address {
+                client
+                    .get_ln_invoice_for_address(invoice_amount, *recipient_address, None, None)
+                    .await
+                    .map_err(|e| anyhow!(e))?
+            } else {
+                client
+                    .get_ln_invoice(invoice_amount, None, None)
+                    .await
+                    .map_err(|e| anyhow!(e))?
+            };
 
             let invoice = res.invoice.to_string();
             let swap_id = res.swap_id;
