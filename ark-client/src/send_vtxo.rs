@@ -111,6 +111,33 @@ where
 
     // Pending transactions
 
+    /// Finalize a specific pending offchain transaction.
+    ///
+    /// Fetches the pending transaction identified by `ark_txid` from the server, signs the
+    /// checkpoint transactions, and finalizes it.
+    ///
+    /// This is useful when you need fine-grained control over which pending transaction to
+    /// finalize (e.g. when a database tracks individual pending funding attempts).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no pending transaction with the given `ark_txid` is found, or if
+    /// signing / finalization fails.
+    pub async fn finalize_pending_offchain_tx(&self, ark_txid: Txid) -> Result<(), Error> {
+        let pending_txs = self.fetch_pending_offchain_txs().await?;
+
+        let pending_tx = pending_txs
+            .into_iter()
+            .find(|tx| tx.ark_txid == ark_txid)
+            .ok_or_else(|| {
+                Error::ad_hoc(format!(
+                    "no pending transaction found for ark txid {ark_txid}"
+                ))
+            })?;
+
+        self.sign_and_finalize_pending_tx(pending_tx).await
+    }
+
     /// Resume and finalize any pending (submitted but not finalized) offchain transactions.
     ///
     /// This handles the case where `send_vtxo` successfully submitted the transaction to the
