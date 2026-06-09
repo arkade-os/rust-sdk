@@ -604,7 +604,7 @@ where
     /// After submit succeeds but before finalize completes, a transient error would leave the
     /// transaction in a pending state. Retrying here attempts to resolve that, without needing full
     /// recovery via [`Self::continue_pending_offchain_txs`].
-    pub(crate) async fn finalize_offchain_tx(
+    pub async fn finalize_offchain_tx(
         &self,
         ark_txid: Txid,
         signed_checkpoint_txs: Vec<bitcoin::Psbt>,
