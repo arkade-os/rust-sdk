@@ -152,8 +152,6 @@ where
         self.fetch_pending_offchain_txs().await
     }
 
-    // Test-only function
-
     /// Build, sign and submit an offchain transaction to the server without finalizing.
     ///
     /// This is primarily useful for testing pending transaction recovery flows.
@@ -161,7 +159,6 @@ where
     /// Returns the Ark TXID. The transaction will remain in a pending state on the server until
     /// [`Self::finalize_pending_offchain_tx`] or [`Self::continue_pending_offchain_txs`] completes
     /// it.
-    #[cfg(feature = "test-utils")]
     pub async fn submit_offchain_tx(
         &self,
         vtxo_inputs: Vec<VtxoInput>,
