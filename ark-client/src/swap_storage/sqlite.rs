@@ -540,6 +540,7 @@ mod tests {
             key_derivation_index: None,
             bolt11: "lnbc100u1ptest".to_string(),
             invoice_expiry: 3600,
+            claim_address: None,
         }
     }
 

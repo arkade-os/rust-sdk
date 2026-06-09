@@ -1050,6 +1050,38 @@ where
 
     // Reverse submarine swap.
 
+    fn validate_reverse_recipient_address(
+        &self,
+        recipient_address: Option<&ArkAddress>,
+    ) -> Result<(), Error> {
+        let Some(recipient_address) = recipient_address else {
+            return Ok(());
+        };
+
+        let server_signer: XOnlyPublicKey = self.server_info.signer_pk.into();
+        if recipient_address.server() != server_signer {
+            return Err(Error::consumer(format!(
+                "recipient Arkade address belongs to a different server: expected {server_signer}, got {}",
+                recipient_address.server()
+            )));
+        }
+
+        Ok(())
+    }
+
+    fn reverse_claim_address(&self, swap: &ReverseSwapData) -> Result<ArkAddress, Error> {
+        if let Some(address) = swap.claim_address {
+            self.validate_reverse_recipient_address(Some(&address))?;
+            return Ok(address);
+        }
+
+        let (address, _) = self
+            .get_offchain_address()
+            .context("failed to get offchain address")?;
+
+        Ok(address)
+    }
+
     /// Generate a BOLT11 invoice to perform a reverse submarine swap via Boltz. This allows to
     /// receive Lightning payments into an Ark wallet.
     ///
@@ -1071,98 +1103,63 @@ where
         expiry_secs: Option<u64>,
         description: Option<String>,
     ) -> Result<ReverseSwapResult, Error> {
-        validate_invoice_description(description.as_deref())?;
+        self.create_reverse_swap_invoice_with_new_preimage(amount, expiry_secs, None, description)
+            .await
+    }
 
+    /// Generate a BOLT11 invoice to receive Lightning into another user's Arkade address.
+    ///
+    /// The local client still creates and claims the Boltz reverse-swap VHTLC, but the resulting
+    /// Ark output is sent to `recipient_address` instead of a fresh local address.
+    ///
+    /// # Arguments
+    ///
+    /// - `amount`: the expected [`Amount`] to be received.
+    /// - `recipient_address`: Arkade address that receives the claimed VHTLC output.
+    /// - `expiry_secs`: optional invoice expiry, in seconds from now. If `None`, Boltz's default is
+    ///   used.
+    /// - `description`: optional memo embedded in the BOLT11 invoice's `d` field (visible to the
+    ///   payer).
+    ///
+    /// # Returns
+    ///
+    /// - A `ReverseSwapResult`, including an identifier for the reverse swap and the
+    ///   [`Bolt11Invoice`] to be paid.
+    pub async fn get_ln_invoice_for_address(
+        &self,
+        amount: SwapAmount,
+        recipient_address: ArkAddress,
+        expiry_secs: Option<u64>,
+        description: Option<String>,
+    ) -> Result<ReverseSwapResult, Error> {
+        self.create_reverse_swap_invoice_with_new_preimage(
+            amount,
+            expiry_secs,
+            Some(recipient_address),
+            description,
+        )
+        .await
+    }
+
+    async fn create_reverse_swap_invoice_with_new_preimage(
+        &self,
+        amount: SwapAmount,
+        expiry_secs: Option<u64>,
+        recipient_address: Option<ArkAddress>,
+        description: Option<String>,
+    ) -> Result<ReverseSwapResult, Error> {
         let preimage: [u8; 32] = rand::random();
         let preimage_hash_sha256 = sha256::Hash::hash(&preimage);
-        let preimage_hash = ripemd160::Hash::hash(preimage_hash_sha256.as_byte_array());
 
-        let claim_keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
-        let claim_public_key = claim_keypair.public_key();
-        let key_derivation_index =
-            self.derivation_index_for_pk(&claim_keypair.x_only_public_key().0);
-
-        let (invoice_amount, onchain_amount) = match amount {
-            SwapAmount::Invoice(amount) => (Some(amount), None),
-            SwapAmount::Vhtlc(amount) => (None, Some(amount)),
-        };
-
-        let request = CreateReverseSwapRequest {
-            from: Asset::Btc,
-            to: Asset::Ark,
-            invoice_amount,
-            onchain_amount,
-            claim_public_key: claim_public_key.into(),
-            preimage_hash: preimage_hash_sha256,
-            invoice_expiry: expiry_secs,
-            referral_id: self.inner.boltz_referral_id.clone(),
+        self.create_reverse_swap_invoice(
+            amount,
+            expiry_secs,
+            preimage_hash_sha256,
+            Some(preimage),
+            recipient_address,
             description,
-        };
-
-        let url = format!("{}/v2/swap/reverse", self.inner.boltz_url);
-
-        let client = reqwest::Client::new();
-        let response = client
-            .post(&url)
-            .json(&request)
-            .send()
-            .await
-            .map_err(|e| Error::ad_hoc(e.to_string()))
-            .context("failed to send reverse swap request")?;
-
-        if !response.status().is_success() {
-            let error_text = response
-                .text()
-                .await
-                .map_err(|e| Error::ad_hoc(e.to_string()))
-                .context("failed to read error text")?;
-
-            return Err(Error::ad_hoc(format!(
-                "failed to create reverse swap: {error_text}"
-            )));
-        }
-
-        let response: CreateReverseSwapResponse = response
-            .json()
-            .await
-            .map_err(|e| Error::ad_hoc(e.to_string()))
-            .context("failed to deserialize reverse swap response")?;
-
-        let created_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(Error::ad_hoc)
-            .context("failed to compute created_at")?;
-
-        let swap_amount = response.onchain_amount.or(onchain_amount).ok_or_else(|| {
-            Error::ad_hoc("onchain_amount not provided by Boltz and not specified in request")
-        })?;
-
-        let swap = ReverseSwapData {
-            id: response.id.clone(),
-            status: SwapStatus::Created,
-            preimage: Some(preimage),
-            vhtlc_address: response.lockup_address,
-            preimage_hash,
-            refund_public_key: response.refund_public_key,
-            amount: swap_amount,
-            claim_public_key: claim_public_key.into(),
-            timeout_block_heights: response.timeout_block_heights,
-            created_at: created_at.as_secs(),
-            key_derivation_index,
-            bolt11: response.invoice.to_string(),
-            invoice_expiry: response.invoice.expiry_time().as_secs(),
-        };
-
-        self.swap_storage()
-            .insert_reverse(response.id.clone(), swap.clone())
-            .await
-            .context("failed to persist swap data")?;
-
-        Ok(ReverseSwapResult {
-            swap_id: swap.id,
-            invoice: response.invoice,
-            amount: swap_amount,
-        })
+        )
+        .await
     }
 
     /// Generate a BOLT11 invoice using a provided SHA256 preimage hash for a reverse submarine
@@ -1195,7 +1192,52 @@ where
         preimage_hash_sha256: sha256::Hash,
         description: Option<String>,
     ) -> Result<ReverseSwapResult, Error> {
+        self.create_reverse_swap_invoice(
+            amount,
+            expiry_secs,
+            preimage_hash_sha256,
+            None,
+            None,
+            description,
+        )
+        .await
+    }
+
+    /// Generate a BOLT11 invoice from an externally managed preimage hash and receive the claimed
+    /// VHTLC output into another user's Arkade address.
+    ///
+    /// After calling this method, use [`Self::wait_for_vhtlc_funding`] to wait for the VHTLC to
+    /// be funded, then [`Self::claim_vhtlc`] with the preimage to claim the funds.
+    pub async fn get_ln_invoice_from_hash_for_address(
+        &self,
+        amount: SwapAmount,
+        recipient_address: ArkAddress,
+        expiry_secs: Option<u64>,
+        preimage_hash_sha256: sha256::Hash,
+        description: Option<String>,
+    ) -> Result<ReverseSwapResult, Error> {
+        self.create_reverse_swap_invoice(
+            amount,
+            expiry_secs,
+            preimage_hash_sha256,
+            None,
+            Some(recipient_address),
+            description,
+        )
+        .await
+    }
+
+    async fn create_reverse_swap_invoice(
+        &self,
+        amount: SwapAmount,
+        expiry_secs: Option<u64>,
+        preimage_hash_sha256: sha256::Hash,
+        preimage: Option<[u8; 32]>,
+        recipient_address: Option<ArkAddress>,
+        description: Option<String>,
+    ) -> Result<ReverseSwapResult, Error> {
         validate_invoice_description(description.as_deref())?;
+        self.validate_reverse_recipient_address(recipient_address.as_ref())?;
 
         let preimage_hash = ripemd160::Hash::hash(preimage_hash_sha256.as_byte_array());
 
@@ -1262,7 +1304,7 @@ where
         let swap = ReverseSwapData {
             id: response.id.clone(),
             status: SwapStatus::Created,
-            preimage: None, // Preimage not known at creation time
+            preimage,
             vhtlc_address: response.lockup_address,
             preimage_hash,
             refund_public_key: response.refund_public_key,
@@ -1273,6 +1315,7 @@ where
             key_derivation_index,
             bolt11: response.invoice.to_string(),
             invoice_expiry: response.invoice.expiry_time().as_secs(),
+            claim_address: recipient_address,
         };
 
         self.swap_storage()
@@ -1440,9 +1483,7 @@ where
             vhtlc_outpoint.clone()
         };
 
-        let (claim_address, _) = self
-            .get_offchain_address()
-            .context("failed to get offchain address")?;
+        let claim_address = self.reverse_claim_address(&swap)?;
         let claim_amount = swap.amount;
 
         let outputs = vec![SendReceiver {
@@ -1692,9 +1733,7 @@ where
             vhtlc_outpoint.clone()
         };
 
-        let (claim_address, _) = self
-            .get_offchain_address()
-            .context("failed to get offchain address")?;
+        let claim_address = self.reverse_claim_address(&swap)?;
         let claim_amount = swap.amount;
 
         let outputs = vec![SendReceiver {
@@ -3906,6 +3945,13 @@ pub struct ReverseSwapData {
     pub bolt11: String,
     /// Invoice expiry in seconds, derived from the BOLT11 invoice itself.
     pub invoice_expiry: u64,
+    /// Arkade address that receives the claimed VHTLC output.
+    ///
+    /// `None` for normal receives and legacy swap data, where the client claims into a fresh local
+    /// offchain address.
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    #[serde(default)]
+    pub claim_address: Option<ArkAddress>,
 }
 
 /// All possible states of a Boltz swap.

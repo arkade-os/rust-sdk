@@ -23,6 +23,11 @@ impl ArkAddress {
     pub fn to_sub_dust_script_pubkey(&self) -> ScriptBuf {
         ScriptBuf::new_op_return(self.vtxo_tap_key.serialize())
     }
+
+    /// Return the Arkade server signer key encoded in this address.
+    pub fn server(&self) -> XOnlyPublicKey {
+        self.server
+    }
 }
 
 impl ArkAddress {
