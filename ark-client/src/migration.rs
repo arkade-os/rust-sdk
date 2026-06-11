@@ -2,7 +2,6 @@ use crate::error::ErrorContext;
 use crate::swap_storage::SwapStorage;
 use crate::utils::timeout_op;
 use crate::utils::unix_now;
-use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use crate::Blockchain;
 use crate::Client;
@@ -323,7 +322,7 @@ pub struct DeprecatedSignerReport {
 impl<B, W, S> Client<B, W, S>
 where
     B: Blockchain,
-    W: BoardingWallet + OnchainWallet,
+    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     /// Sweep VTXOs and boarding outputs minted under a *pre-cutoff* deprecated server signer to
@@ -412,9 +411,22 @@ where
         }
 
         // Build the candidate list for the boarding leg.
+        let boarding_outputs_by_script = self
+            .boarding_outputs()?
+            .into_iter()
+            .map(|boarding_output| (boarding_output.script_pubkey(), boarding_output))
+            .collect::<HashMap<_, _>>();
         let mut boarding_candidates: Vec<MigrationVtxoRef> = Vec::new();
         for input in &boarding_inputs {
-            let signer_pk = input.boarding_output().server_pk();
+            let Some(boarding_output) = boarding_outputs_by_script.get(input.script_pubkey())
+            else {
+                tracing::debug!(
+                    outpoint = %input.outpoint(),
+                    "Skipping boarding input with no contract during migration"
+                );
+                continue;
+            };
+            let signer_pk = boarding_output.server_pk();
             if let Some(cutoff_date) = is_pre_cutoff_deprecated(signer_pk) {
                 boarding_candidates.push(MigrationVtxoRef {
                     outpoint: input.outpoint(),
@@ -538,7 +550,7 @@ where
         // unilateral sweep).
         let mut boarding_aggs: HashMap<XOnlyPublicKey, (usize, Amount)> = HashMap::new();
         let mut seen_outpoints = HashSet::new();
-        for boarding_output in self.inner.wallet.get_boarding_outputs()? {
+        for boarding_output in self.boarding_outputs()? {
             let outpoints = timeout_op(
                 self.inner.timeout,
                 self.blockchain().find_outpoints(boarding_output.address()),

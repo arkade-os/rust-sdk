@@ -16,6 +16,7 @@ use ark_core::batch::sign_batch_tree_tx;
 use ark_core::batch::sign_commitment_psbt;
 use ark_core::batch::Delegate;
 use ark_core::batch::NonceKps;
+use ark_core::contract::SpendPathKind;
 use ark_core::intent;
 use ark_core::script::extract_checksig_pubkeys;
 use ark_core::server;
@@ -1179,8 +1180,21 @@ where
                         // Mark this outpoint as seen
                         seen_outpoints.insert(*outpoint);
 
+                        let script_pubkey = boarding_output.script_pubkey();
+                        let spend_paths = self.spend_paths_for_script(&script_pubkey)?;
+                        let tapscripts = spend_paths
+                            .iter()
+                            .map(|path| path.script.clone())
+                            .collect::<Vec<_>>();
+                        let spend_info =
+                            self.spend_info_for_script(&script_pubkey, SpendPathKind::Forfeit)?;
+
                         boarding_inputs.push(batch::OnChainInput::new(
-                            boarding_output.clone(),
+                            boarding_output.exit_delay(),
+                            script_pubkey,
+                            tapscripts,
+                            spend_info,
+                            boarding_output.owner_pk(),
                             *amount,
                             *outpoint,
                         ));
@@ -1269,14 +1283,14 @@ where
             let boarding_inputs = onchain_inputs.clone().into_iter().map(|o| {
                 intent::Input::new(
                     o.outpoint(),
-                    o.boarding_output().exit_delay(),
+                    o.sequence(),
                     None,
                     TxOut {
                         value: o.amount(),
-                        script_pubkey: o.boarding_output().script_pubkey(),
+                        script_pubkey: o.script_pubkey().clone(),
                     },
-                    o.boarding_output().tapscripts(),
-                    o.boarding_output().forfeit_spend_info(),
+                    o.tapscripts().to_vec(),
+                    o.spend_info().clone(),
                     true,
                     false,
                     Vec::new(),
@@ -1374,7 +1388,7 @@ where
                 let onchain_input = onchain_inputs
                     .iter()
                     .find(|o| {
-                        Some(o.boarding_output().script_pubkey())
+                        Some(o.script_pubkey().clone())
                             == input.witness_utxo.clone().map(|w| w.script_pubkey)
                     })
                     .ok_or_else(|| {
@@ -1383,7 +1397,7 @@ where
                         )
                     })?;
 
-                let owner_pk = onchain_input.boarding_output().owner_pk();
+                let owner_pk = onchain_input.owner_pk();
                 let sig = self
                     .sign_for_pk(&owner_pk, &msg)
                     .map_err(|e| ark_core::Error::ad_hoc(e.to_string()))?;

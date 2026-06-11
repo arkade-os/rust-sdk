@@ -83,17 +83,46 @@ pub struct ContractView {
     pub address: Option<Address>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpendPathKind {
+    Forfeit,
+    Exit,
+    Delegate,
+    Claim,
+    Refund,
+    RefundWithoutReceiver,
+    UnilateralClaim,
+    UnilateralRefund,
+    UnilateralRefundWithoutReceiver,
+    Custom(String),
+}
+
+impl SpendPathKind {
+    pub fn from_vhtlc_name(name: String) -> Self {
+        match name.as_str() {
+            "claim" => Self::Claim,
+            "refund" => Self::Refund,
+            "refund_without_receiver" => Self::RefundWithoutReceiver,
+            "unilateral_claim" => Self::UnilateralClaim,
+            "unilateral_refund" => Self::UnilateralRefund,
+            "unilateral_refund_without_receiver" => Self::UnilateralRefundWithoutReceiver,
+            _ => Self::Custom(name),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpendPath {
-    pub name: String,
+    pub kind: SpendPathKind,
     pub script: ScriptBuf,
     pub control_block: Option<ControlBlock>,
 }
 
 impl SpendPath {
-    pub fn new(name: impl Into<String>, script: ScriptBuf, control_block: ControlBlock) -> Self {
+    pub fn new(kind: SpendPathKind, script: ScriptBuf, control_block: ControlBlock) -> Self {
         Self {
-            name: name.into(),
+            kind,
             script,
             control_block: Some(control_block),
         }
@@ -156,8 +185,12 @@ impl ContractSpec for DefaultVtxoContract {
         let (forfeit_script, forfeit_control_block) = vtxo.forfeit_spend_info()?;
         let (exit_script, exit_control_block) = vtxo.exit_spend_info()?;
         Ok(vec![
-            SpendPath::new("forfeit", forfeit_script, forfeit_control_block),
-            SpendPath::new("exit", exit_script, exit_control_block),
+            SpendPath::new(
+                SpendPathKind::Forfeit,
+                forfeit_script,
+                forfeit_control_block,
+            ),
+            SpendPath::new(SpendPathKind::Exit, exit_script, exit_control_block),
         ])
     }
 }
@@ -199,9 +232,17 @@ impl ContractSpec for DelegateVtxoContract {
         let (exit_script, exit_control_block) = vtxo.exit_spend_info()?;
         let (delegate_script, delegate_control_block) = vtxo.delegate_spend_info()?;
         Ok(vec![
-            SpendPath::new("forfeit", forfeit_script, forfeit_control_block),
-            SpendPath::new("exit", exit_script, exit_control_block),
-            SpendPath::new("delegate", delegate_script, delegate_control_block),
+            SpendPath::new(
+                SpendPathKind::Forfeit,
+                forfeit_script,
+                forfeit_control_block,
+            ),
+            SpendPath::new(SpendPathKind::Exit, exit_script, exit_control_block),
+            SpendPath::new(
+                SpendPathKind::Delegate,
+                delegate_script,
+                delegate_control_block,
+            ),
         ])
     }
 }
@@ -242,8 +283,12 @@ impl ContractSpec for BoardingContract {
         let (forfeit_script, forfeit_control_block) = boarding_output.forfeit_spend_info();
         let (exit_script, exit_control_block) = boarding_output.exit_spend_info();
         Ok(vec![
-            SpendPath::new("forfeit", forfeit_script, forfeit_control_block),
-            SpendPath::new("exit", exit_script, exit_control_block),
+            SpendPath::new(
+                SpendPathKind::Forfeit,
+                forfeit_script,
+                forfeit_control_block,
+            ),
+            SpendPath::new(SpendPathKind::Exit, exit_script, exit_control_block),
         ])
     }
 }
@@ -289,7 +334,7 @@ impl ContractSpec for VhtlcContract {
                     .taproot_spend_info()
                     .control_block(&(tapscript.clone(), bitcoin::taproot::LeafVersion::TapScript));
                 SpendPath {
-                    name,
+                    kind: SpendPathKind::from_vhtlc_name(name),
                     script: tapscript,
                     control_block,
                 }

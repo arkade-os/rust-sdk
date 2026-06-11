@@ -433,7 +433,7 @@ async fn run_watcher_loop<B, W, S>(
 async fn run_migration_arm<B, W, S>(client: &Client<B, W, S>, stop_rx: &mut watch::Receiver<bool>)
 where
     B: Blockchain + Send + Sync + 'static,
-    W: BoardingWallet + OnchainWallet + Send + Sync + 'static,
+    W: OnchainWallet + Send + Sync + 'static,
     S: SwapStorage + 'static,
 {
     // Consecutive-failure count drives the exponential cooldown; `0` means healthy (use the base

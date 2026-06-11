@@ -4,6 +4,7 @@ use crate::wallet::OnchainWallet;
 use crate::Blockchain;
 use crate::Client;
 use crate::Error;
+use ark_core::contract::SpendPathKind;
 use ark_core::unilateral_exit;
 use ark_core::ExplorerUtxo;
 use bitcoin::Amount;
@@ -73,8 +74,14 @@ where
                 ) {
                     tracing::debug!(?outpoint, %amount, ?boarding_output, "Selected boarding output");
 
+                    let script_pubkey = boarding_output.script_pubkey();
+                    let spend_info =
+                        client.spend_info_for_script(&script_pubkey, SpendPathKind::Exit)?;
+
                     if selected_boarding_outputs.insert(unilateral_exit::OnChainInput::new(
-                        boarding_output.clone(),
+                        boarding_output.exit_delay(),
+                        script_pubkey,
+                        spend_info,
                         *amount,
                         *outpoint,
                     )) {

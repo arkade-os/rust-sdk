@@ -10,6 +10,7 @@ use ark_core::contract::BoardingContract;
 use ark_core::contract::ContractContext;
 use ark_core::contract::ContractState;
 use ark_core::contract::ContractType;
+use ark_core::contract::SpendPathKind;
 use ark_core::history;
 use ark_core::history::generate_incoming_vtxo_transaction_history;
 use ark_core::history::generate_outgoing_vtxo_transaction_history;
@@ -37,6 +38,7 @@ use bitcoin::secp256k1::Message;
 use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
+use bitcoin::Script;
 use bitcoin::ScriptBuf;
 use bitcoin::Transaction;
 use bitcoin::Txid;
@@ -1051,26 +1053,42 @@ where
     ///
     /// Covers the current signer plus every deprecated signer, each paired with
     /// [`ark_core::candidate_exit_delays`] (the advertised boarding-exit delay plus, on mainnet,
-    /// the legacy delay). Calling [`BoardingWallet::new_boarding_output`] writes the row to the
-    /// wallet's store; re-persisting the same boarding output is a harmless overwrite (the store
-    /// keys rows by [`BoardingOutput`] identity), so this is safe to call repeatedly — at connect
-    /// time and again from [`Client::get_boarding_addresses`].
+    /// the legacy delay). Re-persisting the same boarding contract is idempotent, so this is safe
+    /// to call repeatedly — at connect time and again from [`Client::get_boarding_addresses`].
     fn persist_watch_boarding_outputs(
         &self,
         server_info: &server::Info,
     ) -> Result<Vec<BoardingOutput>, Error> {
         let candidate_delays =
             ark_core::candidate_exit_delays(server_info.boarding_exit_delay, server_info.network)?;
+        let owner = self
+            .next_keypair(KeypairIndex::LastUnused)?
+            .x_only_public_key()
+            .0;
+        let key_index = self.derivation_index_for_pk(&owner);
+        let ctx = ContractContext::new(server_info.network);
+        let state = self
+            .state
+            .read()
+            .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+        let mut manager = state
+            .contract_manager
+            .lock()
+            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?;
 
         let mut outputs = Vec::new();
         for server_pk in server_info.all_server_keys() {
             for exit_delay in &candidate_delays {
-                let boarding_output = self.inner.wallet.new_boarding_output(
-                    server_pk,
-                    *exit_delay,
-                    server_info.network,
-                )?;
-                outputs.push(boarding_output);
+                let contract = BoardingContract {
+                    server: server_pk.into(),
+                    owner,
+                    exit_delay: *exit_delay,
+                };
+                let stored = manager.insert_or_get(contract, ContractState::Active, key_index)?;
+                let contract = manager
+                    .get_typed::<BoardingContract>(&stored.script_pubkey)?
+                    .ok_or_else(|| Error::ad_hoc("missing boarding contract"))?;
+                outputs.push(contract.boarding_output(&ctx)?);
             }
         }
 
@@ -1430,6 +1448,16 @@ where
             .read()
             .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
         let ctx = ContractContext::new(state.server_info.network);
+        self.boarding_contracts_with_state(&state)?
+            .into_iter()
+            .map(|contract| contract.boarding_output(&ctx).map_err(Into::into))
+            .collect()
+    }
+
+    fn boarding_contracts_with_state(
+        &self,
+        state: &ServerState,
+    ) -> Result<Vec<BoardingContract>, Error> {
         let manager = state
             .contract_manager
             .lock()
@@ -1440,11 +1468,41 @@ where
             .map(|stored| {
                 manager
                     .get_typed::<BoardingContract>(&stored.script_pubkey)?
-                    .ok_or_else(|| Error::ad_hoc("missing boarding contract"))?
-                    .boarding_output(&ctx)
-                    .map_err(Into::into)
+                    .ok_or_else(|| Error::ad_hoc("missing boarding contract"))
             })
             .collect()
+    }
+
+    fn spend_paths_for_script(
+        &self,
+        script_pubkey: &Script,
+    ) -> Result<Vec<ark_core::contract::SpendPath>, Error> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+        let paths = state
+            .contract_manager
+            .lock()
+            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?
+            .spendable_paths_for_script(script_pubkey)?;
+        Ok(paths)
+    }
+
+    fn spend_info_for_script(
+        &self,
+        script_pubkey: &Script,
+        kind: SpendPathKind,
+    ) -> Result<(ScriptBuf, bitcoin::taproot::ControlBlock), Error> {
+        let path = self
+            .spend_paths_for_script(script_pubkey)?
+            .into_iter()
+            .find(|path| path.kind == kind)
+            .ok_or_else(|| Error::ad_hoc(format!("missing {kind:?} spend path")))?;
+        let control_block = path.control_block.ok_or_else(|| {
+            Error::ad_hoc(format!("missing control block for {kind:?} spend path"))
+        })?;
+        Ok((path.script, control_block))
     }
 
     fn derivation_index_for_pk(&self, pk: &XOnlyPublicKey) -> Option<u32> {
@@ -1644,31 +1702,6 @@ mod digest_guard_tests {
             let secret_key = SecretKey::from_slice(&[2; 32]).unwrap();
             let keypair = Keypair::from_secret_key(&secp, &secret_key);
             Self { keypair, secp }
-        }
-    }
-
-    impl BoardingWallet for DummyWallet {
-        fn new_boarding_output(
-            &self,
-            server_pubkey: XOnlyPublicKey,
-            exit_delay: bitcoin::Sequence,
-            network: Network,
-        ) -> Result<BoardingOutput, Error> {
-            let owner = self.keypair.x_only_public_key().0;
-            BoardingOutput::new(&self.secp, server_pubkey, owner, exit_delay, network)
-                .map_err(Into::into)
-        }
-
-        fn get_boarding_outputs(&self) -> Result<Vec<BoardingOutput>, Error> {
-            Ok(Vec::new())
-        }
-
-        fn sign_for_pk(
-            &self,
-            _pk: &XOnlyPublicKey,
-            msg: &bitcoin::secp256k1::Message,
-        ) -> Result<bitcoin::secp256k1::schnorr::Signature, Error> {
-            Ok(self.secp.sign_schnorr_no_aux_rand(msg, &self.keypair))
         }
     }
 
@@ -1958,6 +1991,8 @@ mod digest_guard_tests {
         inner.connect().await.unwrap();
 
         let initial_info: server::Info = info_response("stale-digest").try_into().unwrap();
+        let mut contract_manager = ContractManager::in_memory(initial_info.network);
+        contract_manager.register_builtins().unwrap();
         let cached_state = Arc::new(RwLock::new(ServerState {
             server_info: initial_info,
             fee_estimator: build_fee_estimator(&info_response("stale-digest").try_into().unwrap())
@@ -1965,6 +2000,7 @@ mod digest_guard_tests {
             server_info_refreshed_at: Instant::now()
                 - DEFAULT_SERVER_INFO_TTL
                 - Duration::from_secs(1),
+            contract_manager: Mutex::new(contract_manager),
         }));
         let hook_state = cached_state.clone();
         inner.set_info_refresh_hook(move |server_info| {
