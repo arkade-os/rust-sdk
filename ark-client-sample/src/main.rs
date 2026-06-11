@@ -1,9 +1,6 @@
 #![allow(clippy::print_stdout)]
 #![allow(clippy::large_enum_variant)]
 
-mod common;
-
-use crate::common::InMemoryDb;
 use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
@@ -453,14 +450,8 @@ async fn main() -> Result<()> {
             let seed = mnemonic.to_seed("");
             let xpriv = Xpriv::new_master(Network::Regtest, &seed)?;
 
-            let db = InMemoryDb::default();
-            let wallet = Wallet::new_from_xpriv(
-                xpriv,
-                secp,
-                Network::Regtest,
-                config.esplora_url.as_str(),
-                db,
-            )?;
+            let wallet =
+                Wallet::new_from_xpriv(xpriv, Network::Regtest, config.esplora_url.as_str())?;
             let wallet = Arc::new(wallet);
 
             let client_config = OfflineClientConfig {
@@ -490,8 +481,7 @@ async fn main() -> Result<()> {
             let sk = SecretKey::from_str(seed.trim())?;
             let kp = sk.keypair(&secp);
 
-            let db = InMemoryDb::default();
-            let wallet = Wallet::new(kp, secp, Network::Regtest, config.esplora_url.as_str(), db)?;
+            let wallet = Wallet::new(kp, Network::Regtest, config.esplora_url.as_str())?;
             let wallet = Arc::new(wallet);
 
             let client_config = OfflineClientConfig {
@@ -522,7 +512,7 @@ async fn main() -> Result<()> {
 
 async fn run_command(
     command: Commands,
-    client: ark_client::Client<EsploraClient, Wallet<InMemoryDb>, SqliteSwapStorage>,
+    client: ark_client::Client<EsploraClient, Wallet, SqliteSwapStorage>,
     esplora_client: Arc<EsploraClient>,
 ) -> Result<()> {
     let client = Arc::new(client);

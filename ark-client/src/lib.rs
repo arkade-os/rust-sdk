@@ -184,13 +184,13 @@ impl Default for OfflineClientConfig {
 /// # use ark_client::OfflineClient;
 /// # use ark_client::OfflineClientConfig;
 /// # use bitcoin::key::Keypair;
-/// # use bitcoin::secp256k1::{Message, SecretKey};
+/// # use bitcoin::secp256k1::SecretKey;
 /// # use std::sync::Arc;
-/// # use bitcoin::{Address, Amount, FeeRate, Network, Psbt, Transaction, Txid, XOnlyPublicKey};
-/// # use bitcoin::secp256k1::schnorr::Signature;
-/// # use ark_client::wallet::{Balance, BoardingWallet, OnchainWallet, Persistence};
+/// # use bitcoin::{Address, Amount, FeeRate, Psbt, Transaction, Txid};
+/// # use ark_client::wallet::{Balance, OnchainWallet};
 /// # use ark_client::InMemorySwapStorage;
-/// # use ark_core::{BoardingOutput, UtxoCoinSelection, ExplorerUtxo};
+/// # use ark_core::{UtxoCoinSelection, ExplorerUtxo};
+/// # use ark_client::StaticKeyProvider;
 ///
 /// struct MyBlockchain {}
 /// #
@@ -261,48 +261,6 @@ impl Default for OfflineClientConfig {
 /// # }
 /// #
 ///
-/// struct InMemoryDb {}
-/// # impl Persistence for InMemoryDb {
-/// #
-/// #     fn save_boarding_output(
-/// #         &self,
-/// #         sk: SecretKey,
-/// #         boarding_output: BoardingOutput,
-/// #     ) -> Result<(), Error> {
-/// #       unimplemented!()
-/// #     }
-/// #
-/// #     fn load_boarding_outputs(&self) -> Result<Vec<BoardingOutput>, Error> {
-/// #           unimplemented!()
-/// #     }
-/// #
-/// #     fn sk_for_pk(&self, pk: &XOnlyPublicKey) -> Result<SecretKey, Error> {
-/// #         unimplemented!()
-/// #     }
-/// # }
-/// #
-/// #
-/// # impl BoardingWallet for MyWallet
-/// # where
-/// # {
-/// #     fn new_boarding_output(
-/// #         &self,
-/// #         server_pk: XOnlyPublicKey,
-/// #         exit_delay: bitcoin::Sequence,
-/// #         network: Network,
-/// #     ) -> Result<BoardingOutput, Error> {
-/// #         unimplemented!()
-/// #     }
-/// #
-/// #     fn get_boarding_outputs(&self) -> Result<Vec<BoardingOutput>, Error> {
-/// #         unimplemented!()
-/// #     }
-/// #
-/// #     fn sign_for_pk(&self, pk: &XOnlyPublicKey, msg: &Message) -> Result<Signature, Error> {
-/// #         unimplemented!()
-/// #     }
-/// # }
-/// #
 /// // Initialize the client with a static keypair
 /// async fn init_client_with_keypair() -> Result<Client<MyBlockchain, MyWallet, InMemorySwapStorage>, ark_client::Error> {
 ///     // Create a keypair for signing transactions
