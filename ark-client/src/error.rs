@@ -361,7 +361,11 @@ where
 
 impl From<ark_grpc::Error> for Error {
     fn from(value: ark_grpc::Error) -> Self {
-        Self::ark_server(value)
+        if value.is_server_info_changed() {
+            Self::server_info_changed(Self::ark_server(value))
+        } else {
+            Self::ark_server(value)
+        }
     }
 }
 

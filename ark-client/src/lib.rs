@@ -641,14 +641,18 @@ where
         );
 
         let fee_estimator = build_fee_estimator(&server_info)?;
+        let state = Arc::new(RwLock::new(ServerState {
+            server_info,
+            fee_estimator,
+        }));
+        let hook_state = state.clone();
+        self.network_client
+            .set_info_refresh_hook(move |server_info| {
+                update_server_state(&hook_state, server_info)
+                    .map_err(|err| Box::new(err) as Box<dyn std::error::Error + Send + Sync>)
+            });
 
-        let client = Client {
-            inner: self,
-            state: Arc::new(RwLock::new(ServerState {
-                server_info,
-                fee_estimator,
-            })),
-        };
+        let client = Client { inner: self, state };
 
         if let Err(error) = client.discover_keys(DEFAULT_GAP_LIMIT).await {
             tracing::warn!(?error, "Failed during key discovery");
@@ -673,213 +677,17 @@ fn build_fee_estimator(server_info: &server::Info) -> Result<ark_fees::Estimator
     ark_fees::Estimator::new(fee_estimator_config).map_err(Error::ark_server)
 }
 
-#[derive(Clone)]
-pub struct GuardedNetworkClient {
-    inner: ark_grpc::Client,
-    state: Arc<RwLock<ServerState>>,
-}
-
-impl GuardedNetworkClient {
-    fn set_server_info(&self, server_info: server::Info) -> Result<(), Error> {
-        let fee_estimator = build_fee_estimator(&server_info)?;
-        let mut state = self
-            .state
-            .write()
-            .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
-        state.server_info = server_info;
-        state.fee_estimator = fee_estimator;
-        Ok(())
-    }
-
-    async fn guarded<T>(
-        &self,
-        op: impl Future<Output = Result<T, ark_grpc::Error>>,
-    ) -> Result<T, Error> {
-        match op.await {
-            Ok(value) => Ok(value),
-            Err(err) if err.is_digest_mismatch() => {
-                let original = Error::ark_server(err);
-                if let Err(refresh_err) = self.get_info_unguarded().await {
-                    return Err(refresh_err.context(Error::server_info_changed(original)));
-                }
-                Err(Error::server_info_changed(original))
-            }
-            Err(err) => Err(Error::ark_server(err)),
-        }
-    }
-
-    /// Bootstrap request that intentionally bypasses digest-mismatch guarding.
-    pub async fn get_info_unguarded(&self) -> Result<server::Info, Error> {
-        let mut inner = self.inner.clone();
-        let server_info = inner.get_info().await.map_err(Error::ark_server)?;
-        self.set_server_info(server_info.clone())?;
-        Ok(server_info)
-    }
-
-    pub async fn get_info(&self) -> Result<server::Info, Error> {
-        self.get_info_unguarded().await
-    }
-
-    pub async fn list_vtxos(
-        &self,
-        request: GetVtxosRequest,
-    ) -> Result<ark_grpc::ListVtxosResponse, Error> {
-        self.guarded(self.inner.list_vtxos(request)).await
-    }
-
-    pub async fn register_intent(&self, intent: ark_core::intent::Intent) -> Result<String, Error> {
-        self.guarded(self.inner.register_intent(intent)).await
-    }
-
-    pub async fn submit_offchain_transaction_request(
-        &self,
-        ark_tx: bitcoin::Psbt,
-        checkpoint_txs: Vec<bitcoin::Psbt>,
-    ) -> Result<server::SubmitOffchainTxResponse, Error> {
-        self.guarded(
-            self.inner
-                .submit_offchain_transaction_request(ark_tx, checkpoint_txs),
-        )
-        .await
-    }
-
-    pub async fn finalize_offchain_transaction(
-        &self,
-        txid: Txid,
-        checkpoint_txs: Vec<bitcoin::Psbt>,
-    ) -> Result<server::FinalizeOffchainTxResponse, Error> {
-        self.guarded(
-            self.inner
-                .finalize_offchain_transaction(txid, checkpoint_txs),
-        )
-        .await
-    }
-
-    pub async fn get_pending_tx(
-        &self,
-        intent: ark_core::intent::Intent,
-    ) -> Result<Vec<server::PendingTx>, Error> {
-        self.guarded(self.inner.get_pending_tx(intent)).await
-    }
-
-    pub async fn confirm_registration(&self, intent_id: String) -> Result<(), Error> {
-        self.guarded(self.inner.confirm_registration(intent_id))
-            .await
-    }
-
-    pub async fn submit_tree_nonces(
-        &self,
-        batch_id: &str,
-        cosigner_pubkey: bitcoin::secp256k1::PublicKey,
-        pub_nonce_tree: server::NoncePks,
-    ) -> Result<(), Error> {
-        self.guarded(
-            self.inner
-                .submit_tree_nonces(batch_id, cosigner_pubkey, pub_nonce_tree),
-        )
-        .await
-    }
-
-    pub async fn submit_tree_signatures(
-        &self,
-        batch_id: &str,
-        cosigner_pk: bitcoin::secp256k1::PublicKey,
-        partial_sig_tree: server::PartialSigTree,
-    ) -> Result<(), Error> {
-        self.guarded(
-            self.inner
-                .submit_tree_signatures(batch_id, cosigner_pk, partial_sig_tree),
-        )
-        .await
-    }
-
-    pub async fn submit_signed_forfeit_txs(
-        &self,
-        signed_forfeit_txs: Vec<bitcoin::Psbt>,
-        signed_commitment_tx: Option<bitcoin::Psbt>,
-    ) -> Result<(), Error> {
-        self.guarded(
-            self.inner
-                .submit_signed_forfeit_txs(signed_forfeit_txs, signed_commitment_tx),
-        )
-        .await
-    }
-
-    pub async fn get_event_stream(
-        &self,
-        topics: Vec<String>,
-    ) -> Result<impl Stream<Item = Result<server::StreamEvent, ark_grpc::Error>> + Unpin, Error>
-    {
-        self.guarded(self.inner.get_event_stream(topics)).await
-    }
-
-    pub async fn get_tx_stream(
-        &self,
-    ) -> Result<
-        impl Stream<Item = Result<server::StreamTransactionData, ark_grpc::Error>> + Unpin,
-        Error,
-    > {
-        self.guarded(self.inner.get_tx_stream()).await
-    }
-
-    pub async fn get_vtxo_chain(
-        &self,
-        outpoint: Option<OutPoint>,
-        size_and_index: Option<(i32, i32)>,
-    ) -> Result<VtxoChainResponse, Error> {
-        self.guarded(self.inner.get_vtxo_chain(outpoint, size_and_index))
-            .await
-    }
-
-    pub async fn get_virtual_txs(
-        &self,
-        txids: Vec<String>,
-        size_and_index: Option<(i32, i32)>,
-    ) -> Result<server::VirtualTxsResponse, Error> {
-        self.guarded(self.inner.get_virtual_txs(txids, size_and_index))
-            .await
-    }
-
-    pub async fn subscribe_to_scripts(
-        &self,
-        scripts: Vec<ArkAddress>,
-        subscription_id: Option<String>,
-    ) -> Result<String, Error> {
-        self.guarded(self.inner.subscribe_to_scripts(scripts, subscription_id))
-            .await
-    }
-
-    pub async fn unsubscribe_from_scripts(
-        &self,
-        scripts: Vec<ArkAddress>,
-        subscription_id: String,
-    ) -> Result<(), Error> {
-        self.guarded(
-            self.inner
-                .unsubscribe_from_scripts(scripts, subscription_id),
-        )
-        .await
-    }
-
-    pub async fn get_subscription(
-        &self,
-        subscription_id: String,
-    ) -> Result<impl Stream<Item = Result<SubscriptionResponse, ark_grpc::Error>> + Unpin, Error>
-    {
-        self.guarded(self.inner.get_subscription(subscription_id))
-            .await
-    }
-
-    pub async fn estimate_fees(
-        &self,
-        intent: ark_core::intent::Intent,
-    ) -> Result<bitcoin::SignedAmount, Error> {
-        self.guarded(self.inner.estimate_fees(intent)).await
-    }
-
-    pub async fn get_asset(&self, asset_id: AssetId) -> Result<server::AssetInfo, Error> {
-        self.guarded(self.inner.get_asset(asset_id)).await
-    }
+fn update_server_state(
+    state: &Arc<RwLock<ServerState>>,
+    server_info: server::Info,
+) -> Result<(), Error> {
+    let fee_estimator = build_fee_estimator(&server_info)?;
+    let mut state = state
+        .write()
+        .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+    state.server_info = server_info;
+    state.fee_estimator = fee_estimator;
+    Ok(())
 }
 
 impl<B, W, S, K> Client<B, W, S, K>
@@ -1442,11 +1250,8 @@ where
         Ok(self.server_info()?.dust)
     }
 
-    pub fn network_client(&self) -> GuardedNetworkClient {
-        GuardedNetworkClient {
-            inner: self.inner.network_client.clone(),
-            state: self.state.clone(),
-        }
+    pub fn network_client(&self) -> ark_grpc::Client {
+        self.inner.network_client.clone()
     }
 
     /// Fetch all VTXOs for a request, handling pagination internally.
@@ -1803,18 +1608,18 @@ mod digest_guard_tests {
         inner.connect().await.unwrap();
 
         let initial_info: server::Info = info_response("stale-digest").try_into().unwrap();
-        let guarded = GuardedNetworkClient {
-            inner,
-            state: Arc::new(RwLock::new(ServerState {
-                server_info: initial_info,
-                fee_estimator: build_fee_estimator(
-                    &info_response("stale-digest").try_into().unwrap(),
-                )
+        let cached_state = Arc::new(RwLock::new(ServerState {
+            server_info: initial_info,
+            fee_estimator: build_fee_estimator(&info_response("stale-digest").try_into().unwrap())
                 .unwrap(),
-            })),
-        };
+        }));
+        let hook_state = cached_state.clone();
+        inner.set_info_refresh_hook(move |server_info| {
+            update_server_state(&hook_state, server_info)
+                .map_err(|err| Box::new(err) as Box<dyn std::error::Error + Send + Sync>)
+        });
 
-        let err = match guarded
+        let err = match inner
             .list_vtxos(GetVtxosRequest::new_for_outpoints(&[OutPoint::null()]))
             .await
         {
@@ -1823,10 +1628,11 @@ mod digest_guard_tests {
         };
 
         assert!(err.is_server_info_changed());
+        assert!(Error::from(err).is_server_info_changed());
         assert_eq!(state.list_vtxos_calls.load(Ordering::SeqCst), 1);
         assert_eq!(state.get_info_calls.load(Ordering::SeqCst), 1);
         assert_eq!(
-            guarded.state.read().unwrap().server_info.digest,
+            cached_state.read().unwrap().server_info.digest,
             "fresh-digest"
         );
     }

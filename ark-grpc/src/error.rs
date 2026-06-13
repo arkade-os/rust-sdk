@@ -20,6 +20,7 @@ enum Kind {
     Conversion,
     EventStreamDisconnect,
     EventStream,
+    ServerInfoChanged,
 }
 
 impl Error {
@@ -58,6 +59,14 @@ impl Error {
         Error::new(Kind::EventStream).with(source)
     }
 
+    pub(crate) fn server_info_changed(source: impl Into<Source>) -> Self {
+        Error::new(Kind::ServerInfoChanged).with(source)
+    }
+
+    pub fn is_server_info_changed(&self) -> bool {
+        matches!(self.inner.kind, Kind::ServerInfoChanged)
+    }
+
     /// Returns `true` if the server rejected the request because the SDK
     /// version is too old.
     pub fn is_version_mismatch(&self) -> bool {
@@ -91,6 +100,7 @@ impl Error {
             Kind::Conversion => "failed to convert between types",
             Kind::EventStreamDisconnect => "got disconnected from event stream",
             Kind::EventStream => "error via event stream",
+            Kind::ServerInfoChanged => "Ark server info changed while processing the request. Server info was refreshed, but the failed operation was not retried. Rebuild the request and retry if safe",
         }
     }
 }
