@@ -306,7 +306,7 @@ where
         }
 
         if !asset_changes.is_empty() {
-            btc_needed += self.server_info.dust;
+            btc_needed += self.server_info()?.dust;
         }
 
         let btc_shortfall = btc_needed.checked_sub(btc_provided).unwrap_or(Amount::ZERO);
@@ -318,7 +318,7 @@ where
                 .cloned()
                 .collect();
 
-            let btc_coins = select_vtxos(available, btc_shortfall, self.server_info.dust, true)
+            let btc_coins = select_vtxos(available, btc_shortfall, self.server_info()?.dust, true)
                 .map_err(Error::from)
                 .context("failed to select BTC coins for asset transfer")?;
 
@@ -504,7 +504,7 @@ where
         Self::validate_selected_inputs_cover_receivers(
             &vtxo_inputs,
             &receivers,
-            self.server_info.dust,
+            self.server_info()?.dust,
         )?;
 
         let pending_tx = self.build_and_submit(vtxo_inputs, receivers).await?;
@@ -563,9 +563,14 @@ where
         let OffchainTransactions {
             ark_tx,
             checkpoint_txs,
-        } = build_asset_send_transactions(&receivers, &change_address, &inputs, &self.server_info)
-            .map_err(Error::from)
-            .context("failed to build offchain asset-send transactions")?;
+        } = build_asset_send_transactions(
+            &receivers,
+            &change_address,
+            &inputs,
+            &self.server_info()?,
+        )
+        .map_err(Error::from)
+        .context("failed to build offchain asset-send transactions")?;
 
         self.submit_built_offchain_send(ark_tx, checkpoint_txs, change_address_vtxo.owner_pk())
             .await

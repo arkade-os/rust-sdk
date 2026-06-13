@@ -26,6 +26,8 @@ enum Kind {
     CoinSelect(CoinSelectError),
     /// An error related to actions within the wallet.
     Wallet(WalletError),
+    /// Ark server info changed while processing a request.
+    ServerInfoChanged(ServerInfoChangedError),
     /// An error thrown by a user of this library
     Consumer(ConsumerError),
 }
@@ -54,6 +56,9 @@ struct CoinSelectError {
 struct WalletError {
     source: Source,
 }
+
+#[derive(Debug)]
+struct ServerInfoChangedError;
 
 #[derive(Debug)]
 struct ConsumerError {
@@ -95,6 +100,25 @@ impl Error {
         Error::new(Kind::Consumer(ConsumerError {
             source: source.into(),
         }))
+    }
+
+    pub(crate) fn server_info_changed(source: impl Into<Error>) -> Self {
+        source
+            .into()
+            .context(Error::new(Kind::ServerInfoChanged(ServerInfoChangedError)))
+    }
+
+    pub fn is_server_info_changed(&self) -> bool {
+        let mut err = self;
+        loop {
+            if matches!(err.inner.kind, Kind::ServerInfoChanged(_)) {
+                return true;
+            }
+            err = match err.inner.cause.as_ref() {
+                Some(err) => err,
+                None => return false,
+            };
+        }
     }
 
     /// Returns `true` if this error chain contains an arkd digest mismatch.
@@ -177,6 +201,7 @@ impl fmt::Display for Kind {
             Kind::Core(ref err) => err.fmt(f),
             Kind::CoinSelect(ref err) => err.fmt(f),
             Kind::Wallet(ref err) => err.fmt(f),
+            Kind::ServerInfoChanged(ref err) => err.fmt(f),
             Kind::Consumer(ref err) => err.fmt(f),
         }
     }
@@ -209,6 +234,12 @@ impl fmt::Display for CoinSelectError {
 impl fmt::Display for WalletError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.source.fmt(f)
+    }
+}
+
+impl fmt::Display for ServerInfoChangedError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Ark server info changed while processing the request. Server info was refreshed, but the failed operation was not retried. Rebuild the request and retry if safe")
     }
 }
 

@@ -56,8 +56,8 @@ where
 
         let selected_coins = select_vtxos(
             spendable,
-            self.server_info.dust,
-            self.server_info.dust,
+            self.server_info()?.dust,
+            self.server_info()?.dust,
             true,
         )
         .map_err(Error::from)
@@ -74,7 +74,7 @@ where
             &own_address,
             &change_address,
             &issuance_inputs,
-            &self.server_info,
+            &self.server_info()?,
             amount,
             control_asset_config,
             metadata,
@@ -131,7 +131,7 @@ where
         let mut selected = control_coins;
         let btc_provided: Amount = selected.iter().map(|coin| coin.amount).sum();
         let btc_shortfall = self
-            .server_info
+            .server_info()?
             .dust
             .checked_sub(btc_provided)
             .unwrap_or(Amount::ZERO);
@@ -143,7 +143,7 @@ where
                 .cloned()
                 .collect();
 
-            let btc_coins = select_vtxos(available, btc_shortfall, self.server_info.dust, true)
+            let btc_coins = select_vtxos(available, btc_shortfall, self.server_info()?.dust, true)
                 .map_err(Error::from)
                 .context("failed to select BTC coins for reissuance")?;
 
@@ -165,7 +165,7 @@ where
             &self_address,
             &change_address,
             &reissuance_inputs,
-            &self.server_info,
+            &self.server_info()?,
             asset_id,
             control_asset_id,
             amount,
@@ -211,9 +211,9 @@ where
         }
 
         let btc_provided: Amount = selected.iter().map(|coin| coin.amount).sum();
-        let mut btc_needed = self.server_info.dust;
+        let mut btc_needed = self.server_info()?.dust;
         if carries_asset_change {
-            btc_needed += self.server_info.dust;
+            btc_needed += self.server_info()?.dust;
         }
 
         let btc_shortfall = btc_needed.checked_sub(btc_provided).unwrap_or(Amount::ZERO);
@@ -224,7 +224,7 @@ where
                 .cloned()
                 .collect();
 
-            let btc_coins = select_vtxos(available, btc_shortfall, self.server_info.dust, true)
+            let btc_coins = select_vtxos(available, btc_shortfall, self.server_info()?.dust, true)
                 .map_err(Error::from)
                 .context("failed to select BTC coins for asset burn")?;
 
@@ -243,7 +243,7 @@ where
             &own_address,
             &change_address,
             &burn_inputs,
-            &self.server_info,
+            &self.server_info()?,
             asset_id,
             amount,
         )
