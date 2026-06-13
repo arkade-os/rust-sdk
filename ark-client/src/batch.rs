@@ -1143,7 +1143,7 @@ where
                 to_address,
                 to_amount,
             } => {
-                if to_amount < self.server_info()?.dust {
+                if to_amount < dust {
                     return Err(Error::ad_hoc(format!(
                         "cannot settle into sub-dust VTXO: {to_amount} < {dust}"
                     )));
