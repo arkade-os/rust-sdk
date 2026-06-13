@@ -55,6 +55,7 @@ use ark_core::server::VirtualTxOutPoint;
 use ark_core::server::VirtualTxsResponse;
 use ark_core::server::VtxoChain;
 use ark_core::server::VtxoChains;
+use ark_core::server::TARGET_ARKD_VERSION;
 use ark_core::ArkAddress;
 use ark_core::TxGraphChunk;
 use async_stream::stream;
@@ -68,34 +69,81 @@ use bitcoin::ScriptBuf;
 use bitcoin::SignedAmount;
 use bitcoin::Transaction;
 use bitcoin::Txid;
+use futures::Future;
 use futures::Stream;
 use futures::StreamExt;
 use futures::TryStreamExt;
 use std::collections::HashMap;
+use std::error::Error as StdError;
 use std::fmt;
 use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::RwLock;
 
-#[derive(Clone, Copy)]
-struct VersionInterceptor;
+#[derive(Clone, Default)]
+struct HeaderState {
+    digest: Arc<RwLock<Option<String>>>,
+}
 
-impl tonic::service::Interceptor for VersionInterceptor {
+impl HeaderState {
+    fn set_digest(&self, digest: String) {
+        let digest = (!digest.is_empty()).then_some(digest);
+        match self.digest.write() {
+            Ok(mut guard) => *guard = digest,
+            Err(poisoned) => {
+                log::warn!("digest header state lock poisoned while updating; recovering");
+                *poisoned.into_inner() = digest;
+            }
+        }
+    }
+
+    fn digest(&self) -> Option<String> {
+        match self.digest.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => {
+                log::warn!("digest header state lock poisoned while reading; recovering");
+                poisoned.into_inner().clone()
+            }
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct HeaderInterceptor {
+    state: HeaderState,
+}
+
+impl tonic::service::Interceptor for HeaderInterceptor {
     fn call(&mut self, mut req: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
-        req.metadata_mut().insert(
+        let metadata = req.metadata_mut();
+        metadata.insert(
             "x-build-version",
-            tonic::metadata::MetadataValue::from_static(env!("CARGO_PKG_VERSION")),
+            tonic::metadata::MetadataValue::from_static(TARGET_ARKD_VERSION),
         );
+
+        if let Some(digest) = self.state.digest() {
+            if let Ok(value) = tonic::metadata::MetadataValue::try_from(digest.as_str()) {
+                metadata.insert("x-digest", value);
+            }
+        }
+
         Ok(req)
     }
 }
 
 type InterceptedChannel =
-    tonic::codegen::InterceptedService<tonic::transport::Channel, VersionInterceptor>;
+    tonic::codegen::InterceptedService<tonic::transport::Channel, HeaderInterceptor>;
+
+type InfoRefreshHook =
+    Arc<dyn Fn(Info) -> Result<(), Box<dyn StdError + Send + Sync + 'static>> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct Client {
     url: String,
     ark_client: Option<ArkServiceClient<InterceptedChannel>>,
     indexer_client: Option<IndexerServiceClient<InterceptedChannel>>,
+    header_state: HeaderState,
+    info_refresh_hook: Option<InfoRefreshHook>,
 }
 
 impl fmt::Debug for Client {
@@ -113,7 +161,19 @@ impl Client {
             url,
             ark_client: None,
             indexer_client: None,
+            header_state: HeaderState::default(),
+            info_refresh_hook: None,
         }
+    }
+
+    pub fn set_info_refresh_hook(
+        &mut self,
+        hook: impl Fn(Info) -> Result<(), Box<dyn StdError + Send + Sync + 'static>>
+            + Send
+            + Sync
+            + 'static,
+    ) {
+        self.info_refresh_hook = Some(Arc::new(hook));
     }
 
     pub async fn connect(&mut self) -> Result<(), Error> {
@@ -132,16 +192,35 @@ impl Client {
 
         let channel = endpoint.connect().await.map_err(Error::connect)?;
 
+        let interceptor = HeaderInterceptor {
+            state: self.header_state.clone(),
+        };
         let ark_service_client =
-            ArkServiceClient::with_interceptor(channel.clone(), VersionInterceptor);
-        let indexer_client = IndexerServiceClient::with_interceptor(channel, VersionInterceptor);
+            ArkServiceClient::with_interceptor(channel.clone(), interceptor.clone());
+        let indexer_client = IndexerServiceClient::with_interceptor(channel, interceptor);
 
         self.ark_client = Some(ark_service_client);
         self.indexer_client = Some(indexer_client);
         Ok(())
     }
 
-    pub async fn get_info(&mut self) -> Result<Info, Error> {
+    async fn guarded<T>(&self, op: impl Future<Output = Result<T, Error>>) -> Result<T, Error> {
+        match op.await {
+            Ok(value) => Ok(value),
+            Err(err) if err.is_digest_mismatch() => {
+                let original = err;
+                let info = self.get_info_unguarded().await?;
+                if let Some(hook) = &self.info_refresh_hook {
+                    hook(info).map_err(Error::conversion)?;
+                }
+                Err(Error::server_info_changed(original))
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Bootstrap request that intentionally bypasses digest-mismatch guarding.
+    pub async fn get_info_unguarded(&self) -> Result<Info, Error> {
         let mut client = self.ark_client()?;
 
         let response = client
@@ -149,7 +228,13 @@ impl Client {
             .await
             .map_err(Error::request)?;
 
-        response.into_inner().try_into()
+        let info: Info = response.into_inner().try_into()?;
+        self.header_state.set_digest(info.digest.clone());
+        Ok(info)
+    }
+
+    pub async fn get_info(&self) -> Result<Info, Error> {
+        self.get_info_unguarded().await
     }
 
     /// List VTXOs with pagination support.
@@ -164,10 +249,14 @@ impl Client {
 
         let mut client = self.indexer_client()?;
 
-        let response = client
-            .get_vtxos(generated::ark::v1::GetVtxosRequest::from(request))
-            .await
-            .map_err(Error::request)?;
+        let response = self
+            .guarded(async {
+                client
+                    .get_vtxos(generated::ark::v1::GetVtxosRequest::from(request))
+                    .await
+                    .map_err(Error::request)
+            })
+            .await?;
 
         let inner = response.into_inner();
 
@@ -194,10 +283,14 @@ impl Client {
             intent: Some(intent),
         };
 
-        let response = client
-            .register_intent(request)
-            .await
-            .map_err(Error::request)?;
+        let response = self
+            .guarded(async {
+                client
+                    .register_intent(request)
+                    .await
+                    .map_err(Error::request)
+            })
+            .await?;
 
         let intent_id = response.into_inner().intent_id;
 
@@ -223,13 +316,17 @@ impl Client {
             .map(|tx| base64.encode(tx.serialize()))
             .collect();
 
-        let res = client
-            .submit_tx(generated::ark::v1::SubmitTxRequest {
-                signed_ark_tx: ark_tx,
-                checkpoint_txs,
+        let res = self
+            .guarded(async {
+                client
+                    .submit_tx(generated::ark::v1::SubmitTxRequest {
+                        signed_ark_tx: ark_tx,
+                        checkpoint_txs,
+                    })
+                    .await
+                    .map_err(Error::request)
             })
-            .await
-            .map_err(Error::request)?;
+            .await?;
 
         let res = res.into_inner();
 
@@ -271,13 +368,16 @@ impl Client {
             .map(|tx| base64.encode(tx.serialize()))
             .collect();
 
-        client
-            .finalize_tx(generated::ark::v1::FinalizeTxRequest {
-                ark_txid: txid.to_string(),
-                final_checkpoint_txs: checkpoint_txs,
-            })
-            .await
-            .map_err(Error::request)?;
+        self.guarded(async {
+            client
+                .finalize_tx(generated::ark::v1::FinalizeTxRequest {
+                    ark_txid: txid.to_string(),
+                    final_checkpoint_txs: checkpoint_txs,
+                })
+                .await
+                .map_err(Error::request)
+        })
+        .await?;
 
         Ok(FinalizeOffchainTxResponse {})
     }
@@ -290,14 +390,18 @@ impl Client {
 
         let intent: Intent = intent.try_into()?;
 
-        let res = client
-            .get_pending_tx(generated::ark::v1::GetPendingTxRequest {
-                identifier: Some(
-                    generated::ark::v1::get_pending_tx_request::Identifier::Intent(intent),
-                ),
+        let res = self
+            .guarded(async {
+                client
+                    .get_pending_tx(generated::ark::v1::GetPendingTxRequest {
+                        identifier: Some(
+                            generated::ark::v1::get_pending_tx_request::Identifier::Intent(intent),
+                        ),
+                    })
+                    .await
+                    .map_err(Error::request)
             })
-            .await
-            .map_err(Error::request)?;
+            .await?;
 
         let inner = res.into_inner();
         let base64 = base64::engine::GeneralPurpose::new(
@@ -335,10 +439,13 @@ impl Client {
     pub async fn confirm_registration(&self, intent_id: String) -> Result<(), Error> {
         let mut client = self.ark_client()?;
 
-        client
-            .confirm_registration(ConfirmRegistrationRequest { intent_id })
-            .await
-            .map_err(Error::request)?;
+        self.guarded(async {
+            client
+                .confirm_registration(ConfirmRegistrationRequest { intent_id })
+                .await
+                .map_err(Error::request)
+        })
+        .await?;
 
         Ok(())
     }
@@ -351,14 +458,17 @@ impl Client {
     ) -> Result<(), Error> {
         let mut client = self.ark_client()?;
 
-        client
-            .submit_tree_nonces(SubmitTreeNoncesRequest {
-                batch_id: batch_id.to_string(),
-                pubkey: cosigner_pubkey.to_string(),
-                tree_nonces: pub_nonce_tree.encode(),
-            })
-            .await
-            .map_err(Error::request)?;
+        self.guarded(async {
+            client
+                .submit_tree_nonces(SubmitTreeNoncesRequest {
+                    batch_id: batch_id.to_string(),
+                    pubkey: cosigner_pubkey.to_string(),
+                    tree_nonces: pub_nonce_tree.encode(),
+                })
+                .await
+                .map_err(Error::request)
+        })
+        .await?;
 
         Ok(())
     }
@@ -371,14 +481,17 @@ impl Client {
     ) -> Result<(), Error> {
         let mut client = self.ark_client()?;
 
-        client
-            .submit_tree_signatures(SubmitTreeSignaturesRequest {
-                batch_id: batch_id.to_string(),
-                pubkey: cosigner_pk.to_string(),
-                tree_signatures: partial_sig_tree.encode(),
-            })
-            .await
-            .map_err(Error::request)?;
+        self.guarded(async {
+            client
+                .submit_tree_signatures(SubmitTreeSignaturesRequest {
+                    batch_id: batch_id.to_string(),
+                    pubkey: cosigner_pk.to_string(),
+                    tree_signatures: partial_sig_tree.encode(),
+                })
+                .await
+                .map_err(Error::request)
+        })
+        .await?;
 
         Ok(())
     }
@@ -399,16 +512,19 @@ impl Client {
             .map(|tx| base64.encode(tx.serialize()))
             .unwrap_or_default();
 
-        client
-            .submit_signed_forfeit_txs(SubmitSignedForfeitTxsRequest {
-                signed_forfeit_txs: signed_forfeit_txs
-                    .iter()
-                    .map(|psbt| base64.encode(psbt.serialize()))
-                    .collect(),
-                signed_commitment_tx,
-            })
-            .await
-            .map_err(Error::request)?;
+        self.guarded(async {
+            client
+                .submit_signed_forfeit_txs(SubmitSignedForfeitTxsRequest {
+                    signed_forfeit_txs: signed_forfeit_txs
+                        .iter()
+                        .map(|psbt| base64.encode(psbt.serialize()))
+                        .collect(),
+                    signed_commitment_tx,
+                })
+                .await
+                .map_err(Error::request)
+        })
+        .await?;
 
         Ok(())
     }
@@ -419,10 +535,14 @@ impl Client {
     ) -> Result<impl Stream<Item = Result<StreamEvent, Error>> + Unpin, Error> {
         let mut client = self.ark_client()?;
 
-        let response = client
-            .get_event_stream(GetEventStreamRequest { topics })
-            .await
-            .map_err(Error::request)?;
+        let response = self
+            .guarded(async {
+                client
+                    .get_event_stream(GetEventStreamRequest { topics })
+                    .await
+                    .map_err(Error::request)
+            })
+            .await?;
         let mut stream = response.into_inner();
 
         let stream = stream! {
@@ -454,10 +574,14 @@ impl Client {
     ) -> Result<impl Stream<Item = Result<StreamTransactionData, Error>> + Unpin, Error> {
         let mut client = self.ark_client()?;
 
-        let response = client
-            .get_transactions_stream(GetTransactionsStreamRequest {})
-            .await
-            .map_err(Error::request)?;
+        let response = self
+            .guarded(async {
+                client
+                    .get_transactions_stream(GetTransactionsStreamRequest {})
+                    .await
+                    .map_err(Error::request)
+            })
+            .await?;
 
         let mut stream = response.into_inner();
 
@@ -491,17 +615,22 @@ impl Client {
         size_and_index: Option<(i32, i32)>,
     ) -> Result<VtxoChainResponse, Error> {
         let mut client = self.indexer_client()?;
-        let response = client
-            .get_vtxo_chain(generated::ark::v1::GetVtxoChainRequest {
-                outpoint: outpoint.map(|o| generated::ark::v1::IndexerOutpoint {
-                    txid: o.txid.to_string(),
-                    vout: o.vout,
-                }),
-                page: size_and_index
-                    .map(|(size, index)| generated::ark::v1::IndexerPageRequest { size, index }),
+        let response = self
+            .guarded(async {
+                client
+                    .get_vtxo_chain(generated::ark::v1::GetVtxoChainRequest {
+                        outpoint: outpoint.map(|o| generated::ark::v1::IndexerOutpoint {
+                            txid: o.txid.to_string(),
+                            vout: o.vout,
+                        }),
+                        page: size_and_index.map(|(size, index)| {
+                            generated::ark::v1::IndexerPageRequest { size, index }
+                        }),
+                    })
+                    .await
+                    .map_err(Error::request)
             })
-            .await
-            .map_err(Error::request)?;
+            .await?;
         let response = response.into_inner();
         let result = response.try_into()?;
         Ok(result)
@@ -513,14 +642,19 @@ impl Client {
         size_and_index: Option<(i32, i32)>,
     ) -> Result<VirtualTxsResponse, Error> {
         let mut client = self.indexer_client()?;
-        let response = client
-            .get_virtual_txs(generated::ark::v1::GetVirtualTxsRequest {
-                txids,
-                page: size_and_index
-                    .map(|(size, index)| generated::ark::v1::IndexerPageRequest { size, index }),
+        let response = self
+            .guarded(async {
+                client
+                    .get_virtual_txs(generated::ark::v1::GetVirtualTxsRequest {
+                        txids,
+                        page: size_and_index.map(|(size, index)| {
+                            generated::ark::v1::IndexerPageRequest { size, index }
+                        }),
+                    })
+                    .await
+                    .map_err(Error::request)
             })
-            .await
-            .map_err(Error::request)?;
+            .await?;
         let response = response.into_inner();
         let result = response.try_into()?;
         Ok(result)
@@ -549,13 +683,17 @@ impl Client {
         // For new subscription we expect empty string ("") here
         let subscription_id = subscription_id.unwrap_or_default();
 
-        let response = client
-            .subscribe_for_scripts(SubscribeForScriptsRequest {
-                scripts,
-                subscription_id,
+        let response = self
+            .guarded(async {
+                client
+                    .subscribe_for_scripts(SubscribeForScriptsRequest {
+                        scripts,
+                        subscription_id,
+                    })
+                    .await
+                    .map_err(Error::request)
             })
-            .await
-            .map_err(Error::request)?;
+            .await?;
 
         let response = response.into_inner();
 
@@ -574,13 +712,16 @@ impl Client {
             .map(|address| address.to_p2tr_script_pubkey().to_hex_string())
             .collect::<Vec<_>>();
 
-        let _ = client
-            .unsubscribe_for_scripts(UnsubscribeForScriptsRequest {
-                subscription_id,
-                scripts,
-            })
-            .await
-            .map_err(Error::request)?;
+        self.guarded(async {
+            client
+                .unsubscribe_for_scripts(UnsubscribeForScriptsRequest {
+                    subscription_id,
+                    scripts,
+                })
+                .await
+                .map_err(Error::request)
+        })
+        .await?;
 
         Ok(())
     }
@@ -592,10 +733,14 @@ impl Client {
     ) -> Result<impl Stream<Item = Result<SubscriptionResponse, Error>> + Unpin, Error> {
         let mut client = self.indexer_client()?;
 
-        let response = client
-            .get_subscription(GetSubscriptionRequest { subscription_id })
-            .await
-            .map_err(Error::request)?;
+        let response = self
+            .guarded(async {
+                client
+                    .get_subscription(GetSubscriptionRequest { subscription_id })
+                    .await
+                    .map_err(Error::request)
+            })
+            .await?;
 
         let mut stream = response.into_inner();
 
@@ -632,12 +777,16 @@ impl Client {
         let mut client = self.ark_client()?;
 
         let intent = intent.try_into()?;
-        let response = client
-            .estimate_intent_fee(EstimateIntentFeeRequest {
-                intent: Some(intent),
+        let response = self
+            .guarded(async {
+                client
+                    .estimate_intent_fee(EstimateIntentFeeRequest {
+                        intent: Some(intent),
+                    })
+                    .await
+                    .map_err(Error::request)
             })
-            .await
-            .map_err(Error::request)?;
+            .await?;
         let response = response.into_inner();
 
         Ok(SignedAmount::from_sat(response.fee))
@@ -646,12 +795,16 @@ impl Client {
     pub async fn get_asset(&self, asset_id: AssetId) -> Result<AssetInfo, Error> {
         let mut client = self.indexer_client()?;
 
-        let response = client
-            .get_asset(generated::ark::v1::GetAssetRequest {
-                asset_id: asset_id.to_string(),
+        let response = self
+            .guarded(async {
+                client
+                    .get_asset(generated::ark::v1::GetAssetRequest {
+                        asset_id: asset_id.to_string(),
+                    })
+                    .await
+                    .map_err(Error::request)
             })
-            .await
-            .map_err(Error::request)?;
+            .await?;
 
         let inner = response.into_inner();
 

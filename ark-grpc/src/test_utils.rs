@@ -6,6 +6,10 @@
 pub use crate::generated::ark::v1::admin_service_client::AdminServiceClient;
 pub use crate::generated::ark::v1::CreateNoteRequest;
 pub use crate::generated::ark::v1::CreateNoteResponse;
+pub use crate::generated::ark::v1::GetInfoRequest;
+pub use crate::generated::ark::v1::GetInfoResponse;
+pub use crate::generated::ark::v1::GetVtxosRequest;
+pub use crate::generated::ark::v1::GetVtxosResponse;
 use ark_core::ArkNote;
 
 /// Default admin service URL (arkd runs admin on port 7071).
