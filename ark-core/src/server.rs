@@ -25,6 +25,9 @@ use std::str::FromStr;
 /// Sent in the `X-Build-Version`/`x-build-version` request header so arkd can
 /// reject clients that target an older incompatible server version. This is the
 /// arkd protocol target, not the Rust crate version.
+///
+/// Update this when the SDK intentionally targets a newer arkd compatibility
+/// baseline.
 pub const TARGET_ARKD_VERSION: &str = "v0.9.8";
 
 /// An aggregate public nonce per shared internal (non-leaf) node in the batch-tree.
