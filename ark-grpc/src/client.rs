@@ -75,28 +75,56 @@ use futures::TryStreamExt;
 use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::RwLock;
 
-#[derive(Clone, Copy)]
-struct VersionInterceptor;
+#[derive(Clone, Default)]
+struct HeaderState {
+    digest: Arc<RwLock<Option<String>>>,
+}
 
-impl tonic::service::Interceptor for VersionInterceptor {
+impl HeaderState {
+    fn set_digest(&self, digest: String) {
+        if let Ok(mut guard) = self.digest.write() {
+            *guard = (!digest.is_empty()).then_some(digest);
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct HeaderInterceptor {
+    state: HeaderState,
+}
+
+impl tonic::service::Interceptor for HeaderInterceptor {
     fn call(&mut self, mut req: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
-        req.metadata_mut().insert(
+        let metadata = req.metadata_mut();
+        metadata.insert(
             "x-build-version",
             tonic::metadata::MetadataValue::from_static(TARGET_ARKD_VERSION),
         );
+
+        if let Ok(guard) = self.state.digest.read() {
+            if let Some(digest) = guard.as_deref() {
+                if let Ok(value) = tonic::metadata::MetadataValue::try_from(digest) {
+                    metadata.insert("x-digest", value);
+                }
+            }
+        }
+
         Ok(req)
     }
 }
 
 type InterceptedChannel =
-    tonic::codegen::InterceptedService<tonic::transport::Channel, VersionInterceptor>;
+    tonic::codegen::InterceptedService<tonic::transport::Channel, HeaderInterceptor>;
 
 #[derive(Clone)]
 pub struct Client {
     url: String,
     ark_client: Option<ArkServiceClient<InterceptedChannel>>,
     indexer_client: Option<IndexerServiceClient<InterceptedChannel>>,
+    header_state: HeaderState,
 }
 
 impl fmt::Debug for Client {
@@ -114,6 +142,7 @@ impl Client {
             url,
             ark_client: None,
             indexer_client: None,
+            header_state: HeaderState::default(),
         }
     }
 
@@ -133,9 +162,12 @@ impl Client {
 
         let channel = endpoint.connect().await.map_err(Error::connect)?;
 
+        let interceptor = HeaderInterceptor {
+            state: self.header_state.clone(),
+        };
         let ark_service_client =
-            ArkServiceClient::with_interceptor(channel.clone(), VersionInterceptor);
-        let indexer_client = IndexerServiceClient::with_interceptor(channel, VersionInterceptor);
+            ArkServiceClient::with_interceptor(channel.clone(), interceptor.clone());
+        let indexer_client = IndexerServiceClient::with_interceptor(channel, interceptor);
 
         self.ark_client = Some(ark_service_client);
         self.indexer_client = Some(indexer_client);
@@ -150,7 +182,9 @@ impl Client {
             .await
             .map_err(Error::request)?;
 
-        response.into_inner().try_into()
+        let info: Info = response.into_inner().try_into()?;
+        self.header_state.set_digest(info.digest.clone());
+        Ok(info)
     }
 
     /// List VTXOs with pagination support.
