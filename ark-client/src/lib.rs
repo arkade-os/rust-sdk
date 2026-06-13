@@ -1609,3 +1609,225 @@ where
             .map_err(Into::into)
     }
 }
+
+#[cfg(test)]
+mod digest_guard_tests {
+    use super::*;
+    use ark_grpc::test_utils;
+    use bitcoin::key::Secp256k1;
+    use bitcoin::secp256k1::SecretKey;
+    use bitcoin::Address;
+    use std::convert::Infallible;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    use std::task::Context;
+    use std::task::Poll;
+    use tokio::net::TcpListener;
+    use tonic::body::Body;
+    use tonic::codegen::http;
+    use tonic::codegen::Service;
+    use tonic::server::NamedService;
+    use tonic::server::UnaryService;
+
+    #[derive(Clone, Default)]
+    struct MockArkServer {
+        state: Arc<MockState>,
+    }
+
+    #[derive(Default)]
+    struct MockState {
+        get_info_calls: AtomicUsize,
+        list_vtxos_calls: AtomicUsize,
+    }
+
+    impl Service<http::Request<Body>> for MockArkServer {
+        type Response = http::Response<Body>;
+        type Error = Infallible;
+        type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, req: http::Request<Body>) -> Self::Future {
+            match req.uri().path() {
+                "/ark.v1.ArkService/GetInfo" => {
+                    let method = GetInfoSvc {
+                        state: self.state.clone(),
+                    };
+                    Box::pin(async move {
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec);
+                        Ok(grpc.unary(method, req).await)
+                    })
+                }
+                "/ark.v1.IndexerService/GetVtxos" => {
+                    let method = ListVtxosSvc {
+                        state: self.state.clone(),
+                    };
+                    Box::pin(async move {
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec);
+                        Ok(grpc.unary(method, req).await)
+                    })
+                }
+                _ => Box::pin(async move {
+                    Ok(http::Response::builder()
+                        .status(200)
+                        .header("grpc-status", "12")
+                        .header("content-type", "application/grpc")
+                        .body(Body::empty())
+                        .unwrap())
+                }),
+            }
+        }
+    }
+
+    impl NamedService for MockArkServer {
+        const NAME: &'static str = "ark.v1.ArkService";
+    }
+
+    #[derive(Clone)]
+    struct MockIndexerServer(MockArkServer);
+
+    impl Service<http::Request<Body>> for MockIndexerServer {
+        type Response = http::Response<Body>;
+        type Error = Infallible;
+        type Future = <MockArkServer as Service<http::Request<Body>>>::Future;
+
+        fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            self.0.poll_ready(cx)
+        }
+
+        fn call(&mut self, req: http::Request<Body>) -> Self::Future {
+            self.0.call(req)
+        }
+    }
+
+    impl NamedService for MockIndexerServer {
+        const NAME: &'static str = "ark.v1.IndexerService";
+    }
+
+    #[derive(Clone)]
+    struct GetInfoSvc {
+        state: Arc<MockState>,
+    }
+
+    impl UnaryService<test_utils::GetInfoRequest> for GetInfoSvc {
+        type Response = test_utils::GetInfoResponse;
+        type Future = Pin<
+            Box<dyn Future<Output = Result<tonic::Response<Self::Response>, tonic::Status>> + Send>,
+        >;
+
+        fn call(&mut self, _request: tonic::Request<test_utils::GetInfoRequest>) -> Self::Future {
+            self.state.get_info_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(tonic::Response::new(info_response("fresh-digest"))) })
+        }
+    }
+
+    #[derive(Clone)]
+    struct ListVtxosSvc {
+        state: Arc<MockState>,
+    }
+
+    impl UnaryService<test_utils::GetVtxosRequest> for ListVtxosSvc {
+        type Response = test_utils::GetVtxosResponse;
+        type Future = Pin<
+            Box<dyn Future<Output = Result<tonic::Response<Self::Response>, tonic::Status>> + Send>,
+        >;
+
+        fn call(&mut self, _request: tonic::Request<test_utils::GetVtxosRequest>) -> Self::Future {
+            self.state.list_vtxos_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async {
+                Err(tonic::Status::failed_precondition(
+                    "DIGEST_MISMATCH: invalid digest header",
+                ))
+            })
+        }
+    }
+
+    fn info_response(digest: &str) -> test_utils::GetInfoResponse {
+        let secp = Secp256k1::new();
+        let secret_key = SecretKey::from_slice(&[1; 32]).unwrap();
+        let keypair = Keypair::from_secret_key(&secp, &secret_key);
+        let public_key = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
+        let (xonly, _) = keypair.x_only_public_key();
+        let address = Address::p2tr(&secp, xonly, None, bitcoin::Network::Regtest);
+
+        test_utils::GetInfoResponse {
+            version: "v0.9.8".to_string(),
+            signer_pubkey: public_key.to_string(),
+            forfeit_pubkey: public_key.to_string(),
+            forfeit_address: address.to_string(),
+            checkpoint_tapscript: String::new(),
+            network: "regtest".to_string(),
+            session_duration: 60,
+            unilateral_exit_delay: 144,
+            boarding_exit_delay: 144,
+            utxo_min_amount: 0,
+            utxo_max_amount: 0,
+            vtxo_min_amount: 0,
+            vtxo_max_amount: 0,
+            dust: 1000,
+            fees: None,
+            scheduled_session: None,
+            deprecated_signers: Vec::new(),
+            service_status: Default::default(),
+            digest: digest.to_string(),
+            max_tx_weight: 0,
+            max_op_return_outputs: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn guarded_client_refreshes_info_and_does_not_retry_on_digest_mismatch() {
+        let mock = MockArkServer::default();
+        let state = mock.state.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+
+        let indexer_mock = MockIndexerServer(mock.clone());
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(mock)
+                .add_service(indexer_mock)
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+
+        let mut inner = ark_grpc::Client::new(format!("http://{addr}"));
+        inner.connect().await.unwrap();
+
+        let initial_info: server::Info = info_response("stale-digest").try_into().unwrap();
+        let guarded = GuardedNetworkClient {
+            inner,
+            state: Arc::new(RwLock::new(ServerState {
+                server_info: initial_info,
+                fee_estimator: build_fee_estimator(
+                    &info_response("stale-digest").try_into().unwrap(),
+                )
+                .unwrap(),
+            })),
+        };
+
+        let err = match guarded
+            .list_vtxos(GetVtxosRequest::new_for_outpoints(&[OutPoint::null()]))
+            .await
+        {
+            Ok(_) => panic!("list_vtxos unexpectedly succeeded"),
+            Err(err) => err,
+        };
+
+        assert!(err.is_server_info_changed());
+        assert_eq!(state.list_vtxos_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state.get_info_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            guarded.state.read().unwrap().server_info.digest,
+            "fresh-digest"
+        );
+    }
+}
