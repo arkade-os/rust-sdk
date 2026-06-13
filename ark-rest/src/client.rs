@@ -43,9 +43,10 @@ use bitcoin::Txid;
 use futures::stream;
 use futures::Stream;
 use futures::StreamExt;
+use std::sync::RwLock;
 
 pub struct Client {
-    configuration: apis::configuration::Configuration,
+    configuration: RwLock<apis::configuration::Configuration>,
 }
 
 pub struct ListVtxosResponse {
@@ -53,33 +54,62 @@ pub struct ListVtxosResponse {
     pub page: Option<IndexerPage>,
 }
 
+fn build_reqwest_client(digest: Option<&str>) -> Result<reqwest::Client, Error> {
+    let mut default_headers = reqwest::header::HeaderMap::new();
+    default_headers.insert(
+        "X-Build-Version",
+        reqwest::header::HeaderValue::from_static(TARGET_ARKD_VERSION),
+    );
+    if let Some(digest) = digest {
+        default_headers.insert(
+            "X-Digest",
+            reqwest::header::HeaderValue::from_str(digest).map_err(Error::request)?,
+        );
+    }
+
+    reqwest::Client::builder()
+        .default_headers(default_headers)
+        .build()
+        .map_err(Error::request)
+}
+
 impl Client {
     pub fn new(ark_server_url: String) -> Result<Self, Error> {
-        let mut default_headers = reqwest::header::HeaderMap::new();
-        default_headers.insert(
-            "X-Build-Version",
-            reqwest::header::HeaderValue::from_static(TARGET_ARKD_VERSION),
-        );
-        let client = reqwest::Client::builder()
-            .default_headers(default_headers)
-            .build()
-            .map_err(Error::request)?;
-
         let configuration = apis::configuration::Configuration {
             base_path: ark_server_url,
-            client,
+            client: build_reqwest_client(None)?,
             ..Default::default()
         };
 
-        Ok(Self { configuration })
+        Ok(Self {
+            configuration: RwLock::new(configuration),
+        })
+    }
+
+    fn configuration(&self) -> Result<apis::configuration::Configuration, Error> {
+        self.configuration
+            .read()
+            .map(|configuration| configuration.clone())
+            .map_err(|_| Error::request("REST client configuration lock poisoned"))
+    }
+
+    fn update_digest(&self, digest: &str) -> Result<(), Error> {
+        let mut configuration = self
+            .configuration
+            .write()
+            .map_err(|_| Error::request("REST client configuration lock poisoned"))?;
+        configuration.client = build_reqwest_client((!digest.is_empty()).then_some(digest))?;
+        Ok(())
     }
 
     pub async fn get_info(&self) -> Result<ark_core::server::Info, Error> {
-        let info = ark_service_get_info(&self.configuration)
+        let configuration = self.configuration()?;
+        let info = ark_service_get_info(&configuration)
             .await
             .map_err(Error::request)?;
 
-        let info = info.try_into()?;
+        let info: ark_core::server::Info = info.try_into()?;
+        self.update_digest(&info.digest)?;
 
         Ok(info)
     }
@@ -102,7 +132,7 @@ impl Client {
             .collect();
 
         let res = ark_service_submit_tx(
-            &self.configuration,
+            &self.configuration()?,
             models::SubmitTxRequest {
                 signed_ark_tx: Some(ark_tx),
                 checkpoint_txs,
@@ -151,7 +181,7 @@ impl Client {
             .collect();
 
         ark_service_finalize_tx(
-            &self.configuration,
+            &self.configuration()?,
             models::FinalizeTxRequest {
                 ark_txid: Some(txid.to_string()),
                 final_checkpoint_txs: checkpoint_txs,
@@ -207,7 +237,7 @@ impl Client {
         let after = request.after().map(|b| b as i64);
 
         let response = indexer_service_get_vtxos(
-            &self.configuration,
+            &self.configuration()?,
             scripts,
             outpoints,
             spendable_only,
@@ -253,7 +283,7 @@ impl Client {
         let proof = base64.encode(&bytes);
 
         let response = ark_service_register_intent(
-            &self.configuration,
+            &self.configuration()?,
             models::RegisterIntentRequest {
                 intent: Some(Intent {
                     proof: Some(proof),
@@ -285,7 +315,7 @@ impl Client {
 
         let proof = base64.encode(&bytes);
         ark_service_delete_intent(
-            &self.configuration,
+            &self.configuration()?,
             models::DeleteIntentRequest {
                 intent: Some(Intent {
                     proof: Some(proof),
@@ -303,8 +333,10 @@ impl Client {
         &self,
         topics: Vec<String>,
     ) -> Result<impl Stream<Item = Result<StreamEvent, Error>> + Unpin, Error> {
+        let configuration = self.configuration()?;
+
         // Build the URL with query parameters
-        let mut url = format!("{}/v1/batch/events", self.configuration.base_path);
+        let mut url = format!("{}/v1/batch/events", configuration.base_path);
         if !topics.is_empty() {
             let query_params: Vec<String> = topics
                 .iter()
@@ -314,8 +346,8 @@ impl Client {
         }
 
         // Create the request for SSE
-        let client = &self.configuration.client;
-        let request = client
+        let request = configuration
+            .client
             .get(&url)
             .header("Accept", "text/event-stream")
             .send()
@@ -380,7 +412,7 @@ impl Client {
     }
     pub async fn confirm_registration(&self, intent_id: String) -> Result<(), Error> {
         ark_service_confirm_registration(
-            &self.configuration,
+            &self.configuration()?,
             ConfirmRegistrationRequest {
                 intent_id: Some(intent_id),
             },
@@ -400,7 +432,7 @@ impl Client {
         let tree_nonces = pub_nonce_tree.encode();
 
         ark_service_submit_tree_nonces(
-            &self.configuration,
+            &self.configuration()?,
             SubmitTreeNoncesRequest {
                 batch_id: Some(batch_id.to_string()),
                 pubkey: Some(cosigner_pubkey.to_string()),
@@ -422,7 +454,7 @@ impl Client {
         let tree_signatures = partial_sig_tree.encode();
 
         ark_service_submit_tree_signatures(
-            &self.configuration,
+            &self.configuration()?,
             SubmitTreeSignaturesRequest {
                 batch_id: Some(batch_id.to_string()),
                 pubkey: Some(cosigner_pk.to_string()),
@@ -450,7 +482,7 @@ impl Client {
             .unwrap_or_default();
 
         ark_service_submit_signed_forfeit_txs(
-            &self.configuration,
+            &self.configuration()?,
             SubmitSignedForfeitTxsRequest {
                 signed_forfeit_txs: signed_forfeit_txs
                     .iter()
@@ -488,7 +520,7 @@ impl Client {
         let subscription_id = subscription_id.unwrap_or_default();
 
         let response = indexer_service_subscribe_for_scripts(
-            &self.configuration,
+            &self.configuration()?,
             SubscribeForScriptsRequest {
                 scripts: Some(scripts),
                 subscription_id: Some(subscription_id),
@@ -516,7 +548,7 @@ impl Client {
             .collect::<Vec<_>>();
 
         let _ = indexer_service_unsubscribe_for_scripts(
-            &self.configuration,
+            &self.configuration()?,
             UnsubscribeForScriptsRequest {
                 subscription_id: Some(subscription_id),
                 scripts: Some(scripts),
@@ -532,15 +564,17 @@ impl Client {
         &self,
         subscription_id: String,
     ) -> Result<impl Stream<Item = Result<SubscriptionResponse, Error>> + Unpin, Error> {
+        let configuration = self.configuration()?;
+
         // Build the URL with subscription_id parameter
         let url = format!(
             "{}/v1/script/subscription/{subscription_id}",
-            self.configuration.base_path,
+            configuration.base_path,
         );
 
         // Create the request for SSE
-        let client = &self.configuration.client;
-        let request = client
+        let request = configuration
+            .client
             .get(&url)
             .header("Accept", "text/event-stream")
             .send()
@@ -614,7 +648,7 @@ impl Client {
         let (size, index) = size_and_index
             .map(|(sz, indx)| (Some(sz), Some(indx)))
             .unwrap_or_default();
-        let response = indexer_service_get_virtual_txs(&self.configuration, txids, size, index)
+        let response = indexer_service_get_virtual_txs(&self.configuration()?, txids, size, index)
             .await
             .map_err(Error::request)?;
 
