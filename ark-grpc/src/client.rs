@@ -87,8 +87,23 @@ struct HeaderState {
 
 impl HeaderState {
     fn set_digest(&self, digest: String) {
-        if let Ok(mut guard) = self.digest.write() {
-            *guard = (!digest.is_empty()).then_some(digest);
+        let digest = (!digest.is_empty()).then_some(digest);
+        match self.digest.write() {
+            Ok(mut guard) => *guard = digest,
+            Err(poisoned) => {
+                log::warn!("digest header state lock poisoned while updating; recovering");
+                *poisoned.into_inner() = digest;
+            }
+        }
+    }
+
+    fn digest(&self) -> Option<String> {
+        match self.digest.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => {
+                log::warn!("digest header state lock poisoned while reading; recovering");
+                poisoned.into_inner().clone()
+            }
         }
     }
 }
@@ -106,11 +121,9 @@ impl tonic::service::Interceptor for HeaderInterceptor {
             tonic::metadata::MetadataValue::from_static(TARGET_ARKD_VERSION),
         );
 
-        if let Ok(guard) = self.state.digest.read() {
-            if let Some(digest) = guard.as_deref() {
-                if let Ok(value) = tonic::metadata::MetadataValue::try_from(digest) {
-                    metadata.insert("x-digest", value);
-                }
+        if let Some(digest) = self.state.digest() {
+            if let Ok(value) = tonic::metadata::MetadataValue::try_from(digest.as_str()) {
+                metadata.insert("x-digest", value);
             }
         }
 
