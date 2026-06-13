@@ -48,6 +48,16 @@ impl Error {
         false
     }
 
+    /// Returns `true` if the server rejected the request because the cached
+    /// `/info` digest is stale.
+    pub fn is_digest_mismatch(&self) -> bool {
+        if let Some(source) = &self.inner.source {
+            let source = source.to_string();
+            return source.contains("DIGEST_MISMATCH") || source.contains("invalid digest header");
+        }
+        false
+    }
+
     fn description(&self) -> &str {
         match &self.inner.kind {
             Kind::Request => "request failed",
@@ -111,5 +121,17 @@ mod tests {
     fn is_version_mismatch_false_when_no_source() {
         let err = Error::new(Kind::Request);
         assert!(!err.is_version_mismatch());
+    }
+
+    #[test]
+    fn is_digest_mismatch_true_when_source_contains_marker() {
+        let err = Error::request("DIGEST_MISMATCH: invalid digest header");
+        assert!(err.is_digest_mismatch());
+    }
+
+    #[test]
+    fn is_digest_mismatch_false_for_other_errors() {
+        let err = Error::request("connection refused");
+        assert!(!err.is_digest_mismatch());
     }
 }

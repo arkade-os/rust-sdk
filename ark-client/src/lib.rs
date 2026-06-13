@@ -635,19 +635,7 @@ where
             "Connected to Ark server"
         );
 
-        let fee_estimator_config = server_info
-            .fees
-            .clone()
-            .map(|fees| ark_fees::Config {
-                intent_offchain_input_program: fees.intent_fee.offchain_input.unwrap_or_default(),
-                intent_onchain_input_program: fees.intent_fee.onchain_input.unwrap_or_default(),
-                intent_offchain_output_program: fees.intent_fee.offchain_output.unwrap_or_default(),
-                intent_onchain_output_program: fees.intent_fee.onchain_output.unwrap_or_default(),
-            })
-            .unwrap_or_default();
-
-        let fee_estimator =
-            ark_fees::Estimator::new(fee_estimator_config).map_err(Error::ark_server)?;
+        let fee_estimator = build_fee_estimator(&server_info)?;
 
         let client = Client {
             inner: self,
@@ -663,6 +651,21 @@ where
     }
 }
 
+fn build_fee_estimator(server_info: &server::Info) -> Result<ark_fees::Estimator, Error> {
+    let fee_estimator_config = server_info
+        .fees
+        .clone()
+        .map(|fees| ark_fees::Config {
+            intent_offchain_input_program: fees.intent_fee.offchain_input.unwrap_or_default(),
+            intent_onchain_input_program: fees.intent_fee.onchain_input.unwrap_or_default(),
+            intent_offchain_output_program: fees.intent_fee.offchain_output.unwrap_or_default(),
+            intent_onchain_output_program: fees.intent_fee.onchain_output.unwrap_or_default(),
+        })
+        .unwrap_or_default();
+
+    ark_fees::Estimator::new(fee_estimator_config).map_err(Error::ark_server)
+}
+
 impl<B, W, S, K> Client<B, W, S, K>
 where
     B: Blockchain,
@@ -670,6 +673,38 @@ where
     S: SwapStorage + 'static,
     K: KeyProvider,
 {
+    /// Refresh cached `/info` data after the server reports a digest mismatch.
+    ///
+    /// This updates [`Client::server_info`], the gRPC digest header, and the fee estimator. The
+    /// SDK intentionally does not retry the failed operation automatically; rebuild the request
+    /// using the refreshed server info and retry only when it is safe for your call site.
+    pub async fn refresh_server_info(&mut self) -> Result<(), Error> {
+        let server_info = timeout_op(self.inner.timeout, self.network_client().get_info())
+            .await
+            .context("Failed to refresh Ark server info")??;
+
+        self.fee_estimator = build_fee_estimator(&server_info)?;
+        self.server_info = server_info;
+
+        Ok(())
+    }
+
+    /// Refresh cached `/info` if `error` is a digest mismatch.
+    ///
+    /// Returns `true` when a refresh happened. The original operation is not retried; callers must
+    /// rebuild any request state that depended on the old [`Client::server_info`] before retrying.
+    pub async fn refresh_server_info_if_digest_mismatch(
+        &mut self,
+        error: &Error,
+    ) -> Result<bool, Error> {
+        if !error.is_digest_mismatch() {
+            return Ok(false);
+        }
+
+        self.refresh_server_info().await?;
+        Ok(true)
+    }
+
     /// Returns the currently configured delegator pubkey, if any.
     pub fn delegator_pk(&self) -> Option<XOnlyPublicKey> {
         self.inner.delegator_pk()

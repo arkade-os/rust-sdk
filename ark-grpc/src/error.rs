@@ -70,6 +70,19 @@ impl Error {
         false
     }
 
+    /// Returns `true` if the server rejected the request because the cached
+    /// `/info` digest is stale.
+    pub fn is_digest_mismatch(&self) -> bool {
+        if let Some(source) = &self.inner.source {
+            if let Some(status) = source.downcast_ref::<tonic::Status>() {
+                return status.code() == tonic::Code::FailedPrecondition
+                    && (status.message().contains("DIGEST_MISMATCH")
+                        || status.message().contains("invalid digest header"));
+            }
+        }
+        false
+    }
+
     fn description(&self) -> &str {
         match &self.inner.kind {
             Kind::Connect => "failed to connect to Ark server",
@@ -151,5 +164,26 @@ mod tests {
     fn is_version_mismatch_false_when_no_source() {
         let err = Error::not_connected();
         assert!(!err.is_version_mismatch());
+    }
+
+    #[test]
+    fn is_digest_mismatch_true_for_matching_status() {
+        let status = tonic::Status::failed_precondition("invalid digest header");
+        let err = Error::request(status);
+        assert!(err.is_digest_mismatch());
+    }
+
+    #[test]
+    fn is_digest_mismatch_true_for_error_code_in_message() {
+        let status = tonic::Status::failed_precondition("DIGEST_MISMATCH");
+        let err = Error::request(status);
+        assert!(err.is_digest_mismatch());
+    }
+
+    #[test]
+    fn is_digest_mismatch_false_for_other_failed_precondition() {
+        let status = tonic::Status::failed_precondition("something else");
+        let err = Error::request(status);
+        assert!(!err.is_digest_mismatch());
     }
 }

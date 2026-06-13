@@ -96,6 +96,62 @@ impl Error {
             source: source.into(),
         }))
     }
+
+    /// Returns `true` if this error chain contains an arkd digest mismatch.
+    pub fn is_digest_mismatch(&self) -> bool {
+        let mut err = self;
+        loop {
+            if err.inner.kind.is_digest_mismatch() {
+                return true;
+            }
+            err = match err.inner.cause.as_ref() {
+                Some(err) => err,
+                None => return false,
+            };
+        }
+    }
+
+    /// Returns `true` if this error chain contains an arkd build-version mismatch.
+    pub fn is_version_mismatch(&self) -> bool {
+        let mut err = self;
+        loop {
+            if err.inner.kind.is_version_mismatch() {
+                return true;
+            }
+            err = match err.inner.cause.as_ref() {
+                Some(err) => err,
+                None => return false,
+            };
+        }
+    }
+}
+
+impl Kind {
+    fn is_digest_mismatch(&self) -> bool {
+        match self {
+            Kind::ArkServer(err) => {
+                err.source.is::<ark_grpc::Error>()
+                    && err
+                        .source
+                        .downcast_ref::<ark_grpc::Error>()
+                        .is_some_and(ark_grpc::Error::is_digest_mismatch)
+            }
+            _ => false,
+        }
+    }
+
+    fn is_version_mismatch(&self) -> bool {
+        match self {
+            Kind::ArkServer(err) => {
+                err.source.is::<ark_grpc::Error>()
+                    && err
+                        .source
+                        .downcast_ref::<ark_grpc::Error>()
+                        .is_some_and(ark_grpc::Error::is_version_mismatch)
+            }
+            _ => false,
+        }
+    }
 }
 
 impl fmt::Display for Error {
