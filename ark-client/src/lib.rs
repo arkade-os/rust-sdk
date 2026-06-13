@@ -1588,6 +1588,8 @@ mod digest_guard_tests {
 
     #[tokio::test]
     async fn guarded_client_refreshes_info_and_does_not_retry_on_digest_mismatch() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
         let mock = MockArkServer::default();
         let state = mock.state.clone();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
