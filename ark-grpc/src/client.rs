@@ -55,6 +55,7 @@ use ark_core::server::VirtualTxOutPoint;
 use ark_core::server::VirtualTxsResponse;
 use ark_core::server::VtxoChain;
 use ark_core::server::VtxoChains;
+use ark_core::server::TARGET_ARKD_VERSION;
 use ark_core::ArkAddress;
 use ark_core::TxGraphChunk;
 use async_stream::stream;
@@ -82,7 +83,7 @@ impl tonic::service::Interceptor for VersionInterceptor {
     fn call(&mut self, mut req: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
         req.metadata_mut().insert(
             "x-build-version",
-            tonic::metadata::MetadataValue::from_static(env!("CARGO_PKG_VERSION")),
+            tonic::metadata::MetadataValue::from_static(TARGET_ARKD_VERSION),
         );
         Ok(req)
     }

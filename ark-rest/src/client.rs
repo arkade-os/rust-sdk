@@ -33,6 +33,7 @@ use ark_core::server::SubmitOffchainTxResponse;
 use ark_core::server::SubscriptionResponse;
 use ark_core::server::VirtualTxOutPoint;
 use ark_core::server::VirtualTxsResponse;
+use ark_core::server::TARGET_ARKD_VERSION;
 use ark_core::ArkAddress;
 use bitcoin::base64;
 use bitcoin::base64::Engine;
@@ -57,7 +58,7 @@ impl Client {
         let mut default_headers = reqwest::header::HeaderMap::new();
         default_headers.insert(
             "X-Build-Version",
-            reqwest::header::HeaderValue::from_static(env!("CARGO_PKG_VERSION")),
+            reqwest::header::HeaderValue::from_static(TARGET_ARKD_VERSION),
         );
         let client = reqwest::Client::builder()
             .default_headers(default_headers)
