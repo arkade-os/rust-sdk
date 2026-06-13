@@ -160,7 +160,12 @@ impl Kind {
                         .downcast_ref::<ark_grpc::Error>()
                         .is_some_and(ark_grpc::Error::is_digest_mismatch)
             }
-            _ => false,
+            Kind::AdHoc(_)
+            | Kind::Core(_)
+            | Kind::CoinSelect(_)
+            | Kind::Wallet(_)
+            | Kind::ServerInfoChanged(_)
+            | Kind::Consumer(_) => false,
         }
     }
 
@@ -173,7 +178,12 @@ impl Kind {
                         .downcast_ref::<ark_grpc::Error>()
                         .is_some_and(ark_grpc::Error::is_version_mismatch)
             }
-            _ => false,
+            Kind::AdHoc(_)
+            | Kind::Core(_)
+            | Kind::CoinSelect(_)
+            | Kind::Wallet(_)
+            | Kind::ServerInfoChanged(_)
+            | Kind::Consumer(_) => false,
         }
     }
 }
