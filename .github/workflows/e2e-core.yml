@@ -1,5 +1,13 @@
 name: Core E2E Tests with Nigiri
 
+# MIGRATION NOTE (tracking: ArkLabsHQ/arkade-regtest#27):
+# arkade-regtest has dropped nigiri/chopsticks in favour of an in-house Docker Compose
+# stack driven by a zero-dependency Node CLI (`regtest.mjs`). This repo consumes nigiri
+# DIRECTLY (it does not embed arkade-regtest as a submodule, and arkd is built from Go
+# source rather than run as a container), so the migration here is a non-trivial rework
+# rather than a mechanical find/replace. See the PR description for the list of open
+# questions that must be resolved before this workflow can be moved off nigiri.
+
 on:
   workflow_call:
     inputs:
