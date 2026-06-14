@@ -492,8 +492,9 @@ impl Info {
     }
 
     /// Returns `true` if `server_pk` is a deprecated signer whose cooperative-sign cutoff has
-    /// already passed at `now_unix_secs`. A `cutoff_date` of `0` means "no cutoff" and is never
-    /// treated as past.
+    /// already passed at `now_unix_secs`. A `cutoff_date` of `0` means "rotate immediately" —
+    /// the operator still co-signs but clients should migrate without delay. It is therefore
+    /// NOT treated as past-cutoff here; use `migrate_deprecated_signer_vtxos` to handle it.
     pub fn is_signer_past_cutoff_at(&self, server_pk: XOnlyPublicKey, now_unix_secs: i64) -> bool {
         self.deprecated_signers.iter().any(|ds| {
             ds.cutoff_date != 0

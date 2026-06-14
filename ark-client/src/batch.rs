@@ -1036,6 +1036,17 @@ where
                         continue;
                     }
 
+                    // Skip boarding outputs whose server key is past its cooperative-sign
+                    // cutoff — the operator won't co-sign the old key's forfeit path.
+                    // These must be recovered via unilateral exit (send_on_chain).
+                    let now_secs = now.as_second();
+                    if self
+                        .server_info
+                        .is_signer_past_cutoff_at(boarding_output.server_pk(), now_secs)
+                    {
+                        continue;
+                    }
+
                     // Only include confirmed boarding outputs with an _inactive_ exit path.
                     if !boarding_output.can_be_claimed_unilaterally_by_owner(
                         now.as_duration().try_into().map_err(Error::ad_hoc)?,
