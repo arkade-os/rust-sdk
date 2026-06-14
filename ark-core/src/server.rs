@@ -484,6 +484,25 @@ pub struct DeprecatedSigner {
     pub cutoff_date: i64,
 }
 
+impl Info {
+    /// Returns all known server signing keys: the current signer followed by all deprecated ones.
+    pub fn all_server_keys(&self) -> impl Iterator<Item = XOnlyPublicKey> + '_ {
+        std::iter::once(self.signer_pk.x_only_public_key().0)
+            .chain(self.deprecated_signers.iter().map(|ds| ds.pk.x_only_public_key().0))
+    }
+
+    /// Returns `true` if `server_pk` is a deprecated signer whose cooperative-sign cutoff has
+    /// already passed at `now_unix_secs`. A `cutoff_date` of `0` means "no cutoff" and is never
+    /// treated as past.
+    pub fn is_signer_past_cutoff_at(&self, server_pk: XOnlyPublicKey, now_unix_secs: i64) -> bool {
+        self.deprecated_signers.iter().any(|ds| {
+            ds.cutoff_date != 0
+                && ds.cutoff_date <= now_unix_secs
+                && ds.pk.x_only_public_key().0 == server_pk
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct StreamStartedEvent {
     pub id: String,

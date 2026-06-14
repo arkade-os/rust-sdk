@@ -336,6 +336,10 @@ pub struct OffChainBalance {
     pre_confirmed: Amount,
     confirmed: Amount,
     recoverable: Amount,
+    /// Funds under a deprecated server signer whose cooperative-sign cutoff has passed.
+    /// These VTXOs cannot be spent offchain (operator won't co-sign the old key) and are not yet
+    /// recoverable (not expired). They will become recoverable once their VTXO expiry passes.
+    pending_recovery: Amount,
     asset_balances: HashMap<AssetId, u64>,
 }
 
@@ -353,8 +357,14 @@ impl OffChainBalance {
         self.recoverable
     }
 
+    /// Funds locked under a deprecated signer past its cutoff — cannot be spent offchain,
+    /// waiting for VTXO expiry to become recoverable. Still counted in `total()`.
+    pub fn pending_recovery(&self) -> Amount {
+        self.pending_recovery
+    }
+
     pub fn total(&self) -> Amount {
-        self.pre_confirmed + self.confirmed + self.recoverable
+        self.pre_confirmed + self.confirmed + self.recoverable + self.pending_recovery
     }
 
     /// Asset balances keyed by asset ID.
@@ -390,6 +400,22 @@ pub trait Blockchain {
         &self,
         txs: &[&Transaction],
     ) -> impl Future<Output = Result<(), Error>> + Send;
+}
+
+/// Current time as unix seconds. Uses `js_sys::Date` on wasm32, `std::time` elsewhere.
+fn unix_now() -> i64 {
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("valid duration")
+            .as_secs() as i64
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        (js_sys::Date::now() / 1000.0) as i64
+    }
 }
 
 impl<B, W, S, K> OfflineClient<B, W, S, K>
@@ -711,38 +737,42 @@ where
     /// [`OfflineClient::new`], addresses for those are included too.
     pub fn get_offchain_addresses(&self) -> Result<Vec<(ArkAddress, Vtxo)>, Error> {
         let server_info = &self.server_info;
-        let server_signer = server_info.signer_pk.into();
-
         let pks = self.inner.key_provider.get_cached_pks()?;
+
+        // Build addresses for current signer + all deprecated signers so VTXOs under any
+        // known server key are discovered and visible in the balance.
+        let all_server_keys: Vec<XOnlyPublicKey> = server_info.all_server_keys().collect();
 
         let mut results = Vec::new();
 
         for owner_pk in &pks {
-            // Always include the default (2-leaf) address.
-            let default_vtxo = Vtxo::new_default(
-                self.secp(),
-                server_signer,
-                *owner_pk,
-                server_info.unilateral_exit_delay,
-                server_info.network,
-            )?;
-            results.push((default_vtxo.to_ark_address(), default_vtxo));
-
-            // Include delegate addresses for all known delegator keys.
-            let mut seen = HashSet::new();
-            for dpk in &self.inner.historical_delegator_pks {
-                if !seen.insert(dpk) {
-                    continue;
-                }
-                let delegate_vtxo = Vtxo::new_with_delegator(
+            for server_signer in &all_server_keys {
+                // Default (2-leaf) address.
+                let default_vtxo = Vtxo::new_default(
                     self.secp(),
-                    server_signer,
+                    *server_signer,
                     *owner_pk,
-                    *dpk,
                     server_info.unilateral_exit_delay,
                     server_info.network,
                 )?;
-                results.push((delegate_vtxo.to_ark_address(), delegate_vtxo));
+                results.push((default_vtxo.to_ark_address(), default_vtxo));
+
+                // Delegate addresses for all known delegator keys.
+                let mut seen = HashSet::new();
+                for dpk in &self.inner.historical_delegator_pks {
+                    if !seen.insert(dpk) {
+                        continue;
+                    }
+                    let delegate_vtxo = Vtxo::new_with_delegator(
+                        self.secp(),
+                        *server_signer,
+                        *owner_pk,
+                        *dpk,
+                        server_info.unilateral_exit_delay,
+                        server_info.network,
+                    )?;
+                    results.push((delegate_vtxo.to_ark_address(), delegate_vtxo));
+                }
             }
         }
 
@@ -910,9 +940,25 @@ where
     }
 
     pub fn get_boarding_addresses(&self) -> Result<Vec<Address>, Error> {
-        let address = self.get_boarding_address()?;
+        let server_info = &self.server_info;
+        let mut addresses = Vec::new();
 
-        Ok(vec![address])
+        // Current signer boarding address.
+        addresses.push(self.get_boarding_address()?);
+
+        // Deprecated signer boarding addresses — for watch/history only.
+        // The spend path (settle) deliberately stays current-signer-only;
+        // deprecated-signer boarding recovery is handled via migrate_deprecated_signer_vtxos().
+        for ds in &server_info.deprecated_signers {
+            let boarding_output = self.inner.wallet.new_boarding_output(
+                ds.pk.x_only_public_key().0,
+                server_info.boarding_exit_delay,
+                server_info.network,
+            )?;
+            addresses.push(boarding_output.address().clone());
+        }
+
+        Ok(addresses)
     }
 
     pub async fn get_virtual_tx_outpoints(
@@ -1002,23 +1048,43 @@ where
     }
 
     pub async fn offchain_balance(&self) -> Result<OffChainBalance, Error> {
-        let (vtxo_list, _) = self.list_vtxos().await.context("failed to list VTXOs")?;
+        let (vtxo_list, script_map) = self.list_vtxos().await.context("failed to list VTXOs")?;
+        let now = unix_now();
+
+        let is_past_cutoff = |v: &VirtualTxOutPoint| {
+            script_map
+                .get(&v.script)
+                .map(|vtxo| {
+                    self.server_info
+                        .is_signer_past_cutoff_at(vtxo.server_pk(), now)
+                })
+                .unwrap_or(false)
+        };
 
         let pre_confirmed = vtxo_list
             .pre_confirmed()
+            .filter(|v| !is_past_cutoff(v))
             .fold(Amount::ZERO, |acc, x| acc + x.amount);
 
         let confirmed = vtxo_list
             .confirmed()
+            .filter(|v| !is_past_cutoff(v))
             .fold(Amount::ZERO, |acc, x| acc + x.amount);
 
         let recoverable = vtxo_list
             .recoverable()
             .fold(Amount::ZERO, |acc, x| acc + x.amount);
 
-        // Aggregate asset balances from all spendable VTXOs.
+        // Spendable offchain VTXOs under a past-cutoff deprecated signer: operator won't
+        // co-sign, so they're stuck until the VTXO expires and becomes recoverable.
+        let pending_recovery = vtxo_list
+            .spendable_offchain()
+            .filter(|v| is_past_cutoff(v))
+            .fold(Amount::ZERO, |acc, x| acc + x.amount);
+
+        // Aggregate asset balances from spendable (non-past-cutoff) VTXOs only.
         let mut asset_balances: HashMap<AssetId, u64> = HashMap::new();
-        for vtxo in vtxo_list.spendable_offchain() {
+        for vtxo in vtxo_list.spendable_offchain().filter(|v| !is_past_cutoff(v)) {
             for asset in &vtxo.assets {
                 let total = asset_balances
                     .get(&asset.asset_id)
@@ -1034,8 +1100,58 @@ where
             pre_confirmed,
             confirmed,
             recoverable,
+            pending_recovery,
             asset_balances,
         })
+    }
+
+    /// Sweep VTXOs under deprecated server signers (before their cutoff) to the current signer.
+    ///
+    /// This joins the next available batch and settles all VTXOs — current-signer and
+    /// deprecated-signer alike — to a fresh current-signer address. Only before-cutoff
+    /// deprecated VTXOs are truly "migrated"; past-cutoff ones are excluded from the batch
+    /// automatically (they cannot be co-signed) and will become recoverable after expiry.
+    ///
+    /// Returns `None` when there are no migratable VTXOs (nothing to do).
+    pub async fn migrate_deprecated_signer_vtxos<R>(
+        &self,
+        rng: &mut R,
+    ) -> Result<Option<Txid>, Error>
+    where
+        R: rand::Rng + rand::CryptoRng + Clone,
+    {
+        if self.server_info.deprecated_signers.is_empty() {
+            return Ok(None);
+        }
+
+        let now = unix_now();
+        let (vtxo_list, script_map) = self.list_vtxos().await?;
+
+        let migratable = vtxo_list.spendable_offchain().any(|v| {
+            script_map
+                .get(&v.script)
+                .map(|vtxo| {
+                    let server_pk = vtxo.server_pk();
+                    self.server_info.deprecated_signers.iter().any(|ds| {
+                        let ds_pk: XOnlyPublicKey = ds.pk.x_only_public_key().0;
+                        ds_pk == server_pk && (ds.cutoff_date == 0 || ds.cutoff_date > now)
+                    })
+                })
+                .unwrap_or(false)
+        });
+
+        if !migratable {
+            tracing::debug!("No migratable deprecated-signer VTXOs found");
+            return Ok(None);
+        }
+
+        tracing::info!(
+            "Found VTXOs under pre-cutoff deprecated signers; settling to current signer"
+        );
+
+        // settle() picks up all unspent VTXOs (expanded addresses include deprecated signers)
+        // and fetch_commitment_transaction_inputs() filters out past-cutoff ones automatically.
+        self.settle(rng).await
     }
 
     /// Get information about an asset by its ID.

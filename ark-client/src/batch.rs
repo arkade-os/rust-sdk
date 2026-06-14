@@ -1057,13 +1057,33 @@ where
         }
 
         let (vtxo_list, script_pubkey_to_vtxo_map) = self.list_vtxos().await?;
+        let now = Timestamp::now().as_second();
+        let dust = self.server_info.dust;
+
+        // Exclude VTXOs under a past-cutoff deprecated signer that still require a forfeit.
+        // The operator won't co-sign the forfeit for the old key, which would brick the whole
+        // batch intent. They wait until expiry (is_recoverable) before joining a batch.
+        let is_excluded = |v: &&ark_core::server::VirtualTxOutPoint| -> bool {
+            if v.is_recoverable(dust) {
+                return false; // recoverable = no forfeit needed, always safe to include
+            }
+            script_pubkey_to_vtxo_map
+                .get(&v.script)
+                .map(|vtxo| {
+                    self.server_info
+                        .is_signer_past_cutoff_at(vtxo.server_pk(), now)
+                })
+                .unwrap_or(false)
+        };
 
         total_amount += vtxo_list
             .all_unspent()
+            .filter(|v| !is_excluded(v))
             .fold(Amount::ZERO, |acc, vtxo| acc + vtxo.amount);
 
         let vtxo_inputs = vtxo_list
             .all_unspent()
+            .filter(|v| !is_excluded(v))
             .map(|virtual_tx_outpoint| {
                 let vtxo = script_pubkey_to_vtxo_map
                     .get(&virtual_tx_outpoint.script)

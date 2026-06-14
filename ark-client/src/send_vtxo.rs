@@ -238,8 +238,19 @@ where
             .await
             .context("failed to get spendable VTXOs")?;
 
+        let now = crate::unix_now();
         let spendable = vtxo_list
             .spendable_offchain()
+            // Exclude VTXOs under a past-cutoff deprecated signer: operator won't co-sign.
+            .filter(|v| {
+                !script_pubkey_to_vtxo_map
+                    .get(&v.script)
+                    .map(|vtxo| {
+                        self.server_info
+                            .is_signer_past_cutoff_at(vtxo.server_pk(), now)
+                    })
+                    .unwrap_or(false)
+            })
             .map(|vtxo| VirtualTxOutPoint {
                 outpoint: vtxo.outpoint,
                 script_pubkey: vtxo.script.clone(),
