@@ -1108,14 +1108,15 @@ where
         })
     }
 
-    /// Sweep VTXOs under deprecated server signers (before their cutoff) to the current signer.
+    /// Sweep VTXOs and boarding outputs under deprecated server signers (before their cutoff)
+    /// to the current signer.
     ///
-    /// This joins the next available batch and settles all VTXOs — current-signer and
-    /// deprecated-signer alike — to a fresh current-signer address. Only before-cutoff
-    /// deprecated VTXOs are truly "migrated"; past-cutoff ones are excluded from the batch
-    /// automatically (they cannot be co-signed) and will become recoverable after expiry.
+    /// This joins the next available batch and settles all inputs — current-signer and
+    /// pre-cutoff deprecated-signer alike — to a fresh current-signer address. Past-cutoff
+    /// VTXOs and boarding outputs are excluded from the batch automatically (the operator
+    /// won't co-sign the old key) and will become recoverable after expiry.
     ///
-    /// Returns `None` when there are no migratable VTXOs (nothing to do).
+    /// Returns `None` when there are no migratable VTXOs or boarding outputs (nothing to do).
     pub async fn migrate_deprecated_signer_vtxos<R>(
         &self,
         rng: &mut R,
@@ -1130,26 +1131,36 @@ where
         let now = unix_now();
         let (vtxo_list, script_map) = self.list_vtxos().await?;
 
-        let migratable = vtxo_list.spendable_offchain().any(|v| {
+        let is_pre_cutoff_deprecated = |server_pk: XOnlyPublicKey| {
+            self.server_info.deprecated_signers.iter().any(|ds| {
+                ds.pk.x_only_public_key().0 == server_pk
+                    && (ds.cutoff_date == 0 || ds.cutoff_date > now)
+            })
+        };
+
+        let migratable_vtxos = vtxo_list.spendable_offchain().any(|v| {
             script_map
                 .get(&v.script)
-                .map(|vtxo| {
-                    let server_pk = vtxo.server_pk();
-                    self.server_info.deprecated_signers.iter().any(|ds| {
-                        let ds_pk: XOnlyPublicKey = ds.pk.x_only_public_key().0;
-                        ds_pk == server_pk && (ds.cutoff_date == 0 || ds.cutoff_date > now)
-                    })
-                })
+                .map(|vtxo| is_pre_cutoff_deprecated(vtxo.server_pk()))
                 .unwrap_or(false)
         });
 
-        if !migratable {
-            tracing::debug!("No migratable deprecated-signer VTXOs found");
+        let migratable_boarding = self
+            .inner
+            .wallet
+            .get_boarding_outputs()?
+            .into_iter()
+            .any(|bo| is_pre_cutoff_deprecated(bo.server_pk()));
+
+        if !migratable_vtxos && !migratable_boarding {
+            tracing::debug!("No migratable deprecated-signer VTXOs or boarding outputs found");
             return Ok(None);
         }
 
         tracing::info!(
-            "Found VTXOs under pre-cutoff deprecated signers; settling to current signer"
+            migratable_vtxos,
+            migratable_boarding,
+            "Found pre-cutoff deprecated-signer outputs; settling to current signer"
         );
 
         // settle() picks up all unspent VTXOs (expanded addresses include deprecated signers)
