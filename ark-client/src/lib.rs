@@ -825,7 +825,9 @@ where
         }
 
         let server_info = &self.server_info;
-        let server_signer: XOnlyPublicKey = server_info.signer_pk.into();
+        // Discover against current + all deprecated signers so that user keys used before a
+        // rotation are still found when recovering from seed.
+        let all_server_keys: Vec<XOnlyPublicKey> = server_info.all_server_keys().collect();
 
         let mut start_index = 0u32;
         let mut discovered_count = 0u32;
@@ -849,30 +851,31 @@ where
 
                 let owner_pk = kp.x_only_public_key().0;
 
-                let mut addresses =
-                    Vec::with_capacity(1 + self.inner.historical_delegator_pks.len());
+                let mut addresses = Vec::new();
 
-                // Default (2-leaf) address.
-                let default_vtxo = Vtxo::new_default(
-                    self.secp(),
-                    server_signer,
-                    owner_pk,
-                    server_info.unilateral_exit_delay,
-                    server_info.network,
-                )?;
-                addresses.push(default_vtxo.to_ark_address());
-
-                // Delegate (3-leaf) addresses for each known delegator.
-                for dpk in &self.inner.historical_delegator_pks {
-                    let delegate_vtxo = Vtxo::new_with_delegator(
+                for server_signer in &all_server_keys {
+                    // Default (2-leaf) address.
+                    let default_vtxo = Vtxo::new_default(
                         self.secp(),
-                        server_signer,
+                        *server_signer,
                         owner_pk,
-                        *dpk,
                         server_info.unilateral_exit_delay,
                         server_info.network,
                     )?;
-                    addresses.push(delegate_vtxo.to_ark_address());
+                    addresses.push(default_vtxo.to_ark_address());
+
+                    // Delegate (3-leaf) addresses for each known delegator.
+                    for dpk in &self.inner.historical_delegator_pks {
+                        let delegate_vtxo = Vtxo::new_with_delegator(
+                            self.secp(),
+                            *server_signer,
+                            owner_pk,
+                            *dpk,
+                            server_info.unilateral_exit_delay,
+                            server_info.network,
+                        )?;
+                        addresses.push(delegate_vtxo.to_ark_address());
+                    }
                 }
 
                 batch.push((index, kp, addresses));
