@@ -541,6 +541,18 @@ where
 
         let timeout_block_heights = swap_data.timeout_block_heights;
 
+        let unilateral_claim_delay =
+            parse_sequence_number(timeout_block_heights.unilateral_claim as i64)
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?;
+        let unilateral_refund_delay =
+            parse_sequence_number(timeout_block_heights.unilateral_refund as i64)
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral refund timeout: {e}")))?;
+        let unilateral_refund_without_receiver_delay =
+            parse_sequence_number(timeout_block_heights.unilateral_refund_without_receiver as i64)
+                .map_err(|e| {
+                    Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
+                })?;
+
         let vhtlc = self.reconstruct_vhtlc_for_address(
             |server| {
                 Ok(VhtlcOptions {
@@ -549,22 +561,9 @@ where
                     server,
                     preimage_hash: swap_data.preimage_hash,
                     refund_locktime: timeout_block_heights.refund,
-                    unilateral_claim_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_claim as i64,
-                    )
-                    .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
-                    unilateral_refund_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid unilateral refund timeout: {e}"))
-                    })?,
-                    unilateral_refund_without_receiver_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund_without_receiver as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
-                    })?,
+                    unilateral_claim_delay,
+                    unilateral_refund_delay,
+                    unilateral_refund_without_receiver_delay,
                 })
             },
             &swap_data.vhtlc_address,
@@ -705,6 +704,18 @@ where
 
         let timeout_block_heights = swap_data.timeout_block_heights;
 
+        let unilateral_claim_delay =
+            parse_sequence_number(timeout_block_heights.unilateral_claim as i64)
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?;
+        let unilateral_refund_delay =
+            parse_sequence_number(timeout_block_heights.unilateral_refund as i64)
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral refund timeout: {e}")))?;
+        let unilateral_refund_without_receiver_delay =
+            parse_sequence_number(timeout_block_heights.unilateral_refund_without_receiver as i64)
+                .map_err(|e| {
+                    Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
+                })?;
+
         let vhtlc = self.reconstruct_vhtlc_for_address(
             |server| {
                 Ok(VhtlcOptions {
@@ -713,22 +724,9 @@ where
                     server,
                     preimage_hash: swap_data.preimage_hash,
                     refund_locktime: timeout_block_heights.refund,
-                    unilateral_claim_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_claim as i64,
-                    )
-                    .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
-                    unilateral_refund_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid unilateral refund timeout: {e}"))
-                    })?,
-                    unilateral_refund_without_receiver_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund_without_receiver as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
-                    })?,
+                    unilateral_claim_delay,
+                    unilateral_refund_delay,
+                    unilateral_refund_without_receiver_delay,
                 })
             },
             &swap_data.vhtlc_address,
@@ -816,6 +814,18 @@ where
 
         let timeout_block_heights = swap_data.timeout_block_heights;
 
+        let unilateral_claim_delay =
+            parse_sequence_number(timeout_block_heights.unilateral_claim as i64)
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?;
+        let unilateral_refund_delay =
+            parse_sequence_number(timeout_block_heights.unilateral_refund as i64)
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral refund timeout: {e}")))?;
+        let unilateral_refund_without_receiver_delay =
+            parse_sequence_number(timeout_block_heights.unilateral_refund_without_receiver as i64)
+                .map_err(|e| {
+                    Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
+                })?;
+
         let vhtlc = self.reconstruct_vhtlc_for_address(
             |server| {
                 Ok(VhtlcOptions {
@@ -824,22 +834,9 @@ where
                     server,
                     preimage_hash: swap_data.preimage_hash,
                     refund_locktime: timeout_block_heights.refund,
-                    unilateral_claim_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_claim as i64,
-                    )
-                    .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
-                    unilateral_refund_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid unilateral refund timeout: {e}"))
-                    })?,
-                    unilateral_refund_without_receiver_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund_without_receiver as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
-                    })?,
+                    unilateral_claim_delay,
+                    unilateral_refund_delay,
+                    unilateral_refund_without_receiver_delay,
                 })
             },
             &swap_data.vhtlc_address,
@@ -1419,6 +1416,18 @@ where
 
         let timeout_block_heights = swap.timeout_block_heights;
 
+        let unilateral_claim_delay =
+            parse_sequence_number(timeout_block_heights.unilateral_claim as i64)
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?;
+        let unilateral_refund_delay =
+            parse_sequence_number(timeout_block_heights.unilateral_refund as i64)
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral refund timeout: {e}")))?;
+        let unilateral_refund_without_receiver_delay =
+            parse_sequence_number(timeout_block_heights.unilateral_refund_without_receiver as i64)
+                .map_err(|e| {
+                    Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
+                })?;
+
         let vhtlc = self.reconstruct_vhtlc_for_address(
             |server| {
                 Ok(VhtlcOptions {
@@ -1427,22 +1436,9 @@ where
                     server,
                     preimage_hash: swap.preimage_hash,
                     refund_locktime: timeout_block_heights.refund,
-                    unilateral_claim_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_claim as i64,
-                    )
-                    .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
-                    unilateral_refund_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid unilateral refund timeout: {e}"))
-                    })?,
-                    unilateral_refund_without_receiver_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund_without_receiver as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
-                    })?,
+                    unilateral_claim_delay,
+                    unilateral_refund_delay,
+                    unilateral_refund_without_receiver_delay,
                 })
             },
             &swap.vhtlc_address,
@@ -1664,6 +1660,18 @@ where
 
         let timeout_block_heights = swap.timeout_block_heights;
 
+        let unilateral_claim_delay =
+            parse_sequence_number(timeout_block_heights.unilateral_claim as i64)
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?;
+        let unilateral_refund_delay =
+            parse_sequence_number(timeout_block_heights.unilateral_refund as i64)
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral refund timeout: {e}")))?;
+        let unilateral_refund_without_receiver_delay =
+            parse_sequence_number(timeout_block_heights.unilateral_refund_without_receiver as i64)
+                .map_err(|e| {
+                    Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
+                })?;
+
         let vhtlc = self.reconstruct_vhtlc_for_address(
             |server| {
                 Ok(VhtlcOptions {
@@ -1672,22 +1680,9 @@ where
                     server,
                     preimage_hash: swap.preimage_hash,
                     refund_locktime: timeout_block_heights.refund,
-                    unilateral_claim_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_claim as i64,
-                    )
-                    .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
-                    unilateral_refund_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid unilateral refund timeout: {e}"))
-                    })?,
-                    unilateral_refund_without_receiver_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund_without_receiver as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
-                    })?,
+                    unilateral_claim_delay,
+                    unilateral_refund_delay,
+                    unilateral_refund_without_receiver_delay,
                 })
             },
             &swap.vhtlc_address,
@@ -2083,6 +2078,18 @@ where
         let expected_address = ArkAddress::decode(&swap.server_lockup_address)
             .map_err(|e| Error::ad_hoc(format!("invalid server lockup address: {e}")))?;
 
+        let unilateral_claim_delay =
+            parse_sequence_number(timeout_block_heights.unilateral_claim as i64)
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?;
+        let unilateral_refund_delay =
+            parse_sequence_number(timeout_block_heights.unilateral_refund as i64)
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral refund timeout: {e}")))?;
+        let unilateral_refund_without_receiver_delay =
+            parse_sequence_number(timeout_block_heights.unilateral_refund_without_receiver as i64)
+                .map_err(|e| {
+                    Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
+                })?;
+
         let vhtlc = self.reconstruct_vhtlc_for_address(
             |server| {
                 Ok(VhtlcOptions {
@@ -2091,22 +2098,9 @@ where
                     server,
                     preimage_hash,
                     refund_locktime: timeout_block_heights.refund,
-                    unilateral_claim_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_claim as i64,
-                    )
-                    .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
-                    unilateral_refund_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid unilateral refund timeout: {e}"))
-                    })?,
-                    unilateral_refund_without_receiver_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund_without_receiver as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
-                    })?,
+                    unilateral_claim_delay,
+                    unilateral_refund_delay,
+                    unilateral_refund_without_receiver_delay,
                 })
             },
             &expected_address,
@@ -2440,6 +2434,18 @@ where
         let expected_address = ArkAddress::decode(&swap.user_lockup_address)
             .map_err(|e| Error::ad_hoc(format!("invalid user lockup address: {e}")))?;
 
+        let unilateral_claim_delay =
+            parse_sequence_number(timeout_block_heights.unilateral_claim as i64)
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?;
+        let unilateral_refund_delay =
+            parse_sequence_number(timeout_block_heights.unilateral_refund as i64)
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral refund timeout: {e}")))?;
+        let unilateral_refund_without_receiver_delay =
+            parse_sequence_number(timeout_block_heights.unilateral_refund_without_receiver as i64)
+                .map_err(|e| {
+                    Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
+                })?;
+
         let vhtlc = self.reconstruct_vhtlc_for_address(
             |server| {
                 Ok(VhtlcOptions {
@@ -2448,22 +2454,9 @@ where
                     server,
                     preimage_hash,
                     refund_locktime: timeout_block_heights.refund,
-                    unilateral_claim_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_claim as i64,
-                    )
-                    .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
-                    unilateral_refund_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid unilateral refund timeout: {e}"))
-                    })?,
-                    unilateral_refund_without_receiver_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund_without_receiver as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
-                    })?,
+                    unilateral_claim_delay,
+                    unilateral_refund_delay,
+                    unilateral_refund_without_receiver_delay,
                 })
             },
             &expected_address,
