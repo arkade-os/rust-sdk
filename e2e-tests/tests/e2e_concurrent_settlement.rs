@@ -6,7 +6,7 @@ use bitcoin::key::Secp256k1;
 use bitcoin::Amount;
 use common::init_tracing;
 use common::set_up_client;
-use common::Nigiri;
+use common::Regtest;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use std::sync::Arc;
@@ -19,13 +19,13 @@ mod common;
 #[ignore]
 pub async fn concurrent_boarding() {
     init_tracing();
-    let nigiri = Arc::new(Nigiri::new());
+    let regtest = Arc::new(Regtest::new());
 
     let secp = Secp256k1::new();
 
-    let (alice, _) = set_up_client("alice".to_string(), nigiri.clone(), secp.clone()).await;
-    let (bob, _) = set_up_client("bob".to_string(), nigiri.clone(), secp.clone()).await;
-    let (claire, _) = set_up_client("claire".to_string(), nigiri.clone(), secp.clone()).await;
+    let (alice, _) = set_up_client("alice".to_string(), regtest.clone(), secp.clone()).await;
+    let (bob, _) = set_up_client("bob".to_string(), regtest.clone(), secp.clone()).await;
+    let (claire, _) = set_up_client("claire".to_string(), regtest.clone(), secp.clone()).await;
 
     let alice_boarding_address = alice.get_boarding_address().unwrap();
     let bob_boarding_address = bob.get_boarding_address().unwrap();
@@ -43,13 +43,13 @@ pub async fn concurrent_boarding() {
     let bob_fund_amount = Amount::ONE_BTC;
     let claire_fund_amount = Amount::from_sat(50_000_000);
 
-    nigiri
+    regtest
         .faucet_fund(&alice_boarding_address, alice_fund_amount)
         .await;
-    nigiri
+    regtest
         .faucet_fund(&bob_boarding_address, bob_fund_amount)
         .await;
-    nigiri
+    regtest
         .faucet_fund(&claire_boarding_address, claire_fund_amount)
         .await;
 

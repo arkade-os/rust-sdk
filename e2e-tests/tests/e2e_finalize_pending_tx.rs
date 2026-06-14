@@ -7,7 +7,7 @@ use bitcoin::Amount;
 use common::init_tracing;
 use common::set_up_client;
 use common::wait_until_balance;
-use common::Nigiri;
+use common::Regtest;
 use rand::thread_rng;
 use std::sync::Arc;
 
@@ -21,17 +21,17 @@ mod common;
 #[ignore]
 pub async fn e2e_finalize_pending_tx() {
     init_tracing();
-    let nigiri = Arc::new(Nigiri::new());
+    let regtest = Arc::new(Regtest::new());
     let secp = Secp256k1::new();
     let mut rng = thread_rng();
 
-    let (alice, _) = set_up_client("alice".to_string(), nigiri.clone(), secp.clone()).await;
-    let (bob, _) = set_up_client("bob".to_string(), nigiri.clone(), secp).await;
+    let (alice, _) = set_up_client("alice".to_string(), regtest.clone(), secp.clone()).await;
+    let (bob, _) = set_up_client("bob".to_string(), regtest.clone(), secp).await;
 
     // Fund Alice via boarding.
     let alice_fund_amount = Amount::ONE_BTC;
     let alice_boarding_address = alice.get_boarding_address().unwrap();
-    nigiri
+    regtest
         .faucet_fund(&alice_boarding_address, alice_fund_amount)
         .await;
 

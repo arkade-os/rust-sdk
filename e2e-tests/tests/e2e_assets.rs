@@ -6,7 +6,7 @@ use bitcoin::key::Secp256k1;
 use bitcoin::Amount;
 use common::init_tracing;
 use common::set_up_client;
-use common::Nigiri;
+use common::Regtest;
 use rand::thread_rng;
 use std::sync::Arc;
 
@@ -16,20 +16,20 @@ mod common;
 #[ignore]
 pub async fn e2e_assets() {
     init_tracing();
-    let nigiri = Arc::new(Nigiri::new());
+    let regtest = Arc::new(Regtest::new());
     let secp = Secp256k1::new();
     let mut rng = thread_rng();
 
-    let (alice, _) = set_up_client("alice".to_string(), nigiri.clone(), secp.clone()).await;
-    let (bob, _) = set_up_client("bob".to_string(), nigiri.clone(), secp).await;
+    let (alice, _) = set_up_client("alice".to_string(), regtest.clone(), secp.clone()).await;
+    let (bob, _) = set_up_client("bob".to_string(), regtest.clone(), secp).await;
 
     // Fund Alice with 1 BTC and settle.
     let alice_boarding_address = alice.get_boarding_address().unwrap();
-    nigiri
+    regtest
         .faucet_fund(&alice_boarding_address, Amount::ONE_BTC)
         .await;
     alice.settle(&mut rng).await.unwrap();
-    nigiri.mine(1).await;
+    regtest.mine(1).await;
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     let balance = alice.offchain_balance().await.unwrap();

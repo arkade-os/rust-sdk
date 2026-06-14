@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
-use common::Nigiri;
+use common::Regtest;
 use std::sync::Arc;
 
 mod common;
@@ -10,7 +10,7 @@ mod dlc_common;
 #[ignore]
 pub async fn e2e_dlc() {
     common::init_tracing();
-    let nigiri = Arc::new(Nigiri::new());
+    let regtest = Arc::new(Regtest::new());
 
-    dlc_common::run_dlc_scenario(&nigiri, false).await.unwrap();
+    dlc_common::run_dlc_scenario(&regtest, false).await.unwrap();
 }

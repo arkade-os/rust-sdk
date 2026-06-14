@@ -5,7 +5,7 @@ use bitcoin::key::Secp256k1;
 use bitcoin::Amount;
 use common::init_tracing;
 use common::set_up_client_with_delegator;
-use common::Nigiri;
+use common::Regtest;
 use rand::thread_rng;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,7 +17,7 @@ mod common;
 async fn fulmine_delegator_smoke() {
     init_tracing();
 
-    let nigiri = Arc::new(Nigiri::new());
+    let regtest = Arc::new(Regtest::new());
     let secp = Secp256k1::new();
 
     // Fulmine delegator API (local regtest stack).
@@ -29,7 +29,7 @@ async fn fulmine_delegator_smoke() {
 
     let (client, _) = set_up_client_with_delegator(
         "alice-delegator-smoke".to_string(),
-        nigiri.clone(),
+        regtest.clone(),
         secp,
         delegator_pk,
     )
@@ -46,7 +46,7 @@ async fn fulmine_delegator_smoke() {
 
     let boarding_address = client.get_boarding_address().unwrap();
     let fund_amount = Amount::from_sat(100_000);
-    let _outpoint = nigiri.faucet_fund(&boarding_address, fund_amount).await;
+    let _outpoint = regtest.faucet_fund(&boarding_address, fund_amount).await;
 
     let mut rng = thread_rng();
     client.settle(&mut rng).await.unwrap();

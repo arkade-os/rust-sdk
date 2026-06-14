@@ -6,7 +6,7 @@ use bitcoin::key::Secp256k1;
 use bitcoin::Amount;
 use common::init_tracing;
 use common::set_up_client;
-use common::Nigiri;
+use common::Regtest;
 use std::sync::Arc;
 
 mod common;
@@ -24,11 +24,11 @@ pub async fn reverse_swap() {
     // to setup the environment including Boltz.
 
     init_tracing();
-    let nigiri = Arc::new(Nigiri::new());
+    let regtest = Arc::new(Regtest::new());
 
     let secp = Secp256k1::new();
 
-    let (alice, _) = set_up_client("alice".to_string(), nigiri.clone(), secp.clone()).await;
+    let (alice, _) = set_up_client("alice".to_string(), regtest.clone(), secp.clone()).await;
 
     let invoice_amount = SwapAmount::invoice(Amount::from_sat(1_000));
     let res = alice

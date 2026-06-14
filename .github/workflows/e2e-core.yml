@@ -1,34 +1,16 @@
-name: Core E2E Tests with Nigiri
+name: Core E2E Tests
+
+# The regtest stack (Bitcoin Core + Fulcrum + mempool/esplora + arkd + emulator)
+# is provided by the `regtest` git submodule (arkade-regtest) and driven by its
+# zero-dependency Node CLI (`regtest.mjs`). arkd runs from a container image
+# (ARKD_IMAGE in .env.regtest); the orchestrator self-funds it on `start`.
 
 on:
   workflow_call:
-    inputs:
-      arkd-version:
-        description: 'Version of arkd to test against (git tag, version, hash)'
-        required: true
-        type: string
-      introspector-version:
-        description: 'Version of introspector to test against (git tag, version, hash)'
-        required: false
-        default: 'master'
-        type: string
 
 env:
   CARGO_INCREMENTAL: 0
   CARGO_TERM_COLOR: always
-  ARK_GO_DIR: ./ark-go/
-  ARKD_DIR: ./ark-go/arkd/
-  INTROSPECTOR_GO_DIR: ./introspector-go/
-  INTROSPECTOR_DIR: ./introspector-go/introspector/
-  ARKD_LIVE_STORE_TYPE: inmemory
-  ARKD_DB_TYPE: sqlite
-  ARKD_EVENT_DB_TYPE: badger
-  ARKD_VTXO_MIN_AMOUNT: 1
-  ARKD_UNILATERAL_EXIT_DELAY: 512
-  ARKD_PUBLIC_UNILATERAL_EXIT_DELAY: 512
-  ARKD_BOARDING_EXIT_DELAY: 1024
-  ARKD_VTXO_TREE_EXPIRY: 512
-  ARKD_CHECKPOINT_EXIT_DELAY: 512
 
 jobs:
   build-tests:
@@ -62,7 +44,7 @@ jobs:
       - name: Upload test binaries
         uses: actions/upload-artifact@v4
         with:
-          name: test-binaries_${{ inputs.arkd-version }}
+          name: test-binaries
           path: target/debug/deps/e2e_*
           retention-days: 1
           overwrite: true
@@ -79,13 +61,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          submodules: recursive
 
-      - uses: extractions/setup-just@v2
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
       - name: Download test binaries
         uses: actions/download-artifact@v4
         with:
-          name: test-binaries_${{ inputs.arkd-version }}
+          name: test-binaries
           path: target/debug/deps
 
       - name: Show downloaded binaries
@@ -94,102 +80,33 @@ jobs:
       - name: Make binaries executable
         run: chmod +x target/debug/deps/e2e_*
 
-      - name: Install Nigiri
-        run: |
-          curl https://getnigiri.vulpem.com | bash
-
-      - name: Start Nigiri
-        run: |
-          nigiri start
-          # Wait for Nigiri to be fully up
-          sleep 15
-
-      # TODO: CI could be optimized by moving this step into the prior step and share the build binaries
-      - name: Checkout arkd `${{ inputs.arkd-version }}`
-        run: |
-          just arkd-checkout ${{ inputs.arkd-version }}
-
-      - name: Set up Go for arkd
-        uses: actions/setup-go@v4
-        with:
-          go-version: '>=1.23.1'
-
-      - name: Build arkd
-        run: |
-          just arkd-build
-
-      - name: Run arkd-wallet
-        run: |
-          just arkd-wallet-run
-
-      - name: Run arkd
-        run: |
-          just arkd-run
-
-      - name: Fund arkd
-        run: |
-          just arkd-fund 20
-          # Wait for arkd to catch up with the chain
-          sleep 10
-
-      - name: Checkout introspector `${{ inputs.introspector-version }}`
-        if: contains(matrix.test-binary, 'e2e_arkade_script')
-        run: just introspector-checkout ${{ inputs.introspector-version }}
-
-      - name: Build introspector docker image
-        if: contains(matrix.test-binary, 'e2e_arkade_script')
-        run: just introspector-docker-build
-
-      - name: Run introspector
-        if: contains(matrix.test-binary, 'e2e_arkade_script')
-        run: just introspector-docker-run
+      # Brings up base + ark (arkd) + emulator. The orchestrator waits for the
+      # stack to be ready and self-funds arkd before returning.
+      - name: Start regtest stack
+        run: node regtest/regtest.mjs start --env .env.regtest --profile emulator
 
       - name: Run Test Binary
         env:
           INTROSPECTOR_URL: http://127.0.0.1:7073
+          REGTEST_DIR: ${{ github.workspace }}/regtest
         run: |
           test_name=$(basename ${{ matrix.test-binary }})
           echo "Running test: $test_name"
           ${{ matrix.test-binary }} --ignored --test-threads=1 --nocapture
 
-      - name: Cleanup introspector
-        if: always() && contains(matrix.test-binary, 'e2e_arkade_script')
-        run: just introspector-docker-kill
+      - name: Print container logs on failure
+        if: failure()
+        run: |
+          echo "=== block height ==="
+          node regtest/regtest.mjs rpc getblockcount 2>&1 || echo "(getblockcount failed)"
+          echo "=== auto-miner ticks ==="
+          docker logs bitcoin-miner 2>&1 | tail -40 || echo "(bitcoin-miner not found)"
+          for c in bitcoin fulcrum mempool_web nbxplorer arkd arkd-wallet emulator; do
+            echo "=== docker logs $c ==="
+            docker logs "$c" 2>&1 || echo "(container $c not found)"
+            echo "=== end $c ==="
+          done
 
-      - name: Cleanup Nigiri
+      - name: Cleanup regtest stack
         if: always()
-        run: nigiri stop --delete
-
-      - name: Print arkd-wallet logs on failure
-        if: failure()
-        run: |
-          if [ -f arkd-wallet.log ]; then
-            echo "=== arkd-wallet.log contents ==="
-            cat arkd-wallet.log
-            echo "=== End of arkd-wallet.log ==="
-          else
-            echo "arkd-wallet.log file not found"
-          fi
-
-      - name: Print arkd logs on failure
-        if: failure()
-        run: |
-          if [ -f arkd.log ]; then
-            echo "=== arkd.log contents ==="
-            cat arkd.log
-            echo "=== End of arkd.log ==="
-          else
-            echo "arkd.log file not found"
-          fi
-
-      - name: Print introspector logs on failure
-        if: failure() && contains(matrix.test-binary, 'e2e_arkade_script')
-        run: |
-          if [ -f introspector.log ]; then
-            echo "=== introspector.log contents ==="
-            cat introspector.log
-            echo "=== End of introspector.log ==="
-          else
-            echo "introspector.log file not found"
-            docker logs introspector || true
-          fi
+        run: node regtest/regtest.mjs clean || true

@@ -12,6 +12,7 @@ use ark_client::SpendStatus;
 use ark_client::TxStatus;
 use ark_core::BoardingOutput;
 use ark_core::ExplorerUtxo;
+use base64::Engine;
 use bitcoin::bip32::Xpriv;
 use bitcoin::hex::FromHex;
 use bitcoin::key::Keypair;
@@ -27,10 +28,10 @@ use bitcoin::Txid;
 use bitcoin::XOnlyPublicKey;
 use rand::thread_rng;
 use rand::Rng;
-use regex::Regex;
 use std::collections::HashMap;
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Once;
 use std::sync::RwLock;
@@ -102,9 +103,109 @@ impl BitcoinRpc {
         );
         Ok(())
     }
+
+    /// Make a blocking JSON-RPC call and return its `result` field (`None` on
+    /// transport error or a null result).
+    ///
+    /// Several `Blockchain` lookups go straight to Bitcoin Core instead of the
+    /// esplora indexer because mempool's esplora-compatible API lags behind the
+    /// chain on regtest. That lag caused two distinct e2e failures: the client
+    /// re-spending an already-spent boarding output (arkd: "boarding input ...
+    /// is spent"), and not finding a freshly-mined commitment TX when building
+    /// unilateral exit trees. The node's own view is authoritative and lag-free.
+    ///
+    /// These are blocking calls (used from the synchronous `Blockchain`
+    /// lookups), so they go through `minreq` rather than the async reqwest
+    /// client.
+    fn rpc_call(&self, method: &str, params: serde_json::Value) -> Option<serde_json::Value> {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": params,
+        })
+        .to_string();
+
+        let auth = base64::engine::general_purpose::STANDARD
+            .encode(format!("{}:{}", self.username, self.password));
+
+        let value = minreq::post(&self.url)
+            .with_header("Content-Type", "application/json")
+            .with_header("Authorization", format!("Basic {auth}"))
+            .with_body(body)
+            .send()
+            .ok()?
+            .json::<serde_json::Value>()
+            .ok()?;
+
+        value
+            .get("result")
+            .filter(|result| !result.is_null())
+            .cloned()
+    }
+
+    /// Whether `txid:vout` is still in the node's UTXO set (unspent), accounting
+    /// for the mempool. `gettxout` returns a null result for an unknown or
+    /// already-spent output.
+    fn is_output_unspent(&self, txid: &Txid, vout: u32) -> bool {
+        // include_mempool = true: treat outputs spent by an unconfirmed tx as
+        // spent too. On any RPC hiccup, fall back to "unspent" so we don't
+        // silently drop a genuinely spendable output.
+        self.rpc_call(
+            "gettxout",
+            serde_json::json!([txid.to_string(), vout, true]),
+        )
+        .is_some()
+    }
+
+    /// Fetch a transaction by id from the node (mempool or, via `txindex`, a
+    /// confirmed block). `None` if the node has never seen it.
+    fn get_raw_transaction(&self, txid: &Txid) -> Option<Transaction> {
+        let hex = self.rpc_call("getrawtransaction", serde_json::json!([txid.to_string()]))?;
+        let bytes = Vec::from_hex(hex.as_str()?).ok()?;
+        bitcoin::consensus::deserialize(&bytes).ok()
+    }
+
+    /// The block time a transaction was confirmed at, or `None` if it is
+    /// unconfirmed or unknown.
+    fn get_tx_blocktime(&self, txid: &Txid) -> Option<i64> {
+        // verbose = true returns a JSON object that includes `blocktime` once
+        // the transaction is mined.
+        self.rpc_call(
+            "getrawtransaction",
+            serde_json::json!([txid.to_string(), true]),
+        )?
+        .get("blocktime")?
+        .as_i64()
+    }
 }
 
-pub struct Nigiri {
+/// Resolve the path to the arkade-regtest `regtest.mjs` orchestrator CLI.
+///
+/// Defaults to `<workspace root>/regtest/regtest.mjs` (the `regtest` submodule),
+/// computed from this crate's manifest dir so it works regardless of the test's
+/// working directory. Override with `REGTEST_DIR` if the submodule lives
+/// elsewhere.
+#[allow(unused)]
+fn regtest_mjs_path() -> PathBuf {
+    if let Ok(dir) = std::env::var("REGTEST_DIR") {
+        return PathBuf::from(dir).join("regtest.mjs");
+    }
+
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("e2e-tests crate has a parent (workspace root)")
+        .join("regtest")
+        .join("regtest.mjs")
+}
+
+/// Drives the arkade-regtest Docker Compose stack (Bitcoin Core + Fulcrum +
+/// mempool/esplora + arkd + …) via its zero-dependency Node CLI (`regtest.mjs`).
+///
+/// Replaces the old `nigiri` binary: faucet/mine shell out to `regtest.mjs`,
+/// chain queries go through mempool's Esplora-compatible REST API, and package
+/// submission hits Bitcoin Core RPC directly.
+pub struct Regtest {
     esplora_client: esplora_client::BlockingClient,
     /// By how much we _reduce_ the block time of outpoints.
     ///
@@ -120,9 +221,10 @@ pub struct Nigiri {
     bitcoin_rpc: BitcoinRpc,
 }
 
-impl Nigiri {
+impl Regtest {
     pub fn new() -> Self {
-        let esplora_url = "http://localhost:30000";
+        // mempool serves the Esplora-compatible REST API under `/api`.
+        let esplora_url = "http://localhost:3000/api";
         let bitcoin_rpc = BitcoinRpc::new(
             "http://localhost:18443".to_string(),
             "admin1".to_string(),
@@ -140,53 +242,52 @@ impl Nigiri {
         }
     }
 
+    /// Run a `regtest.mjs` subcommand, asserting it succeeds.
+    #[allow(unused)]
+    fn run_regtest(&self, args: &[&str]) -> std::process::Output {
+        let script = regtest_mjs_path();
+        let output = Command::new("node")
+            .arg(&script)
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to run `node {} {args:?}`: {e}", script.display()));
+
+        assert!(
+            output.status.success(),
+            "`regtest.mjs {args:?}` failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        output
+    }
+
+    #[allow(unused)]
     pub async fn faucet_fund(&self, address: &Address, amount: Amount) -> OutPoint {
-        let res = Command::new("nigiri")
-            .args(["faucet", &address.to_string(), &amount.to_btc().to_string()])
-            .output()
-            .unwrap();
+        // `--confirm` mines one block so the funds confirm immediately; unlike
+        // nigiri, the regtest CLI does not auto-mine on faucet.
+        self.run_regtest(&[
+            "faucet",
+            &address.to_string(),
+            &amount.to_btc().to_string(),
+            "--confirm",
+        ]);
 
-        assert!(res.status.success());
-
-        let text = String::from_utf8(res.stdout).unwrap();
-        let re = Regex::new(r"txId: ([0-9a-fA-F]{64})").unwrap();
-
-        let txid = match re.captures(&text) {
-            Some(captures) => match captures.get(1) {
-                Some(txid) => txid.as_str(),
-                _ => panic!("Could not parse TXID"),
-            },
-            None => {
-                panic!("Could not parse TXID");
+        // The faucet does not print the funding txid, so locate the newly
+        // created output via esplora. Poll until the indexer catches up with
+        // the freshly mined block.
+        for _ in 0..30 {
+            if let Some(utxo) = self
+                .find_outpoints_blocking(address)
+                .into_iter()
+                .find(|u| u.amount == amount && !u.is_spent)
+            {
+                return utxo.outpoint;
             }
-        };
 
-        let txid: Txid = txid.parse().unwrap();
-
-        let res = Command::new("nigiri")
-            .args(["rpc", "getrawtransaction", &txid.to_string()])
-            .output()
-            .unwrap();
-
-        let tx = String::from_utf8(res.stdout).unwrap();
-
-        let tx = Vec::from_hex(tx.trim()).unwrap();
-        let tx: Transaction = bitcoin::consensus::deserialize(&tx).unwrap();
-
-        let (vout, _) = tx
-            .output
-            .iter()
-            .enumerate()
-            .find(|(_, o)| o.script_pubkey == address.script_pubkey())
-            .unwrap();
-
-        // Wait for output to be confirmed.
-        tokio::time::sleep(Duration::from_secs(5)).await;
-
-        OutPoint {
-            txid,
-            vout: vout as u32,
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
+
+        panic!("funding output for {address} ({amount}) not found via esplora");
     }
 
     #[allow(unused)]
@@ -201,29 +302,23 @@ impl Nigiri {
         *guard = outpoint_block_height_offset;
     }
 
-    #[allow(unused)]
+    // `mine` stays async (callers `.await` it) even though shelling out to the
+    // regtest CLI is synchronous.
+    #[allow(unused, clippy::unused_async)]
     pub async fn mine(&self, n: u32) {
-        for i in 0..n {
-            self.faucet_fund(
-                &Address::from_str("bcrt1q8frde3yn78tl9ecgq4anlz909jh0clefhucdur")
-                    .unwrap()
-                    .assume_checked(),
-                Amount::from_sat(10_000),
-            )
-            .await;
-        }
+        self.run_regtest(&["mine", &n.to_string()]);
 
         tracing::debug!(n, "Mined blocks");
     }
 }
 
-impl Default for Nigiri {
+impl Default for Regtest {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Nigiri {
+impl Regtest {
     /// Get the current block height from the esplora client.
     #[allow(unused)]
     pub fn get_height(&self) -> u32 {
@@ -294,21 +389,18 @@ impl Nigiri {
         let mut utxos = Vec::new();
         for output in outputs.iter() {
             let outpoint = output.outpoint;
-            let status = self
-                .esplora_client
-                .get_output_status(&outpoint.txid, outpoint.vout as u64)
-                .unwrap();
-
-            match status {
-                Some(esplora_client::OutputStatus { spent: false, .. }) | None => {
-                    utxos.push(*output);
-                }
-                Some(esplora_client::OutputStatus { spent: true, .. }) => {
-                    utxos.push(ExplorerUtxo {
-                        is_spent: true,
-                        ..*output
-                    })
-                }
+            // Determine spentness from Bitcoin Core's UTXO set rather than the
+            // esplora indexer — see `BitcoinRpc::is_output_unspent`.
+            if self
+                .bitcoin_rpc
+                .is_output_unspent(&outpoint.txid, outpoint.vout)
+            {
+                utxos.push(*output);
+            } else {
+                utxos.push(ExplorerUtxo {
+                    is_spent: true,
+                    ..*output
+                })
             }
         }
 
@@ -316,22 +408,22 @@ impl Nigiri {
     }
 }
 
-impl Blockchain for Nigiri {
+impl Blockchain for Regtest {
     async fn find_outpoints(&self, address: &Address) -> Result<Vec<ExplorerUtxo>, Error> {
         Ok(self.find_outpoints_blocking(address))
     }
 
     async fn find_tx(&self, txid: &Txid) -> Result<Option<Transaction>, Error> {
-        let tx = self.esplora_client.get_tx(txid).unwrap();
-
-        Ok(tx)
+        // Query the node directly rather than the esplora indexer, which lags
+        // the chain on regtest and would intermittently fail to return a
+        // freshly-mined commitment TX (e.g. when building unilateral exit
+        // trees).
+        Ok(self.bitcoin_rpc.get_raw_transaction(txid))
     }
 
     async fn get_tx_status(&self, txid: &Txid) -> Result<TxStatus, Error> {
-        let info = self.esplora_client.get_tx_info(txid).unwrap();
-
         Ok(TxStatus {
-            confirmed_at: info.and_then(|s| s.status.block_time.map(|t| t as i64)),
+            confirmed_at: self.bitcoin_rpc.get_tx_blocktime(txid),
         })
     }
 
@@ -415,10 +507,10 @@ impl Persistence for InMemoryDb {
 #[allow(unused)]
 pub async fn set_up_client(
     name: String,
-    nigiri: Arc<Nigiri>,
+    regtest: Arc<Regtest>,
     secp: Secp256k1<All>,
 ) -> (
-    Client<Nigiri, Wallet<InMemoryDb>, InMemorySwapStorage, Bip32KeyProvider>,
+    Client<Regtest, Wallet<InMemoryDb>, InMemorySwapStorage, Bip32KeyProvider>,
     Arc<Wallet<InMemoryDb>>,
 ) {
     let mut rng = thread_rng();
@@ -429,7 +521,7 @@ pub async fn set_up_client(
     let network = Network::Regtest;
 
     let db = InMemoryDb::default();
-    let wallet = Wallet::new(kp, secp, network, "http://localhost:3000", db).unwrap();
+    let wallet = Wallet::new(kp, secp, network, "http://localhost:3000/api", db).unwrap();
     let wallet = Arc::new(wallet);
 
     let seed: [u8; 32] = rng.r#gen();
@@ -439,11 +531,11 @@ pub async fn set_up_client(
         name,
         xpriv,
         None,
-        nigiri,
+        regtest,
         wallet.clone(),
         "http://localhost:7070".to_string(),
         Arc::new(InMemorySwapStorage::default()),
-        "http://localhost:9001".to_string(),
+        "http://localhost:9069".to_string(),
         None,
         Duration::from_secs(30),
         None,
@@ -459,11 +551,11 @@ pub async fn set_up_client(
 #[allow(unused)]
 pub async fn set_up_client_with_delegator(
     name: String,
-    nigiri: Arc<Nigiri>,
+    regtest: Arc<Regtest>,
     secp: Secp256k1<All>,
     delegator_pk: XOnlyPublicKey,
 ) -> (
-    Client<Nigiri, Wallet<InMemoryDb>, InMemorySwapStorage, Bip32KeyProvider>,
+    Client<Regtest, Wallet<InMemoryDb>, InMemorySwapStorage, Bip32KeyProvider>,
     Arc<Wallet<InMemoryDb>>,
 ) {
     let mut rng = thread_rng();
@@ -474,7 +566,7 @@ pub async fn set_up_client_with_delegator(
     let network = Network::Regtest;
 
     let db = InMemoryDb::default();
-    let wallet = Wallet::new(kp, secp, network, "http://localhost:3000", db).unwrap();
+    let wallet = Wallet::new(kp, secp, network, "http://localhost:3000/api", db).unwrap();
     let wallet = Arc::new(wallet);
 
     let seed: [u8; 32] = rng.r#gen();
@@ -484,11 +576,11 @@ pub async fn set_up_client_with_delegator(
         name,
         xpriv,
         None,
-        nigiri,
+        regtest,
         wallet.clone(),
         "http://localhost:7070".to_string(),
         Arc::new(InMemorySwapStorage::default()),
-        "http://localhost:9001".to_string(),
+        "http://localhost:9069".to_string(),
         None,
         Duration::from_secs(30),
         Some(delegator_pk),
@@ -569,11 +661,11 @@ pub(crate) use wait_until_balance;
 #[allow(unused)]
 pub async fn set_up_client_with_seed(
     name: String,
-    nigiri: Arc<Nigiri>,
+    regtest: Arc<Regtest>,
     secp: Secp256k1<All>,
     seed: [u8; 32],
 ) -> (
-    Client<Nigiri, Wallet<InMemoryDb>, InMemorySwapStorage, Bip32KeyProvider>,
+    Client<Regtest, Wallet<InMemoryDb>, InMemorySwapStorage, Bip32KeyProvider>,
     Arc<Wallet<InMemoryDb>>,
 ) {
     let mut rng = thread_rng();
@@ -584,7 +676,7 @@ pub async fn set_up_client_with_seed(
     let network = Network::Regtest;
 
     let db = InMemoryDb::default();
-    let wallet = Wallet::new(kp, secp, network, "http://localhost:3000", db).unwrap();
+    let wallet = Wallet::new(kp, secp, network, "http://localhost:3000/api", db).unwrap();
     let wallet = Arc::new(wallet);
 
     let xpriv = Xpriv::new_master(network, &seed).unwrap();
@@ -593,11 +685,11 @@ pub async fn set_up_client_with_seed(
         name,
         xpriv,
         None,
-        nigiri,
+        regtest,
         wallet.clone(),
         "http://localhost:7070".to_string(),
         Arc::new(InMemorySwapStorage::default()),
-        "http://localhost:9001".to_string(),
+        "http://localhost:9069".to_string(),
         None,
         Duration::from_secs(30),
         None,
