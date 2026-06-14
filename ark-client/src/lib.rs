@@ -1114,10 +1114,11 @@ where
     /// Sweep VTXOs and boarding outputs under deprecated server signers (before their cutoff)
     /// to the current signer.
     ///
-    /// This joins the next available batch and settles all inputs — current-signer and
-    /// pre-cutoff deprecated-signer alike — to a fresh current-signer address. Past-cutoff
-    /// VTXOs and boarding outputs are excluded from the batch automatically (the operator
-    /// won't co-sign the old key) and will become recoverable after expiry.
+    /// Internally this calls [`Self::settle`], which settles **all** unspent VTXOs and boarding
+    /// outputs in a single batch — not just the deprecated-signer ones. Current-signer VTXOs are
+    /// included too, which consolidates the wallet but does incur settlement fees on outputs that
+    /// would otherwise not need to move. Past-cutoff VTXOs and boarding outputs are excluded
+    /// automatically (the operator won't co-sign the old key) and become recoverable after expiry.
     ///
     /// Returns `None` when there are no migratable VTXOs or boarding outputs (nothing to do).
     pub async fn migrate_deprecated_signer_vtxos<R>(
