@@ -49,6 +49,7 @@ backon = { version = "1", features = ["gloo-timers-sleep"] }
 futures-util = { version = "0.3.31", default-features = false, features = ["alloc"] }
 getrandom = { version = "0.2", features = ["wasm-bindgen", "js"] }
 gloo-timers = { version = "0.3.0", features = ["futures"] }
+js-sys = { version = "0.3" }
 tonic = { version = "0.14", default-features = false, features = ["codegen"] }
 tonic-prost = "0.14"
 tonic-web-wasm-client = { version = "0.6", default-features = false }
