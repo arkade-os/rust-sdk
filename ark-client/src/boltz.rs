@@ -552,9 +552,7 @@ where
                     unilateral_claim_delay: parse_sequence_number(
                         timeout_block_heights.unilateral_claim as i64,
                     )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid unilateral claim timeout: {e}"))
-                    })?,
+                    .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
                     unilateral_refund_delay: parse_sequence_number(
                         timeout_block_heights.unilateral_refund as i64,
                     )
@@ -718,9 +716,7 @@ where
                     unilateral_claim_delay: parse_sequence_number(
                         timeout_block_heights.unilateral_claim as i64,
                     )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid unilateral claim timeout: {e}"))
-                    })?,
+                    .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
                     unilateral_refund_delay: parse_sequence_number(
                         timeout_block_heights.unilateral_refund as i64,
                     )
@@ -831,9 +827,7 @@ where
                     unilateral_claim_delay: parse_sequence_number(
                         timeout_block_heights.unilateral_claim as i64,
                     )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid unilateral claim timeout: {e}"))
-                    })?,
+                    .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
                     unilateral_refund_delay: parse_sequence_number(
                         timeout_block_heights.unilateral_refund as i64,
                     )
@@ -1436,9 +1430,7 @@ where
                     unilateral_claim_delay: parse_sequence_number(
                         timeout_block_heights.unilateral_claim as i64,
                     )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid unilateral claim timeout: {e}"))
-                    })?,
+                    .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
                     unilateral_refund_delay: parse_sequence_number(
                         timeout_block_heights.unilateral_refund as i64,
                     )
@@ -1683,9 +1675,7 @@ where
                     unilateral_claim_delay: parse_sequence_number(
                         timeout_block_heights.unilateral_claim as i64,
                     )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid unilateral claim timeout: {e}"))
-                    })?,
+                    .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
                     unilateral_refund_delay: parse_sequence_number(
                         timeout_block_heights.unilateral_refund as i64,
                     )
@@ -2104,9 +2094,7 @@ where
                     unilateral_claim_delay: parse_sequence_number(
                         timeout_block_heights.unilateral_claim as i64,
                     )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid unilateral claim timeout: {e}"))
-                    })?,
+                    .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
                     unilateral_refund_delay: parse_sequence_number(
                         timeout_block_heights.unilateral_refund as i64,
                     )
@@ -2463,9 +2451,7 @@ where
                     unilateral_claim_delay: parse_sequence_number(
                         timeout_block_heights.unilateral_claim as i64,
                     )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid unilateral claim timeout: {e}"))
-                    })?,
+                    .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
                     unilateral_refund_delay: parse_sequence_number(
                         timeout_block_heights.unilateral_refund as i64,
                     )
@@ -3400,18 +3386,17 @@ where
         timeout_block_heights: &TimeoutBlockHeights,
         expected_address: &ArkAddress,
     ) -> Result<VhtlcScript, Error> {
-        let unilateral_claim_delay = parse_sequence_number(
-            timeout_block_heights.unilateral_claim as i64,
-        )
-        .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?;
-        let unilateral_refund_delay = parse_sequence_number(
-            timeout_block_heights.unilateral_refund as i64,
-        )
-        .map_err(|e| Error::ad_hoc(format!("invalid unilateral refund timeout: {e}")))?;
-        let unilateral_refund_without_receiver_delay = parse_sequence_number(
-            timeout_block_heights.unilateral_refund_without_receiver as i64,
-        )
-        .map_err(|e| Error::ad_hoc(format!("invalid refund without receiver timeout: {e}")))?;
+        let unilateral_claim_delay =
+            parse_sequence_number(timeout_block_heights.unilateral_claim as i64)
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?;
+        let unilateral_refund_delay =
+            parse_sequence_number(timeout_block_heights.unilateral_refund as i64)
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral refund timeout: {e}")))?;
+        let unilateral_refund_without_receiver_delay =
+            parse_sequence_number(timeout_block_heights.unilateral_refund_without_receiver as i64)
+                .map_err(|e| {
+                    Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
+                })?;
 
         self.reconstruct_vhtlc_for_address(
             |server| {
@@ -3507,13 +3492,23 @@ where
                 continue;
             }
 
-            let vhtlc = self.build_vhtlc_script(
+            let vhtlc = match self.build_vhtlc_script(
                 swap.claim_public_key,
                 swap.refund_public_key,
                 swap.preimage_hash,
                 &swap.timeout_block_heights,
                 &swap.vhtlc_address,
-            )?;
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        swap_id = swap.id,
+                        error = %e,
+                        "VHTLC reconstruction failed for submarine swap, skipping"
+                    );
+                    continue;
+                }
+            };
 
             // For submarine swaps, the user is the sender (refund key).
             // Use refund_without_receiver_script as the intent proof — it only requires
@@ -3550,13 +3545,23 @@ where
                 continue;
             }
 
-            let vhtlc = self.build_vhtlc_script(
+            let vhtlc = match self.build_vhtlc_script(
                 swap.claim_public_key,
                 swap.refund_public_key,
                 swap.preimage_hash,
                 &swap.timeout_block_heights,
                 &swap.vhtlc_address,
-            )?;
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        swap_id = swap.id,
+                        error = %e,
+                        "VHTLC reconstruction failed for reverse swap, skipping"
+                    );
+                    continue;
+                }
+            };
 
             // For reverse swaps, the user is the receiver (claim key).
             // Use claim_script as the intent proof — we need to sign with the receiver key.

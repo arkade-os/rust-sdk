@@ -1087,7 +1087,10 @@ where
 
         // Aggregate asset balances from spendable (non-past-cutoff) VTXOs only.
         let mut asset_balances: HashMap<AssetId, u64> = HashMap::new();
-        for vtxo in vtxo_list.spendable_offchain().filter(|v| !is_past_cutoff(v)) {
+        for vtxo in vtxo_list
+            .spendable_offchain()
+            .filter(|v| !is_past_cutoff(v))
+        {
             for asset in &vtxo.assets {
                 let total = asset_balances
                     .get(&asset.asset_id)

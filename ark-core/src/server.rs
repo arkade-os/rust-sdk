@@ -487,8 +487,11 @@ pub struct DeprecatedSigner {
 impl Info {
     /// Returns all known server signing keys: the current signer followed by all deprecated ones.
     pub fn all_server_keys(&self) -> impl Iterator<Item = XOnlyPublicKey> + '_ {
-        std::iter::once(self.signer_pk.x_only_public_key().0)
-            .chain(self.deprecated_signers.iter().map(|ds| ds.pk.x_only_public_key().0))
+        std::iter::once(self.signer_pk.x_only_public_key().0).chain(
+            self.deprecated_signers
+                .iter()
+                .map(|ds| ds.pk.x_only_public_key().0),
+        )
     }
 
     /// Returns `true` if `server_pk` is a deprecated signer whose cooperative-sign cutoff has
