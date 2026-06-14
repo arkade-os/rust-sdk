@@ -104,8 +104,7 @@ impl BitcoinRpc {
         Ok(())
     }
 
-    /// Make a blocking JSON-RPC call and return its `result` field (`None` on
-    /// transport error or a null result).
+    /// Make a blocking JSON-RPC call and return its `result` field.
     ///
     /// Several `Blockchain` lookups go straight to Bitcoin Core instead of the
     /// esplora indexer because mempool's esplora-compatible API lags behind the
@@ -117,7 +116,16 @@ impl BitcoinRpc {
     /// These are blocking calls (used from the synchronous `Blockchain`
     /// lookups), so they go through `minreq` rather than the async reqwest
     /// client.
-    fn rpc_call(&self, method: &str, params: serde_json::Value) -> Option<serde_json::Value> {
+    ///
+    /// Returns the `result` field: `Ok(None)` for a genuine null result (e.g.
+    /// `gettxout` on an unknown/spent output, or an unknown tx), and `Err` for a
+    /// transport/parse failure — kept distinct so callers don't mistake an RPC
+    /// hiccup for an authoritative "not found".
+    fn rpc_call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<Option<serde_json::Value>, Error> {
         let body = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -134,14 +142,14 @@ impl BitcoinRpc {
             .with_header("Authorization", format!("Basic {auth}"))
             .with_body(body)
             .send()
-            .ok()?
+            .map_err(|e| Error::wallet(format!("Bitcoin RPC transport error: {e}")))?
             .json::<serde_json::Value>()
-            .ok()?;
+            .map_err(|e| Error::wallet(format!("Bitcoin RPC parse error: {e}")))?;
 
-        value
+        Ok(value
             .get("result")
             .filter(|result| !result.is_null())
-            .cloned()
+            .cloned())
     }
 
     /// Whether `txid:vout` is still in the node's UTXO set (unspent), accounting
@@ -149,32 +157,44 @@ impl BitcoinRpc {
     /// already-spent output.
     fn is_output_unspent(&self, txid: &Txid, vout: u32) -> bool {
         // include_mempool = true: treat outputs spent by an unconfirmed tx as
-        // spent too. On any RPC hiccup, fall back to "unspent" so we don't
-        // silently drop a genuinely spendable output.
-        self.rpc_call(
+        // spent too.
+        match self.rpc_call(
             "gettxout",
             serde_json::json!([txid.to_string(), vout, true]),
-        )
-        .is_some()
+        ) {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            // On an RPC hiccup, fall back to "unspent" so we don't silently drop
+            // a genuinely spendable output.
+            Err(e) => {
+                tracing::warn!(%txid, vout, error = %e, "gettxout failed; treating as unspent");
+                true
+            }
+        }
     }
 
     /// Fetch a transaction by id from the node (mempool or, via `txindex`, a
-    /// confirmed block). `None` if the node has never seen it.
+    /// confirmed block). `None` if the node has never seen it (or on RPC error).
     fn get_raw_transaction(&self, txid: &Txid) -> Option<Transaction> {
-        let hex = self.rpc_call("getrawtransaction", serde_json::json!([txid.to_string()]))?;
+        let hex = self
+            .rpc_call("getrawtransaction", serde_json::json!([txid.to_string()]))
+            .ok()
+            .flatten()?;
         let bytes = Vec::from_hex(hex.as_str()?).ok()?;
         bitcoin::consensus::deserialize(&bytes).ok()
     }
 
     /// The block time a transaction was confirmed at, or `None` if it is
-    /// unconfirmed or unknown.
+    /// unconfirmed or unknown (or on RPC error).
     fn get_tx_blocktime(&self, txid: &Txid) -> Option<i64> {
         // verbose = true returns a JSON object that includes `blocktime` once
         // the transaction is mined.
         self.rpc_call(
             "getrawtransaction",
             serde_json::json!([txid.to_string(), true]),
-        )?
+        )
+        .ok()
+        .flatten()?
         .get("blocktime")?
         .as_i64()
     }
@@ -263,6 +283,15 @@ impl Regtest {
 
     #[allow(unused)]
     pub async fn faucet_fund(&self, address: &Address, amount: Amount) -> OutPoint {
+        // Snapshot the address's existing outpoints so we can tell the new
+        // faucet output apart from any pre-existing one of the same amount (the
+        // faucet doesn't print the funding txid for us to match on directly).
+        let existing: std::collections::HashSet<OutPoint> = self
+            .find_outpoints_blocking(address)
+            .into_iter()
+            .map(|utxo| utxo.outpoint)
+            .collect();
+
         // `--confirm` mines one block so the funds confirm immediately; unlike
         // nigiri, the regtest CLI does not auto-mine on faucet.
         self.run_regtest(&[
@@ -272,14 +301,13 @@ impl Regtest {
             "--confirm",
         ]);
 
-        // The faucet does not print the funding txid, so locate the newly
-        // created output via esplora. Poll until the indexer catches up with
-        // the freshly mined block.
+        // Locate the newly created output via esplora. Poll until the indexer
+        // catches up with the freshly mined block.
         for _ in 0..30 {
             if let Some(utxo) = self
                 .find_outpoints_blocking(address)
                 .into_iter()
-                .find(|u| u.amount == amount && !u.is_spent)
+                .find(|u| u.amount == amount && !u.is_spent && !existing.contains(&u.outpoint))
             {
                 return utxo.outpoint;
             }
