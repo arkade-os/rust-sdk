@@ -117,11 +117,12 @@ impl TryFrom<crate::models::DeprecatedSigner> for ark_core::server::DeprecatedSi
             .parse::<PublicKey>()
             .map_err(|e| ConversionError(format!("Invalid pubkey '{pubkey_str}': {e}")))?;
 
-        let cutoff_date_str = value.cutoff_date.ok_or_else(|| {
-            ConversionError("Missing cutoff_date in deprecated signer".to_string())
-        })?;
-        let cutoff_date = i64::from_str(&cutoff_date_str)
-            .map_err(|e| ConversionError(format!("Could not parse cutoff_date: {e:#}")))?;
+        // A missing cutoffDate means "rotate immediately" (same as 0).
+        let cutoff_date = match value.cutoff_date {
+            Some(s) => i64::from_str(&s)
+                .map_err(|e| ConversionError(format!("Could not parse cutoff_date: {e:#}")))?,
+            None => 0,
+        };
 
         Ok(ark_core::server::DeprecatedSigner { pk, cutoff_date })
     }
