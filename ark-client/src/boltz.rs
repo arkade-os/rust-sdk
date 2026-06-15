@@ -546,6 +546,7 @@ where
             &swap_data.timeout_block_heights,
             &swap_data.vhtlc_address,
         )?;
+        let server_info = self.server_info()?;
         let vhtlc_address = vhtlc.address();
 
         let vhtlc_outpoint = {
@@ -553,7 +554,7 @@ where
                 .get_virtual_tx_outpoints(std::iter::once(vhtlc_address))
                 .await?;
 
-            let vtxo_list = VtxoList::new(self.server_info.dust, virtual_tx_outpoints);
+            let vtxo_list = VtxoList::new(server_info.dust, virtual_tx_outpoints);
 
             // We expect a single outpoint.
             let mut unspent = vtxo_list.all_unspent();
@@ -607,7 +608,7 @@ where
             &outputs,
             change_address,
             std::slice::from_ref(&vhtlc_input),
-            &self.server_info,
+            &server_info,
         )?;
 
         let kp = self.keypair_by_pk(&refunder_pk)?;
@@ -687,6 +688,7 @@ where
             &swap_data.timeout_block_heights,
             &swap_data.vhtlc_address,
         )?;
+        let server_info = self.server_info()?;
         let vhtlc_address = vhtlc.address();
 
         let vhtlc_outpoint = {
@@ -694,7 +696,7 @@ where
                 .get_virtual_tx_outpoints(std::iter::once(vhtlc_address))
                 .await?;
 
-            let vtxo_list = VtxoList::new(self.server_info.dust, virtual_tx_outpoints);
+            let vtxo_list = VtxoList::new(server_info.dust, virtual_tx_outpoints);
 
             // We expect a single outpoint.
             let mut recoverable = vtxo_list.recoverable();
@@ -775,6 +777,7 @@ where
             &swap_data.timeout_block_heights,
             &swap_data.vhtlc_address,
         )?;
+        let server_info = self.server_info()?;
         let vhtlc_address = vhtlc.address();
 
         let vhtlc_outpoint = {
@@ -782,7 +785,7 @@ where
                 .get_virtual_tx_outpoints(std::iter::once(vhtlc_address))
                 .await?;
 
-            let vtxo_list = VtxoList::new(self.server_info.dust, virtual_tx_outpoints);
+            let vtxo_list = VtxoList::new(server_info.dust, virtual_tx_outpoints);
 
             // We expect a single outpoint.
             let mut unspent = vtxo_list.all_unspent();
@@ -835,7 +838,7 @@ where
             &outputs,
             change_address,
             std::slice::from_ref(&vhtlc_input),
-            &self.server_info,
+            &server_info,
         )?;
 
         // Sign the ark transaction with the sender's (user's) key.
@@ -977,7 +980,8 @@ where
             return Ok(());
         };
 
-        let server_signer: XOnlyPublicKey = self.server_info.signer_pk.into();
+        let server_info = self.server_info()?;
+        let server_signer: XOnlyPublicKey = server_info.signer_pk.into();
         if recipient_address.server() != server_signer {
             return Err(Error::consumer(format!(
                 "recipient Arkade address belongs to a different server: expected {server_signer}, got {}",
@@ -1355,6 +1359,7 @@ where
             &swap.timeout_block_heights,
             &swap.vhtlc_address,
         )?;
+        let server_info = self.server_info()?;
         let vhtlc_address = vhtlc.address();
 
         // TODO: Ideally we can skip this if the vout is always the same (probably 0).
@@ -1363,7 +1368,7 @@ where
                 .get_virtual_tx_outpoints(std::iter::once(vhtlc_address))
                 .await?;
 
-            let vtxo_list = VtxoList::new(self.server_info.dust, virtual_tx_outpoints);
+            let vtxo_list = VtxoList::new(server_info.dust, virtual_tx_outpoints);
 
             // We expect a single outpoint.
             let mut unspent = vtxo_list.all_unspent();
@@ -1413,7 +1418,7 @@ where
             &outputs,
             change_address,
             std::slice::from_ref(&vhtlc_input),
-            &self.server_info,
+            &server_info,
         )
         .map_err(Error::from)
         .context("failed to build offchain TXs")?;
@@ -1577,6 +1582,7 @@ where
             &swap.timeout_block_heights,
             &swap.vhtlc_address,
         )?;
+        let server_info = self.server_info()?;
         let vhtlc_address = vhtlc.address();
 
         // TODO: Ideally we can skip this if the vout is always the same (probably 0).
@@ -1585,7 +1591,7 @@ where
                 .get_virtual_tx_outpoints(std::iter::once(vhtlc_address))
                 .await?;
 
-            let vtxo_list = VtxoList::new(self.server_info.dust, virtual_tx_outpoints);
+            let vtxo_list = VtxoList::new(server_info.dust, virtual_tx_outpoints);
 
             // We expect a single outpoint.
             let mut unspent = vtxo_list.all_unspent();
@@ -1635,7 +1641,7 @@ where
             &outputs,
             change_address,
             std::slice::from_ref(&vhtlc_input),
-            &self.server_info,
+            &server_info,
         )
         .map_err(Error::from)
         .context("failed to build offchain TXs")?;
@@ -1964,6 +1970,7 @@ where
                  (this swap's server lockup is on-chain BTC, not an Ark VHTLC)"
             ))
         })?;
+        let server_info = self.server_info()?;
 
         let expected_address = ArkAddress::decode(&swap.server_lockup_address)
             .map_err(|e| Error::ad_hoc(format!("invalid server lockup address: {e}")))?;
@@ -1982,7 +1989,7 @@ where
                 .get_virtual_tx_outpoints(std::iter::once(vhtlc_address))
                 .await?;
 
-            let vtxo_list = VtxoList::new(self.server_info.dust, virtual_tx_outpoints);
+            let vtxo_list = VtxoList::new(server_info.dust, virtual_tx_outpoints);
 
             let mut unspent = vtxo_list.all_unspent();
             let vhtlc_outpoint = unspent.next().ok_or_else(|| {
@@ -2029,7 +2036,7 @@ where
             &outputs,
             change_address,
             std::slice::from_ref(&vhtlc_input),
-            &self.server_info,
+            &server_info,
         )
         .map_err(Error::from)
         .context("failed to build offchain TXs")?;
@@ -2299,6 +2306,7 @@ where
         })?;
 
         let preimage_hash = ripemd160::Hash::hash(swap.preimage_hash.as_byte_array());
+        let server_info = self.server_info()?;
 
         // User's lockup VHTLC: sender=user(refund), receiver=server(claim)
         let expected_address = ArkAddress::decode(&swap.user_lockup_address)
@@ -2318,7 +2326,7 @@ where
                 .get_virtual_tx_outpoints(std::iter::once(vhtlc_address))
                 .await?;
 
-            let vtxo_list = VtxoList::new(self.server_info.dust, virtual_tx_outpoints);
+            let vtxo_list = VtxoList::new(server_info.dust, virtual_tx_outpoints);
 
             let mut unspent = vtxo_list.all_unspent();
             unspent
@@ -2367,7 +2375,7 @@ where
             &outputs,
             change_address,
             std::slice::from_ref(&vhtlc_input),
-            &self.server_info,
+            &server_info,
         )?;
 
         let kp = self.keypair_by_pk(&refunder_pk)?;
@@ -3206,9 +3214,10 @@ where
         mk_opts: impl Fn(XOnlyPublicKey) -> Result<VhtlcOptions, Error>,
         expected_address: &ArkAddress,
     ) -> Result<VhtlcScript, Error> {
+        let server_info = self.server_info()?;
         reconstruct_vhtlc_from_keys(
-            self.server_info.all_server_keys(),
-            self.server_info.network,
+            server_info.all_server_keys(),
+            server_info.network,
             mk_opts,
             expected_address,
         )

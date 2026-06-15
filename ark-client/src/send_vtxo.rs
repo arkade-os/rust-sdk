@@ -18,6 +18,7 @@ use ark_core::send::sign_checkpoint_transaction;
 use ark_core::send::OffchainTransactions;
 use ark_core::send::SendReceiver;
 use ark_core::send::VtxoInput;
+use ark_core::server;
 use ark_core::server::PendingTx;
 use bitcoin::key::Secp256k1;
 use bitcoin::psbt;
@@ -192,12 +193,15 @@ where
         address: ark_core::ArkAddress,
         amount: Amount,
     ) -> Result<Txid, Error> {
+        let server_info = self.server_info()?;
         let receivers = vec![SendReceiver {
             address,
             amount,
             assets: Vec::new(),
         }];
-        let pending_tx = self.build_and_submit(vtxo_inputs, receivers).await?;
+        let pending_tx = self
+            .build_and_submit(vtxo_inputs, receivers, &server_info)
+            .await?;
         Ok(pending_tx.ark_txid)
     }
 
@@ -239,16 +243,14 @@ where
             .context("failed to get spendable VTXOs")?;
 
         let now = crate::unix_now();
+        let server_info = self.server_info()?;
         let spendable = vtxo_list
             .spendable_offchain()
             // Exclude VTXOs under a past-cutoff deprecated signer: operator won't co-sign.
             .filter(|v| {
                 !script_pubkey_to_vtxo_map
                     .get(&v.script)
-                    .map(|vtxo| {
-                        self.server_info
-                            .is_signer_past_cutoff_at(vtxo.server_pk(), now)
-                    })
+                    .map(|vtxo| server_info.is_signer_past_cutoff_at(vtxo.server_pk(), now))
                     .unwrap_or(false)
             })
             .map(|vtxo| VirtualTxOutPoint {
@@ -260,6 +262,7 @@ where
             })
             .collect::<Vec<_>>();
 
+        let server_info = self.server_info()?;
         let mut selected_outpoints = HashSet::new();
         let mut selected = Vec::new();
         let mut asset_changes: HashMap<AssetId, u64> = HashMap::new();
@@ -317,7 +320,7 @@ where
         }
 
         if !asset_changes.is_empty() {
-            btc_needed += self.server_info.dust;
+            btc_needed += server_info.dust;
         }
 
         let btc_shortfall = btc_needed.checked_sub(btc_provided).unwrap_or(Amount::ZERO);
@@ -329,7 +332,7 @@ where
                 .cloned()
                 .collect();
 
-            let btc_coins = select_vtxos(available, btc_shortfall, self.server_info.dust, true)
+            let btc_coins = select_vtxos(available, btc_shortfall, server_info.dust, true)
                 .map_err(Error::from)
                 .context("failed to select BTC coins for asset transfer")?;
 
@@ -512,13 +515,12 @@ where
         vtxo_inputs: Vec<VtxoInput>,
         receivers: Vec<SendReceiver>,
     ) -> Result<Txid, Error> {
-        Self::validate_selected_inputs_cover_receivers(
-            &vtxo_inputs,
-            &receivers,
-            self.server_info.dust,
-        )?;
+        let server_info = self.server_info()?;
+        Self::validate_selected_inputs_cover_receivers(&vtxo_inputs, &receivers, server_info.dust)?;
 
-        let pending_tx = self.build_and_submit(vtxo_inputs, receivers).await?;
+        let pending_tx = self
+            .build_and_submit(vtxo_inputs, receivers, &server_info)
+            .await?;
         let ark_txid = pending_tx.ark_txid;
 
         self.sign_and_finalize_pending_tx(pending_tx).await?;
@@ -568,13 +570,14 @@ where
         &self,
         inputs: Vec<VtxoInput>,
         receivers: Vec<SendReceiver>,
+        server_info: &server::Info,
     ) -> Result<PendingTx, Error> {
         let (change_address, change_address_vtxo) = self.get_offchain_address()?;
 
         let OffchainTransactions {
             ark_tx,
             checkpoint_txs,
-        } = build_asset_send_transactions(&receivers, &change_address, &inputs, &self.server_info)
+        } = build_asset_send_transactions(&receivers, &change_address, &inputs, server_info)
             .map_err(Error::from)
             .context("failed to build offchain asset-send transactions")?;
 
@@ -700,7 +703,7 @@ where
         // finalized. This is much cheaper than fetching all VTXOs when there
         // are no pending transactions (common case).
         let addresses = ark_addresses.iter().map(|(a, _)| *a);
-        let request = ark_core::server::GetVtxosRequest::new_for_addresses(addresses)
+        let request = server::GetVtxosRequest::new_for_addresses(addresses)
             .pending_only()
             .map_err(Error::from)?;
 

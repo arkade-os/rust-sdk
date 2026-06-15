@@ -120,7 +120,8 @@ pub async fn reverse_swap_claim_with_vhtlc_ancestor_can_exit_unilaterally() {
     let mut max_blocktime_offset = 0;
 
     match alice
-        .server_info
+        .server_info()
+        .unwrap()
         .unilateral_exit_delay
         .to_relative_lock_time()
         .expect("unilateral VTXO exit delay should be relative")

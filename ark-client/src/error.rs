@@ -26,6 +26,8 @@ enum Kind {
     CoinSelect(CoinSelectError),
     /// An error related to actions within the wallet.
     Wallet(WalletError),
+    /// Ark server info changed while processing a request.
+    ServerInfoChanged(ServerInfoChangedError),
     /// An error thrown by a user of this library
     Consumer(ConsumerError),
 }
@@ -54,6 +56,9 @@ struct CoinSelectError {
 struct WalletError {
     source: Source,
 }
+
+#[derive(Debug)]
+struct ServerInfoChangedError;
 
 #[derive(Debug)]
 struct ConsumerError {
@@ -96,6 +101,91 @@ impl Error {
             source: source.into(),
         }))
     }
+
+    pub(crate) fn server_info_changed(source: impl Into<Error>) -> Self {
+        source
+            .into()
+            .context(Error::new(Kind::ServerInfoChanged(ServerInfoChangedError)))
+    }
+
+    pub fn is_server_info_changed(&self) -> bool {
+        let mut err = self;
+        loop {
+            if matches!(err.inner.kind, Kind::ServerInfoChanged(_)) {
+                return true;
+            }
+            err = match err.inner.cause.as_ref() {
+                Some(err) => err,
+                None => return false,
+            };
+        }
+    }
+
+    /// Returns `true` if this error chain contains an arkd digest mismatch.
+    pub fn is_digest_mismatch(&self) -> bool {
+        let mut err = self;
+        loop {
+            if err.inner.kind.is_digest_mismatch() {
+                return true;
+            }
+            err = match err.inner.cause.as_ref() {
+                Some(err) => err,
+                None => return false,
+            };
+        }
+    }
+
+    /// Returns `true` if this error chain contains an arkd build-version mismatch.
+    pub fn is_version_mismatch(&self) -> bool {
+        let mut err = self;
+        loop {
+            if err.inner.kind.is_version_mismatch() {
+                return true;
+            }
+            err = match err.inner.cause.as_ref() {
+                Some(err) => err,
+                None => return false,
+            };
+        }
+    }
+}
+
+impl Kind {
+    fn is_digest_mismatch(&self) -> bool {
+        match self {
+            Kind::ArkServer(err) => {
+                err.source.is::<ark_grpc::Error>()
+                    && err
+                        .source
+                        .downcast_ref::<ark_grpc::Error>()
+                        .is_some_and(ark_grpc::Error::is_digest_mismatch)
+            }
+            Kind::AdHoc(_)
+            | Kind::Core(_)
+            | Kind::CoinSelect(_)
+            | Kind::Wallet(_)
+            | Kind::ServerInfoChanged(_)
+            | Kind::Consumer(_) => false,
+        }
+    }
+
+    fn is_version_mismatch(&self) -> bool {
+        match self {
+            Kind::ArkServer(err) => {
+                err.source.is::<ark_grpc::Error>()
+                    && err
+                        .source
+                        .downcast_ref::<ark_grpc::Error>()
+                        .is_some_and(ark_grpc::Error::is_version_mismatch)
+            }
+            Kind::AdHoc(_)
+            | Kind::Core(_)
+            | Kind::CoinSelect(_)
+            | Kind::Wallet(_)
+            | Kind::ServerInfoChanged(_)
+            | Kind::Consumer(_) => false,
+        }
+    }
 }
 
 impl fmt::Display for Error {
@@ -121,6 +211,7 @@ impl fmt::Display for Kind {
             Kind::Core(ref err) => err.fmt(f),
             Kind::CoinSelect(ref err) => err.fmt(f),
             Kind::Wallet(ref err) => err.fmt(f),
+            Kind::ServerInfoChanged(ref err) => err.fmt(f),
             Kind::Consumer(ref err) => err.fmt(f),
         }
     }
@@ -153,6 +244,12 @@ impl fmt::Display for CoinSelectError {
 impl fmt::Display for WalletError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.source.fmt(f)
+    }
+}
+
+impl fmt::Display for ServerInfoChangedError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Ark server info changed while processing the request. Server info was refreshed, but the failed operation was not retried. Rebuild the request and retry if safe")
     }
 }
 
@@ -274,7 +371,11 @@ where
 
 impl From<ark_grpc::Error> for Error {
     fn from(value: ark_grpc::Error) -> Self {
-        Self::ark_server(value)
+        if value.is_server_info_changed() {
+            Self::server_info_changed(Self::ark_server(value))
+        } else {
+            Self::ark_server(value)
+        }
     }
 }
 

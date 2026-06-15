@@ -50,7 +50,7 @@ pub async fn e2e_signer_rotation_sweep_migration() {
         set_up_client_with_seed("alice".to_string(), regtest.clone(), secp.clone(), seed).await;
 
     assert!(
-        !client2.server_info.deprecated_signers.is_empty(),
+        !client2.server_info().unwrap().deprecated_signers.is_empty(),
         "server_info should list the old signer as deprecated after rotation"
     );
 
@@ -132,7 +132,7 @@ pub async fn e2e_signer_rotation_past_cutoff_held_back() {
         set_up_client_with_seed("alice".to_string(), regtest.clone(), secp.clone(), seed).await;
 
     assert!(
-        !client2.server_info.deprecated_signers.is_empty(),
+        !client2.server_info().unwrap().deprecated_signers.is_empty(),
         "server_info should list the old signer as deprecated after rotation"
     );
 

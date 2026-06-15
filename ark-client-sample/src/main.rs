@@ -769,7 +769,7 @@ async fn run_command<K: KeyProvider + 'static>(
             unreachable!("pending future never resolves");
         }
         Commands::SendOnchain { address, amount } => {
-            let network = client.server_info.network;
+            let network = client.server_info()?.network;
             let checked_address = address.clone().require_network(network)?;
 
             let mut rng = thread_rng();
@@ -798,7 +798,7 @@ async fn run_command<K: KeyProvider + 'static>(
                 })
                 .collect::<Result<Vec<_>>>()?;
 
-            let network = client.server_info.network;
+            let network = client.server_info()?.network;
             let checked_address = address.clone().require_network(network)?;
 
             let mut rng = thread_rng();
@@ -1201,7 +1201,7 @@ async fn run_command<K: KeyProvider + 'static>(
             println!("{}", serde_json::to_string_pretty(&output)?);
         }
         Commands::EstimateFees { address, amount } => {
-            let network = client.server_info.network;
+            let network = client.server_info()?.network;
             let mut rng = thread_rng();
 
             // Try parsing as ArkAddress first, then as Bitcoin address
@@ -1293,7 +1293,7 @@ async fn run_command<K: KeyProvider + 'static>(
             let selected = ark_core::coin_select::select_vtxos(
                 spendable,
                 amount,
-                client.server_info.dust,
+                client.server_info()?.dust,
                 true,
             )
             .map_err(|e| anyhow!(e))?;
@@ -1426,7 +1426,7 @@ async fn run_command<K: KeyProvider + 'static>(
 
             let receiver = SendReceiver {
                 address: address.0,
-                amount: client.dust(),
+                amount: client.dust()?,
                 assets: vec![ark_core::server::Asset {
                     asset_id,
                     amount: *amount,
