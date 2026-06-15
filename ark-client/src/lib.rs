@@ -223,6 +223,72 @@ impl DeprecatedSignerMigrationReport {
     }
 }
 
+/// Machine-readable status of a single deprecated server signer the wallet holds funds under.
+///
+/// Derived at read time by [`Client::deprecated_signer_status`] from the advertised
+/// `cutoff_date` and the current time; never persisted. Mirrors ts-sdk's `SignerStatus`
+/// (the non-`CURRENT`/`UNKNOWN_SIGNER` variants) and stays consistent with
+/// [`server::Info::is_signer_past_cutoff_at`]: a `cutoff_date` of `0` is "rotate immediately"
+/// (still co-signable now) and is therefore NOT treated as past-cutoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeprecatedSignerStatus {
+    /// The signer is deprecated with a future cutoff (`cutoff_date > now`). The operator still
+    /// co-signs, so these outputs are cooperatively migratable (see
+    /// [`Client::migrate_deprecated_signer_vtxos`]).
+    Migratable,
+    /// The signer is deprecated with no cutoff advertised (`cutoff_date == 0`): rotate
+    /// immediately. The operator still co-signs now, so these outputs are still cooperatively
+    /// migratable, but clients should migrate without delay.
+    DueNow,
+    /// The signer's cutoff has passed (`cutoff_date != 0 && cutoff_date <= now`). The operator
+    /// will no longer co-sign the old key — these funds cannot migrate cooperatively and instead
+    /// drain to the active signer via the recover-on-sweep path once they expire.
+    Expired,
+}
+
+/// Read-only, per-signer status of the deprecated server signers the wallet currently holds funds
+/// under. Produced by [`Client::deprecated_signer_status`]; mirrors ts-sdk's
+/// `DeprecatedSignerReport`.
+///
+/// This is observability only — building it never moves funds and never settles or migrates. The
+/// `recoverable_*` vs `awaiting_sweep_*` split and `next_sweep_eta` are only populated for
+/// [`DeprecatedSignerStatus::Expired`] signers (the post-cutoff recover-on-sweep lifecycle applies
+/// to VTXOs only).
+#[derive(Debug, Clone)]
+pub struct DeprecatedSignerReport {
+    /// The deprecated signer's x-only key.
+    pub signer_pk: XOnlyPublicKey,
+    /// The signer's status, derived from its cutoff and the current time.
+    pub status: DeprecatedSignerStatus,
+    /// The advertised cooperative-sign cutoff (Unix seconds); `0` means "rotate immediately".
+    pub cutoff_date: i64,
+    /// Seconds until the cutoff (`cutoff_date - now`); `None` when no future cutoff is advertised
+    /// (i.e. `cutoff_date == 0` or already passed).
+    pub seconds_until_cutoff: Option<i64>,
+    /// Number of spendable (non-recoverable) VTXOs the wallet holds under this signer.
+    pub vtxo_count: usize,
+    /// Total value of those spendable VTXOs.
+    pub vtxo_value: Amount,
+    /// Number of confirmed boarding UTXOs the wallet holds under this signer (includes those whose
+    /// own CSV exit window has elapsed — they leave via the unilateral sweep).
+    pub boarding_count: usize,
+    /// Total value of those boarding UTXOs.
+    pub boarding_value: Amount,
+    /// Expired-signer VTXOs already swept/expired and queued for recovery to the active signer.
+    /// Non-zero only on [`DeprecatedSignerStatus::Expired`] rows.
+    pub recoverable_count: usize,
+    /// Total value of the recoverable VTXOs.
+    pub recoverable_value: Amount,
+    /// Expired-signer VTXOs not yet swept; awaiting the server batch sweep before they become
+    /// recoverable. Non-zero only on [`DeprecatedSignerStatus::Expired`] rows.
+    pub awaiting_sweep_count: usize,
+    /// Total value of the awaiting-sweep VTXOs.
+    pub awaiting_sweep_value: Amount,
+    /// Soonest VTXO expiry (Unix seconds) among the awaiting-sweep set, as a recovery ETA hint.
+    /// `None` when there are no awaiting-sweep VTXOs under this signer.
+    pub next_sweep_eta: Option<i64>,
+}
+
 /// A client to interact with Ark Server
 ///
 /// ## Example
@@ -1532,6 +1598,175 @@ where
             vtxo: vtxo_leg,
             boarding: boarding_leg,
         })
+    }
+
+    /// Report the per-signer status of every deprecated server signer the wallet currently holds
+    /// funds under, without migrating anything.
+    ///
+    /// This is observability only — it never moves funds and never calls settle or migrate. It is
+    /// the read-only sibling of [`Self::migrate_deprecated_signer_vtxos`] and mirrors ts-sdk's
+    /// `getDeprecatedSignerStatus`. For each deprecated signer it merges the wallet's VTXO holdings
+    /// (resolved via the script -> VTXO map, like [`Self::offchain_balance`]) and its on-chain
+    /// boarding holdings (grouped by [`BoardingOutput::server_pk`]) into one
+    /// [`DeprecatedSignerReport`].
+    ///
+    /// Signers under which the wallet holds neither VTXOs nor boarding outputs are omitted (a row
+    /// per deprecated signer the wallet holds funds under, matching ts-sdk). When the server
+    /// advertises no deprecated signers, returns an empty vector without touching the chain.
+    ///
+    /// For [`DeprecatedSignerStatus::Expired`] signers the VTXOs are additionally split into the
+    /// already-swept/expired `recoverable_*` set and the not-yet-swept `awaiting_sweep_*` set, and
+    /// `next_sweep_eta` is the soonest VTXO expiry (`expires_at`) among the awaiting set.
+    pub async fn deprecated_signer_status(&self) -> Result<Vec<DeprecatedSignerReport>, Error> {
+        // Snapshot once (TOCTOU): the empty-check and every per-signer classification must see the
+        // same `deprecated_signers`/`dust` even if a concurrent refresh swaps the snapshot.
+        let server_info = self.server_info()?;
+        if server_info.deprecated_signers.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let now = unix_now();
+        let dust = server_info.dust;
+
+        // Aggregate VTXO holdings per signer in a single pass over all unspent VTXOs, resolving the
+        // signer via the script -> VTXO map (the same mapping `offchain_balance` relies on).
+        #[derive(Default)]
+        struct VtxoAgg {
+            // Spendable (non-recoverable) VTXOs.
+            spendable_count: usize,
+            spendable_value: Amount,
+            // Already-swept/expired VTXOs (only surfaced for past-cutoff signers).
+            recoverable_count: usize,
+            recoverable_value: Amount,
+            // Soonest expiry among the spendable (awaiting-sweep) VTXOs.
+            next_sweep_eta: Option<i64>,
+        }
+
+        let (vtxo_list, script_map) = self.list_vtxos().await.context("failed to list VTXOs")?;
+        let mut vtxo_aggs: HashMap<XOnlyPublicKey, VtxoAgg> = HashMap::new();
+        for v in vtxo_list.all_unspent() {
+            let Some(vtxo) = script_map.get(&v.script) else {
+                continue;
+            };
+            let agg = vtxo_aggs.entry(vtxo.server_pk()).or_default();
+            if v.is_recoverable(dust) {
+                agg.recoverable_count += 1;
+                agg.recoverable_value += v.amount;
+            } else {
+                agg.spendable_count += 1;
+                agg.spendable_value += v.amount;
+                agg.next_sweep_eta = Some(match agg.next_sweep_eta {
+                    Some(eta) => eta.min(v.expires_at),
+                    None => v.expires_at,
+                });
+            }
+        }
+
+        // Aggregate confirmed boarding holdings per signer. Mirrors the discovery in
+        // `fetch_commitment_transaction_inputs` (boarding outputs -> `find_outpoints`) but WITHOUT
+        // the cutoff/CSV-claimability filters: the report counts every confirmed, unspent boarding
+        // coin under a signer, including past-cutoff and CSV-expired ones (they still leave via the
+        // unilateral sweep).
+        let mut boarding_aggs: HashMap<XOnlyPublicKey, (usize, Amount)> = HashMap::new();
+        let mut seen_outpoints = HashSet::new();
+        for boarding_output in self.inner.wallet.get_boarding_outputs()? {
+            let outpoints = timeout_op(
+                self.inner.timeout,
+                self.blockchain().find_outpoints(boarding_output.address()),
+            )
+            .await
+            .context("failed to find boarding outpoints")??;
+
+            for o in outpoints.iter() {
+                if let ExplorerUtxo {
+                    outpoint,
+                    amount,
+                    confirmation_blocktime: Some(_),
+                    is_spent: false,
+                    ..
+                } = o
+                {
+                    if !seen_outpoints.insert(*outpoint) {
+                        continue;
+                    }
+                    let entry = boarding_aggs
+                        .entry(boarding_output.server_pk())
+                        .or_insert((0, Amount::ZERO));
+                    entry.0 += 1;
+                    entry.1 += *amount;
+                }
+            }
+        }
+
+        let mut reports = Vec::new();
+        for ds in &server_info.deprecated_signers {
+            let signer_pk = ds.pk.x_only_public_key().0;
+            let cutoff_date = ds.cutoff_date;
+
+            // Status + `seconds_until_cutoff`, consistent with `is_signer_past_cutoff_at` /
+            // `is_pre_cutoff_deprecated`: cutoff `0` = rotate-now (still co-signable); a future
+            // cutoff = migratable; a passed cutoff = expired.
+            let (status, seconds_until_cutoff) = if cutoff_date == 0 {
+                (DeprecatedSignerStatus::DueNow, None)
+            } else if cutoff_date > now {
+                (DeprecatedSignerStatus::Migratable, Some(cutoff_date - now))
+            } else {
+                (DeprecatedSignerStatus::Expired, None)
+            };
+
+            let vtxo_agg = vtxo_aggs.get(&signer_pk);
+            let (boarding_count, boarding_value) = boarding_aggs
+                .get(&signer_pk)
+                .copied()
+                .unwrap_or((0, Amount::ZERO));
+
+            let vtxo_count = vtxo_agg.map(|a| a.spendable_count).unwrap_or(0);
+            let vtxo_value = vtxo_agg.map(|a| a.spendable_value).unwrap_or(Amount::ZERO);
+
+            // Skip signers under which the wallet holds no funds at all.
+            if vtxo_count == 0 && boarding_count == 0 {
+                continue;
+            }
+
+            // The recover-on-sweep split applies to past-cutoff (expired) signers only; for still
+            // co-signable signers these stay zero / `None`.
+            let is_expired = status == DeprecatedSignerStatus::Expired;
+            let recoverable_count = vtxo_agg
+                .filter(|_| is_expired)
+                .map(|a| a.recoverable_count)
+                .unwrap_or(0);
+            let recoverable_value = vtxo_agg
+                .filter(|_| is_expired)
+                .map(|a| a.recoverable_value)
+                .unwrap_or(Amount::ZERO);
+            let (awaiting_sweep_count, awaiting_sweep_value, next_sweep_eta) = if is_expired {
+                (
+                    vtxo_count,
+                    vtxo_value,
+                    vtxo_agg.and_then(|a| a.next_sweep_eta),
+                )
+            } else {
+                (0, Amount::ZERO, None)
+            };
+
+            reports.push(DeprecatedSignerReport {
+                signer_pk,
+                status,
+                cutoff_date,
+                seconds_until_cutoff,
+                vtxo_count,
+                vtxo_value,
+                boarding_count,
+                boarding_value,
+                recoverable_count,
+                recoverable_value,
+                awaiting_sweep_count,
+                awaiting_sweep_value,
+                next_sweep_eta,
+            });
+        }
+
+        Ok(reports)
     }
 
     /// Size a single migration leg against the server limits and settle the selected inputs.
