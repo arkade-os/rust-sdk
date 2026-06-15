@@ -33,6 +33,7 @@ use ark_core::server::SubmitOffchainTxResponse;
 use ark_core::server::SubscriptionResponse;
 use ark_core::server::VirtualTxOutPoint;
 use ark_core::server::VirtualTxsResponse;
+use ark_core::server::SDK_VERSION;
 use ark_core::server::TARGET_ARKD_VERSION;
 use ark_core::ArkAddress;
 use bitcoin::base64;
@@ -69,6 +70,10 @@ fn build_reqwest_client(digest: Option<&str>) -> Result<reqwest::Client, Error> 
     default_headers.insert(
         "X-Build-Version",
         reqwest::header::HeaderValue::from_static(TARGET_ARKD_VERSION),
+    );
+    default_headers.insert(
+        "X-Sdk-Version",
+        reqwest::header::HeaderValue::from_static(SDK_VERSION),
     );
     if let Some(digest) = digest {
         default_headers.insert(

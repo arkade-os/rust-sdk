@@ -55,6 +55,7 @@ use ark_core::server::VirtualTxOutPoint;
 use ark_core::server::VirtualTxsResponse;
 use ark_core::server::VtxoChain;
 use ark_core::server::VtxoChains;
+use ark_core::server::SDK_VERSION;
 use ark_core::server::TARGET_ARKD_VERSION;
 use ark_core::ArkAddress;
 use ark_core::TxGraphChunk;
@@ -119,6 +120,10 @@ impl tonic::service::Interceptor for HeaderInterceptor {
         metadata.insert(
             "x-build-version",
             tonic::metadata::MetadataValue::from_static(TARGET_ARKD_VERSION),
+        );
+        metadata.insert(
+            "x-sdk-version",
+            tonic::metadata::MetadataValue::from_static(SDK_VERSION),
         );
 
         if let Some(digest) = self.state.digest() {

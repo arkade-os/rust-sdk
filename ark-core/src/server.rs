@@ -30,6 +30,16 @@ use std::str::FromStr;
 /// baseline.
 pub const TARGET_ARKD_VERSION: &str = "v0.9.8";
 
+/// Version of this SDK, as `rust-sdk/<crate version>`.
+///
+/// Sent in the `X-SDK-Version`/`x-sdk-version` request header so the server can
+/// attribute traffic to the Rust SDK (the `rust-sdk/` prefix distinguishes it
+/// from other SDKs that may send the same header) and its release. The version
+/// is resolved from the crate version at compile time, so it tracks releases
+/// automatically — unlike [`TARGET_ARKD_VERSION`], which is the hand-maintained
+/// arkd compatibility target.
+pub const SDK_VERSION: &str = concat!("rust-sdk/", env!("CARGO_PKG_VERSION"));
+
 /// An aggregate public nonce per shared internal (non-leaf) node in the batch-tree.
 #[derive(Debug, Clone)]
 pub struct NoncePks(HashMap<Txid, musig::PublicNonce>);
