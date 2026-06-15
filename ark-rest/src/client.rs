@@ -57,6 +57,11 @@ type InfoRefreshHook = Arc<
 
 pub struct Client {
     configuration: RwLock<apis::configuration::Configuration>,
+    // The `X-Digest` currently baked into `configuration.client`'s default headers. Tracked
+    // separately so `update_digest` can skip rebuilding the `reqwest::Client` (which would drop
+    // the connection pool and TLS sessions) when the digest is unchanged — the steady-state
+    // case, since every `/info` fetch re-applies the same digest.
+    digest: RwLock<Option<String>>,
     info_refresh_hook: Option<InfoRefreshHook>,
 }
 
@@ -98,6 +103,7 @@ impl Client {
 
         Ok(Self {
             configuration: RwLock::new(configuration),
+            digest: RwLock::new(None),
             info_refresh_hook: None,
         })
     }
@@ -124,11 +130,31 @@ impl Client {
     }
 
     fn update_digest(&self, digest: &str) -> Result<(), Error> {
+        let normalized = (!digest.is_empty()).then(|| digest.to_owned());
+
+        // Skip the rebuild (which drops the connection pool) when the digest is unchanged — the
+        // common case, since every `/info` fetch re-applies the current digest.
+        {
+            let current = self
+                .digest
+                .read()
+                .map_err(|_| Error::request("REST client digest lock poisoned"))?;
+            if *current == normalized {
+                return Ok(());
+            }
+        }
+
         let mut configuration = self
             .configuration
             .write()
             .map_err(|_| Error::request("REST client configuration lock poisoned"))?;
-        configuration.client = build_reqwest_client((!digest.is_empty()).then_some(digest))?;
+        configuration.client = build_reqwest_client(normalized.as_deref())?;
+
+        let mut current = self
+            .digest
+            .write()
+            .map_err(|_| Error::request("REST client digest lock poisoned"))?;
+        *current = normalized;
         Ok(())
     }
 
