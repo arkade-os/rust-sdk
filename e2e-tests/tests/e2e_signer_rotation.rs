@@ -186,13 +186,12 @@ pub async fn e2e_signer_rotation_boarding_only_migration() {
     // test isolates the boarding migration *leg* itself.
     regtest.rotate_signer("+86400");
 
-    // The rotation recreates arkd-wallet and restarts arkd, so the existing connection breaks
-    // and the stack takes the better part of a minute to fully recover (arkd-wallet recreate +
-    // arkd restart + reconnect). Retry the info refresh until arkd is back and advertises the
-    // deprecated signer (the gRPC channel re-dials on retry); the reconnect-based tests get a
-    // comparable budget from connect_with_retries + the get_info timeout.
+    // `rotate_signer` already blocks until arkd has restarted and re-advertises the deprecated
+    // signer, but the restart broke our existing gRPC connection, so the first refresh may hit a
+    // stale channel and need a re-dial. Retry until the refreshed snapshot shows the deprecated
+    // signer.
     let mut rotated = false;
-    for _ in 0..60 {
+    for _ in 0..30 {
         if client.refresh_server_info().await.is_ok()
             && !client.server_info().unwrap().deprecated_signers.is_empty()
         {

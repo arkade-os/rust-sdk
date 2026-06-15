@@ -1105,12 +1105,18 @@ where
     /// [`Self::migrate_deprecated_signer_vtxos`]. Detection (here) and migration (the watcher) are
     /// decoupled through the cached `server_info`, so no direct call between them is needed.
     pub async fn refresh_server_info(&self) -> Result<(), Error> {
-        timeout_op(
+        let server_info = timeout_op(
             self.inner.timeout,
             self.network_client().get_info_unguarded(),
         )
         .await
         .context("Failed to refresh Ark server info")??;
+
+        // `get_info_unguarded` already refreshed the gRPC digest header; mirror the freshly
+        // fetched snapshot into the cached server state so `server_info()` (and the fee estimator)
+        // reflect the new info — otherwise this method would update the digest but leave callers
+        // reading the stale `deprecated_signers`/fee data from connect time.
+        update_server_state(&self.state, server_info)?;
 
         Ok(())
     }
