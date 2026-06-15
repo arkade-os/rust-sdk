@@ -167,15 +167,29 @@ impl Client {
     async fn guarded<T>(&self, op: impl Future<Output = Result<T, Error>>) -> Result<T, Error> {
         match op.await {
             Ok(value) => Ok(value),
-            Err(err) if err.is_digest_mismatch() => {
-                let info = self.get_info_unguarded().await?;
-                if let Some(hook) = &self.info_refresh_hook {
-                    hook(info).map_err(Error::conversion)?;
-                }
-                Err(Error::server_info_changed(err))
-            }
-            Err(err) => Err(err),
+            Err(err) => Err(self.refresh_on_digest_mismatch(err).await),
         }
+    }
+
+    /// If `err` is a digest mismatch, re-fetch `/info` (updating the cached `X-Digest` header and
+    /// invoking [`Self::set_info_refresh_hook`]) and rewrap as [`Error::server_info_changed`];
+    /// otherwise return `err` unchanged. Errors from the refresh or the hook are surfaced in place.
+    /// Shared by [`Self::guarded`] (unary calls) and the SSE connection paths, which detect the
+    /// mismatch from the streaming response's status + body rather than a generated error.
+    async fn refresh_on_digest_mismatch(&self, err: Error) -> Error {
+        if !err.is_digest_mismatch() {
+            return err;
+        }
+        let info = match self.get_info_unguarded().await {
+            Ok(info) => info,
+            Err(refresh_err) => return refresh_err,
+        };
+        if let Some(hook) = &self.info_refresh_hook {
+            if let Err(hook_err) = hook(info).map_err(Error::conversion) {
+                return hook_err;
+            }
+        }
+        Error::server_info_changed(err)
     }
 
     /// Fetch `/info`, updating the cached `X-Digest` header. Intentionally bypasses
@@ -459,12 +473,16 @@ impl Client {
             .await
             .map_err(Error::request)?;
 
-        // Check if the request was successful
+        // Check if the request was successful. Read the body (not just the status) so a
+        // DIGEST_MISMATCH marker is visible to `refresh_on_digest_mismatch`, which refreshes
+        // `/info` and surfaces `ServerInfoChanged` — matching the unary guarded path.
         if !request.status().is_success() {
-            return Err(Error::request(format!(
-                "Event stream request failed with status: {}",
-                request.status()
-            )));
+            let status = request.status();
+            let body = request.text().await.unwrap_or_default();
+            let err = Error::request(format!(
+                "Event stream request failed with status {status}: {body}"
+            ));
+            return Err(self.refresh_on_digest_mismatch(err).await);
         }
 
         // Convert the response into a byte stream using async chunks
@@ -640,15 +658,20 @@ impl Client {
         // For new subscription we expect empty string ("") here
         let subscription_id = subscription_id.unwrap_or_default();
 
-        let response = indexer_service_subscribe_for_scripts(
-            &self.configuration()?,
-            SubscribeForScriptsRequest {
-                scripts: Some(scripts),
-                subscription_id: Some(subscription_id),
-            },
-        )
-        .await
-        .map_err(Error::request)?;
+        let configuration = self.configuration()?;
+        let response = self
+            .guarded(async {
+                indexer_service_subscribe_for_scripts(
+                    &configuration,
+                    SubscribeForScriptsRequest {
+                        scripts: Some(scripts),
+                        subscription_id: Some(subscription_id),
+                    },
+                )
+                .await
+                .map_err(Error::request)
+            })
+            .await?;
 
         let subscription_id = response
             .subscription_id
@@ -668,15 +691,19 @@ impl Client {
             .map(|address| address.to_p2tr_script_pubkey().to_hex_string())
             .collect::<Vec<_>>();
 
-        let _ = indexer_service_unsubscribe_for_scripts(
-            &self.configuration()?,
-            UnsubscribeForScriptsRequest {
-                subscription_id: Some(subscription_id),
-                scripts: Some(scripts),
-            },
-        )
-        .await
-        .map_err(Error::request)?;
+        let configuration = self.configuration()?;
+        self.guarded(async {
+            indexer_service_unsubscribe_for_scripts(
+                &configuration,
+                UnsubscribeForScriptsRequest {
+                    subscription_id: Some(subscription_id),
+                    scripts: Some(scripts),
+                },
+            )
+            .await
+            .map_err(Error::request)
+        })
+        .await?;
 
         Ok(())
     }
@@ -702,12 +729,16 @@ impl Client {
             .await
             .map_err(Error::request)?;
 
-        // Check if the request was successful
+        // Check if the request was successful. Read the body (not just the status) so a
+        // DIGEST_MISMATCH marker is visible to `refresh_on_digest_mismatch`, which refreshes
+        // `/info` and surfaces `ServerInfoChanged` — matching the unary guarded path.
         if !request.status().is_success() {
-            return Err(Error::request(format!(
-                "Subscription stream request failed with status: {}",
-                request.status()
-            )));
+            let status = request.status();
+            let body = request.text().await.unwrap_or_default();
+            let err = Error::request(format!(
+                "Subscription stream request failed with status {status}: {body}"
+            ));
+            return Err(self.refresh_on_digest_mismatch(err).await);
         }
 
         // Convert the response into a byte stream using async chunks
