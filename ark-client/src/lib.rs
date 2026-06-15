@@ -223,6 +223,134 @@ impl DeprecatedSignerMigrationReport {
     }
 }
 
+/// Outcome of sizing one migration leg's candidate inputs against the server limits, before any
+/// settlement I/O. Produced by [`size_migration_leg`].
+#[derive(Debug, Clone)]
+struct MigrationLegSizing {
+    /// Inputs chosen to be settled this pass (highest-value-first within the caps).
+    selected: Vec<MigrationVtxoRef>,
+    /// Migratable inputs deferred to a later cycle by the count or aggregate caps.
+    deferred: Vec<MigrationVtxoRef>,
+    /// Inputs whose individual value exceeds the per-output ceiling; they can never form a
+    /// `<= ceiling` output and must exit unilaterally.
+    oversized: Vec<MigrationVtxoRef>,
+    /// Why nothing was selected, if so. `None` when [`Self::selected`] is non-empty and the leg
+    /// should proceed to settle.
+    skip_reason: Option<MigrationSkipReason>,
+}
+
+/// Size one migration leg's candidates against the per-output ceiling (`vtxo_max_amount`) and the
+/// dust floor, without performing any settlement.
+///
+/// This is the pure core of [`Client::run_migration_leg`], factored out so its branching (oversized
+/// split, count cap, running-aggregate ceiling, dust floor, and the skip-reason classification) is
+/// unit-testable without a `Client`/network. Mirrors ts-sdk's
+/// `runMigrationLeg`/`capSettlementBatch` selection. The pipeline is:
+///
+/// 1. inputs whose individual amount exceeds `vtxo_max_amount` are split out as `oversized` (a
+///    `None` ceiling means no limit, so nothing is oversized);
+/// 2. the remainder is selected highest-value-first, bounded by both [`MAX_VTXOS_PER_SETTLEMENT`]
+///    (a hard stop) and a running aggregate kept within the ceiling (a skip, so a smaller input
+///    behind a larger one can still get in); the overflow lands in `deferred`;
+/// 3. if nothing was selected, or the selected aggregate is below `dust`, `skip_reason` is set
+///    ([`MigrationSkipReason::OversizedOnly`] when the only candidates were oversized, else
+///    [`MigrationSkipReason::BelowDust`]); an empty candidate list yields
+///    [`MigrationSkipReason::NothingMigratable`].
+fn size_migration_leg(
+    candidates: Vec<MigrationVtxoRef>,
+    vtxo_max_amount: Option<Amount>,
+    dust: Amount,
+) -> MigrationLegSizing {
+    if candidates.is_empty() {
+        return MigrationLegSizing {
+            selected: Vec::new(),
+            deferred: Vec::new(),
+            oversized: Vec::new(),
+            skip_reason: Some(MigrationSkipReason::NothingMigratable),
+        };
+    }
+
+    // (1) Split out inputs whose INDIVIDUAL amount exceeds the per-output ceiling. They can
+    // never form a `<= ceiling` output, so they cannot migrate cooperatively and must exit
+    // unilaterally. Report them rather than dropping them. `None` ceiling => no limit.
+    let (oversized, mut sized): (Vec<_>, Vec<_>) = candidates
+        .into_iter()
+        .partition(|c| vtxo_max_amount.is_some_and(|max| c.amount > max));
+
+    if !oversized.is_empty() {
+        tracing::warn!(
+            count = oversized.len(),
+            ?vtxo_max_amount,
+            "Deprecated-signer migration: inputs exceed the per-output limit and cannot be \
+             migrated cooperatively; they require a unilateral exit"
+        );
+    }
+
+    // (2) Select highest-value-first, bounded by both the count cap and a running aggregate
+    // within the ceiling. Skipped (not stopped) on an aggregate breach so a smaller input
+    // behind an oversized-but-sized one still gets in; the count cap is a hard stop. The rest
+    // is deferred to a later cycle.
+    sized.sort_by_key(|c| std::cmp::Reverse(c.amount));
+
+    let mut selected: Vec<MigrationVtxoRef> = Vec::new();
+    let mut deferred: Vec<MigrationVtxoRef> = Vec::new();
+    let mut aggregate = Amount::ZERO;
+    for candidate in sized {
+        if selected.len() >= MAX_VTXOS_PER_SETTLEMENT {
+            deferred.push(candidate);
+            continue;
+        }
+        let next = aggregate + candidate.amount;
+        if vtxo_max_amount.is_some_and(|max| next > max) {
+            deferred.push(candidate);
+            continue;
+        }
+        aggregate = next;
+        selected.push(candidate);
+    }
+
+    // (3) A migration output equals the gross sum of its inputs (migration is fee-exempt), so a
+    // selected aggregate below dust would be rejected — skip the leg.
+    let skip_reason = if selected.is_empty() || aggregate < dust {
+        // Nothing got selected and the only candidates were oversized => OversizedOnly;
+        // otherwise the (sized) selection summed below dust.
+        if selected.is_empty() && !oversized.is_empty() {
+            Some(MigrationSkipReason::OversizedOnly)
+        } else {
+            Some(MigrationSkipReason::BelowDust)
+        }
+    } else {
+        None
+    };
+
+    MigrationLegSizing {
+        selected,
+        deferred,
+        oversized,
+        skip_reason,
+    }
+}
+
+/// Classify a deprecated signer from its advertised cutoff and the current time, returning the
+/// [`DeprecatedSignerStatus`] and `seconds_until_cutoff` hint.
+///
+/// Pure core of [`Client::deprecated_signer_status`], factored out so the classification is
+/// unit-testable without a `Client`/network. Consistent with
+/// [`server::Info::is_signer_past_cutoff_at`] and the `is_pre_cutoff_deprecated` check in
+/// [`Client::migrate_deprecated_signer_vtxos`]: a `cutoff_date` of `0` is "rotate now"
+/// ([`DeprecatedSignerStatus::DueNow`], still co-signable); a future cutoff is
+/// [`DeprecatedSignerStatus::Migratable`] (with a positive `seconds_until_cutoff`); a passed cutoff
+/// is [`DeprecatedSignerStatus::Expired`].
+fn classify_deprecated_signer(cutoff_date: i64, now: i64) -> (DeprecatedSignerStatus, Option<i64>) {
+    if cutoff_date == 0 {
+        (DeprecatedSignerStatus::DueNow, None)
+    } else if cutoff_date > now {
+        (DeprecatedSignerStatus::Migratable, Some(cutoff_date - now))
+    } else {
+        (DeprecatedSignerStatus::Expired, None)
+    }
+}
+
 /// Machine-readable status of a single deprecated server signer the wallet holds funds under.
 ///
 /// Derived at read time by [`Client::deprecated_signer_status`] from the advertised
@@ -1716,13 +1844,7 @@ where
             // Status + `seconds_until_cutoff`, consistent with `is_signer_past_cutoff_at` /
             // `is_pre_cutoff_deprecated`: cutoff `0` = rotate-now (still co-signable); a future
             // cutoff = migratable; a passed cutoff = expired.
-            let (status, seconds_until_cutoff) = if cutoff_date == 0 {
-                (DeprecatedSignerStatus::DueNow, None)
-            } else if cutoff_date > now {
-                (DeprecatedSignerStatus::Migratable, Some(cutoff_date - now))
-            } else {
-                (DeprecatedSignerStatus::Expired, None)
-            };
+            let (status, seconds_until_cutoff) = classify_deprecated_signer(cutoff_date, now);
 
             let vtxo_agg = vtxo_aggs.get(&signer_pk);
             let (boarding_count, boarding_value) = boarding_aggs
@@ -1795,61 +1917,17 @@ where
     where
         R: rand::Rng + rand::CryptoRng + Clone,
     {
-        if candidates.is_empty() {
-            return Ok(MigrationLegReport::skipped(
-                MigrationSkipReason::NothingMigratable,
-            ));
-        }
+        // Pure sizing (split oversized, cap count + aggregate, dust floor) is factored into
+        // `size_migration_leg` so it can be unit-tested without a `Client`/network. This leg only
+        // adds the I/O: settling the selected inputs and mapping the outcome onto a report.
+        let MigrationLegSizing {
+            selected,
+            deferred,
+            oversized,
+            skip_reason,
+        } = size_migration_leg(candidates, vtxo_max_amount, dust);
 
-        // (1) Split out inputs whose INDIVIDUAL amount exceeds the per-output ceiling. They can
-        // never form a `<= ceiling` output, so they cannot migrate cooperatively and must exit
-        // unilaterally. Report them rather than dropping them. `None` ceiling => no limit.
-        let (oversized, mut sized): (Vec<_>, Vec<_>) = candidates
-            .into_iter()
-            .partition(|c| vtxo_max_amount.is_some_and(|max| c.amount > max));
-
-        if !oversized.is_empty() {
-            tracing::warn!(
-                count = oversized.len(),
-                ?vtxo_max_amount,
-                "Deprecated-signer migration: inputs exceed the per-output limit and cannot be \
-                 migrated cooperatively; they require a unilateral exit"
-            );
-        }
-
-        // (2) Select highest-value-first, bounded by both the count cap and a running aggregate
-        // within the ceiling. Skipped (not stopped) on an aggregate breach so a smaller input
-        // behind an oversized-but-sized one still gets in; the count cap is a hard stop. The rest
-        // is deferred to a later cycle.
-        sized.sort_by_key(|c| std::cmp::Reverse(c.amount));
-
-        let mut selected: Vec<MigrationVtxoRef> = Vec::new();
-        let mut deferred: Vec<MigrationVtxoRef> = Vec::new();
-        let mut aggregate = Amount::ZERO;
-        for candidate in sized {
-            if selected.len() >= MAX_VTXOS_PER_SETTLEMENT {
-                deferred.push(candidate);
-                continue;
-            }
-            let next = aggregate + candidate.amount;
-            if vtxo_max_amount.is_some_and(|max| next > max) {
-                deferred.push(candidate);
-                continue;
-            }
-            aggregate = next;
-            selected.push(candidate);
-        }
-
-        // (3) A migration output equals the gross sum of its inputs (migration is fee-exempt), so a
-        // selected aggregate below dust would be rejected — skip the leg.
-        if selected.is_empty() || aggregate < dust {
-            // Nothing got selected and the only candidates were oversized => OversizedOnly;
-            // otherwise the (sized) selection summed below dust.
-            let reason = if selected.is_empty() && !oversized.is_empty() {
-                MigrationSkipReason::OversizedOnly
-            } else {
-                MigrationSkipReason::BelowDust
-            };
+        if let Some(reason) = skip_reason {
             return Ok(MigrationLegReport {
                 settle_txid: None,
                 migrated: Vec::new(),
@@ -2413,5 +2491,199 @@ mod digest_guard_tests {
             cached_state.read().unwrap().server_info.digest,
             "fresh-digest"
         );
+    }
+}
+
+/// Unit coverage for the pure deprecated-signer-migration logic: the per-leg sizing pipeline
+/// ([`size_migration_leg`]), the signer classification ([`classify_deprecated_signer`]), and the
+/// empty-`deprecated_signers` short-circuit report ([`DeprecatedSignerMigrationReport`]). These
+/// run without a `Client`/network — they exercise the same branching the regtest e2e tests cover
+/// end-to-end, mirroring ts-sdk's `runMigrationLeg`/`getDeprecatedSignerStatus` unit layer.
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+    use bitcoin::hashes::Hash;
+
+    /// A migratable candidate of the given amount. Each gets a distinct outpoint (via `vout`) so
+    /// selection order and counts are observable; the signer/cutoff are fixed placeholders the
+    /// sizing logic does not inspect.
+    fn candidate(vout: u32, amount: Amount) -> MigrationVtxoRef {
+        let secp = Secp256k1::new();
+        let sk = bitcoin::secp256k1::SecretKey::from_slice(&[7u8; 32]).unwrap();
+        let signer_pk = Keypair::from_secret_key(&secp, &sk).x_only_public_key().0;
+        MigrationVtxoRef {
+            outpoint: OutPoint::new(Txid::from_byte_array([0u8; 32]), vout),
+            amount,
+            signer_pk,
+            cutoff_date: 0,
+        }
+    }
+
+    fn sat(n: u64) -> Amount {
+        Amount::from_sat(n)
+    }
+
+    // ── size_migration_leg ───────────────────────────────────────────────────
+
+    #[test]
+    fn sizing_empty_candidates_is_nothing_migratable() {
+        let sizing = size_migration_leg(Vec::new(), Some(sat(1000)), sat(330));
+        assert!(sizing.selected.is_empty());
+        assert!(sizing.deferred.is_empty());
+        assert!(sizing.oversized.is_empty());
+        assert_eq!(
+            sizing.skip_reason,
+            Some(MigrationSkipReason::NothingMigratable)
+        );
+    }
+
+    #[test]
+    fn sizing_selects_all_when_within_limits() {
+        let candidates = vec![candidate(0, sat(500)), candidate(1, sat(400))];
+        let sizing = size_migration_leg(candidates, Some(sat(1000)), sat(330));
+        assert_eq!(sizing.selected.len(), 2);
+        assert!(sizing.deferred.is_empty());
+        assert!(sizing.oversized.is_empty());
+        assert_eq!(sizing.skip_reason, None);
+        // Highest-value-first ordering.
+        assert_eq!(sizing.selected[0].amount, sat(500));
+        assert_eq!(sizing.selected[1].amount, sat(400));
+    }
+
+    #[test]
+    fn sizing_caps_to_vtxo_max_deferring_the_rest() {
+        // Ceiling 1000: the 700 fits, the next 700 would push the aggregate to 1400 (> ceiling)
+        // so it is deferred, not stopped — a later 300 still fits under the running aggregate.
+        let candidates = vec![
+            candidate(0, sat(700)),
+            candidate(1, sat(700)),
+            candidate(2, sat(300)),
+        ];
+        let sizing = size_migration_leg(candidates, Some(sat(1000)), sat(330));
+        assert_eq!(sizing.selected.len(), 2);
+        let selected: Vec<_> = sizing.selected.iter().map(|c| c.amount).collect();
+        assert_eq!(selected, vec![sat(700), sat(300)]);
+        assert_eq!(sizing.deferred.len(), 1);
+        assert_eq!(sizing.deferred[0].amount, sat(700));
+        assert!(sizing.oversized.is_empty());
+        assert_eq!(sizing.skip_reason, None);
+    }
+
+    #[test]
+    fn sizing_splits_oversized_inputs() {
+        // 1500 alone exceeds the 1000 ceiling: it can never form a `<= ceiling` output, so it is
+        // reported as oversized (not dropped, not deferred). The 600 still migrates.
+        let candidates = vec![candidate(0, sat(1500)), candidate(1, sat(600))];
+        let sizing = size_migration_leg(candidates, Some(sat(1000)), sat(330));
+        assert_eq!(sizing.oversized.len(), 1);
+        assert_eq!(sizing.oversized[0].amount, sat(1500));
+        assert_eq!(sizing.selected.len(), 1);
+        assert_eq!(sizing.selected[0].amount, sat(600));
+        assert!(sizing.deferred.is_empty());
+        assert_eq!(sizing.skip_reason, None);
+    }
+
+    #[test]
+    fn sizing_oversized_only_when_all_exceed_ceiling() {
+        let candidates = vec![candidate(0, sat(1500)), candidate(1, sat(2000))];
+        let sizing = size_migration_leg(candidates, Some(sat(1000)), sat(330));
+        assert_eq!(sizing.oversized.len(), 2);
+        assert!(sizing.selected.is_empty());
+        assert!(sizing.deferred.is_empty());
+        assert_eq!(sizing.skip_reason, Some(MigrationSkipReason::OversizedOnly));
+    }
+
+    #[test]
+    fn sizing_skips_below_dust() {
+        // Selected aggregate (200) is below the dust floor (330): the leg is skipped as BelowDust
+        // (no oversized inputs involved). The candidate still satisfied the per-input and aggregate
+        // ceilings, so it remains in `selected`; `run_migration_leg` reads `selected` only when
+        // `skip_reason` is `None`, so a BelowDust leg settles nothing.
+        let candidates = vec![candidate(0, sat(200))];
+        let sizing = size_migration_leg(candidates, Some(sat(1000)), sat(330));
+        assert_eq!(sizing.skip_reason, Some(MigrationSkipReason::BelowDust));
+        assert!(sizing.oversized.is_empty());
+    }
+
+    #[test]
+    fn sizing_defers_beyond_count_cap() {
+        // One more candidate than the per-settlement count cap, each tiny so the aggregate ceiling
+        // never binds: exactly MAX_VTXOS_PER_SETTLEMENT are selected and the remainder is deferred.
+        let candidates: Vec<_> = (0..=MAX_VTXOS_PER_SETTLEMENT as u32)
+            .map(|i| candidate(i, sat(1)))
+            .collect();
+        // `None` ceiling => the aggregate cap does not apply; dust floor of 1 sat is met by the
+        // selected aggregate (MAX_VTXOS_PER_SETTLEMENT sats).
+        let sizing = size_migration_leg(candidates, None, sat(1));
+        assert_eq!(sizing.selected.len(), MAX_VTXOS_PER_SETTLEMENT);
+        assert_eq!(sizing.deferred.len(), 1);
+        assert!(sizing.oversized.is_empty());
+        assert_eq!(sizing.skip_reason, None);
+    }
+
+    #[test]
+    fn sizing_none_ceiling_means_no_oversized() {
+        // With no advertised ceiling, no input is ever oversized regardless of size.
+        let candidates = vec![candidate(0, sat(10_000_000)), candidate(1, sat(20_000_000))];
+        let sizing = size_migration_leg(candidates, None, sat(330));
+        assert!(sizing.oversized.is_empty());
+        assert_eq!(sizing.selected.len(), 2);
+        assert_eq!(sizing.skip_reason, None);
+    }
+
+    // ── classify_deprecated_signer ───────────────────────────────────────────
+
+    #[test]
+    fn classify_cutoff_zero_is_due_now() {
+        let (status, secs) = classify_deprecated_signer(0, 1_000_000);
+        assert_eq!(status, DeprecatedSignerStatus::DueNow);
+        assert_eq!(secs, None);
+    }
+
+    #[test]
+    fn classify_future_cutoff_is_migratable() {
+        let now = 1_000_000i64;
+        let (status, secs) = classify_deprecated_signer(now + 86_400, now);
+        assert_eq!(status, DeprecatedSignerStatus::Migratable);
+        assert_eq!(secs, Some(86_400));
+    }
+
+    #[test]
+    fn classify_exact_cutoff_boundary_is_expired() {
+        // cutoff_date <= now (and != 0) => expired. The boundary (cutoff == now) is past-cutoff,
+        // matching `server::Info::is_signer_past_cutoff_at`.
+        let now = 1_000_000i64;
+        let (status, secs) = classify_deprecated_signer(now, now);
+        assert_eq!(status, DeprecatedSignerStatus::Expired);
+        assert_eq!(secs, None);
+    }
+
+    #[test]
+    fn classify_past_cutoff_is_expired() {
+        let now = 1_000_000i64;
+        let (status, secs) = classify_deprecated_signer(now - 1, now);
+        assert_eq!(status, DeprecatedSignerStatus::Expired);
+        assert_eq!(secs, None);
+    }
+
+    // ── empty-deprecated-signers short-circuit report ────────────────────────
+
+    #[test]
+    fn nothing_migratable_report_is_not_rotated() {
+        // The report `migrate_deprecated_signer_vtxos` returns when the server advertises no
+        // deprecated signers: not rotated, no settle txids, both legs NothingMigratable.
+        let report = DeprecatedSignerMigrationReport::nothing_migratable();
+        assert!(!report.rotated());
+        assert!(report.settle_txids().is_empty());
+        assert_eq!(
+            report.vtxo.skipped,
+            Some(MigrationSkipReason::NothingMigratable)
+        );
+        assert_eq!(
+            report.boarding.skipped,
+            Some(MigrationSkipReason::NothingMigratable)
+        );
+        assert!(report.vtxo.migrated.is_empty());
+        assert!(report.boarding.migrated.is_empty());
     }
 }
