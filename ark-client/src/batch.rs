@@ -45,7 +45,6 @@ use bitcoin::TxOut;
 use bitcoin::Txid;
 use bitcoin::XOnlyPublicKey;
 use futures::StreamExt;
-use jiff::Timestamp;
 use rand::CryptoRng;
 use rand::Rng;
 use std::collections::HashMap;
@@ -1011,7 +1010,7 @@ where
         // To track unique outpoints and prevent duplicates
         let mut seen_outpoints = std::collections::HashSet::new();
 
-        let now = Timestamp::now();
+        let now_secs = super::unix_now();
 
         // Find outpoints for each boarding output.
         for boarding_output in boarding_outputs {
@@ -1039,7 +1038,6 @@ where
                     // Skip boarding outputs whose server key is past its cooperative-sign
                     // cutoff — the operator won't co-sign the old key's forfeit path.
                     // These must be recovered via unilateral exit (send_on_chain).
-                    let now_secs = now.as_second();
                     if self
                         .server_info
                         .is_signer_past_cutoff_at(boarding_output.server_pk(), now_secs)
@@ -1049,7 +1047,7 @@ where
 
                     // Only include confirmed boarding outputs with an _inactive_ exit path.
                     if !boarding_output.can_be_claimed_unilaterally_by_owner(
-                        now.as_duration().try_into().map_err(Error::ad_hoc)?,
+                        std::time::Duration::from_secs(now_secs as u64),
                         std::time::Duration::from_secs(*confirmation_blocktime),
                         *confirmations,
                     ) {
@@ -1068,7 +1066,7 @@ where
         }
 
         let (vtxo_list, script_pubkey_to_vtxo_map) = self.list_vtxos().await?;
-        let now = Timestamp::now().as_second();
+        let now = super::unix_now();
         let dust = self.server_info.dust;
 
         // Exclude VTXOs under a past-cutoff deprecated signer that still require a forfeit.
