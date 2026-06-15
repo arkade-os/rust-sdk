@@ -117,12 +117,13 @@ impl TryFrom<crate::models::DeprecatedSigner> for ark_core::server::DeprecatedSi
             .parse::<PublicKey>()
             .map_err(|e| ConversionError(format!("Invalid pubkey '{pubkey_str}': {e}")))?;
 
-        // A missing cutoffDate means "rotate immediately" (same as 0).
-        let cutoff_date = match value.cutoff_date {
-            Some(s) => i64::from_str(&s)
-                .map_err(|e| ConversionError(format!("Could not parse cutoff_date: {e:#}")))?,
-            None => 0,
-        };
+        let cutoff_date = value
+            .cutoff_date
+            .map(|s| {
+                i64::from_str(&s)
+                    .map_err(|e| ConversionError(format!("Could not parse cutoff_date: {e:#}")))
+            })
+            .transpose()?;
 
         Ok(ark_core::server::DeprecatedSigner { pk, cutoff_date })
     }
@@ -615,16 +616,16 @@ mod tests {
     fn deprecated_signer_parses_cutoff_date() {
         let result = ark_core::server::DeprecatedSigner::try_from(model(Some(PK_A), Some("12345")));
         let ds = result.expect("should succeed");
-        assert_eq!(ds.cutoff_date, 12345);
+        assert_eq!(ds.cutoff_date, Some(12345));
         assert_eq!(ds.pk.to_string(), PK_A);
     }
 
     #[test]
-    fn deprecated_signer_missing_cutoff_defaults_to_zero() {
-        // A missing cutoffDate means "rotate immediately" (cutoff_date == 0).
+    fn deprecated_signer_missing_cutoff_is_none() {
+        // A missing cutoffDate means "rotate immediately" (cutoff_date == None).
         let result = ark_core::server::DeprecatedSigner::try_from(model(Some(PK_A), None));
         let ds = result.expect("should succeed");
-        assert_eq!(ds.cutoff_date, 0);
+        assert_eq!(ds.cutoff_date, None);
     }
 
     #[test]

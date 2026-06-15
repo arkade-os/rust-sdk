@@ -125,8 +125,8 @@ pub struct MigrationVtxoRef {
     pub amount: Amount,
     /// The deprecated signer the input was minted under.
     pub signer_pk: XOnlyPublicKey,
-    /// The signer's advertised cooperative-sign cutoff (Unix seconds); `0` means "rotate now".
-    pub cutoff_date: i64,
+    /// The signer's advertised cooperative-sign cutoff (Unix seconds); `None` means "rotate now".
+    pub cutoff_date: Option<i64>,
 }
 
 /// Why a single migration leg ([`DeprecatedSignerMigrationReport::vtxo`] or
@@ -352,17 +352,18 @@ fn signer_holds_funds(
 /// Pure core of [`Client::deprecated_signer_status`], factored out so the classification is
 /// unit-testable without a `Client`/network. Consistent with
 /// [`server::Info::is_signer_past_cutoff_at`] and the `is_pre_cutoff_deprecated` check in
-/// [`Client::migrate_deprecated_signer_vtxos`]: a `cutoff_date` of `0` is "rotate now"
+/// [`Client::migrate_deprecated_signer_vtxos`]: `None` is "rotate now"
 /// ([`DeprecatedSignerStatus::DueNow`], still co-signable); a future cutoff is
 /// [`DeprecatedSignerStatus::Migratable`] (with a positive `seconds_until_cutoff`); a passed cutoff
 /// is [`DeprecatedSignerStatus::Expired`].
-fn classify_deprecated_signer(cutoff_date: i64, now: i64) -> (DeprecatedSignerStatus, Option<i64>) {
-    if cutoff_date == 0 {
-        (DeprecatedSignerStatus::DueNow, None)
-    } else if cutoff_date > now {
-        (DeprecatedSignerStatus::Migratable, Some(cutoff_date - now))
-    } else {
-        (DeprecatedSignerStatus::Expired, None)
+fn classify_deprecated_signer(
+    cutoff_date: Option<i64>,
+    now: i64,
+) -> (DeprecatedSignerStatus, Option<i64>) {
+    match cutoff_date {
+        None => (DeprecatedSignerStatus::DueNow, None),
+        Some(d) if d > now => (DeprecatedSignerStatus::Migratable, Some(d - now)),
+        Some(_) => (DeprecatedSignerStatus::Expired, None),
     }
 }
 
@@ -371,19 +372,19 @@ fn classify_deprecated_signer(cutoff_date: i64, now: i64) -> (DeprecatedSignerSt
 /// Derived at read time by [`Client::deprecated_signer_status`] from the advertised
 /// `cutoff_date` and the current time; never persisted. Mirrors ts-sdk's `SignerStatus`
 /// (the non-`CURRENT`/`UNKNOWN_SIGNER` variants) and stays consistent with
-/// [`server::Info::is_signer_past_cutoff_at`]: a `cutoff_date` of `0` is "rotate immediately"
+/// [`server::Info::is_signer_past_cutoff_at`]: `cutoff_date == None` is "rotate immediately"
 /// (still co-signable now) and is therefore NOT treated as past-cutoff.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeprecatedSignerStatus {
-    /// The signer is deprecated with a future cutoff (`cutoff_date > now`). The operator still
-    /// co-signs, so these outputs are cooperatively migratable (see
+    /// The signer is deprecated with a future cutoff (`cutoff_date == Some(d)` where `d > now`).
+    /// The operator still co-signs, so these outputs are cooperatively migratable (see
     /// [`Client::migrate_deprecated_signer_vtxos`]).
     Migratable,
-    /// The signer is deprecated with no cutoff advertised (`cutoff_date == 0`): rotate
+    /// The signer is deprecated with no cutoff advertised (`cutoff_date == None`): rotate
     /// immediately. The operator still co-signs now, so these outputs are still cooperatively
     /// migratable, but clients should migrate without delay.
     DueNow,
-    /// The signer's cutoff has passed (`cutoff_date != 0 && cutoff_date <= now`). The operator
+    /// The signer's cutoff has passed (`cutoff_date == Some(d)` where `d <= now`). The operator
     /// will no longer co-sign the old key — these funds cannot migrate cooperatively and instead
     /// drain to the active signer via the recover-on-sweep path once they expire.
     Expired,
@@ -403,10 +404,10 @@ pub struct DeprecatedSignerReport {
     pub signer_pk: XOnlyPublicKey,
     /// The signer's status, derived from its cutoff and the current time.
     pub status: DeprecatedSignerStatus,
-    /// The advertised cooperative-sign cutoff (Unix seconds); `0` means "rotate immediately".
-    pub cutoff_date: i64,
+    /// The advertised cooperative-sign cutoff (Unix seconds); `None` means "rotate immediately".
+    pub cutoff_date: Option<i64>,
     /// Seconds until the cutoff (`cutoff_date - now`); `None` when no future cutoff is advertised
-    /// (i.e. `cutoff_date == 0` or already passed).
+    /// (i.e. `cutoff_date` is `None` or already passed).
     pub seconds_until_cutoff: Option<i64>,
     /// Number of spendable (non-recoverable) VTXOs the wallet holds under this signer.
     pub vtxo_count: usize,
@@ -1685,15 +1686,19 @@ where
 
         let now = unix_now();
 
-        let is_pre_cutoff_deprecated = |server_pk: XOnlyPublicKey| -> Option<i64> {
+        let is_pre_cutoff_deprecated = |server_pk: XOnlyPublicKey| {
+            server_info.deprecated_signers.iter().any(|ds| {
+                ds.pk.x_only_public_key().0 == server_pk
+                    && ds.cutoff_date.is_none_or(|cutoff| cutoff > now)
+            })
+        };
+
+        let cutoff_date_for = |server_pk: XOnlyPublicKey| {
             server_info
                 .deprecated_signers
                 .iter()
-                .find(|ds| {
-                    ds.pk.x_only_public_key().0 == server_pk
-                        && (ds.cutoff_date == 0 || ds.cutoff_date > now)
-                })
-                .map(|ds| ds.cutoff_date)
+                .find(|ds| ds.pk.x_only_public_key().0 == server_pk)
+                .and_then(|ds| ds.cutoff_date)
         };
 
         // `fetch_commitment_transaction_inputs` already drops PAST-cutoff deprecated inputs (the
@@ -1716,12 +1721,12 @@ where
                 );
                 continue;
             };
-            if let Some(cutoff_date) = is_pre_cutoff_deprecated(vtxo.server_pk()) {
+            if is_pre_cutoff_deprecated(vtxo.server_pk()) {
                 vtxo_candidates.push(MigrationVtxoRef {
                     outpoint: input.outpoint(),
                     amount: input.amount(),
                     signer_pk: vtxo.server_pk(),
-                    cutoff_date,
+                    cutoff_date: cutoff_date_for(vtxo.server_pk()),
                 });
             }
         }
@@ -1730,12 +1735,12 @@ where
         let mut boarding_candidates: Vec<MigrationVtxoRef> = Vec::new();
         for input in &boarding_inputs {
             let signer_pk = input.boarding_output().server_pk();
-            if let Some(cutoff_date) = is_pre_cutoff_deprecated(signer_pk) {
+            if is_pre_cutoff_deprecated(signer_pk) {
                 boarding_candidates.push(MigrationVtxoRef {
                     outpoint: input.outpoint(),
                     amount: input.amount(),
                     signer_pk,
-                    cutoff_date,
+                    cutoff_date: cutoff_date_for(signer_pk),
                 });
             }
         }
@@ -1872,7 +1877,7 @@ where
             let cutoff_date = ds.cutoff_date;
 
             // Status + `seconds_until_cutoff`, consistent with `is_signer_past_cutoff_at` /
-            // `is_pre_cutoff_deprecated`: cutoff `0` = rotate-now (still co-signable); a future
+            // `is_pre_cutoff_deprecated`: cutoff `None` = rotate-now (still co-signable); a future
             // cutoff = migratable; a passed cutoff = expired.
             let (status, seconds_until_cutoff) = classify_deprecated_signer(cutoff_date, now);
 
@@ -2549,7 +2554,7 @@ mod migration_tests {
             outpoint: OutPoint::new(Txid::from_byte_array([0u8; 32]), vout),
             amount,
             signer_pk,
-            cutoff_date: 0,
+            cutoff_date: None,
         }
     }
 
@@ -2668,8 +2673,8 @@ mod migration_tests {
     // ── classify_deprecated_signer ───────────────────────────────────────────
 
     #[test]
-    fn classify_cutoff_zero_is_due_now() {
-        let (status, secs) = classify_deprecated_signer(0, 1_000_000);
+    fn classify_cutoff_none_is_due_now() {
+        let (status, secs) = classify_deprecated_signer(None, 1_000_000);
         assert_eq!(status, DeprecatedSignerStatus::DueNow);
         assert_eq!(secs, None);
     }
@@ -2677,17 +2682,17 @@ mod migration_tests {
     #[test]
     fn classify_future_cutoff_is_migratable() {
         let now = 1_000_000i64;
-        let (status, secs) = classify_deprecated_signer(now + 86_400, now);
+        let (status, secs) = classify_deprecated_signer(Some(now + 86_400), now);
         assert_eq!(status, DeprecatedSignerStatus::Migratable);
         assert_eq!(secs, Some(86_400));
     }
 
     #[test]
     fn classify_exact_cutoff_boundary_is_expired() {
-        // cutoff_date <= now (and != 0) => expired. The boundary (cutoff == now) is past-cutoff,
+        // Some(d) where d <= now => expired. The boundary (cutoff == now) is past-cutoff,
         // matching `server::Info::is_signer_past_cutoff_at`.
         let now = 1_000_000i64;
-        let (status, secs) = classify_deprecated_signer(now, now);
+        let (status, secs) = classify_deprecated_signer(Some(now), now);
         assert_eq!(status, DeprecatedSignerStatus::Expired);
         assert_eq!(secs, None);
     }
@@ -2695,7 +2700,7 @@ mod migration_tests {
     #[test]
     fn classify_past_cutoff_is_expired() {
         let now = 1_000_000i64;
-        let (status, secs) = classify_deprecated_signer(now - 1, now);
+        let (status, secs) = classify_deprecated_signer(Some(now - 1), now);
         assert_eq!(status, DeprecatedSignerStatus::Expired);
         assert_eq!(secs, None);
     }

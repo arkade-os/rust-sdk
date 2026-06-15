@@ -501,7 +501,7 @@ pub struct ScheduledSession {
 #[derive(Clone, Debug)]
 pub struct DeprecatedSigner {
     pub pk: PublicKey,
-    pub cutoff_date: i64,
+    pub cutoff_date: Option<i64>,
 }
 
 impl Info {
@@ -515,13 +515,12 @@ impl Info {
     }
 
     /// Returns `true` if `server_pk` is a deprecated signer whose cooperative-sign cutoff has
-    /// already passed at `now_unix_secs`. A `cutoff_date` of `0` means "rotate immediately" —
-    /// the operator still co-signs but clients should migrate without delay. It is therefore
-    /// NOT treated as past-cutoff here; use `migrate_deprecated_signer_vtxos` to handle it.
+    /// already passed at `now_unix_secs`. `None` means "rotate immediately" — the operator still
+    /// co-signs but clients should migrate without delay. It is therefore NOT treated as
+    /// past-cutoff here; use `migrate_deprecated_signer_vtxos` to handle it.
     pub fn is_signer_past_cutoff_at(&self, server_pk: XOnlyPublicKey, now_unix_secs: i64) -> bool {
         self.deprecated_signers.iter().any(|ds| {
-            ds.cutoff_date != 0
-                && ds.cutoff_date <= now_unix_secs
+            ds.cutoff_date.map_or(false, |d| d <= now_unix_secs)
                 && ds.pk.x_only_public_key().0 == server_pk
         })
     }
@@ -842,7 +841,7 @@ mod tests {
         pk(hex).x_only_public_key().0
     }
 
-    fn make_info(current_hex: &str, deprecated: Vec<(&str, i64)>) -> Info {
+    fn make_info(current_hex: &str, deprecated: Vec<(&str, Option<i64>)>) -> Info {
         let dummy_address: bitcoin::Address<NetworkUnchecked> =
             "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"
                 .parse()
@@ -889,14 +888,14 @@ mod tests {
 
     #[test]
     fn all_server_keys_includes_deprecated_in_order() {
-        let info = make_info(PK_A, vec![(PK_B, 1000), (PK_C, 2000)]);
+        let info = make_info(PK_A, vec![(PK_B, Some(1000)), (PK_C, Some(2000))]);
         let keys: Vec<_> = info.all_server_keys().collect();
         assert_eq!(keys, vec![xonly(PK_A), xonly(PK_B), xonly(PK_C)]);
     }
 
     #[test]
     fn all_server_keys_current_is_always_first() {
-        let info = make_info(PK_C, vec![(PK_A, 500), (PK_B, 600)]);
+        let info = make_info(PK_C, vec![(PK_A, Some(500)), (PK_B, Some(600))]);
         let keys: Vec<_> = info.all_server_keys().collect();
         assert_eq!(keys[0], xonly(PK_C));
     }
@@ -911,36 +910,36 @@ mod tests {
 
     #[test]
     fn unknown_key_is_not_past_cutoff() {
-        let info = make_info(PK_A, vec![(PK_B, 100)]);
+        let info = make_info(PK_A, vec![(PK_B, Some(100))]);
         assert!(!info.is_signer_past_cutoff_at(xonly(PK_UNRELATED), 200));
     }
 
     #[test]
-    fn cutoff_zero_means_rotate_immediately_not_past_cutoff() {
-        // cutoff_date == 0 means "rotate now" but the operator still co-signs.
+    fn cutoff_none_means_rotate_immediately_not_past_cutoff() {
+        // cutoff_date == None means "rotate now" but the operator still co-signs.
         // is_signer_past_cutoff_at must return false so the key is not excluded from batches.
-        let info = make_info(PK_A, vec![(PK_B, 0)]);
+        let info = make_info(PK_A, vec![(PK_B, None)]);
         assert!(!info.is_signer_past_cutoff_at(xonly(PK_B), 9_999_999));
     }
 
     #[test]
     fn future_cutoff_is_not_past() {
         let now = 1_000_000i64;
-        let info = make_info(PK_A, vec![(PK_B, now + 1)]);
+        let info = make_info(PK_A, vec![(PK_B, Some(now + 1))]);
         assert!(!info.is_signer_past_cutoff_at(xonly(PK_B), now));
     }
 
     #[test]
     fn exact_cutoff_boundary_is_past() {
         let now = 1_000_000i64;
-        let info = make_info(PK_A, vec![(PK_B, now)]);
+        let info = make_info(PK_A, vec![(PK_B, Some(now))]);
         assert!(info.is_signer_past_cutoff_at(xonly(PK_B), now));
     }
 
     #[test]
     fn past_cutoff_is_past() {
         let now = 1_000_000i64;
-        let info = make_info(PK_A, vec![(PK_B, now - 1)]);
+        let info = make_info(PK_A, vec![(PK_B, Some(now - 1))]);
         assert!(info.is_signer_past_cutoff_at(xonly(PK_B), now));
     }
 
@@ -948,7 +947,7 @@ mod tests {
     fn multiple_deprecated_only_past_key_is_flagged() {
         let now = 1_000_000i64;
         // PK_B: future (not past), PK_C: past
-        let info = make_info(PK_A, vec![(PK_B, now + 100), (PK_C, now - 100)]);
+        let info = make_info(PK_A, vec![(PK_B, Some(now + 100)), (PK_C, Some(now - 100))]);
         assert!(!info.is_signer_past_cutoff_at(xonly(PK_B), now));
         assert!(info.is_signer_past_cutoff_at(xonly(PK_C), now));
     }

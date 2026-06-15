@@ -137,7 +137,7 @@ impl TryFrom<generated::ark::v1::DeprecatedSigner> for DeprecatedSigner {
 
         Ok(Self {
             pk,
-            cutoff_date: value.cutoff_date,
+            cutoff_date: (value.cutoff_date != 0).then_some(value.cutoff_date),
         })
     }
 }

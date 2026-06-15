@@ -299,8 +299,8 @@ pub async fn e2e_signer_rotation_status_migratable() {
         "a future cutoff classifies as Migratable"
     );
     assert!(
-        row.cutoff_date > before_rotate,
-        "cutoff_date ({}) should be a future timestamp (> {before_rotate})",
+        row.cutoff_date.is_some_and(|d| d > before_rotate),
+        "cutoff_date ({:?}) should be a future timestamp (> {before_rotate})",
         row.cutoff_date
     );
     assert!(
@@ -316,10 +316,10 @@ pub async fn e2e_signer_rotation_status_migratable() {
 }
 
 /// Classification: a zero cutoff (`"0"`) makes the deprecated signer `DueNow` with
-/// `cutoff_date == 0` and no `seconds_until_cutoff`, exposed via `deprecated_signer_status()`.
+/// `cutoff_date == None` and no `seconds_until_cutoff`, exposed via `deprecated_signer_status()`.
 ///
 /// Mirrors ts-sdk `deprecatedSignerMigration.test.ts` DUE_NOW group (`status: "DUE_NOW"`,
-/// `cutoffDate` undefined). `rotate_signer("0")` advertises cutoff `0` ("rotate immediately",
+/// `cutoffDate` undefined). `rotate_signer("0")` advertises no cutoff ("rotate immediately",
 /// still co-signable).
 #[tokio::test]
 #[ignore = "requires regtest"]
@@ -364,8 +364,8 @@ pub async fn e2e_signer_rotation_status_due_now() {
         "a zero cutoff classifies as DueNow"
     );
     assert_eq!(
-        row.cutoff_date, 0,
-        "DueNow signer advertises cutoff_date == 0"
+        row.cutoff_date, None,
+        "DueNow signer advertises cutoff_date == None"
     );
     assert_eq!(
         row.seconds_until_cutoff, None,
