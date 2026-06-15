@@ -1142,12 +1142,17 @@ where
             })
         };
 
-        let migratable_vtxos = vtxo_list.spendable_offchain().any(|v| {
-            script_map
-                .get(&v.script)
-                .map(|vtxo| is_pre_cutoff_deprecated(vtxo.server_pk()))
-                .unwrap_or(false)
-        });
+        // Collect outpoints of VTXOs under pre-cutoff deprecated signers.
+        let deprecated_vtxo_outpoints: HashSet<OutPoint> = vtxo_list
+            .spendable_offchain()
+            .filter(|v| {
+                script_map
+                    .get(&v.script)
+                    .map(|vtxo| is_pre_cutoff_deprecated(vtxo.server_pk()))
+                    .unwrap_or(false)
+            })
+            .map(|v| v.outpoint)
+            .collect();
 
         let migratable_boarding = self
             .inner
@@ -1156,21 +1161,53 @@ where
             .into_iter()
             .any(|bo| is_pre_cutoff_deprecated(bo.server_pk()));
 
-        if !migratable_vtxos && !migratable_boarding {
+        if deprecated_vtxo_outpoints.is_empty() && !migratable_boarding {
             tracing::debug!("No migratable deprecated-signer VTXOs or boarding outputs found");
             return Ok(None);
         }
 
         tracing::info!(
-            migratable_vtxos,
+            migratable_vtxos = deprecated_vtxo_outpoints.len(),
             migratable_boarding,
             "Found pre-cutoff deprecated-signer outputs; settling to current signer"
         );
 
-        // settle_at(now) uses the same timestamp as the pre-check above, so a VTXO that
-        // passes the migration gate cannot be silently excluded by a clock tick between
-        // the two evaluations.
-        self.settle_at(now, rng).await
+        let (to_address, _) = self.get_offchain_address()?;
+
+        // fetch_commitment_transaction_inputs uses the same `now` snapshot as the pre-check
+        // above (TOCTOU fix) and already excludes past-cutoff VTXOs.
+        let (boarding_inputs, vtxo_inputs, _) =
+            self.fetch_commitment_transaction_inputs(now).await?;
+
+        // Keep only deprecated-signer inputs — leave current-signer VTXOs untouched.
+        let boarding_inputs: Vec<_> = boarding_inputs
+            .into_iter()
+            .filter(|i| is_pre_cutoff_deprecated(i.boarding_output().server_pk()))
+            .collect();
+        let vtxo_inputs: Vec<_> = vtxo_inputs
+            .into_iter()
+            .filter(|i| deprecated_vtxo_outpoints.contains(&i.outpoint()))
+            .collect();
+
+        let total_amount = boarding_inputs.iter().map(|i| i.amount()).sum::<Amount>()
+            + vtxo_inputs.iter().map(|i| i.amount()).sum::<Amount>();
+
+        if boarding_inputs.is_empty() && vtxo_inputs.is_empty() {
+            tracing::debug!("All deprecated-signer outputs were excluded (past cutoff)");
+            return Ok(None);
+        }
+
+        self.join_next_batch(
+            rng,
+            boarding_inputs,
+            vtxo_inputs,
+            batch::BatchOutputType::Board {
+                to_address,
+                to_amount: total_amount,
+            },
+        )
+        .await
+        .map(Some)
     }
 
     /// Get information about an asset by its ID.
