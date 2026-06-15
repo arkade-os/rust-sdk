@@ -144,6 +144,11 @@ impl Client {
             }
         }
 
+        // Lock-ordering invariant: when both are held, `configuration` is acquired before
+        // `digest`. This is the only place both write locks are taken; keep that order if other
+        // code paths ever need both, to avoid a deadlock. A benign race (two threads passing the
+        // unchanged-check above and both rebuilding) only costs a redundant rebuild, not
+        // correctness.
         let mut configuration = self
             .configuration
             .write()
