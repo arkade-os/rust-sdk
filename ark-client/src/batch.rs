@@ -1016,7 +1016,8 @@ where
         let mut seen_outpoints = std::collections::HashSet::new();
 
         let now_secs = now;
-        // Snapshot once; reused for the boarding cutoff filter and the VTXO dust/cutoff logic below.
+        // Snapshot once; reused for the boarding cutoff filter and the VTXO dust/cutoff logic
+        // below.
         let server_info = self.server_info()?;
 
         // Find outpoints for each boarding output.

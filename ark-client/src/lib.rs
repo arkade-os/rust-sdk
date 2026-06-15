@@ -16,6 +16,7 @@ use ark_core::server::GetVtxosRequest;
 use ark_core::server::SubscriptionResponse;
 use ark_core::server::VirtualTxOutPoint;
 use ark_core::ArkAddress;
+use ark_core::BoardingOutput;
 use ark_core::ExplorerUtxo;
 use ark_core::UtxoCoinSelection;
 use ark_core::Vtxo;
@@ -99,6 +100,21 @@ pub const DEFAULT_BOLTZ_REFERRAL_ID: &str = "arkade-rs-SDK";
 /// VTXOs does not build a batch intent that exceeds the server's transaction-weight limit. Any
 /// overflow is deferred to a later migration cycle (see [`MigrationLegReport::deferred`]).
 pub const MAX_VTXOS_PER_SETTLEMENT: usize = 50;
+
+/// Mainnet's original unilateral-exit delay (~7 days, in seconds).
+///
+/// arkd only advertises the CURRENT exit delay in `/info`; it does not record the delays it used
+/// in the past. If the operator shortens the delay (with or without a key rotation), deposits
+/// minted under the OLD delay have a different `scriptPubKey` and would silently fall out of
+/// watch/discovery. To avoid that, discovery on mainnet probes this hardcoded legacy delay
+/// alongside the advertised one. We keep a single fallback rather than scanning an unbounded
+/// history because arkd does not expose deprecated delays. Matches `MAINNET_UNILATERAL_EXIT_DELAY`
+/// in arkade-os/ts-sdk and `MainnetLegacyUnilateralExit` in the dotnet SDK.
+///
+/// On testnets arkd has always advertised the network's intended delay, so this probe would only
+/// widen the candidate set without ever hitting; the candidate-delay helper therefore adds it on
+/// mainnet only (see [`Client::candidate_exit_delays`]).
+const MAINNET_LEGACY_UNILATERAL_EXIT_DELAY_SECS: u32 = 605_184;
 
 /// A single VTXO or boarding output referenced in a [`DeprecatedSignerMigrationReport`].
 #[derive(Debug, Clone)]
@@ -799,6 +815,26 @@ where
             tracing::warn!(?error, "Failed during key discovery");
         };
 
+        // Eagerly persist boarding rows for the current signer and every deprecated signer (each
+        // crossed with the candidate exit delays). Without this, deprecated-signer boarding rows
+        // exist only after an integrator calls `get_boarding_addresses()`, and the boarding leg of
+        // `migrate_deprecated_signer_vtxos` (a pure DB read) would silently see none — an ordering
+        // footgun the ts-sdk (eager boarding matrix at boot) and dotnet (BoardingUtxoSyncService)
+        // both avoid. Re-persisting is idempotent, so this is safe to run on every connect.
+        match client.server_info() {
+            Ok(server_info) => {
+                if let Err(error) = client.persist_watch_boarding_outputs(&server_info) {
+                    tracing::warn!(?error, "Failed to persist boarding outputs at connect");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    "Failed to read server info for boarding persistence"
+                );
+            }
+        }
+
         Ok(client)
     }
 }
@@ -1023,6 +1059,11 @@ where
         // Discover against current + all deprecated signers so that user keys used before a
         // rotation are still found when recovering from seed.
         let all_server_keys: Vec<XOnlyPublicKey> = server_info.all_server_keys().collect();
+        // Probe each server key under every candidate exit delay (the advertised delay plus, on
+        // mainnet, the legacy delay), so VTXOs minted before the operator shortened the delay are
+        // still discovered. Off mainnet this is just the advertised delay (no behaviour change).
+        let candidate_delays =
+            self.candidate_exit_delays(server_info.unilateral_exit_delay, server_info.network)?;
 
         let mut start_index = 0u32;
         let mut discovered_count = 0u32;
@@ -1049,27 +1090,29 @@ where
                 let mut addresses = Vec::new();
 
                 for server_signer in &all_server_keys {
-                    // Default (2-leaf) address.
-                    let default_vtxo = Vtxo::new_default(
-                        self.secp(),
-                        *server_signer,
-                        owner_pk,
-                        server_info.unilateral_exit_delay,
-                        server_info.network,
-                    )?;
-                    addresses.push(default_vtxo.to_ark_address());
-
-                    // Delegate (3-leaf) addresses for each known delegator.
-                    for dpk in &self.inner.historical_delegator_pks {
-                        let delegate_vtxo = Vtxo::new_with_delegator(
+                    for exit_delay in &candidate_delays {
+                        // Default (2-leaf) address.
+                        let default_vtxo = Vtxo::new_default(
                             self.secp(),
                             *server_signer,
                             owner_pk,
-                            *dpk,
-                            server_info.unilateral_exit_delay,
+                            *exit_delay,
                             server_info.network,
                         )?;
-                        addresses.push(delegate_vtxo.to_ark_address());
+                        addresses.push(default_vtxo.to_ark_address());
+
+                        // Delegate (3-leaf) addresses for each known delegator.
+                        for dpk in &self.inner.historical_delegator_pks {
+                            let delegate_vtxo = Vtxo::new_with_delegator(
+                                self.secp(),
+                                *server_signer,
+                                owner_pk,
+                                *dpk,
+                                *exit_delay,
+                                server_info.network,
+                            )?;
+                            addresses.push(delegate_vtxo.to_ark_address());
+                        }
                     }
                 }
 
@@ -1120,6 +1163,36 @@ where
         Ok(discovered_count)
     }
 
+    /// Candidate exit-delay set for discovery/watch, given the current delay advertised for one
+    /// axis (boarding or unilateral-exit).
+    ///
+    /// Returns the `current` delay plus — only on mainnet — the hardcoded legacy delay
+    /// [`MAINNET_LEGACY_UNILATERAL_EXIT_DELAY_SECS`], deduplicated. arkd advertises only the
+    /// CURRENT delay, so deposits minted under an older (longer) delay live at a different
+    /// `scriptPubKey`; probing the legacy delay too keeps them visible. On non-mainnet the set is
+    /// just `[current]`, so behaviour there is unchanged, and the de-dup makes the legacy entry a
+    /// no-op whenever `current` already equals it.
+    fn candidate_exit_delays(
+        &self,
+        current: bitcoin::Sequence,
+        network: bitcoin::Network,
+    ) -> Result<Vec<bitcoin::Sequence>, Error> {
+        let mut delays = vec![current];
+
+        if network == bitcoin::Network::Bitcoin {
+            let legacy =
+                bitcoin::Sequence::from_seconds_ceil(MAINNET_LEGACY_UNILATERAL_EXIT_DELAY_SECS)
+                    .map_err(Error::ad_hoc)?;
+            // De-dup: when the advertised mainnet delay already equals the legacy value, the
+            // legacy probe is a no-op.
+            if !delays.contains(&legacy) {
+                delays.push(legacy);
+            }
+        }
+
+        Ok(delays)
+    }
+
     // At the moment we are always generating the same address.
     pub fn get_boarding_address(&self) -> Result<Address, Error> {
         let server_info = &self.server_info()?;
@@ -1139,24 +1212,58 @@ where
 
     pub fn get_boarding_addresses(&self) -> Result<Vec<Address>, Error> {
         let server_info = &self.server_info()?;
-        let mut addresses = Vec::new();
 
-        // Current signer boarding address.
-        addresses.push(self.get_boarding_address()?);
-
-        // Deprecated signer boarding addresses — for watch/history only.
+        // Persist a boarding output for every (signer, exit-delay) candidate and return the
+        // de-duplicated addresses. This is the watch/history surface: it covers the current signer
+        // plus all deprecated signers (server-key rotation), each crossed with the candidate
+        // exit-delay set (the advertised delay plus, on mainnet, the legacy delay) so deposits
+        // minted under an older delay or an older key are still visible.
+        //
         // The spend path (settle) deliberately stays current-signer-only;
         // deprecated-signer boarding recovery is handled via migrate_deprecated_signer_vtxos().
-        for ds in &server_info.deprecated_signers {
-            let boarding_output = self.inner.wallet.new_boarding_output(
-                ds.pk.x_only_public_key().0,
-                server_info.boarding_exit_delay,
-                server_info.network,
-            )?;
-            addresses.push(boarding_output.address().clone());
+        let outputs = self.persist_watch_boarding_outputs(server_info)?;
+
+        let mut seen = HashSet::new();
+        let mut addresses = Vec::with_capacity(outputs.len());
+        for output in &outputs {
+            let address = output.address().clone();
+            if seen.insert(address.clone()) {
+                addresses.push(address);
+            }
         }
 
         Ok(addresses)
+    }
+
+    /// Persist (idempotently) a boarding output for each signer the wallet should watch crossed
+    /// with each candidate exit delay, returning the created [`BoardingOutput`]s.
+    ///
+    /// Covers the current signer plus every deprecated signer, each paired with
+    /// [`Client::candidate_exit_delays`] (the advertised boarding-exit delay plus, on mainnet, the
+    /// legacy delay). Calling [`BoardingWallet::new_boarding_output`] writes the row to the
+    /// wallet's store; re-persisting the same boarding output is a harmless overwrite (the store
+    /// keys rows by [`BoardingOutput`] identity), so this is safe to call repeatedly — at connect
+    /// time and again from [`Client::get_boarding_addresses`].
+    fn persist_watch_boarding_outputs(
+        &self,
+        server_info: &server::Info,
+    ) -> Result<Vec<BoardingOutput>, Error> {
+        let candidate_delays =
+            self.candidate_exit_delays(server_info.boarding_exit_delay, server_info.network)?;
+
+        let mut outputs = Vec::new();
+        for server_pk in server_info.all_server_keys() {
+            for exit_delay in &candidate_delays {
+                let boarding_output = self.inner.wallet.new_boarding_output(
+                    server_pk,
+                    *exit_delay,
+                    server_info.network,
+                )?;
+                outputs.push(boarding_output);
+            }
+        }
+
+        Ok(outputs)
     }
 
     pub async fn get_virtual_tx_outpoints(
