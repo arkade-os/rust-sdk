@@ -1071,7 +1071,10 @@ where
         }
 
         let (vtxo_list, script_pubkey_to_vtxo_map) = self.list_vtxos().await?;
-        let now = super::unix_now();
+        // Reuse the caller-supplied timestamp (not a fresh wall-clock) so the VTXO cutoff filter
+        // below is evaluated against the same instant as the boarding filter above, and so a
+        // test-injected `now` deterministically controls both.
+        let now = now_secs;
         let dust = server_info.dust;
 
         // Exclude VTXOs under a past-cutoff deprecated signer that still require a forfeit.

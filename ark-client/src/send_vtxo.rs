@@ -262,7 +262,6 @@ where
             })
             .collect::<Vec<_>>();
 
-        let server_info = self.server_info()?;
         let mut selected_outpoints = HashSet::new();
         let mut selected = Vec::new();
         let mut asset_changes: HashMap<AssetId, u64> = HashMap::new();

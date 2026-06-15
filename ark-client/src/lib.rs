@@ -1183,36 +1183,45 @@ where
         // Build addresses for current signer + all deprecated signers so VTXOs under any
         // known server key are discovered and visible in the balance.
         let all_server_keys: Vec<XOnlyPublicKey> = server_info.all_server_keys().collect();
+        // Enumerate under every candidate exit delay (the advertised delay plus, on mainnet, the
+        // legacy delay), mirroring `discover_keys`: a VTXO minted before the operator shortened the
+        // delay lives at a legacy-delay address, so building only the current delay would hide it
+        // from `list_vtxos`/balance/migration even though its key was discovered. Off mainnet this
+        // is just the advertised delay (no behaviour change).
+        let candidate_delays =
+            self.candidate_exit_delays(server_info.unilateral_exit_delay, server_info.network)?;
 
         let mut results = Vec::new();
 
         for owner_pk in &pks {
             for server_signer in &all_server_keys {
-                // Default (2-leaf) address.
-                let default_vtxo = Vtxo::new_default(
-                    self.secp(),
-                    *server_signer,
-                    *owner_pk,
-                    server_info.unilateral_exit_delay,
-                    server_info.network,
-                )?;
-                results.push((default_vtxo.to_ark_address(), default_vtxo));
-
-                // Delegate addresses for all known delegator keys.
-                let mut seen = HashSet::new();
-                for dpk in &self.inner.historical_delegator_pks {
-                    if !seen.insert(dpk) {
-                        continue;
-                    }
-                    let delegate_vtxo = Vtxo::new_with_delegator(
+                for exit_delay in &candidate_delays {
+                    // Default (2-leaf) address.
+                    let default_vtxo = Vtxo::new_default(
                         self.secp(),
                         *server_signer,
                         *owner_pk,
-                        *dpk,
-                        server_info.unilateral_exit_delay,
+                        *exit_delay,
                         server_info.network,
                     )?;
-                    results.push((delegate_vtxo.to_ark_address(), delegate_vtxo));
+                    results.push((default_vtxo.to_ark_address(), default_vtxo));
+
+                    // Delegate addresses for all known delegator keys.
+                    let mut seen = HashSet::new();
+                    for dpk in &self.inner.historical_delegator_pks {
+                        if !seen.insert(dpk) {
+                            continue;
+                        }
+                        let delegate_vtxo = Vtxo::new_with_delegator(
+                            self.secp(),
+                            *server_signer,
+                            *owner_pk,
+                            *dpk,
+                            *exit_delay,
+                            server_info.network,
+                        )?;
+                        results.push((delegate_vtxo.to_ark_address(), delegate_vtxo));
+                    }
                 }
             }
         }
@@ -1861,8 +1870,13 @@ where
             let vtxo_count = vtxo_agg.map(|a| a.spendable_count).unwrap_or(0);
             let vtxo_value = vtxo_agg.map(|a| a.spendable_value).unwrap_or(Amount::ZERO);
 
-            // Skip signers under which the wallet holds no funds at all.
-            if vtxo_count == 0 && boarding_count == 0 {
+            // Skip signers under which the wallet holds no funds at all. Count recoverable VTXOs
+            // too: an expired signer whose VTXOs are all recoverable (spendable_count == 0) still
+            // holds funds the user needs to see — dropping it would hide them from the report.
+            let has_any_vtxos = vtxo_agg
+                .map(|a| a.spendable_count + a.recoverable_count > 0)
+                .unwrap_or(false);
+            if !has_any_vtxos && boarding_count == 0 {
                 continue;
             }
 
@@ -1937,7 +1951,10 @@ where
             return Ok(MigrationLegReport {
                 settle_txid: None,
                 migrated: Vec::new(),
-                deferred,
+                // Surface any sized-but-skipped inputs (e.g. a below-dust selection) as deferred
+                // so a later cycle re-attempts them, matching the settle-error path below. For
+                // OversizedOnly/NothingMigratable `selected` is empty, so this is a no-op there.
+                deferred: selected.into_iter().chain(deferred).collect(),
                 oversized,
                 skipped: Some(reason),
                 error: None,
