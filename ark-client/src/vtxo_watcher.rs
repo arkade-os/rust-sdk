@@ -62,6 +62,38 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 const KEY_DISCOVERY_INTERVAL: Duration = Duration::from_secs(10);
 const KEY_DISCOVERY_GAP_LIMIT: u32 = 20;
 
+/// How often the background migration arm fires when healthy. The frequent cadence is safe
+/// because [`Client::migrate_deprecated_signer_vtxos`] short-circuits to a no-op
+/// `NothingMigratable` report when the server advertises no deprecated signers or the wallet holds
+/// no pre-cutoff deprecated-signer outputs.
+const MIGRATION_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Exponential-backoff bounds for the migration arm after a failing pass. Mirrors ts-sdk's
+/// `MIGRATION_COOLDOWN_MS` (base 30s, doubling per consecutive failure, capped at 5 minutes); the
+/// cooldown resets to the base on a successful or no-op pass.
+const MIGRATION_BASE_COOLDOWN: Duration = Duration::from_secs(30);
+const MIGRATION_MAX_COOLDOWN: Duration = Duration::from_secs(300);
+
+/// Configuration for [`Client::start_vtxo_watcher`].
+#[derive(Debug, Clone, Copy)]
+pub struct VtxoWatcherConfig {
+    /// When `true` (the default), the watcher runs a periodic
+    /// [`Client::migrate_deprecated_signer_vtxos`] pass that rotates funds off any deprecated
+    /// server signer the wallet still holds pre-cutoff outputs under. Errors are logged and
+    /// swallowed (never killing the loop), and a persistently failing pass backs off
+    /// exponentially. Set to `false` to disable the migration arm entirely; renewal and delegation
+    /// behavior are unaffected either way.
+    pub migrate_deprecated_signers: bool,
+}
+
+impl Default for VtxoWatcherConfig {
+    fn default() -> Self {
+        Self {
+            migrate_deprecated_signers: true,
+        }
+    }
+}
+
 /// Pre-computed mapping from script pubkeys to their Vtxo metadata and ArkAddress.
 ///
 /// Built once per (re)connection from `get_offchain_addresses()`. Used both for the subscription
@@ -122,6 +154,8 @@ where
     ///
     /// 1. **Delegates** them to the configured delegator service for future auto-renewal
     /// 2. **Self-renews** VTXOs that are close to expiry (safety net)
+    /// 3. **Migrates** funds off deprecated server signers on a periodic, backed-off pass (unless
+    ///    disabled via [`VtxoWatcherConfig::migrate_deprecated_signers`])
     ///
     /// Reconnects automatically with exponential backoff (1s → 2s → … → 30s) on stream errors.
     ///
@@ -132,12 +166,13 @@ where
     pub fn start_vtxo_watcher(
         self: &Arc<Self>,
         delegator: Arc<DelegatorClient>,
+        config: VtxoWatcherConfig,
     ) -> VtxoWatcherHandle {
         let (stop_tx, stop_rx) = watch::channel(false);
 
         let client = Arc::clone(self);
         tokio::spawn(async move {
-            run_watcher_loop(client, delegator, stop_rx).await;
+            run_watcher_loop(client, delegator, config, stop_rx).await;
             tracing::debug!("VTXO watcher stopped");
         });
 
@@ -149,6 +184,7 @@ where
 async fn run_watcher_loop<B, W, S, K>(
     client: Arc<Client<B, W, S, K>>,
     delegator: Arc<DelegatorClient>,
+    config: VtxoWatcherConfig,
     mut stop_rx: watch::Receiver<bool>,
 ) where
     B: Blockchain + Send + Sync + 'static,
@@ -290,11 +326,27 @@ async fn run_watcher_loop<B, W, S, K>(
             }
         });
 
+        // Independent migration arm: rotates funds off deprecated server signers on its own
+        // self-paced cooldown loop, separate from the renewal/delegation worker and the
+        // subscription stream (it polls wallet state, like renewal). Spawned per connection and
+        // aborted on reconnect/stop so passes never overlap. Disabled entirely when the config
+        // flag is off.
+        let migration_handle = config.migrate_deprecated_signers.then(|| {
+            let client = client.clone();
+            let mut stop_rx = stop_rx.clone();
+            tokio::spawn(async move {
+                run_migration_arm(&client, &mut stop_rx).await;
+            })
+        });
+
         loop {
             tokio::select! {
                 _ = stop_rx.changed() => {
                     drop(work_tx);
                     let _ = worker_handle.await;
+                    if let Some(handle) = migration_handle {
+                        handle.abort();
+                    }
                     return;
                 }
                 _ = renew_interval.tick() => {
@@ -359,12 +411,88 @@ async fn run_watcher_loop<B, W, S, K>(
 
         drop(work_tx);
         let _ = worker_handle.await;
+        // Abort the per-connection migration arm; the next iteration spawns a fresh one. This
+        // prevents two migration loops racing across a reconnect.
+        if let Some(handle) = migration_handle {
+            handle.abort();
+        }
 
         if wait_or_stop(&mut stop_rx, backoff).await {
             return;
         }
         backoff = (backoff * 2).min(MAX_BACKOFF);
     }
+}
+
+/// Background migration arm: periodically rotate funds off deprecated server signers.
+///
+/// On each fire it runs one [`Client::migrate_deprecated_signer_vtxos`] pass and logs the outcome.
+/// Errors are swallowed (never propagated — this must never kill the watcher). Cadence is
+/// [`MIGRATION_INTERVAL`] while healthy; a failing pass backs off exponentially between
+/// [`MIGRATION_BASE_COOLDOWN`] and [`MIGRATION_MAX_COOLDOWN`], resetting to the base interval on a
+/// successful or no-op pass. The frequent base cadence is cheap because the migration call is a
+/// no-op (`NothingMigratable`) whenever there is nothing to rotate.
+///
+/// This closes the detect→react loop with the digest-mismatch machinery: when a guarded request
+/// (gRPC `guarded()` / REST `guarded()`) detects a stale `/info` digest, its `info_refresh_hook`
+/// calls [`Client::refresh_server_info`], which swaps the cached `deprecated_signers`. This arm
+/// then picks up the freshly advertised deprecated signers on its next pass and migrates.
+async fn run_migration_arm<B, W, S, K>(
+    client: &Client<B, W, S, K>,
+    stop_rx: &mut watch::Receiver<bool>,
+) where
+    B: Blockchain + Send + Sync + 'static,
+    W: BoardingWallet + OnchainWallet + Send + Sync + 'static,
+    S: SwapStorage + 'static,
+    K: KeyProvider + Send + Sync + 'static,
+{
+    // Consecutive-failure count drives the exponential cooldown; `0` means healthy (use the base
+    // interval). Reset to `0` on any successful or no-op pass.
+    let mut consecutive_failures: u32 = 0;
+    loop {
+        let delay = migration_delay(consecutive_failures);
+        if wait_or_stop(stop_rx, delay).await {
+            return;
+        }
+
+        let mut rng = OsRng;
+        match client.migrate_deprecated_signer_vtxos(&mut rng).await {
+            Ok(report) => {
+                if report.rotated() {
+                    tracing::info!(
+                        txids = ?report.settle_txids(),
+                        "Background migration rotated funds off deprecated signer(s)"
+                    );
+                } else {
+                    tracing::debug!("Background migration pass: nothing to migrate");
+                }
+                // Success or no-op: back to the healthy cadence.
+                consecutive_failures = 0;
+            }
+            Err(e) => {
+                // Back off so a persistently failing migration does not retry every interval.
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                let next = migration_delay(consecutive_failures);
+                tracing::warn!("Background migration pass failed: {e}; backing off {next:?}");
+            }
+        }
+    }
+}
+
+/// Cooldown before the next migration pass given the consecutive-failure count.
+///
+/// `0` failures → the healthy [`MIGRATION_INTERVAL`]. Otherwise an exponential backoff of
+/// `MIGRATION_BASE_COOLDOWN * 2^(failures - 1)`, saturating at [`MIGRATION_MAX_COOLDOWN`] (mirrors
+/// ts-sdk's `MIGRATION_COOLDOWN_MS = 30_000 * 2^failures`, capped at 5 minutes).
+fn migration_delay(consecutive_failures: u32) -> Duration {
+    if consecutive_failures == 0 {
+        return MIGRATION_INTERVAL;
+    }
+    let shift = consecutive_failures - 1;
+    let scaled = MIGRATION_BASE_COOLDOWN
+        .checked_mul(1u32.checked_shl(shift).unwrap_or(u32::MAX))
+        .unwrap_or(MIGRATION_MAX_COOLDOWN);
+    scaled.min(MIGRATION_MAX_COOLDOWN)
 }
 
 /// Wait for the given duration or until stop is signalled. Returns `true` if stopped.
@@ -923,6 +1051,24 @@ mod tests {
             ark_txid: None,
             assets: vec![],
         }
+    }
+
+    #[test]
+    fn migration_delay_uses_base_interval_when_healthy() {
+        assert_eq!(migration_delay(0), MIGRATION_INTERVAL);
+    }
+
+    #[test]
+    fn migration_delay_backs_off_exponentially_and_caps() {
+        // 30s * 2^(failures-1): 30s, 60s, 120s, 240s, then saturates at the 5min cap.
+        assert_eq!(migration_delay(1), MIGRATION_BASE_COOLDOWN);
+        assert_eq!(migration_delay(2), MIGRATION_BASE_COOLDOWN * 2);
+        assert_eq!(migration_delay(3), MIGRATION_BASE_COOLDOWN * 4);
+        assert_eq!(migration_delay(4), MIGRATION_BASE_COOLDOWN * 8);
+        assert_eq!(migration_delay(5), MIGRATION_MAX_COOLDOWN);
+        // Large failure counts must not panic (no shift overflow) and stay at the cap.
+        assert_eq!(migration_delay(100), MIGRATION_MAX_COOLDOWN);
+        assert_eq!(migration_delay(u32::MAX), MIGRATION_MAX_COOLDOWN);
     }
 
     #[test]

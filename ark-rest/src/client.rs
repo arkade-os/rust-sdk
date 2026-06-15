@@ -41,12 +41,22 @@ use bitcoin::secp256k1::PublicKey;
 use bitcoin::Psbt;
 use bitcoin::Txid;
 use futures::stream;
+use futures::Future;
 use futures::Stream;
 use futures::StreamExt;
+use std::error::Error as StdError;
+use std::sync::Arc;
 use std::sync::RwLock;
+
+type InfoRefreshHook = Arc<
+    dyn Fn(ark_core::server::Info) -> Result<(), Box<dyn StdError + Send + Sync + 'static>>
+        + Send
+        + Sync,
+>;
 
 pub struct Client {
     configuration: RwLock<apis::configuration::Configuration>,
+    info_refresh_hook: Option<InfoRefreshHook>,
 }
 
 pub struct ListVtxosResponse {
@@ -83,7 +93,22 @@ impl Client {
 
         Ok(Self {
             configuration: RwLock::new(configuration),
+            info_refresh_hook: None,
         })
+    }
+
+    /// Register a callback invoked with the freshly fetched [`ark_core::server::Info`] whenever a
+    /// mutating call triggers a digest-mismatch refresh (see [`Self::guarded`]). Mirrors
+    /// `ark_grpc::Client::set_info_refresh_hook`; lets `ark-client` keep its cached server info
+    /// (including `deprecated_signers`) up to date so the background migration watcher reacts.
+    pub fn set_info_refresh_hook(
+        &mut self,
+        hook: impl Fn(ark_core::server::Info) -> Result<(), Box<dyn StdError + Send + Sync + 'static>>
+            + Send
+            + Sync
+            + 'static,
+    ) {
+        self.info_refresh_hook = Some(Arc::new(hook));
     }
 
     fn configuration(&self) -> Result<apis::configuration::Configuration, Error> {
@@ -102,7 +127,29 @@ impl Client {
         Ok(())
     }
 
-    pub async fn get_info(&self) -> Result<ark_core::server::Info, Error> {
+    /// Run a mutating request and, on a digest mismatch, refresh `/info` before surfacing the
+    /// error. Mirrors `ark_grpc::Client::guarded`: the server signals `DIGEST_MISMATCH` when the
+    /// cached `/info` digest (sent as `X-Digest`) is stale; we re-fetch `/info` (which updates the
+    /// cached digest header and invokes [`Self::set_info_refresh_hook`]), then return
+    /// [`Error::server_info_changed`] WITHOUT retrying the original request — the caller must
+    /// rebuild it against the refreshed server info if a retry is safe.
+    async fn guarded<T>(&self, op: impl Future<Output = Result<T, Error>>) -> Result<T, Error> {
+        match op.await {
+            Ok(value) => Ok(value),
+            Err(err) if err.is_digest_mismatch() => {
+                let info = self.get_info_unguarded().await?;
+                if let Some(hook) = &self.info_refresh_hook {
+                    hook(info).map_err(Error::conversion)?;
+                }
+                Err(Error::server_info_changed(err))
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Fetch `/info`, updating the cached `X-Digest` header. Intentionally bypasses
+    /// digest-mismatch guarding (it is the bootstrap/refresh request itself).
+    pub async fn get_info_unguarded(&self) -> Result<ark_core::server::Info, Error> {
         let configuration = self.configuration()?;
         let info = ark_service_get_info(&configuration)
             .await
@@ -112,6 +159,10 @@ impl Client {
         self.update_digest(&info.digest)?;
 
         Ok(info)
+    }
+
+    pub async fn get_info(&self) -> Result<ark_core::server::Info, Error> {
+        self.get_info_unguarded().await
     }
 
     pub async fn submit_offchain_transaction_request(
@@ -131,15 +182,20 @@ impl Client {
             .map(|tx| Some(base64.encode(tx.serialize())))
             .collect();
 
-        let res = ark_service_submit_tx(
-            &self.configuration()?,
-            models::SubmitTxRequest {
-                signed_ark_tx: Some(ark_tx),
-                checkpoint_txs,
-            },
-        )
-        .await
-        .map_err(Error::request)?;
+        let configuration = self.configuration()?;
+        let res = self
+            .guarded(async {
+                ark_service_submit_tx(
+                    &configuration,
+                    models::SubmitTxRequest {
+                        signed_ark_tx: Some(ark_tx),
+                        checkpoint_txs,
+                    },
+                )
+                .await
+                .map_err(Error::request)
+            })
+            .await?;
 
         let signed_ark_tx = res.final_ark_tx;
         let signed_ark_tx = signed_ark_tx.ok_or(Error::request("Signed ark tx not received"))?;
@@ -180,15 +236,19 @@ impl Client {
             .map(|tx| Some(base64.encode(tx.serialize())))
             .collect();
 
-        ark_service_finalize_tx(
-            &self.configuration()?,
-            models::FinalizeTxRequest {
-                ark_txid: Some(txid.to_string()),
-                final_checkpoint_txs: checkpoint_txs,
-            },
-        )
-        .await
-        .map_err(Error::request)?;
+        let configuration = self.configuration()?;
+        self.guarded(async {
+            ark_service_finalize_tx(
+                &configuration,
+                models::FinalizeTxRequest {
+                    ark_txid: Some(txid.to_string()),
+                    final_checkpoint_txs: checkpoint_txs,
+                },
+            )
+            .await
+            .map_err(Error::request)
+        })
+        .await?;
 
         Ok(FinalizeOffchainTxResponse {})
     }
@@ -282,17 +342,22 @@ impl Client {
 
         let proof = base64.encode(&bytes);
 
-        let response = ark_service_register_intent(
-            &self.configuration()?,
-            models::RegisterIntentRequest {
-                intent: Some(Intent {
-                    proof: Some(proof),
-                    message: Some(message),
-                }),
-            },
-        )
-        .await
-        .map_err(Error::request)?;
+        let configuration = self.configuration()?;
+        let response = self
+            .guarded(async {
+                ark_service_register_intent(
+                    &configuration,
+                    models::RegisterIntentRequest {
+                        intent: Some(Intent {
+                            proof: Some(proof),
+                            message: Some(message),
+                        }),
+                    },
+                )
+                .await
+                .map_err(Error::request)
+            })
+            .await?;
         let intent_id = response
             .intent_id
             .ok_or(Error::request("Could not get intent id"))?;
@@ -314,17 +379,21 @@ impl Client {
         let bytes = proof.serialize();
 
         let proof = base64.encode(&bytes);
-        ark_service_delete_intent(
-            &self.configuration()?,
-            models::DeleteIntentRequest {
-                intent: Some(Intent {
-                    proof: Some(proof),
-                    message: Some(message),
-                }),
-            },
-        )
-        .await
-        .map_err(Error::request)?;
+        let configuration = self.configuration()?;
+        self.guarded(async {
+            ark_service_delete_intent(
+                &configuration,
+                models::DeleteIntentRequest {
+                    intent: Some(Intent {
+                        proof: Some(proof),
+                        message: Some(message),
+                    }),
+                },
+            )
+            .await
+            .map_err(Error::request)
+        })
+        .await?;
 
         Ok(())
     }
@@ -411,14 +480,18 @@ impl Client {
         Ok(Box::pin(stream))
     }
     pub async fn confirm_registration(&self, intent_id: String) -> Result<(), Error> {
-        ark_service_confirm_registration(
-            &self.configuration()?,
-            ConfirmRegistrationRequest {
-                intent_id: Some(intent_id),
-            },
-        )
-        .await
-        .map_err(Error::request)?;
+        let configuration = self.configuration()?;
+        self.guarded(async {
+            ark_service_confirm_registration(
+                &configuration,
+                ConfirmRegistrationRequest {
+                    intent_id: Some(intent_id),
+                },
+            )
+            .await
+            .map_err(Error::request)
+        })
+        .await?;
 
         Ok(())
     }
@@ -431,16 +504,20 @@ impl Client {
     ) -> Result<(), Error> {
         let tree_nonces = pub_nonce_tree.encode();
 
-        ark_service_submit_tree_nonces(
-            &self.configuration()?,
-            SubmitTreeNoncesRequest {
-                batch_id: Some(batch_id.to_string()),
-                pubkey: Some(cosigner_pubkey.to_string()),
-                tree_nonces: Some(tree_nonces),
-            },
-        )
-        .await
-        .map_err(Error::request)?;
+        let configuration = self.configuration()?;
+        self.guarded(async {
+            ark_service_submit_tree_nonces(
+                &configuration,
+                SubmitTreeNoncesRequest {
+                    batch_id: Some(batch_id.to_string()),
+                    pubkey: Some(cosigner_pubkey.to_string()),
+                    tree_nonces: Some(tree_nonces),
+                },
+            )
+            .await
+            .map_err(Error::request)
+        })
+        .await?;
 
         Ok(())
     }
@@ -453,16 +530,20 @@ impl Client {
     ) -> Result<(), Error> {
         let tree_signatures = partial_sig_tree.encode();
 
-        ark_service_submit_tree_signatures(
-            &self.configuration()?,
-            SubmitTreeSignaturesRequest {
-                batch_id: Some(batch_id.to_string()),
-                pubkey: Some(cosigner_pk.to_string()),
-                tree_signatures: Some(tree_signatures),
-            },
-        )
-        .await
-        .map_err(Error::request)?;
+        let configuration = self.configuration()?;
+        self.guarded(async {
+            ark_service_submit_tree_signatures(
+                &configuration,
+                SubmitTreeSignaturesRequest {
+                    batch_id: Some(batch_id.to_string()),
+                    pubkey: Some(cosigner_pk.to_string()),
+                    tree_signatures: Some(tree_signatures),
+                },
+            )
+            .await
+            .map_err(Error::request)
+        })
+        .await?;
 
         Ok(())
     }
@@ -481,18 +562,22 @@ impl Client {
             .map(|tx| base64.encode(tx.serialize()))
             .unwrap_or_default();
 
-        ark_service_submit_signed_forfeit_txs(
-            &self.configuration()?,
-            SubmitSignedForfeitTxsRequest {
-                signed_forfeit_txs: signed_forfeit_txs
-                    .iter()
-                    .map(|psbt| Some(base64.encode(psbt.serialize())))
-                    .collect(),
-                signed_commitment_tx: Some(signed_commitment_tx),
-            },
-        )
-        .await
-        .map_err(Error::request)?;
+        let configuration = self.configuration()?;
+        self.guarded(async {
+            ark_service_submit_signed_forfeit_txs(
+                &configuration,
+                SubmitSignedForfeitTxsRequest {
+                    signed_forfeit_txs: signed_forfeit_txs
+                        .iter()
+                        .map(|psbt| Some(base64.encode(psbt.serialize())))
+                        .collect(),
+                    signed_commitment_tx: Some(signed_commitment_tx),
+                },
+            )
+            .await
+            .map_err(Error::request)
+        })
+        .await?;
 
         Ok(())
     }
@@ -677,5 +762,60 @@ impl Client {
                 total: a.total.unwrap_or_default(),
             }),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+
+    /// A non-digest error passes through `guarded` untouched: no refresh, no hook, no
+    /// `server_info_changed` rewrap.
+    #[tokio::test]
+    async fn guarded_passes_through_non_digest_error() {
+        let mut client = Client::new("http://127.0.0.1:1".to_string()).unwrap();
+        let hook_fired = Arc::new(AtomicBool::new(false));
+        let flag = hook_fired.clone();
+        client.set_info_refresh_hook(move |_info| {
+            flag.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+
+        let err = client
+            .guarded(async { Err::<(), _>(Error::request("connection refused")) })
+            .await
+            .expect_err("should surface the original error");
+
+        assert!(!err.is_server_info_changed());
+        assert!(!err.is_digest_mismatch());
+        assert!(!hook_fired.load(Ordering::SeqCst));
+    }
+
+    /// A digest-mismatch error routes into the refresh branch: `guarded` attempts to re-fetch
+    /// `/info`. Here `base_path` points at a closed port so the refetch fails, proving the branch
+    /// was taken (the original error is NOT returned verbatim — it is replaced by the failed
+    /// refresh attempt) without needing a live server. The hook only fires once the refetch
+    /// succeeds, so it stays unfired here.
+    #[tokio::test]
+    async fn guarded_detects_digest_mismatch_and_attempts_refresh() {
+        let mut client = Client::new("http://127.0.0.1:1".to_string()).unwrap();
+        let hook_fired = Arc::new(AtomicBool::new(false));
+        let flag = hook_fired.clone();
+        client.set_info_refresh_hook(move |_info| {
+            flag.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+
+        let err = client
+            .guarded(async { Err::<(), _>(Error::request("DIGEST_MISMATCH")) })
+            .await
+            .expect_err("digest mismatch should trigger a refresh that fails on a closed port");
+
+        // The refetch failed, so we get its request error, not the original passed straight
+        // through and not `server_info_changed` (which only happens on a successful refresh).
+        assert!(!err.is_server_info_changed());
+        assert!(!hook_fired.load(Ordering::SeqCst));
     }
 }

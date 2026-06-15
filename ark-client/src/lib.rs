@@ -966,6 +966,16 @@ where
     /// This updates server info, the gRPC digest header, and the fee estimator. The SDK
     /// intentionally does not retry the failed operation automatically; rebuild the request using
     /// the refreshed server info and retry only when it is safe for your call site.
+    ///
+    /// This is the "react" half of the digest-mismatch loop and the hinge that links detection to
+    /// background migration. A guarded mutating call (`ark_grpc::Client::guarded` /
+    /// `ark_rest::Client::guarded`) that hits a stale-digest error invokes its `info_refresh_hook`,
+    /// which drives this method; the refreshed snapshot includes the server's current
+    /// [`server::Info::deprecated_signers`]. The background watcher's migration arm (see
+    /// [`crate::vtxo_watcher::run_migration_arm`]) then observes those freshly advertised
+    /// deprecated signers on its next pass and rotates funds off them via
+    /// [`Self::migrate_deprecated_signer_vtxos`]. Detection (here) and migration (the watcher) are
+    /// decoupled through the cached `server_info`, so no direct call between them is needed.
     pub async fn refresh_server_info(&self) -> Result<(), Error> {
         timeout_op(
             self.inner.timeout,
