@@ -62,11 +62,18 @@ where
     where
         R: Rng + CryptoRng + Clone,
     {
+        self.settle_at(super::unix_now(), rng).await
+    }
+
+    pub(crate) async fn settle_at<R>(&self, now: i64, rng: &mut R) -> Result<Option<Txid>, Error>
+    where
+        R: Rng + CryptoRng + Clone,
+    {
         // Get off-chain address and send all funds to this address, no change output 🦄
         let (to_address, _) = self.get_offchain_address()?;
 
         let (boarding_inputs, vtxo_inputs, total_amount) =
-            self.fetch_commitment_transaction_inputs().await?;
+            self.fetch_commitment_transaction_inputs(now).await?;
 
         tracing::debug!(
             offchain_adress = %to_address.encode(),
@@ -124,8 +131,9 @@ where
     {
         let (to_address, _) = self.get_offchain_address()?;
 
-        let (boarding_inputs, vtxo_inputs, mut total_amount) =
-            self.fetch_commitment_transaction_inputs().await?;
+        let (boarding_inputs, vtxo_inputs, mut total_amount) = self
+            .fetch_commitment_transaction_inputs(super::unix_now())
+            .await?;
 
         // Convert arknotes to intent inputs and add their value to total
         let note_inputs: Vec<intent::Input> = notes
@@ -198,8 +206,9 @@ where
         // Get off-chain address and send all funds to this address, no change output.
         let (to_address, _) = self.get_offchain_address()?;
 
-        let (all_boarding_inputs, all_vtxo_inputs, _) =
-            self.fetch_commitment_transaction_inputs().await?;
+        let (all_boarding_inputs, all_vtxo_inputs, _) = self
+            .fetch_commitment_transaction_inputs(super::unix_now())
+            .await?;
 
         // Filter boarding inputs to only those specified.
         let boarding_inputs: Vec<_> = all_boarding_inputs
@@ -274,8 +283,9 @@ where
     {
         let (change_address, _) = self.get_offchain_address()?;
 
-        let (boarding_inputs, vtxo_inputs, total_amount) =
-            self.fetch_commitment_transaction_inputs().await?;
+        let (boarding_inputs, vtxo_inputs, total_amount) = self
+            .fetch_commitment_transaction_inputs(super::unix_now())
+            .await?;
 
         let onchain_fee = self
             .fee_estimator
@@ -470,7 +480,9 @@ where
         let (to_address, _) = self.get_offchain_address()?;
 
         // Simply collect all VTXOs that can be settled.
-        let (_, vtxo_inputs, _) = self.fetch_commitment_transaction_inputs().await?;
+        let (_, vtxo_inputs, _) = self
+            .fetch_commitment_transaction_inputs(super::unix_now())
+            .await?;
 
         let total_amount = vtxo_inputs
             .iter()
@@ -1000,6 +1012,7 @@ where
     /// upcoming batch.
     pub(crate) async fn fetch_commitment_transaction_inputs(
         &self,
+        now: i64,
     ) -> Result<(Vec<batch::OnChainInput>, Vec<intent::Input>, Amount), Error> {
         // Get all known boarding outputs.
         let boarding_outputs = self.inner.wallet.get_boarding_outputs()?;
@@ -1010,7 +1023,7 @@ where
         // To track unique outpoints and prevent duplicates
         let mut seen_outpoints = std::collections::HashSet::new();
 
-        let now_secs = super::unix_now();
+        let now_secs = now;
 
         // Find outpoints for each boarding output.
         for boarding_output in boarding_outputs {

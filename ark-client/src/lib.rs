@@ -1167,9 +1167,10 @@ where
             "Found pre-cutoff deprecated-signer outputs; settling to current signer"
         );
 
-        // settle() picks up all unspent VTXOs (expanded addresses include deprecated signers)
-        // and fetch_commitment_transaction_inputs() filters out past-cutoff ones automatically.
-        self.settle(rng).await
+        // settle_at(now) uses the same timestamp as the pre-check above, so a VTXO that
+        // passes the migration gate cannot be silently excluded by a clock tick between
+        // the two evaluations.
+        self.settle_at(now, rng).await
     }
 
     /// Get information about an asset by its ID.
