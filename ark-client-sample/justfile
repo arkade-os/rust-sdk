@@ -10,7 +10,9 @@ faucet actor:
     set -euxo pipefail
 
     address=$(just boarding-address {{ actor }} 2>/dev/null | jq .address -r)
-    nigiri faucet $address 1
+    # `--confirm` mines 1 block so the faucet output confirms (the regtest CLI
+    # does not auto-mine on faucet). Run against the `regtest` submodule stack.
+    node ../regtest/regtest.mjs faucet $address 1 --confirm
 
 # Show the balance for a given actor (e.g., alice, bob)
 balance actor:

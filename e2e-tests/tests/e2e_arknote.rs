@@ -6,7 +6,7 @@ use bitcoin::Amount;
 use common::init_tracing;
 use common::set_up_client;
 use common::wait_until_balance;
-use common::Nigiri;
+use common::Regtest;
 use rand::thread_rng;
 use std::sync::Arc;
 
@@ -20,7 +20,7 @@ mod common;
 #[ignore]
 pub async fn settle_arknote() {
     init_tracing();
-    let nigiri = Arc::new(Nigiri::new());
+    let regtest = Arc::new(Regtest::new());
 
     let secp = Secp256k1::new();
     let mut rng = thread_rng();
@@ -28,7 +28,7 @@ pub async fn settle_arknote() {
     // --- Part 1: Settle a single ArkNote ---
     tracing::info!("=== Part 1: Settle single ArkNote ===");
 
-    let (alice, _) = set_up_client("alice".to_string(), nigiri.clone(), secp.clone()).await;
+    let (alice, _) = set_up_client("alice".to_string(), regtest.clone(), secp.clone()).await;
 
     let note_amount = Amount::from_sat(100_000);
     let notes = create_notes(note_amount.to_sat() as u32, 1).await.unwrap();
@@ -55,7 +55,7 @@ pub async fn settle_arknote() {
     // --- Part 2: Settle multiple ArkNotes ---
     tracing::info!("=== Part 2: Settle multiple ArkNotes ===");
 
-    let (bob, _) = set_up_client("bob".to_string(), nigiri.clone(), secp.clone()).await;
+    let (bob, _) = set_up_client("bob".to_string(), regtest.clone(), secp.clone()).await;
 
     let multi_note_amount = Amount::from_sat(50_000);
     let notes = create_notes(multi_note_amount.to_sat() as u32, 3)
@@ -83,11 +83,11 @@ pub async fn settle_arknote() {
     // --- Part 3: Settle ArkNote with boarding output ---
     tracing::info!("=== Part 3: Settle ArkNote with boarding output ===");
 
-    let (charlie, _) = set_up_client("charlie".to_string(), nigiri.clone(), secp).await;
+    let (charlie, _) = set_up_client("charlie".to_string(), regtest.clone(), secp).await;
 
     // Fund Charlie with a boarding output
     let boarding_amount = Amount::from_sat(200_000);
-    nigiri
+    regtest
         .faucet_fund(&charlie.get_boarding_address().unwrap(), boarding_amount)
         .await;
 

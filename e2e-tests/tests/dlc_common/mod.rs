@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
-use crate::common::Nigiri;
+use crate::common::Regtest;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
@@ -63,7 +63,7 @@ use zkp::musig::MusigKeyAggCache;
 use zkp::musig::MusigSession;
 use zkp::musig::MusigSessionId;
 
-pub async fn run_dlc_scenario(nigiri: &Nigiri, run_refund_scenario: bool) -> Result<()> {
+pub async fn run_dlc_scenario(regtest: &Regtest, run_refund_scenario: bool) -> Result<()> {
     // We instantiate an oracle that attests to coin flips.
     let mut oracle = Oracle::new();
 
@@ -92,7 +92,7 @@ pub async fn run_dlc_scenario(nigiri: &Nigiri, run_refund_scenario: bool) -> Res
 
     let alice_fund_amount = Amount::from_sat(100_000_000);
     let alice_dlc_input = fund_vtxo(
-        nigiri,
+        regtest,
         &grpc_client,
         &server_info,
         &alice_kp,
@@ -101,8 +101,14 @@ pub async fn run_dlc_scenario(nigiri: &Nigiri, run_refund_scenario: bool) -> Res
     .await?;
 
     let bob_fund_amount = Amount::from_sat(100_000_000);
-    let bob_dlc_input =
-        fund_vtxo(nigiri, &grpc_client, &server_info, &bob_kp, bob_fund_amount).await?;
+    let bob_dlc_input = fund_vtxo(
+        regtest,
+        &grpc_client,
+        &server_info,
+        &bob_kp,
+        bob_fund_amount,
+    )
+    .await?;
 
     // Using Musig2, the server is not even aware that this is a shared VTXO.
     let musig_key_agg_cache =
@@ -599,7 +605,7 @@ pub async fn run_dlc_scenario(nigiri: &Nigiri, run_refund_scenario: bool) -> Res
 }
 
 async fn fund_vtxo(
-    nigiri: &Nigiri,
+    regtest: &Regtest,
     grpc_client: &ark_grpc::Client,
     server_info: &server::Info,
     kp: &Keypair,
@@ -617,11 +623,11 @@ async fn fund_vtxo(
         server_info.network,
     )?;
 
-    nigiri.faucet_fund(boarding_output.address(), amount).await;
+    regtest.faucet_fund(boarding_output.address(), amount).await;
 
     let boarding_outpoints = list_boarding_outpoints(
         |address: &bitcoin::Address| -> Result<Vec<ExplorerUtxo>, ark_core::Error> {
-            Ok(nigiri.find_outpoints_blocking(address))
+            Ok(regtest.find_outpoints_blocking(address))
         },
         &[boarding_output],
     )?;

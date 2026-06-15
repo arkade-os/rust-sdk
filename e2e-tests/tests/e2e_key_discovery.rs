@@ -4,7 +4,7 @@ use bitcoin::key::Secp256k1;
 use bitcoin::Amount;
 use common::init_tracing;
 use common::set_up_client_with_seed;
-use common::Nigiri;
+use common::Regtest;
 use rand::thread_rng;
 use rand::Rng;
 use std::sync::Arc;
@@ -21,11 +21,11 @@ mod common;
 /// 5. Verifies that discover_keys (called during connect) repopulates the cache
 /// 6. Checks that the balance is the same before and after restarting the client
 #[tokio::test]
-#[ignore = "requires nigiri"]
+#[ignore = "requires regtest"]
 pub async fn e2e_key_discovery() {
     init_tracing();
 
-    let nigiri = Arc::new(Nigiri::new());
+    let regtest = Arc::new(Regtest::new());
     let secp = Secp256k1::new();
     let mut rng = thread_rng();
 
@@ -36,7 +36,7 @@ pub async fn e2e_key_discovery() {
 
     // Create the first client with the seed
     let (client, _wallet) =
-        set_up_client_with_seed("alice".to_string(), nigiri.clone(), secp.clone(), seed).await;
+        set_up_client_with_seed("alice".to_string(), regtest.clone(), secp.clone(), seed).await;
 
     // Verify initial balance is zero
     let initial_balance = client.offchain_balance().await.unwrap();
@@ -49,7 +49,7 @@ pub async fn e2e_key_discovery() {
 
     tracing::info!(%boarding_address, %fund_amount, "Funding boarding output");
 
-    let _outpoint = nigiri.faucet_fund(&boarding_address, fund_amount).await;
+    let _outpoint = regtest.faucet_fund(&boarding_address, fund_amount).await;
 
     // Settle the boarding output to create a VTXO
     tracing::info!("Settling boarding output");
@@ -71,7 +71,7 @@ pub async fn e2e_key_discovery() {
     // The discover_keys method should be called during connect and repopulate the cache
     tracing::info!("Creating new client with same seed");
     let (client2, _wallet2) =
-        set_up_client_with_seed("alice-restored".to_string(), nigiri.clone(), secp, seed).await;
+        set_up_client_with_seed("alice-restored".to_string(), regtest.clone(), secp, seed).await;
 
     // Check the balance - it should be the same as before
     let balance_after_restore = client2.offchain_balance().await.unwrap();

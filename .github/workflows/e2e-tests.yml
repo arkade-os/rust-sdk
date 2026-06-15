@@ -1,4 +1,4 @@
-name: E2E Test Matrix Runner
+name: E2E Test Nightly Runner
 
 on:
   # Schedule nightly runs
@@ -6,17 +6,5 @@ on:
     - cron: '0 0 * * *'  # Run at midnight UTC every day
 
 jobs:
-  matrix-runner:
-    strategy:
-      fail-fast: false
-      matrix:
-        arkd-version: [
-          'master',
-          'v0.9.4'
-          # Add more versions as needed
-        ]
-
+  nightly:
     uses: ./.github/workflows/e2e-core.yml
-    with:
-      arkd-version: ${{ matrix.arkd-version }}
-      introspector-version: master

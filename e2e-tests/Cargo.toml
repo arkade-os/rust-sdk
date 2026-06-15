@@ -18,6 +18,7 @@ ark-introspector-client = { path = "../ark-introspector-client" }
 ark-rest = { path = "../ark-rest" }
 ark-script = { path = "../ark-script" }
 async-stream = "0.3"
+base64 = "0.22"
 bdk_esplora = "0.19.0"
 bdk_wallet = "1.0.0-beta.5"
 bech32 = "0.11"
@@ -25,6 +26,7 @@ bitcoin = { version = "0.32.7", features = ["rand"] }
 bitcoinconsensus = "0.106.0"
 esplora-client = { version = "0.10.0", features = ["async-https", "blocking-https"] }
 futures = "0.3.31"
+minreq = { version = "2", features = ["json-using-serde"] }
 prost = "0.13.3"
 rand = "0.8.5"
 regex = "1"

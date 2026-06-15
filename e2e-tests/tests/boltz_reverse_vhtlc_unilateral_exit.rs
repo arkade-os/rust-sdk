@@ -9,7 +9,7 @@ use bitcoin::relative;
 use bitcoin::Amount;
 use common::init_tracing;
 use common::set_up_client;
-use common::Nigiri;
+use common::Regtest;
 use std::process::Output;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -25,16 +25,16 @@ pub async fn reverse_swap_claim_with_vhtlc_ancestor_can_exit_unilaterally() {
     // Requires the Boltz regtest environment. See scripts/boltz-setup.sh.
     init_tracing();
 
-    let nigiri = Arc::new(Nigiri::new());
+    let regtest = Arc::new(Regtest::new());
     let secp = Secp256k1::new();
 
     let (alice, alice_wallet) =
-        set_up_client("alice".to_string(), nigiri.clone(), secp.clone()).await;
+        set_up_client("alice".to_string(), regtest.clone(), secp.clone()).await;
 
     // The unilateral exit transactions are fee-bumped through Alice's on-chain wallet.
     let alice_onchain_address = alice.get_onchain_address().unwrap();
     for _ in 0..5 {
-        nigiri
+        regtest
             .faucet_fund(&alice_onchain_address, Amount::from_sat(100_000))
             .await;
     }
@@ -81,11 +81,11 @@ pub async fn reverse_swap_claim_with_vhtlc_ancestor_can_exit_unilaterally() {
 
     // Mine blocks regularly to ensure any transaction published by the Ark server confirms.
     tokio::spawn({
-        let nigiri = nigiri.clone();
+        let regtest = regtest.clone();
         let alice_wallet = alice_wallet.clone();
         async move {
             loop {
-                nigiri.mine(1).await;
+                regtest.mine(1).await;
                 alice_wallet.sync().await.unwrap();
 
                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -103,7 +103,7 @@ pub async fn reverse_swap_claim_with_vhtlc_ancestor_can_exit_unilaterally() {
 
             // Each transaction needs a confirmation so the next transaction in the tree can use
             // the P2A fee-bump output.
-            nigiri.mine(1).await;
+            regtest.mine(1).await;
             alice_wallet.sync().await.unwrap();
         }
 
@@ -111,7 +111,7 @@ pub async fn reverse_swap_claim_with_vhtlc_ancestor_can_exit_unilaterally() {
     }
 
     // Confirm the exited VTXO itself.
-    nigiri.mine(1).await;
+    regtest.mine(1).await;
     alice_wallet.sync().await.unwrap();
 
     wait_until_balance!(&alice, confirmed: Amount::ZERO, pre_confirmed: Amount::ZERO);
@@ -133,8 +133,8 @@ pub async fn reverse_swap_claim_with_vhtlc_ancestor_can_exit_unilaterally() {
         }
     };
 
-    nigiri.set_outpoint_block_height_offset(max_block_height_offset as u64);
-    nigiri.set_outpoint_blocktime_offset(max_blocktime_offset as u64);
+    regtest.set_outpoint_block_height_offset(max_block_height_offset as u64);
+    regtest.set_outpoint_blocktime_offset(max_blocktime_offset as u64);
 
     let send_amount = claim.claim_amount - Amount::from_sat(1_000);
     let (tx, prevouts) = alice

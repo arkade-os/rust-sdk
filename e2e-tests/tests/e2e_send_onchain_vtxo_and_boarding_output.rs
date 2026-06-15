@@ -9,7 +9,7 @@ use bitcoin::relative;
 use bitcoin::Amount;
 use common::init_tracing;
 use common::set_up_client;
-use common::Nigiri;
+use common::Regtest;
 use rand::thread_rng;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -22,13 +22,13 @@ mod common;
 pub async fn send_onchain_vtxo_and_boarding_output() {
     init_tracing();
 
-    let nigiri = Arc::new(Nigiri::new());
+    let regtest = Arc::new(Regtest::new());
 
     let secp = Secp256k1::new();
     let mut rng = thread_rng();
 
     let (alice, alice_wallet) =
-        set_up_client("alice".to_string(), nigiri.clone(), secp.clone()).await;
+        set_up_client("alice".to_string(), regtest.clone(), secp.clone()).await;
 
     let offchain_balance = alice.offchain_balance().await.unwrap();
 
@@ -38,17 +38,17 @@ pub async fn send_onchain_vtxo_and_boarding_output() {
 
     let fund_amount = Amount::ONE_BTC;
 
-    nigiri
+    regtest
         .faucet_fund(&alice_boarding_address, fund_amount)
         .await;
 
     // We give Alice two extra UTXOs to be able to bump the two transactions she needs to broadcast
     // to commit her VTXO (and the change VTXO too!) to the blockchain.
     let alice_onchain_address = alice.get_onchain_address().unwrap();
-    nigiri
+    regtest
         .faucet_fund(&alice_onchain_address, Amount::from_sat(100_000))
         .await;
-    nigiri
+    regtest
         .faucet_fund(&alice_onchain_address, Amount::from_sat(100_000))
         .await;
 
@@ -60,7 +60,7 @@ pub async fn send_onchain_vtxo_and_boarding_output() {
     wait_until_balance!(&alice, confirmed: fund_amount, pre_confirmed: Amount::ZERO);
 
     // Ensure that the commitment TX is mined.
-    nigiri.mine(1).await;
+    regtest.mine(1).await;
     alice_wallet.sync().await.unwrap();
 
     let (alice_offchain_address, _) = alice.get_offchain_address().unwrap();
@@ -80,11 +80,11 @@ pub async fn send_onchain_vtxo_and_boarding_output() {
     // Mine blocks regularly to ensure that any transaction published by the Ark server actually
     // gets confirmed.
     tokio::spawn({
-        let nigiri = nigiri.clone();
+        let regtest = regtest.clone();
         let alice_wallet = alice_wallet.clone();
         async move {
             loop {
-                nigiri.mine(1).await;
+                regtest.mine(1).await;
                 alice_wallet.sync().await.unwrap();
 
                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -102,7 +102,7 @@ pub async fn send_onchain_vtxo_and_boarding_output() {
 
             // The transaction needs a confirmation so that we can bump the P2A output for the next
             // transaction in the tree.
-            nigiri.mine(1).await;
+            regtest.mine(1).await;
             alice_wallet.sync().await.unwrap();
         }
 
@@ -110,12 +110,12 @@ pub async fn send_onchain_vtxo_and_boarding_output() {
     }
 
     // Get one confirmation on the VTXO.
-    nigiri.mine(1).await;
+    regtest.mine(1).await;
 
     wait_until_balance!(&alice, confirmed: Amount::ZERO, pre_confirmed: Amount::ZERO);
 
     let alice_boarding_address = alice.get_boarding_address().unwrap();
-    nigiri
+    regtest
         .faucet_fund(&alice_boarding_address, Amount::ONE_BTC)
         .await;
 
@@ -155,8 +155,8 @@ pub async fn send_onchain_vtxo_and_boarding_output() {
         }
     };
 
-    nigiri.set_outpoint_block_height_offset(max_block_height_offset as u64);
-    nigiri.set_outpoint_blocktime_offset(max_blocktime_offset as u64);
+    regtest.set_outpoint_block_height_offset(max_block_height_offset as u64);
+    regtest.set_outpoint_blocktime_offset(max_blocktime_offset as u64);
 
     let (tx, prevouts) = alice
         .create_send_on_chain_transaction(

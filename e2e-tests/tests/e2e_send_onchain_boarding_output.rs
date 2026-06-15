@@ -6,7 +6,7 @@ use bitcoin::relative;
 use bitcoin::Amount;
 use common::init_tracing;
 use common::set_up_client;
-use common::Nigiri;
+use common::Regtest;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -17,11 +17,11 @@ mod common;
 pub async fn send_onchain_boarding_output() {
     init_tracing();
 
-    let nigiri = Arc::new(Nigiri::new());
+    let regtest = Arc::new(Regtest::new());
 
     let secp = Secp256k1::new();
 
-    let (alice, _) = set_up_client("alice".to_string(), nigiri.clone(), secp.clone()).await;
+    let (alice, _) = set_up_client("alice".to_string(), regtest.clone(), secp.clone()).await;
 
     // To be able to spend a boarding output it needs to have been confirmed for at least
     // `boarding_exit_delay`.
@@ -32,16 +32,16 @@ pub async fn send_onchain_boarding_output() {
         .expect("boarding exit delay should be relative")
     {
         relative::LockTime::Blocks(height) => {
-            nigiri.set_outpoint_block_height_offset(height.value() as u64);
+            regtest.set_outpoint_block_height_offset(height.value() as u64);
         }
         relative::LockTime::Time(time) => {
-            nigiri.set_outpoint_blocktime_offset((time.value() * 512) as u64);
+            regtest.set_outpoint_blocktime_offset((time.value() * 512) as u64);
         }
     };
 
     let alice_boarding_address = alice.get_boarding_address().unwrap();
 
-    nigiri
+    regtest
         .faucet_fund(&alice_boarding_address, Amount::ONE_BTC)
         .await;
 

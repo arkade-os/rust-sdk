@@ -68,14 +68,7 @@ jobs:
 
   e2e-tests:
     needs: [ clippy ]
-    strategy:
-      fail-fast: false
-      matrix:
-        arkd-version: [ 'v0.9.4' ]
     uses: ./.github/workflows/e2e-core.yml
-    with:
-      arkd-version: ${{ matrix.arkd-version }}
-      introspector-version: master
 
   wasm_ubuntu:
     strategy:

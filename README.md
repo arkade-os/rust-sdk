@@ -69,14 +69,19 @@ Generate gRPC code after changing proto files:
 just gen-grpc
 ```
 
-Run end-to-end tests against a local `arkd` environment:
+Run end-to-end tests against a local regtest environment. The stack (Bitcoin
+Core + Fulcrum + mempool/esplora + arkd + emulator) is provided by the `regtest`
+git submodule ([arkade-regtest](https://github.com/ArkLabsHQ/arkade-regtest))
+and driven by its Node CLI; it requires Docker and Node.js:
 
 ```bash
-just arkd-setup
-just e2e-tests
+just regtest-init    # initialize the regtest submodule (first time only)
+just regtest-start   # bring up the stack (arkd runs from a container image)
+just e2e-tests       # run the e2e suite
+just regtest-clean   # tear the stack down
 ```
 
-See `just --list` for the full set of local development, Arkade server, introspector, WASM, and release helper commands.
+See `just --list` for the full set of local development, regtest, WASM, and release helper commands.
 
 ## Minimum supported Rust version
 

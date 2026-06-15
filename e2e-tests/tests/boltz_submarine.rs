@@ -6,7 +6,7 @@ use bitcoin::key::Secp256k1;
 use bitcoin::Amount;
 use common::init_tracing;
 use common::set_up_client;
-use common::Nigiri;
+use common::Regtest;
 use rand::thread_rng;
 use std::sync::Arc;
 
@@ -28,18 +28,18 @@ pub async fn submarine_swap() {
     // to setup the environment including Boltz.
 
     init_tracing();
-    let nigiri = Arc::new(Nigiri::new());
+    let regtest = Arc::new(Regtest::new());
 
     let secp = Secp256k1::new();
     let mut rng = thread_rng();
 
     let invoice: Bolt11Invoice = INVOICE.parse().expect("valid BOLT11 invoice");
 
-    let (alice, _) = set_up_client("alice".to_string(), nigiri.clone(), secp.clone()).await;
+    let (alice, _) = set_up_client("alice".to_string(), regtest.clone(), secp.clone()).await;
 
     let alice_fund_amount = Amount::ONE_BTC;
 
-    nigiri
+    regtest
         .faucet_fund(&alice.get_boarding_address().unwrap(), alice_fund_amount)
         .await;
 
