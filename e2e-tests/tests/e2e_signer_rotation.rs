@@ -185,14 +185,26 @@ pub async fn e2e_signer_rotation_boarding_only_migration() {
     // do not). Connect-time deprecated-boarding persistence is exercised on every connect; this
     // test isolates the boarding migration *leg* itself.
     regtest.rotate_signer("+86400");
-    client.refresh_server_info().await.unwrap();
+
+    // The rotation recreates arkd-wallet and restarts arkd, so the existing connection breaks
+    // briefly. Retry the info refresh until arkd is back and advertises the deprecated signer
+    // (the gRPC channel re-dials on retry).
+    let mut rotated = false;
+    for _ in 0..30 {
+        if client.refresh_server_info().await.is_ok()
+            && !client.server_info().unwrap().deprecated_signers.is_empty()
+        {
+            rotated = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    assert!(
+        rotated,
+        "server_info should list the old signer as deprecated after rotation"
+    );
     tracing::info!(
         "Signer rotated with future cutoff (+86400); boarding UTXO now under deprecated signer"
-    );
-
-    assert!(
-        !client.server_info().unwrap().deprecated_signers.is_empty(),
-        "server_info should list the old signer as deprecated after rotation"
     );
 
     let report = client
