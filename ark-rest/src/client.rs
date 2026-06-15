@@ -327,21 +327,26 @@ impl Client {
         let before = request.before().map(|b| b as i64);
         let after = request.after().map(|b| b as i64);
 
-        let response = indexer_service_get_vtxos(
-            &self.configuration()?,
-            scripts,
-            outpoints,
-            spendable_only,
-            spent_only,
-            recoverable_only,
-            pending_only,
-            before,
-            after,
-            page_period_size,
-            page_period_index,
-        )
-        .await
-        .map_err(Error::request)?;
+        let configuration = self.configuration()?;
+        let response = self
+            .guarded(async {
+                indexer_service_get_vtxos(
+                    &configuration,
+                    scripts,
+                    outpoints,
+                    spendable_only,
+                    spent_only,
+                    recoverable_only,
+                    pending_only,
+                    before,
+                    after,
+                    page_period_size,
+                    page_period_index,
+                )
+                .await
+                .map_err(Error::request)
+            })
+            .await?;
 
         let vtxos = response.vtxos.ok_or(Error::request("VTXOs not received"))?;
         let vtxos = vtxos
@@ -764,9 +769,14 @@ impl Client {
         let (size, index) = size_and_index
             .map(|(sz, indx)| (Some(sz), Some(indx)))
             .unwrap_or_default();
-        let response = indexer_service_get_virtual_txs(&self.configuration()?, txids, size, index)
-            .await
-            .map_err(Error::request)?;
+        let configuration = self.configuration()?;
+        let response = self
+            .guarded(async {
+                indexer_service_get_virtual_txs(&configuration, txids, size, index)
+                    .await
+                    .map_err(Error::request)
+            })
+            .await?;
 
         let base64 = &base64::engine::GeneralPurpose::new(
             &base64::alphabet::STANDARD,
