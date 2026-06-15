@@ -331,6 +331,21 @@ fn size_migration_leg(
     }
 }
 
+/// Whether the wallet holds any funds under a (deprecated) signer — spendable VTXOs, recoverable
+/// VTXOs, or boarding outputs — deciding whether the signer is surfaced by
+/// [`Client::deprecated_signer_status`].
+///
+/// Recoverable VTXOs must count: an expired signer whose VTXOs have all become recoverable
+/// (`spendable_count == 0`) still holds funds the user needs surfaced. Counting only spendable
+/// VTXOs would drop such a signer from the report and hide those funds.
+fn signer_holds_funds(
+    spendable_count: usize,
+    recoverable_count: usize,
+    boarding_count: usize,
+) -> bool {
+    spendable_count + recoverable_count + boarding_count > 0
+}
+
 /// Classify a deprecated signer from its advertised cutoff and the current time, returning the
 /// [`DeprecatedSignerStatus`] and `seconds_until_cutoff` hint.
 ///
@@ -1870,13 +1885,9 @@ where
             let vtxo_count = vtxo_agg.map(|a| a.spendable_count).unwrap_or(0);
             let vtxo_value = vtxo_agg.map(|a| a.spendable_value).unwrap_or(Amount::ZERO);
 
-            // Skip signers under which the wallet holds no funds at all. Count recoverable VTXOs
-            // too: an expired signer whose VTXOs are all recoverable (spendable_count == 0) still
-            // holds funds the user needs to see — dropping it would hide them from the report.
-            let has_any_vtxos = vtxo_agg
-                .map(|a| a.spendable_count + a.recoverable_count > 0)
-                .unwrap_or(false);
-            if !has_any_vtxos && boarding_count == 0 {
+            // Skip signers under which the wallet holds no funds at all.
+            let recoverable_vtxo_count = vtxo_agg.map(|a| a.recoverable_count).unwrap_or(0);
+            if !signer_holds_funds(vtxo_count, recoverable_vtxo_count, boarding_count) {
                 continue;
             }
 
@@ -2687,6 +2698,30 @@ mod migration_tests {
         let (status, secs) = classify_deprecated_signer(now - 1, now);
         assert_eq!(status, DeprecatedSignerStatus::Expired);
         assert_eq!(secs, None);
+    }
+
+    // ── deprecated_signer_status emptiness skip ──────────────────────────────
+
+    #[test]
+    fn signer_with_only_recoverable_vtxos_is_kept() {
+        // Regression for the report skip dropping an expired signer whose VTXOs are all
+        // recoverable (spendable_count == 0): those funds must still be surfaced.
+        assert!(signer_holds_funds(0, 3, 0));
+    }
+
+    #[test]
+    fn signer_with_only_spendable_vtxos_is_kept() {
+        assert!(signer_holds_funds(5, 0, 0));
+    }
+
+    #[test]
+    fn signer_with_only_boarding_is_kept() {
+        assert!(signer_holds_funds(0, 0, 2));
+    }
+
+    #[test]
+    fn signer_with_no_funds_is_dropped() {
+        assert!(!signer_holds_funds(0, 0, 0));
     }
 
     // ── empty-deprecated-signers short-circuit report ────────────────────────
