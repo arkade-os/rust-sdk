@@ -92,6 +92,121 @@ pub const DEFAULT_GAP_LIMIT: u32 = 20;
 /// provide one. Identifies traffic originating from this SDK.
 pub const DEFAULT_BOLTZ_REFERRAL_ID: &str = "arkade-rs-SDK";
 
+/// Maximum number of inputs a single deprecated-signer migration leg will settle in one batch.
+///
+/// A client-side safeguard mirroring ts-sdk's `MAX_VTXOS_PER_SETTLEMENT`: it bounds the input
+/// count of one [`Client::migrate_deprecated_signer_vtxos`] leg so a wallet holding many small
+/// VTXOs does not build a batch intent that exceeds the server's transaction-weight limit. Any
+/// overflow is deferred to a later migration cycle (see [`MigrationLegReport::deferred`]).
+pub const MAX_VTXOS_PER_SETTLEMENT: usize = 50;
+
+/// A single VTXO or boarding output referenced in a [`DeprecatedSignerMigrationReport`].
+#[derive(Debug, Clone)]
+pub struct MigrationVtxoRef {
+    /// The input's outpoint.
+    pub outpoint: OutPoint,
+    /// The input's amount.
+    pub amount: Amount,
+    /// The deprecated signer the input was minted under.
+    pub signer_pk: XOnlyPublicKey,
+    /// The signer's advertised cooperative-sign cutoff (Unix seconds); `0` means "rotate now".
+    pub cutoff_date: i64,
+}
+
+/// Why a single migration leg ([`DeprecatedSignerMigrationReport::vtxo`] or
+/// [`DeprecatedSignerMigrationReport::boarding`]) settled nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MigrationSkipReason {
+    /// The selected aggregate fell below the server's dust floor.
+    BelowDust,
+    /// Every migratable input in the leg individually exceeds the per-output ceiling
+    /// (`vtxo_max_amount`); none can migrate cooperatively, so the leg has only `oversized`
+    /// inputs and submitted nothing.
+    OversizedOnly,
+    /// The leg had no migratable inputs at all.
+    NothingMigratable,
+}
+
+/// Outcome of one [`Client::migrate_deprecated_signer_vtxos`] leg.
+///
+/// Each leg owns its full sizing pipeline and reports independently — a failure or skip in one leg
+/// never suppresses the other. The pipeline (mirroring ts-sdk's `runMigrationLeg`) is:
+///
+/// 1. inputs whose individual amount exceeds the server's per-output ceiling (`vtxo_max_amount`)
+///    are split out as [`Self::oversized`] — they can never form a `<= ceiling` output and must
+///    exit unilaterally;
+/// 2. the remainder is selected highest-value-first, bounded by both [`MAX_VTXOS_PER_SETTLEMENT`]
+///    and a running aggregate within the ceiling — the overflow lands in [`Self::deferred`] for a
+///    later cycle;
+/// 3. if the selected aggregate is below the dust floor, the leg is [`Self::skipped`] and nothing
+///    is submitted.
+#[derive(Debug, Clone)]
+pub struct MigrationLegReport {
+    /// The settlement TXID, when this leg submitted a batch. `None` on skip.
+    pub settle_txid: Option<Txid>,
+    /// Inputs submitted in this leg's settlement; empty on skip.
+    pub migrated: Vec<MigrationVtxoRef>,
+    /// Migratable inputs deferred to a later cycle by this leg's count or amount caps.
+    pub deferred: Vec<MigrationVtxoRef>,
+    /// Inputs whose value alone exceeds the per-output ceiling; they require a unilateral exit and
+    /// never migrate cooperatively.
+    pub oversized: Vec<MigrationVtxoRef>,
+    /// Why this leg submitted nothing; `None` when a settlement was attempted.
+    pub skipped: Option<MigrationSkipReason>,
+    /// The settlement error, if this leg's `settle_vtxos` call failed. Set independently of the
+    /// other leg — a failure here does not prevent the other leg from running.
+    pub error: Option<String>,
+}
+
+impl MigrationLegReport {
+    /// A leg that submitted nothing for the given reason.
+    fn skipped(reason: MigrationSkipReason) -> Self {
+        Self {
+            settle_txid: None,
+            migrated: Vec::new(),
+            deferred: Vec::new(),
+            oversized: Vec::new(),
+            skipped: Some(reason),
+            error: None,
+        }
+    }
+}
+
+/// Result of a [`Client::migrate_deprecated_signer_vtxos`] pass, split into two symmetric legs:
+/// a VTXO leg and a boarding leg. They are never combined into a single intent.
+#[derive(Debug, Clone)]
+pub struct DeprecatedSignerMigrationReport {
+    /// The VTXO migration leg.
+    pub vtxo: MigrationLegReport,
+    /// The boarding-output migration leg.
+    pub boarding: MigrationLegReport,
+}
+
+impl DeprecatedSignerMigrationReport {
+    /// A report where both legs found nothing to migrate (e.g. the server advertises no
+    /// deprecated signers, or the wallet holds no pre-cutoff deprecated-signer outputs).
+    fn nothing_migratable() -> Self {
+        Self {
+            vtxo: MigrationLegReport::skipped(MigrationSkipReason::NothingMigratable),
+            boarding: MigrationLegReport::skipped(MigrationSkipReason::NothingMigratable),
+        }
+    }
+
+    /// Whether the wallet was rotated off a deprecated signer this pass — i.e. at least one leg
+    /// submitted a settlement.
+    pub fn rotated(&self) -> bool {
+        self.vtxo.settle_txid.is_some() || self.boarding.settle_txid.is_some()
+    }
+
+    /// The settlement TXIDs produced this pass (at most one per leg).
+    pub fn settle_txids(&self) -> Vec<Txid> {
+        [self.vtxo.settle_txid, self.boarding.settle_txid]
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+}
+
 /// A client to interact with Ark Server
 ///
 /// ## Example
@@ -1190,71 +1305,241 @@ where
         })
     }
 
-    /// Sweep VTXOs and boarding outputs under deprecated server signers (before their cutoff)
-    /// to the current signer.
+    /// Sweep VTXOs and boarding outputs minted under a *pre-cutoff* deprecated server signer to
+    /// the current signer, then report what moved.
     ///
-    /// Internally this calls [`Self::settle`], which settles **all** unspent VTXOs and boarding
-    /// outputs in a single batch — not just the deprecated-signer ones. Current-signer VTXOs are
-    /// included too, which consolidates the wallet but does incur settlement fees on outputs that
-    /// would otherwise not need to move. Past-cutoff VTXOs and boarding outputs are excluded
-    /// automatically (the operator won't co-sign the old key) and become recoverable after expiry.
+    /// Only deprecated-signer, pre-cutoff inputs are touched — current-signer outputs are left
+    /// untouched (no consolidation, no incidental settlement fee), and past-cutoff outputs are
+    /// skipped automatically by [`Self::fetch_commitment_transaction_inputs`] (the operator won't
+    /// co-sign the old key, so they become recoverable after expiry and exit via the recovery
+    /// path).
     ///
-    /// Returns `None` when there are no migratable VTXOs or boarding outputs (nothing to do).
+    /// Migration runs as two **independent** legs — a VTXO leg and a boarding leg — each routed
+    /// through [`Self::settle_vtxos`] with its own scoped outpoint set. A failure in one leg does
+    /// not suppress the other. Before settling, each leg is sized against the server's per-output
+    /// ceiling (`vtxo_max_amount`) and dust floor (see [`MigrationLegReport`] for the exact
+    /// pipeline): inputs that individually exceed the ceiling are reported as `oversized` (they can
+    /// never form a `<= ceiling` output and must exit unilaterally — they are NOT silently
+    /// dropped); the remainder is selected highest-value-first up to [`MAX_VTXOS_PER_SETTLEMENT`]
+    /// and a running aggregate within the ceiling, deferring the rest to a later cycle; a leg whose
+    /// selected aggregate is below dust is skipped.
+    ///
+    /// When the server advertises no deprecated signers, returns an empty
+    /// [`MigrationSkipReason::NothingMigratable`] report without touching the wallet.
     pub async fn migrate_deprecated_signer_vtxos<R>(
         &self,
         rng: &mut R,
-    ) -> Result<Option<Txid>, Error>
+    ) -> Result<DeprecatedSignerMigrationReport, Error>
     where
         R: rand::Rng + rand::CryptoRng + Clone,
     {
-        // Snapshot the server info once so the empty-check, the per-output
-        // classification closure, and `settle_at` all see the same
-        // `deprecated_signers` set even if a concurrent digest-driven
-        // `refresh_server_info` swaps it mid-call.
+        // Snapshot the server info once (TOCTOU): the empty-check, the per-input
+        // classification closure, and the leg sizing must all see the same
+        // `deprecated_signers`/`vtxo_max_amount`/`dust` even if a concurrent digest-driven
+        // `refresh_server_info` swaps the snapshot mid-call.
         let server_info = self.server_info()?;
         if server_info.deprecated_signers.is_empty() {
-            return Ok(None);
+            return Ok(DeprecatedSignerMigrationReport::nothing_migratable());
         }
 
         let now = unix_now();
-        let (vtxo_list, script_map) = self.list_vtxos().await?;
 
-        let is_pre_cutoff_deprecated = |server_pk: XOnlyPublicKey| {
-            server_info.deprecated_signers.iter().any(|ds| {
-                ds.pk.x_only_public_key().0 == server_pk
-                    && (ds.cutoff_date == 0 || ds.cutoff_date > now)
-            })
+        let is_pre_cutoff_deprecated = |server_pk: XOnlyPublicKey| -> Option<i64> {
+            server_info
+                .deprecated_signers
+                .iter()
+                .find(|ds| {
+                    ds.pk.x_only_public_key().0 == server_pk
+                        && (ds.cutoff_date == 0 || ds.cutoff_date > now)
+                })
+                .map(|ds| ds.cutoff_date)
         };
 
-        let migratable_vtxos = vtxo_list.spendable_offchain().any(|v| {
-            script_map
-                .get(&v.script)
-                .map(|vtxo| is_pre_cutoff_deprecated(vtxo.server_pk()))
-                .unwrap_or(false)
-        });
+        // `fetch_commitment_transaction_inputs` already drops PAST-cutoff deprecated inputs (the
+        // operator won't co-sign the old key). We narrow further to the PRE-cutoff deprecated
+        // inputs, which is exactly the cooperatively-migratable set.
+        let (boarding_inputs, vtxo_inputs, _) =
+            self.fetch_commitment_transaction_inputs(now).await?;
 
-        let migratable_boarding = self
-            .inner
-            .wallet
-            .get_boarding_outputs()?
-            .into_iter()
-            .any(|bo| is_pre_cutoff_deprecated(bo.server_pk()));
+        // The VTXO inputs only expose their script pubkey, so resolve each one's signer via the
+        // script -> VTXO map (the same mapping `offchain_balance`/`settle_at` rely on).
+        let (_, script_map) = self.list_vtxos().await?;
 
-        if !migratable_vtxos && !migratable_boarding {
+        // Build the candidate (outpoint, amount, signer, cutoff) list for the VTXO leg.
+        let mut vtxo_candidates: Vec<MigrationVtxoRef> = Vec::new();
+        for input in &vtxo_inputs {
+            let Some(vtxo) = script_map.get(input.script_pubkey()) else {
+                tracing::debug!(
+                    outpoint = %input.outpoint(),
+                    "Skipping VTXO with no spend info during migration"
+                );
+                continue;
+            };
+            if let Some(cutoff_date) = is_pre_cutoff_deprecated(vtxo.server_pk()) {
+                vtxo_candidates.push(MigrationVtxoRef {
+                    outpoint: input.outpoint(),
+                    amount: input.amount(),
+                    signer_pk: vtxo.server_pk(),
+                    cutoff_date,
+                });
+            }
+        }
+
+        // Build the candidate list for the boarding leg.
+        let mut boarding_candidates: Vec<MigrationVtxoRef> = Vec::new();
+        for input in &boarding_inputs {
+            let signer_pk = input.boarding_output().server_pk();
+            if let Some(cutoff_date) = is_pre_cutoff_deprecated(signer_pk) {
+                boarding_candidates.push(MigrationVtxoRef {
+                    outpoint: input.outpoint(),
+                    amount: input.amount(),
+                    signer_pk,
+                    cutoff_date,
+                });
+            }
+        }
+
+        if vtxo_candidates.is_empty() && boarding_candidates.is_empty() {
             tracing::debug!("No migratable deprecated-signer VTXOs or boarding outputs found");
-            return Ok(None);
+            return Ok(DeprecatedSignerMigrationReport::nothing_migratable());
         }
 
         tracing::info!(
-            migratable_vtxos,
-            migratable_boarding,
-            "Found pre-cutoff deprecated-signer outputs; settling to current signer"
+            num_vtxos = vtxo_candidates.len(),
+            num_boarding = boarding_candidates.len(),
+            "Found pre-cutoff deprecated-signer outputs; migrating to current signer"
         );
 
-        // settle_at(now) uses the same timestamp as the pre-check above, so a VTXO that
-        // passes the migration gate cannot be silently excluded by a clock tick between
-        // the two evaluations.
-        self.settle_at(now, rng).await
+        let vtxo_max_amount = server_info.vtxo_max_amount;
+        let dust = server_info.dust;
+
+        // Run each leg independently so a failure in one does not suppress the other.
+        let vtxo_leg = self
+            .run_migration_leg(rng, vtxo_candidates, vtxo_max_amount, dust, true)
+            .await?;
+        let boarding_leg = self
+            .run_migration_leg(rng, boarding_candidates, vtxo_max_amount, dust, false)
+            .await?;
+
+        Ok(DeprecatedSignerMigrationReport {
+            vtxo: vtxo_leg,
+            boarding: boarding_leg,
+        })
+    }
+
+    /// Size a single migration leg against the server limits and settle the selected inputs.
+    ///
+    /// Mirrors ts-sdk's `runMigrationLeg`/`capSettlementBatch`. `is_vtxo_leg` selects which
+    /// argument of [`Self::settle_vtxos`] the chosen outpoints are passed in (VTXO vs boarding);
+    /// the other argument is empty so each leg is a distinct intent.
+    async fn run_migration_leg<R>(
+        &self,
+        rng: &mut R,
+        candidates: Vec<MigrationVtxoRef>,
+        vtxo_max_amount: Option<Amount>,
+        dust: Amount,
+        is_vtxo_leg: bool,
+    ) -> Result<MigrationLegReport, Error>
+    where
+        R: rand::Rng + rand::CryptoRng + Clone,
+    {
+        if candidates.is_empty() {
+            return Ok(MigrationLegReport::skipped(
+                MigrationSkipReason::NothingMigratable,
+            ));
+        }
+
+        // (1) Split out inputs whose INDIVIDUAL amount exceeds the per-output ceiling. They can
+        // never form a `<= ceiling` output, so they cannot migrate cooperatively and must exit
+        // unilaterally. Report them rather than dropping them. `None` ceiling => no limit.
+        let (oversized, mut sized): (Vec<_>, Vec<_>) = candidates
+            .into_iter()
+            .partition(|c| vtxo_max_amount.is_some_and(|max| c.amount > max));
+
+        if !oversized.is_empty() {
+            tracing::warn!(
+                count = oversized.len(),
+                ?vtxo_max_amount,
+                "Deprecated-signer migration: inputs exceed the per-output limit and cannot be \
+                 migrated cooperatively; they require a unilateral exit"
+            );
+        }
+
+        // (2) Select highest-value-first, bounded by both the count cap and a running aggregate
+        // within the ceiling. Skipped (not stopped) on an aggregate breach so a smaller input
+        // behind an oversized-but-sized one still gets in; the count cap is a hard stop. The rest
+        // is deferred to a later cycle.
+        sized.sort_by_key(|c| std::cmp::Reverse(c.amount));
+
+        let mut selected: Vec<MigrationVtxoRef> = Vec::new();
+        let mut deferred: Vec<MigrationVtxoRef> = Vec::new();
+        let mut aggregate = Amount::ZERO;
+        for candidate in sized {
+            if selected.len() >= MAX_VTXOS_PER_SETTLEMENT {
+                deferred.push(candidate);
+                continue;
+            }
+            let next = aggregate + candidate.amount;
+            if vtxo_max_amount.is_some_and(|max| next > max) {
+                deferred.push(candidate);
+                continue;
+            }
+            aggregate = next;
+            selected.push(candidate);
+        }
+
+        // (3) A migration output equals the gross sum of its inputs (migration is fee-exempt), so a
+        // selected aggregate below dust would be rejected — skip the leg.
+        if selected.is_empty() || aggregate < dust {
+            // Nothing got selected and the only candidates were oversized => OversizedOnly;
+            // otherwise the (sized) selection summed below dust.
+            let reason = if selected.is_empty() && !oversized.is_empty() {
+                MigrationSkipReason::OversizedOnly
+            } else {
+                MigrationSkipReason::BelowDust
+            };
+            return Ok(MigrationLegReport {
+                settle_txid: None,
+                migrated: Vec::new(),
+                deferred,
+                oversized,
+                skipped: Some(reason),
+                error: None,
+            });
+        }
+
+        let selected_outpoints: Vec<OutPoint> = selected.iter().map(|c| c.outpoint).collect();
+        let settle_result = if is_vtxo_leg {
+            self.settle_vtxos(rng, &selected_outpoints, &[]).await
+        } else {
+            self.settle_vtxos(rng, &[], &selected_outpoints).await
+        };
+
+        // Capture (rather than propagate) the settle error so the caller can still run the other
+        // leg — a failure in one leg must not suppress the other.
+        Ok(match settle_result {
+            Ok(settle_txid) => MigrationLegReport {
+                settle_txid,
+                migrated: selected,
+                deferred,
+                oversized,
+                skipped: None,
+                error: None,
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "Deprecated-signer migration leg failed to settle");
+                MigrationLegReport {
+                    settle_txid: None,
+                    migrated: Vec::new(),
+                    // The selected inputs did not move; surface them as deferred so a retry
+                    // re-attempts them.
+                    deferred: selected.into_iter().chain(deferred).collect(),
+                    oversized,
+                    skipped: None,
+                    error: Some(e.to_string()),
+                }
+            }
+        })
     }
 
     /// Get information about an asset by its ID.

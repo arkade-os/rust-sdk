@@ -65,16 +65,16 @@ pub async fn e2e_signer_rotation_sweep_migration() {
         "Total balance must be preserved after rotation"
     );
 
-    let txid = client2
+    let report = client2
         .migrate_deprecated_signer_vtxos(&mut rng)
         .await
         .unwrap();
     assert!(
-        txid.is_some(),
-        "migrate_deprecated_signer_vtxos must submit a settlement (returned None)"
+        report.rotated(),
+        "migrate_deprecated_signer_vtxos must submit a settlement (no leg rotated)"
     );
     tracing::info!(
-        ?txid,
+        ?report,
         "migrate_deprecated_signer_vtxos submitted settlement"
     );
 
@@ -82,13 +82,13 @@ pub async fn e2e_signer_rotation_sweep_migration() {
     wait_until_balance!(&client2, confirmed: fund_amount);
 
     // If migration actually moved VTXOs to the new signer, there is nothing left
-    // to migrate — a second call must return None.
+    // to migrate — a second call must rotate nothing.
     let second = client2
         .migrate_deprecated_signer_vtxos(&mut rng)
         .await
         .unwrap();
     assert!(
-        second.is_none(),
+        !second.rotated(),
         "second migrate call should find nothing to migrate (VTXOs are already under new signer)"
     );
     tracing::info!("Sweep-migration test passed: all VTXOs settled under new signer");
