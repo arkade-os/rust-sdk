@@ -28,7 +28,7 @@ use std::str::FromStr;
 ///
 /// Update this when the SDK intentionally targets a newer arkd compatibility
 /// baseline.
-pub const TARGET_ARKD_VERSION: &str = "v0.9.8";
+pub const TARGET_ARKD_VERSION: &str = "0.9.9";
 
 /// Version of this SDK, as `rust-sdk/<crate version>`.
 ///
