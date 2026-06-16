@@ -2450,7 +2450,7 @@ mod digest_guard_tests {
         let address = Address::p2tr(&secp, xonly, None, bitcoin::Network::Regtest);
 
         test_utils::GetInfoResponse {
-            version: "v0.9.8".to_string(),
+            version: "0.9.9".to_string(),
             signer_pubkey: public_key.to_string(),
             forfeit_pubkey: public_key.to_string(),
             forfeit_address: address.to_string(),
