@@ -74,7 +74,7 @@ pub async fn e2e_arkade_script_submit_tx_to_bob() {
         .faucet_fund(&alice_boarding_address, fund_amount)
         .await;
 
-    alice.settle(&mut rng).await.unwrap();
+    alice.settle_all(&mut rng).await.unwrap();
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     let custom_owner_kp = Keypair::new(&secp, &mut rng);
@@ -191,7 +191,7 @@ pub async fn e2e_arkade_script_submit_tx_to_bob() {
 
     wait_until_balance!(&bob, pre_confirmed: receiver_amount);
 
-    bob.settle(&mut rng).await.unwrap();
+    bob.settle_all(&mut rng).await.unwrap();
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     wait_until_balance!(&bob, confirmed: receiver_amount, pre_confirmed: Amount::ZERO);
