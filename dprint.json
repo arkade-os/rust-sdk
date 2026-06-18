@@ -10,7 +10,7 @@
   ],
   "excludes": [
     "**/target",
-    "ark-rust-secp256k1/*"
+    "regtest/*"
   ],
   "exec": {
     "commands": [
