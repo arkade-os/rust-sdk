@@ -16,7 +16,7 @@ mod common;
 /// Regime 1: VTXO created under current signer → rotate with future cutoff (still cooperative)
 /// → `migrate_deprecated_signer_vtxos` settles all pre-cutoff VTXOs to the new signer.
 ///
-/// Mirrors dotnet-sdk `SweepMigrationRotationTests` and ts-sdk rotation/migration scenario.
+/// Verifies the cooperative rotation path for still-co-signable deprecated signer outputs.
 #[tokio::test]
 #[ignore = "requires regtest"]
 pub async fn e2e_signer_rotation_sweep_migration() {
@@ -98,7 +98,7 @@ pub async fn e2e_signer_rotation_sweep_migration() {
 /// Regime 2: VTXO created under current signer → rotate with past cutoff (operator will NOT
 /// co-sign the old key) → VTXO is stuck in `pending_recovery`, NOT in confirmed/pre_confirmed.
 ///
-/// Mirrors dotnet-sdk `PastCutoffHeldBackRotationTests`.
+/// Verifies the held-back balance state for outputs whose deprecated signer no longer co-signs.
 #[tokio::test]
 #[ignore = "requires regtest"]
 pub async fn e2e_signer_rotation_past_cutoff_held_back() {
@@ -155,8 +155,7 @@ pub async fn e2e_signer_rotation_past_cutoff_held_back() {
 /// `get_boarding_addresses()` call, because connect-time boarding persistence already watches the
 /// deprecated signer's boarding outputs.
 ///
-/// Mirrors ts-sdk `deprecatedSignerMigration.test.ts` "migrates a real boarding UTXO with no cutoff
-/// (DUE_NOW)" — the boarding-only leg isolated from the VTXO path.
+/// Exercises the boarding-only migration leg, isolated from the VTXO path.
 #[tokio::test]
 #[ignore = "requires regtest"]
 pub async fn e2e_signer_rotation_boarding_only_migration() {
@@ -248,10 +247,9 @@ pub async fn e2e_signer_rotation_boarding_only_migration() {
 /// Classification: a future cutoff (`+86400`) makes the deprecated signer `Migratable` with a
 /// positive `seconds_until_cutoff`, exposed via the read-only `deprecated_signer_status()`.
 ///
-/// Mirrors ts-sdk `deprecatedSignerMigration.test.ts` MIGRATABLE group
-/// (`status: "MIGRATABLE"`, `secondsUntilCutoff > 0`). `rotate_signer("+86400")` resolves the
-/// cutoff to `now + 86400` (an absolute future Unix timestamp), so we assert `cutoff_date` is in
-/// the future and `seconds_until_cutoff > 0` rather than an exact offset.
+/// `rotate_signer("+86400")` resolves the cutoff to `now + 86400` (an absolute future Unix
+/// timestamp), so we assert `cutoff_date` is in the future and `seconds_until_cutoff > 0` rather
+/// than an exact offset.
 #[tokio::test]
 #[ignore = "requires regtest"]
 pub async fn e2e_signer_rotation_status_migratable() {
@@ -318,9 +316,7 @@ pub async fn e2e_signer_rotation_status_migratable() {
 /// Classification: a zero cutoff (`"0"`) makes the deprecated signer `DueNow` with
 /// `cutoff_date == 0` and no `seconds_until_cutoff`, exposed via `deprecated_signer_status()`.
 ///
-/// Mirrors ts-sdk `deprecatedSignerMigration.test.ts` DUE_NOW group (`status: "DUE_NOW"`,
-/// `cutoffDate` undefined). `rotate_signer("0")` advertises cutoff `0` ("rotate immediately",
-/// still co-signable).
+/// `rotate_signer("0")` advertises cutoff `0` ("rotate immediately", still co-signable).
 #[tokio::test]
 #[ignore = "requires regtest"]
 pub async fn e2e_signer_rotation_status_due_now() {

@@ -19,10 +19,10 @@ use std::collections::HashSet;
 
 /// Maximum number of inputs a single deprecated-signer migration leg will settle in one batch.
 ///
-/// A client-side safeguard mirroring ts-sdk's `MAX_VTXOS_PER_SETTLEMENT`: it bounds the input
-/// count of one [`Client::migrate_deprecated_signer_vtxos`] leg so a wallet holding many small
-/// VTXOs does not build a batch intent that exceeds the server's transaction-weight limit. Any
-/// overflow is deferred to a later migration cycle (see [`MigrationLegReport::deferred`]).
+/// A client-side safeguard: it bounds the input count of one
+/// [`Client::migrate_deprecated_signer_vtxos`] leg so a wallet holding many small VTXOs does not
+/// build a batch intent that exceeds the server's transaction-weight limit. Any overflow is
+/// deferred to a later migration cycle (see [`MigrationLegReport::deferred`]).
 pub const MAX_VTXOS_PER_SETTLEMENT: usize = 50;
 
 /// A single VTXO or boarding output referenced in a [`DeprecatedSignerMigrationReport`].
@@ -55,7 +55,7 @@ pub enum MigrationSkipReason {
 /// Outcome of one [`Client::migrate_deprecated_signer_vtxos`] leg.
 ///
 /// Each leg owns its full sizing pipeline and reports independently — a failure or skip in one leg
-/// never suppresses the other. The pipeline (mirroring ts-sdk's `runMigrationLeg`) is:
+/// never suppresses the other. The pipeline is:
 ///
 /// 1. inputs whose individual amount exceeds the server's per-output ceiling (`vtxo_max_amount`)
 ///    are split out as [`Self::oversized`] — they can never form a `<= ceiling` output and must
@@ -153,8 +153,7 @@ struct MigrationLegSizing {
 ///
 /// This is the pure core of [`Client::run_migration_leg`], factored out so its branching (oversized
 /// split, count cap, running-aggregate ceiling, dust floor, and the skip-reason classification) is
-/// unit-testable without a `Client`/network. Mirrors ts-sdk's
-/// `runMigrationLeg`/`capSettlementBatch` selection. The pipeline is:
+/// unit-testable without a `Client`/network. The pipeline is:
 ///
 /// 1. inputs whose individual amount exceeds `vtxo_max_amount` are split out as `oversized` (a
 ///    `None` ceiling means no limit, so nothing is oversized);
@@ -260,7 +259,7 @@ fn signer_holds_funds(
 ///
 /// Pure core of [`Client::deprecated_signer_status`], factored out so the classification is
 /// unit-testable without a `Client`/network. Consistent with
-/// [`server::Info::is_signer_past_cutoff_at`] and the `is_pre_cutoff_deprecated` check in
+/// [`ark_core::server::Info::signer_status_at`] and the `is_pre_cutoff_deprecated` check in
 /// [`Client::migrate_deprecated_signer_vtxos`]: a `cutoff_date` of `0` is "rotate now"
 /// ([`DeprecatedSignerStatus::DueNow`], still co-signable); a future cutoff is
 /// [`DeprecatedSignerStatus::Migratable`] (with a positive `seconds_until_cutoff`); a passed cutoff
@@ -271,8 +270,7 @@ fn classify_deprecated_signer(cutoff_date: i64, now: i64) -> (DeprecatedSignerSt
 }
 
 /// Read-only, per-signer status of the deprecated server signers the wallet currently holds funds
-/// under. Produced by [`Client::deprecated_signer_status`]; mirrors ts-sdk's
-/// `DeprecatedSignerReport`.
+/// under. Produced by [`Client::deprecated_signer_status`].
 ///
 /// This is observability only — building it never moves funds and never settles or migrates. The
 /// `recoverable_*` vs `awaiting_sweep_*` split and `next_sweep_eta` are only populated for
@@ -450,15 +448,14 @@ where
     /// funds under, without migrating anything.
     ///
     /// This is observability only — it never moves funds and never calls settle or migrate. It is
-    /// the read-only sibling of [`Self::migrate_deprecated_signer_vtxos`] and mirrors ts-sdk's
-    /// `getDeprecatedSignerStatus`. For each deprecated signer it merges the wallet's VTXO holdings
-    /// (resolved via the script -> VTXO map, like [`Self::offchain_balance`]) and its on-chain
-    /// boarding holdings (grouped by [`BoardingOutput::server_pk`]) into one
-    /// [`DeprecatedSignerReport`].
+    /// the read-only sibling of [`Self::migrate_deprecated_signer_vtxos`]. For each deprecated
+    /// signer it merges the wallet's VTXO holdings (resolved via the script -> VTXO map, like
+    /// [`Self::offchain_balance`]) and its on-chain boarding holdings (grouped by
+    /// [`BoardingOutput::server_pk`]) into one [`DeprecatedSignerReport`].
     ///
-    /// Signers under which the wallet holds neither VTXOs nor boarding outputs are omitted (a row
-    /// per deprecated signer the wallet holds funds under, matching ts-sdk). When the server
-    /// advertises no deprecated signers, returns an empty vector without touching the chain.
+    /// Signers under which the wallet holds neither VTXOs nor boarding outputs are omitted. When
+    /// the server advertises no deprecated signers, returns an empty vector without touching the
+    /// chain.
     ///
     /// For [`DeprecatedSignerStatus::Expired`] signers the VTXOs are additionally split into the
     /// already-swept/expired `recoverable_*` set and the not-yet-swept `awaiting_sweep_*` set, and
@@ -612,8 +609,8 @@ where
 
     /// Size a single migration leg against the server limits and settle the selected inputs.
     ///
-    /// Mirrors ts-sdk's `runMigrationLeg`/`capSettlementBatch`. `is_vtxo_leg` selects which
-    /// argument of [`Self::settle_vtxos`] the chosen outpoints are passed in (VTXO vs boarding);
+    /// `is_vtxo_leg` selects which argument of [`Self::settle_vtxos`] the chosen outpoints are
+    /// passed in (VTXO vs boarding);
     /// the other argument is empty so each leg is a distinct intent.
     async fn run_migration_leg<R>(
         &self,
@@ -689,7 +686,7 @@ where
 /// ([`size_migration_leg`]), the signer classification ([`classify_deprecated_signer`]), and the
 /// empty-`deprecated_signers` short-circuit report ([`DeprecatedSignerMigrationReport`]). These
 /// run without a `Client`/network — they exercise the same branching the regtest e2e tests cover
-/// end-to-end, mirroring ts-sdk's `runMigrationLeg`/`getDeprecatedSignerStatus` unit layer.
+/// end-to-end.
 #[cfg(test)]
 mod migration_tests {
     use super::*;
@@ -843,8 +840,8 @@ mod migration_tests {
 
     #[test]
     fn classify_exact_cutoff_boundary_is_expired() {
-        // cutoff_date <= now (and != 0) => expired. The boundary (cutoff == now) is past-cutoff,
-        // matching `server::Info::is_signer_past_cutoff_at`.
+        // cutoff_date <= now (and != 0) => expired. The boundary (cutoff == now) requires
+        // recovery instead of cooperative migration.
         let now = 1_000_000i64;
         let (status, secs) = classify_deprecated_signer(now, now);
         assert_eq!(status, DeprecatedSignerStatus::Expired);

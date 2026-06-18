@@ -62,17 +62,14 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 const KEY_DISCOVERY_INTERVAL: Duration = Duration::from_secs(10);
 const KEY_DISCOVERY_GAP_LIMIT: u32 = 20;
 
-// TODO: Let's refrain from mentioning other SDKs as an explanation. That stuff can change.
-
 /// How often the background migration arm fires when healthy. The frequent cadence is safe
 /// because [`Client::migrate_deprecated_signer_vtxos`] short-circuits to a no-op
 /// `NothingMigratable` report when the server advertises no deprecated signers or the wallet holds
 /// no pre-cutoff deprecated-signer outputs.
 const MIGRATION_INTERVAL: Duration = Duration::from_secs(60);
 
-/// Exponential-backoff bounds for the migration arm after a failing pass. Mirrors ts-sdk's
-/// `MIGRATION_COOLDOWN_MS` (base 30s, doubling per consecutive failure, capped at 5 minutes); the
-/// cooldown resets to the base on a successful or no-op pass.
+/// Exponential-backoff bounds for the migration arm after a failing pass. The cooldown doubles per
+/// consecutive failure, caps at five minutes, and resets to the base on a successful or no-op pass.
 const MIGRATION_BASE_COOLDOWN: Duration = Duration::from_secs(30);
 const MIGRATION_MAX_COOLDOWN: Duration = Duration::from_secs(300);
 
@@ -482,8 +479,7 @@ async fn run_migration_arm<B, W, S, K>(
 /// Cooldown before the next migration pass given the consecutive-failure count.
 ///
 /// `0` failures → the healthy [`MIGRATION_INTERVAL`]. Otherwise an exponential backoff of
-/// `MIGRATION_BASE_COOLDOWN * 2^(failures - 1)`, saturating at [`MIGRATION_MAX_COOLDOWN`] (mirrors
-/// ts-sdk's `MIGRATION_COOLDOWN_MS = 30_000 * 2^failures`, capped at 5 minutes).
+/// `MIGRATION_BASE_COOLDOWN * 2^(failures - 1)`, saturating at [`MIGRATION_MAX_COOLDOWN`].
 fn migration_delay(consecutive_failures: u32) -> Duration {
     if consecutive_failures == 0 {
         return MIGRATION_INTERVAL;

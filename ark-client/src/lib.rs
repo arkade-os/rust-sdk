@@ -678,15 +678,10 @@ where
             tracing::warn!(?error, "Failed during key discovery");
         };
 
-        // TODO: This is ugly. But I guess it's also correct. Not sure how to solve this
-        // differently.
-
-        // Eagerly persist boarding rows for the current signer and every deprecated signer (each
-        // crossed with the candidate exit delays). Without this, deprecated-signer boarding rows
-        // exist only after an integrator calls `get_boarding_addresses()`, and the boarding leg of
-        // `migrate_deprecated_signer_vtxos` (a pure DB read) would silently see none — an ordering
-        // footgun the ts-sdk (eager boarding matrix at boot) and dotnet (BoardingUtxoSyncService)
-        // both avoid. Re-persisting is idempotent, so this is safe to run on every connect.
+        // Eagerly persist boarding rows for every signer/delay candidate the wallet should watch.
+        // The migration boarding leg reads the wallet DB only; without this connect-time seed, a
+        // deprecated-signer boarding UTXO could be invisible until the caller happened to call
+        // `get_boarding_addresses()`. Re-persisting is idempotent, so it is safe on every connect.
         match client.server_info() {
             Ok(server_info) => {
                 if let Err(error) = client.persist_watch_boarding_outputs(&server_info) {
@@ -761,10 +756,10 @@ where
             .map_err(Error::ad_hoc)
     }
 
-    // TODO: Not sure if this should be part of the public API if is only ever used in a test. Do we
-    // need this? We could put it under the test-utils feature flag.
-
-    /// Refresh cached `/info` data after the server reports that client state is stale.
+    /// Refresh cached `/info` data.
+    ///
+    /// Useful after an out-of-band server restart or signer rotation, and also used by guarded RPC
+    /// clients after arkd reports stale client state.
     ///
     /// The refreshed snapshot includes the server's current
     /// [`server::Info::deprecated_signers`]. The background watcher's migration arm then observes

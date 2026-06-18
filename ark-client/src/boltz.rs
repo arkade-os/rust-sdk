@@ -1,4 +1,6 @@
-// TODO: Are we handling migration of these contracts too?
+// Active VHTLC contracts are not swept by deprecated-signer migration. Their claim/refund
+// recovery paths reconstruct scripts against both current and deprecated server keys so swaps
+// created before a signer rotation remain recoverable.
 
 use crate::batch::BatchOutputType;
 use crate::error::ErrorContext as _;
@@ -4376,7 +4378,9 @@ struct ChainSwapSideDetails {
     bip21: Option<String>,
 }
 
-// TODO: Why can we get away with not considering the legacy exit delay for VHTLCs?
+// VHTLC timeouts come from the stored swap data/Boltz response, not from the server's current
+// unilateral-exit delay. The legacy exit-delay probe is therefore only needed for regular
+// VTXO/boarding script discovery.
 
 /// Iterate `server_keys` in order, building a [`VhtlcScript`] for each one, and return the
 /// first whose address matches `expected_address`.
