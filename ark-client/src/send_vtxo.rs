@@ -245,16 +245,10 @@ where
         let now = crate::unix_now();
         let server_info = self.server_info()?;
         let spendable = vtxo_list
-            .spendable_offchain()
-            // TODO: Shouldn't this logic be inside spendable offchain already? Seems error-prone to
-            // have to bolt this on for correctness.
-            //
-            // Exclude VTXOs under a past-cutoff deprecated signer: operator won't co-sign.
-            .filter(|v| {
-                !script_pubkey_to_vtxo_map
-                    .get(&v.script)
-                    .map(|vtxo| server_info.is_signer_past_cutoff_at(vtxo.server_pk(), now))
-                    .unwrap_or(false)
+            .spendable_offchain_at(&server_info, now, |script| {
+                script_pubkey_to_vtxo_map
+                    .get(script)
+                    .map(|vtxo| vtxo.server_pk())
             })
             .map(|vtxo| VirtualTxOutPoint {
                 outpoint: vtxo.outpoint,
@@ -365,8 +359,14 @@ where
             .await
             .context("failed to get VTXO list")?;
 
+        let now = crate::unix_now();
+        let server_info = self.server_info()?;
         let selected: Vec<_> = vtxo_list
-            .spendable_offchain()
+            .spendable_offchain_at(&server_info, now, |script| {
+                script_pubkey_to_vtxo_map
+                    .get(script)
+                    .map(|vtxo| vtxo.server_pk())
+            })
             .filter(|vtxo| requested_outpoints.contains(&vtxo.outpoint))
             .map(|vtxo| VirtualTxOutPoint {
                 outpoint: vtxo.outpoint,

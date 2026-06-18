@@ -1551,40 +1551,38 @@ where
         let now = unix_now();
         let server_info = self.server_info()?;
 
-        let is_past_cutoff = |v: &VirtualTxOutPoint| {
-            script_map
-                .get(&v.script)
-                .map(|vtxo| server_info.is_signer_past_cutoff_at(vtxo.server_pk(), now))
-                .unwrap_or(false)
-        };
+        let spendable_outpoints: HashSet<OutPoint> = vtxo_list
+            .spendable_offchain_at(&server_info, now, |script| {
+                script_map.get(script).map(|vtxo| vtxo.server_pk())
+            })
+            .map(|vtxo| vtxo.outpoint)
+            .collect();
 
         let pre_confirmed = vtxo_list
             .pre_confirmed()
-            .filter(|v| !is_past_cutoff(v))
+            .filter(|v| spendable_outpoints.contains(&v.outpoint))
             .fold(Amount::ZERO, |acc, x| acc + x.amount);
 
         let confirmed = vtxo_list
             .confirmed()
-            .filter(|v| !is_past_cutoff(v))
+            .filter(|v| spendable_outpoints.contains(&v.outpoint))
             .fold(Amount::ZERO, |acc, x| acc + x.amount);
 
         let recoverable = vtxo_list
             .recoverable()
             .fold(Amount::ZERO, |acc, x| acc + x.amount);
 
-        // Spendable offchain VTXOs under a past-cutoff deprecated signer: operator won't
-        // co-sign, so they're stuck until the VTXO expires and becomes recoverable.
         let pending_recovery = vtxo_list
-            .spendable_offchain()
-            .filter(|v| is_past_cutoff(v))
+            .pending_recovery_due_to_signer_at(&server_info, now, |script| {
+                script_map.get(script).map(|vtxo| vtxo.server_pk())
+            })
             .fold(Amount::ZERO, |acc, x| acc + x.amount);
 
-        // Aggregate asset balances from spendable (non-past-cutoff) VTXOs only.
+        // Aggregate asset balances from currently offchain-spendable VTXOs only.
         let mut asset_balances: HashMap<AssetId, u64> = HashMap::new();
-        for vtxo in vtxo_list
-            .spendable_offchain()
-            .filter(|v| !is_past_cutoff(v))
-        {
+        for vtxo in vtxo_list.spendable_offchain_at(&server_info, now, |script| {
+            script_map.get(script).map(|vtxo| vtxo.server_pk())
+        }) {
             for asset in &vtxo.assets {
                 let total = asset_balances
                     .get(&asset.asset_id)
@@ -1647,13 +1645,17 @@ where
         let now = unix_now();
 
         let is_pre_cutoff_deprecated = |server_pk: XOnlyPublicKey| -> Option<i64> {
+            if !server_info
+                .signer_status_at(server_pk, now)
+                .is_pre_cutoff_deprecated()
+            {
+                return None;
+            }
+
             server_info
                 .deprecated_signers
                 .iter()
-                .find(|ds| {
-                    ds.pk.x_only_public_key().0 == server_pk
-                        && (ds.cutoff_date == 0 || ds.cutoff_date > now)
-                })
+                .find(|ds| ds.pk.x_only_public_key().0 == server_pk)
                 .map(|ds| ds.cutoff_date)
         };
 

@@ -1090,7 +1090,9 @@ where
                     // Skip boarding outputs whose server key is past its cooperative-sign
                     // cutoff — the operator won't co-sign the old key's forfeit path.
                     // These must be recovered via unilateral exit (send_on_chain).
-                    if server_info.is_signer_past_cutoff_at(boarding_output.server_pk(), now_secs) {
+                    if server_info
+                        .signer_requires_recovery_at(boarding_output.server_pk(), now_secs)
+                    {
                         continue;
                     }
 
@@ -1119,31 +1121,20 @@ where
         // below is evaluated against the same instant as the boarding filter above, and so a
         // test-injected `now` deterministically controls both.
         let now = now_secs;
-        let dust = server_info.dust;
+        let settleable_vtxos: Vec<_> = vtxo_list
+            .batch_settleable_at(&server_info, now, |script| {
+                script_pubkey_to_vtxo_map
+                    .get(script)
+                    .map(|vtxo| vtxo.server_pk())
+            })
+            .collect();
 
-        // TODO: Should go in ark-core as a function?
-
-        // Exclude VTXOs under a past-cutoff deprecated signer that still require a forfeit.
-        // The operator won't co-sign the forfeit for the old key, which would brick the whole
-        // batch intent. They wait until expiry (is_recoverable) before joining a batch.
-        let is_excluded = |v: &&ark_core::server::VirtualTxOutPoint| -> bool {
-            if v.is_recoverable(dust) {
-                return false; // recoverable = no forfeit needed, always safe to include
-            }
-            script_pubkey_to_vtxo_map
-                .get(&v.script)
-                .map(|vtxo| server_info.is_signer_past_cutoff_at(vtxo.server_pk(), now))
-                .unwrap_or(false)
-        };
-
-        total_amount += vtxo_list
-            .all_unspent()
-            .filter(|v| !is_excluded(v))
+        total_amount += settleable_vtxos
+            .iter()
             .fold(Amount::ZERO, |acc, vtxo| acc + vtxo.amount);
 
-        let vtxo_inputs = vtxo_list
-            .all_unspent()
-            .filter(|v| !is_excluded(v))
+        let vtxo_inputs = settleable_vtxos
+            .into_iter()
             .map(|virtual_tx_outpoint| {
                 let vtxo = script_pubkey_to_vtxo_map
                     .get(&virtual_tx_outpoint.script)

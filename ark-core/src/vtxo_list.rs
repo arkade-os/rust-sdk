@@ -1,8 +1,10 @@
+use crate::server::Info;
 use crate::server::VirtualTxOutPoint;
 use crate::ExplorerUtxo;
 use crate::Vtxo;
 use bitcoin::Amount;
 use bitcoin::ScriptBuf;
+use bitcoin::XOnlyPublicKey;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -72,6 +74,69 @@ impl VtxoList {
     /// VTXOs that can be spent in an offchain transaction.
     pub fn spendable_offchain(&self) -> impl Iterator<Item = &VirtualTxOutPoint> {
         self.pre_confirmed.iter().chain(self.confirmed.iter())
+    }
+
+    /// VTXOs that can be spent in an offchain transaction at `now_unix_secs`.
+    ///
+    /// This excludes otherwise-spendable VTXOs minted under a deprecated signer whose
+    /// cooperative-sign window has closed. Those VTXOs cannot be forfeited by the server anymore;
+    /// they become usable again only after they expire and move into the recovery path.
+    pub fn spendable_offchain_at<'a, F>(
+        &'a self,
+        server_info: &'a Info,
+        now_unix_secs: i64,
+        server_pk_for_script: F,
+    ) -> impl Iterator<Item = &'a VirtualTxOutPoint> + 'a
+    where
+        F: Fn(&ScriptBuf) -> Option<XOnlyPublicKey> + 'a,
+    {
+        self.spendable_offchain().filter(move |vtxo| {
+            !server_pk_for_script(&vtxo.script)
+                .map(|server_pk| server_info.signer_requires_recovery_at(server_pk, now_unix_secs))
+                .unwrap_or(false)
+        })
+    }
+
+    /// Otherwise-spendable VTXOs blocked only by a deprecated signer's closed cooperative-sign
+    /// window. These remain wallet funds, but they are pending recovery until expiry.
+    pub fn pending_recovery_due_to_signer_at<'a, F>(
+        &'a self,
+        server_info: &'a Info,
+        now_unix_secs: i64,
+        server_pk_for_script: F,
+    ) -> impl Iterator<Item = &'a VirtualTxOutPoint> + 'a
+    where
+        F: Fn(&ScriptBuf) -> Option<XOnlyPublicKey> + 'a,
+    {
+        self.spendable_offchain().filter(move |vtxo| {
+            server_pk_for_script(&vtxo.script)
+                .map(|server_pk| server_info.signer_requires_recovery_at(server_pk, now_unix_secs))
+                .unwrap_or(false)
+        })
+    }
+
+    /// Unspent VTXOs that may be included in a cooperative batch settlement at `now_unix_secs`.
+    ///
+    /// Recoverable VTXOs are always safe: they no longer need a server forfeit signature. Healthy
+    /// VTXOs still need that signature, so VTXOs under an expired deprecated signer are excluded.
+    pub fn batch_settleable_at<'a, F>(
+        &'a self,
+        server_info: &'a Info,
+        now_unix_secs: i64,
+        server_pk_for_script: F,
+    ) -> impl Iterator<Item = &'a VirtualTxOutPoint> + 'a
+    where
+        F: Fn(&ScriptBuf) -> Option<XOnlyPublicKey> + 'a,
+    {
+        let dust = server_info.dust;
+        self.all_unspent().filter(move |vtxo| {
+            vtxo.is_recoverable(dust)
+                || !server_pk_for_script(&vtxo.script)
+                    .map(|server_pk| {
+                        server_info.signer_requires_recovery_at(server_pk, now_unix_secs)
+                    })
+                    .unwrap_or(false)
+        })
     }
 
     pub fn pre_confirmed(&self) -> impl Iterator<Item = &VirtualTxOutPoint> {
