@@ -1,8 +1,8 @@
 use crate::error::ErrorContext;
 use crate::key_provider::KeyProvider;
 use crate::swap_storage::SwapStorage;
-use crate::unix_now;
 use crate::utils::timeout_op;
+use crate::utils::unix_now;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use crate::Blockchain;

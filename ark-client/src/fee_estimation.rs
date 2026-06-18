@@ -59,7 +59,7 @@ where
         let (change_address, _) = self.get_offchain_address()?;
 
         let (boarding_inputs, vtxo_inputs, total_amount) = self
-            .fetch_commitment_transaction_inputs(super::unix_now())
+            .fetch_commitment_transaction_inputs(crate::utils::unix_now())
             .await?;
 
         let change_amount = total_amount.checked_sub(to_amount).ok_or_else(|| {
@@ -128,7 +128,7 @@ where
         R: Rng + CryptoRng + Clone,
     {
         let (boarding_inputs, vtxo_inputs, total_amount) = self
-            .fetch_commitment_transaction_inputs(super::unix_now())
+            .fetch_commitment_transaction_inputs(crate::utils::unix_now())
             .await?;
 
         tracing::info!(

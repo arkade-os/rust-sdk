@@ -242,7 +242,7 @@ where
             .await
             .context("failed to get spendable VTXOs")?;
 
-        let now = crate::unix_now();
+        let now = crate::utils::unix_now();
         let server_info = self.server_info()?;
         let spendable = vtxo_list
             .spendable_offchain_at(&server_info, now, |script| {
@@ -359,7 +359,7 @@ where
             .await
             .context("failed to get VTXO list")?;
 
-        let now = crate::unix_now();
+        let now = crate::utils::unix_now();
         let server_info = self.server_info()?;
         let selected: Vec<_> = vtxo_list
             .spendable_offchain_at(&server_info, now, |script| {

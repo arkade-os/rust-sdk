@@ -1,6 +1,22 @@
 use crate::Error;
 use std::time::Duration;
 
+/// Current time as Unix seconds. Uses `js_sys::Date` on wasm32, `std::time` elsewhere.
+pub(crate) fn unix_now() -> i64 {
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("valid duration")
+            .as_secs() as i64
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        (js_sys::Date::now() / 1000.0) as i64
+    }
+}
+
 pub(crate) async fn sleep(duration: Duration) {
     #[cfg(target_arch = "wasm32")]
     {

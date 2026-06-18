@@ -2,6 +2,7 @@ use crate::error::ErrorContext;
 use crate::key_provider::KeypairIndex;
 use crate::utils::sleep;
 use crate::utils::timeout_op;
+use crate::utils::unix_now;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use ark_core::asset::AssetId;
@@ -100,25 +101,6 @@ pub const DEFAULT_GAP_LIMIT: u32 = 20;
 /// Default Boltz `referralId` sent with swap creation requests when the caller does not
 /// provide one. Identifies traffic originating from this SDK.
 pub const DEFAULT_BOLTZ_REFERRAL_ID: &str = "arkade-rs-SDK";
-
-// TODO: Below constants belong in ark-core.
-
-// TODO: Don't love mentioning other SDKs as a reason for adding things.
-
-/// Mainnet's original unilateral-exit delay (~7 days, in seconds).
-///
-/// arkd only advertises the CURRENT exit delay in `/info`; it does not record the delays it used
-/// in the past. If the operator shortens the delay (with or without a key rotation), deposits
-/// minted under the OLD delay have a different `scriptPubKey` and would silently fall out of
-/// watch/discovery. To avoid that, discovery on mainnet probes this hardcoded legacy delay
-/// alongside the advertised one. We keep a single fallback rather than scanning an unbounded
-/// history because arkd does not expose deprecated delays. Matches `MAINNET_UNILATERAL_EXIT_DELAY`
-/// in arkade-os/ts-sdk and `MainnetLegacyUnilateralExit` in the dotnet SDK.
-///
-/// On testnets arkd has always advertised the network's intended delay, so this probe would only
-/// widen the candidate set without ever hitting; the candidate-delay helper therefore adds it on
-/// mainnet only (see [`Client::candidate_exit_delays`]).
-const MAINNET_LEGACY_UNILATERAL_EXIT_DELAY_SECS: u32 = 605_184;
 
 /// A client to interact with Ark Server
 ///
@@ -433,26 +415,6 @@ pub trait Blockchain {
         &self,
         txs: &[&Transaction],
     ) -> impl Future<Output = Result<(), Error>> + Send;
-}
-
-// TODO: Perhaps move to utils?
-
-// TODO: May want to move away from jiff dependency in most of these crates now?
-
-/// Current time as unix seconds. Uses `js_sys::Date` on wasm32, `std::time` elsewhere.
-fn unix_now() -> i64 {
-    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-    {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("valid duration")
-            .as_secs() as i64
-    }
-
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-    {
-        (js_sys::Date::now() / 1000.0) as i64
-    }
 }
 
 impl<B, W, S, K> OfflineClient<B, W, S, K>
@@ -869,8 +831,10 @@ where
         // delay lives at a legacy-delay address, so building only the current delay would hide it
         // from `list_vtxos`/balance/migration even though its key was discovered. Off mainnet this
         // is just the advertised delay (no behaviour change).
-        let candidate_delays =
-            self.candidate_exit_delays(server_info.unilateral_exit_delay, server_info.network)?;
+        let candidate_delays = ark_core::candidate_exit_delays(
+            server_info.unilateral_exit_delay,
+            server_info.network,
+        )?;
 
         let mut results = Vec::new();
 
@@ -962,8 +926,10 @@ where
         // Probe each server key under every candidate exit delay (the advertised delay plus, on
         // mainnet, the legacy delay), so VTXOs minted before the operator shortened the delay are
         // still discovered. Off mainnet this is just the advertised delay (no behaviour change).
-        let candidate_delays =
-            self.candidate_exit_delays(server_info.unilateral_exit_delay, server_info.network)?;
+        let candidate_delays = ark_core::candidate_exit_delays(
+            server_info.unilateral_exit_delay,
+            server_info.network,
+        )?;
 
         let mut start_index = 0u32;
         let mut discovered_count = 0u32;
@@ -1063,39 +1029,6 @@ where
         Ok(discovered_count)
     }
 
-    // TODO: No need for this a method, since self is not used. Could go in ark-core, together with
-    // the constant.
-
-    /// Candidate exit-delay set for discovery/watch, given the current delay advertised for one
-    /// axis (boarding or unilateral-exit).
-    ///
-    /// Returns the `current` delay plus — only on mainnet — the hardcoded legacy delay
-    /// [`MAINNET_LEGACY_UNILATERAL_EXIT_DELAY_SECS`], deduplicated. arkd advertises only the
-    /// CURRENT delay, so deposits minted under an older (longer) delay live at a different
-    /// `scriptPubKey`; probing the legacy delay too keeps them visible. On non-mainnet the set is
-    /// just `[current]`, so behaviour there is unchanged, and the de-dup makes the legacy entry a
-    /// no-op whenever `current` already equals it.
-    fn candidate_exit_delays(
-        &self,
-        current: bitcoin::Sequence,
-        network: bitcoin::Network,
-    ) -> Result<Vec<bitcoin::Sequence>, Error> {
-        let mut delays = vec![current];
-
-        if network == bitcoin::Network::Bitcoin {
-            let legacy =
-                bitcoin::Sequence::from_seconds_ceil(MAINNET_LEGACY_UNILATERAL_EXIT_DELAY_SECS)
-                    .map_err(Error::ad_hoc)?;
-            // De-dup: when the advertised mainnet delay already equals the legacy value, the
-            // legacy probe is a no-op.
-            if !delays.contains(&legacy) {
-                delays.push(legacy);
-            }
-        }
-
-        Ok(delays)
-    }
-
     // At the moment we are always generating the same address.
     pub fn get_boarding_address(&self) -> Result<Address, Error> {
         let server_info = &self.server_info()?;
@@ -1142,8 +1075,8 @@ where
     /// with each candidate exit delay, returning the created [`BoardingOutput`]s.
     ///
     /// Covers the current signer plus every deprecated signer, each paired with
-    /// [`Client::candidate_exit_delays`] (the advertised boarding-exit delay plus, on mainnet, the
-    /// legacy delay). Calling [`BoardingWallet::new_boarding_output`] writes the row to the
+    /// [`ark_core::candidate_exit_delays`] (the advertised boarding-exit delay plus, on mainnet,
+    /// the legacy delay). Calling [`BoardingWallet::new_boarding_output`] writes the row to the
     /// wallet's store; re-persisting the same boarding output is a harmless overwrite (the store
     /// keys rows by [`BoardingOutput`] identity), so this is safe to call repeatedly — at connect
     /// time and again from [`Client::get_boarding_addresses`].
@@ -1152,7 +1085,7 @@ where
         server_info: &server::Info,
     ) -> Result<Vec<BoardingOutput>, Error> {
         let candidate_delays =
-            self.candidate_exit_delays(server_info.boarding_exit_delay, server_info.network)?;
+            ark_core::candidate_exit_delays(server_info.boarding_exit_delay, server_info.network)?;
 
         let mut outputs = Vec::new();
         for server_pk in server_info.all_server_keys() {
