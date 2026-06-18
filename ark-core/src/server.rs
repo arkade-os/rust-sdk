@@ -20,6 +20,24 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::str::FromStr;
 
+/// arkd build version targeted by this SDK.
+///
+/// Sent in the `X-Build-Version`/`x-build-version` request header so arkd can
+/// reject clients that target an older incompatible server version. This is the
+/// arkd protocol target, not the Rust crate version.
+///
+/// Update this when the SDK intentionally targets a newer arkd compatibility
+/// baseline.
+pub const TARGET_ARKD_VERSION: &str = "0.9.9";
+
+/// Version of this SDK, as `rust-sdk/<crate version>`.
+///
+/// Sent in the `X-SDK-Version`/`x-sdk-version` request header so arkd can attribute
+/// traffic to this SDK and release. The version is resolved from the crate version at
+/// compile time, unlike [`TARGET_ARKD_VERSION`], which is the hand-maintained arkd
+/// compatibility target.
+pub const SDK_VERSION: &str = concat!("rust-sdk/", env!("CARGO_PKG_VERSION"));
+
 /// An aggregate public nonce per shared internal (non-leaf) node in the batch-tree.
 #[derive(Debug, Clone)]
 pub struct NoncePks(HashMap<Txid, musig::PublicNonce>);

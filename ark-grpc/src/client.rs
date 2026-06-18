@@ -55,6 +55,8 @@ use ark_core::server::VirtualTxOutPoint;
 use ark_core::server::VirtualTxsResponse;
 use ark_core::server::VtxoChain;
 use ark_core::server::VtxoChains;
+use ark_core::server::SDK_VERSION;
+use ark_core::server::TARGET_ARKD_VERSION;
 use ark_core::ArkAddress;
 use ark_core::TxGraphChunk;
 use async_stream::stream;
@@ -74,28 +76,73 @@ use futures::TryStreamExt;
 use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::RwLock;
 
-#[derive(Clone, Copy)]
-struct VersionInterceptor;
+#[derive(Clone, Default)]
+struct HeaderState {
+    digest: Arc<RwLock<Option<String>>>,
+}
 
-impl tonic::service::Interceptor for VersionInterceptor {
+impl HeaderState {
+    fn set_digest(&self, digest: String) {
+        let digest = (!digest.is_empty()).then_some(digest);
+        match self.digest.write() {
+            Ok(mut guard) => *guard = digest,
+            Err(poisoned) => {
+                log::warn!("digest header state lock poisoned while updating; recovering");
+                *poisoned.into_inner() = digest;
+            }
+        }
+    }
+
+    fn digest(&self) -> Option<String> {
+        match self.digest.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => {
+                log::warn!("digest header state lock poisoned while reading; recovering");
+                poisoned.into_inner().clone()
+            }
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct HeaderInterceptor {
+    state: HeaderState,
+}
+
+impl tonic::service::Interceptor for HeaderInterceptor {
     fn call(&mut self, mut req: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
-        req.metadata_mut().insert(
+        let metadata = req.metadata_mut();
+        metadata.insert(
             "x-build-version",
-            tonic::metadata::MetadataValue::from_static(env!("CARGO_PKG_VERSION")),
+            tonic::metadata::MetadataValue::from_static(TARGET_ARKD_VERSION),
         );
+        metadata.insert(
+            "x-sdk-version",
+            tonic::metadata::MetadataValue::from_static(SDK_VERSION),
+        );
+
+        if let Some(digest) = self.state.digest() {
+            if let Ok(value) = tonic::metadata::MetadataValue::try_from(digest.as_str()) {
+                metadata.insert("x-digest", value);
+            }
+        }
+
         Ok(req)
     }
 }
 
 type InterceptedChannel =
-    tonic::codegen::InterceptedService<tonic::transport::Channel, VersionInterceptor>;
+    tonic::codegen::InterceptedService<tonic::transport::Channel, HeaderInterceptor>;
 
 #[derive(Clone)]
 pub struct Client {
     url: String,
     ark_client: Option<ArkServiceClient<InterceptedChannel>>,
     indexer_client: Option<IndexerServiceClient<InterceptedChannel>>,
+    header_state: HeaderState,
 }
 
 impl fmt::Debug for Client {
@@ -113,6 +160,7 @@ impl Client {
             url,
             ark_client: None,
             indexer_client: None,
+            header_state: HeaderState::default(),
         }
     }
 
@@ -132,9 +180,12 @@ impl Client {
 
         let channel = endpoint.connect().await.map_err(Error::connect)?;
 
+        let interceptor = HeaderInterceptor {
+            state: self.header_state.clone(),
+        };
         let ark_service_client =
-            ArkServiceClient::with_interceptor(channel.clone(), VersionInterceptor);
-        let indexer_client = IndexerServiceClient::with_interceptor(channel, VersionInterceptor);
+            ArkServiceClient::with_interceptor(channel.clone(), interceptor.clone());
+        let indexer_client = IndexerServiceClient::with_interceptor(channel, interceptor);
 
         self.ark_client = Some(ark_service_client);
         self.indexer_client = Some(indexer_client);
@@ -149,7 +200,9 @@ impl Client {
             .await
             .map_err(Error::request)?;
 
-        response.into_inner().try_into()
+        let info: Info = response.into_inner().try_into()?;
+        self.header_state.set_digest(info.digest.clone());
+        Ok(info)
     }
 
     /// List VTXOs with pagination support.
