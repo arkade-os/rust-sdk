@@ -70,10 +70,12 @@ use bitcoin::ScriptBuf;
 use bitcoin::SignedAmount;
 use bitcoin::Transaction;
 use bitcoin::Txid;
+use futures::Future;
 use futures::Stream;
 use futures::StreamExt;
 use futures::TryStreamExt;
 use std::collections::HashMap;
+use std::error::Error as StdError;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -137,19 +139,100 @@ impl tonic::service::Interceptor for HeaderInterceptor {
 type InterceptedChannel =
     tonic::codegen::InterceptedService<tonic::transport::Channel, HeaderInterceptor>;
 
+type InfoRefreshHook =
+    Arc<dyn Fn(Info) -> Result<(), Box<dyn StdError + Send + Sync + 'static>> + Send + Sync>;
+
+#[derive(Clone, Default)]
+struct SharedState {
+    headers: HeaderState,
+    info_refresh_hook: Arc<RwLock<Option<InfoRefreshHook>>>,
+}
+
+impl SharedState {
+    fn set_info_refresh_hook(&self, hook: InfoRefreshHook) {
+        match self.info_refresh_hook.write() {
+            Ok(mut guard) => *guard = Some(hook),
+            Err(poisoned) => {
+                log::warn!("info refresh hook lock poisoned while updating; recovering");
+                *poisoned.into_inner() = Some(hook);
+            }
+        }
+    }
+
+    /// Runs one RPC operation with digest-mismatch handling.
+    ///
+    /// If the server rejects the operation because our cached `/info` digest is stale,
+    /// this fetches fresh `/info` through the supplied Ark client, runs the refresh hook,
+    /// commits the new digest header, and returns `ServerInfoChanged` for the original
+    /// failure. The original operation is never retried automatically.
+    async fn guarded<T>(
+        &self,
+        info_client: ArkServiceClient<InterceptedChannel>,
+        op: impl Future<Output = Result<T, Error>>,
+    ) -> Result<T, Error> {
+        match op.await {
+            Ok(value) => Ok(value),
+            Err(err) if err.is_digest_mismatch() => {
+                let original = err;
+                let info = self.fetch_info_unguarded(info_client).await?;
+                let digest = info.digest.clone();
+
+                if let Some(hook) = self.info_refresh_hook() {
+                    hook(info).map_err(Error::conversion)?;
+                }
+
+                self.headers.set_digest(digest);
+                Err(Error::server_info_changed(original))
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    fn info_refresh_hook(&self) -> Option<InfoRefreshHook> {
+        match self.info_refresh_hook.read() {
+            Ok(hook) => hook.clone(),
+            Err(poisoned) => {
+                log::warn!("info refresh hook lock poisoned while reading; recovering");
+                poisoned.into_inner().clone()
+            }
+        }
+    }
+
+    async fn get_info_unguarded(
+        &self,
+        client: ArkServiceClient<InterceptedChannel>,
+    ) -> Result<Info, Error> {
+        let info = self.fetch_info_unguarded(client).await?;
+        self.headers.set_digest(info.digest.clone());
+        Ok(info)
+    }
+
+    async fn fetch_info_unguarded(
+        &self,
+        mut client: ArkServiceClient<InterceptedChannel>,
+    ) -> Result<Info, Error> {
+        let response = client
+            .get_info(GetInfoRequest {})
+            .await
+            .map_err(Error::request)?;
+
+        response.into_inner().try_into()
+    }
+}
+
 #[derive(Clone)]
 pub struct Client {
     url: String,
-    ark_client: Option<ArkServiceClient<InterceptedChannel>>,
-    indexer_client: Option<IndexerServiceClient<InterceptedChannel>>,
-    header_state: HeaderState,
+    ark: Option<guarded::Ark>,
+    indexer: Option<guarded::Indexer>,
+    shared: SharedState,
 }
 
 impl fmt::Debug for Client {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Client")
             .field("url", &self.url)
-            .field("connected", &self.ark_client.is_some())
+            .field("connected", &self.ark.is_some())
             .finish()
     }
 }
@@ -158,10 +241,20 @@ impl Client {
     pub fn new(url: String) -> Self {
         Self {
             url,
-            ark_client: None,
-            indexer_client: None,
-            header_state: HeaderState::default(),
+            ark: None,
+            indexer: None,
+            shared: SharedState::default(),
         }
+    }
+
+    pub fn set_info_refresh_hook(
+        &mut self,
+        hook: impl Fn(Info) -> Result<(), Box<dyn StdError + Send + Sync + 'static>>
+            + Send
+            + Sync
+            + 'static,
+    ) {
+        self.shared.set_info_refresh_hook(Arc::new(hook));
     }
 
     pub async fn connect(&mut self) -> Result<(), Error> {
@@ -181,28 +274,26 @@ impl Client {
         let channel = endpoint.connect().await.map_err(Error::connect)?;
 
         let interceptor = HeaderInterceptor {
-            state: self.header_state.clone(),
+            state: self.shared.headers.clone(),
         };
         let ark_service_client =
             ArkServiceClient::with_interceptor(channel.clone(), interceptor.clone());
         let indexer_client = IndexerServiceClient::with_interceptor(channel, interceptor);
 
-        self.ark_client = Some(ark_service_client);
-        self.indexer_client = Some(indexer_client);
+        self.ark = Some(guarded::Ark::new(
+            ark_service_client.clone(),
+            self.shared.clone(),
+        ));
+        self.indexer = Some(guarded::Indexer::new(
+            indexer_client,
+            ark_service_client,
+            self.shared.clone(),
+        ));
         Ok(())
     }
 
-    pub async fn get_info(&mut self) -> Result<Info, Error> {
-        let mut client = self.ark_client()?;
-
-        let response = client
-            .get_info(GetInfoRequest {})
-            .await
-            .map_err(Error::request)?;
-
-        let info: Info = response.into_inner().try_into()?;
-        self.header_state.set_digest(info.digest.clone());
-        Ok(info)
+    pub async fn get_info(&self) -> Result<Info, Error> {
+        self.ark()?.get_info().await
     }
 
     /// List VTXOs with pagination support.
@@ -215,12 +306,14 @@ impl Client {
             });
         }
 
-        let mut client = self.indexer_client()?;
-
-        let response = client
-            .get_vtxos(generated::ark::v1::GetVtxosRequest::from(request))
-            .await
-            .map_err(Error::request)?;
+        let response = self
+            .indexer()?
+            .request(move |mut client| async move {
+                client
+                    .get_vtxos(generated::ark::v1::GetVtxosRequest::from(request))
+                    .await
+            })
+            .await?;
 
         let inner = response.into_inner();
 
@@ -240,17 +333,15 @@ impl Client {
     }
 
     pub async fn register_intent(&self, intent: ark_core::intent::Intent) -> Result<String, Error> {
-        let mut client = self.ark_client()?;
-
         let intent = intent.try_into()?;
         let request = RegisterIntentRequest {
             intent: Some(intent),
         };
 
-        let response = client
-            .register_intent(request)
-            .await
-            .map_err(Error::request)?;
+        let response = self
+            .ark()?
+            .request(move |mut client| async move { client.register_intent(request).await })
+            .await?;
 
         let intent_id = response.into_inner().intent_id;
 
@@ -262,8 +353,6 @@ impl Client {
         ark_tx: Psbt,
         checkpoint_txs: Vec<Psbt>,
     ) -> Result<SubmitOffchainTxResponse, Error> {
-        let mut client = self.ark_client()?;
-
         let base64 = base64::engine::GeneralPurpose::new(
             &base64::alphabet::STANDARD,
             base64::engine::GeneralPurposeConfig::new(),
@@ -276,13 +365,17 @@ impl Client {
             .map(|tx| base64.encode(tx.serialize()))
             .collect();
 
-        let res = client
-            .submit_tx(generated::ark::v1::SubmitTxRequest {
-                signed_ark_tx: ark_tx,
-                checkpoint_txs,
+        let res = self
+            .ark()?
+            .request(move |mut client| async move {
+                client
+                    .submit_tx(generated::ark::v1::SubmitTxRequest {
+                        signed_ark_tx: ark_tx,
+                        checkpoint_txs,
+                    })
+                    .await
             })
-            .await
-            .map_err(Error::request)?;
+            .await?;
 
         let res = res.into_inner();
 
@@ -312,8 +405,6 @@ impl Client {
         txid: Txid,
         checkpoint_txs: Vec<Psbt>,
     ) -> Result<FinalizeOffchainTxResponse, Error> {
-        let mut client = self.ark_client()?;
-
         let base64 = base64::engine::GeneralPurpose::new(
             &base64::alphabet::STANDARD,
             base64::engine::GeneralPurposeConfig::new(),
@@ -324,13 +415,16 @@ impl Client {
             .map(|tx| base64.encode(tx.serialize()))
             .collect();
 
-        client
-            .finalize_tx(generated::ark::v1::FinalizeTxRequest {
-                ark_txid: txid.to_string(),
-                final_checkpoint_txs: checkpoint_txs,
+        self.ark()?
+            .request(move |mut client| async move {
+                client
+                    .finalize_tx(generated::ark::v1::FinalizeTxRequest {
+                        ark_txid: txid.to_string(),
+                        final_checkpoint_txs: checkpoint_txs,
+                    })
+                    .await
             })
-            .await
-            .map_err(Error::request)?;
+            .await?;
 
         Ok(FinalizeOffchainTxResponse {})
     }
@@ -339,18 +433,20 @@ impl Client {
         &self,
         intent: ark_core::intent::Intent,
     ) -> Result<Vec<ark_core::server::PendingTx>, Error> {
-        let mut client = self.ark_client()?;
-
         let intent: Intent = intent.try_into()?;
 
-        let res = client
-            .get_pending_tx(generated::ark::v1::GetPendingTxRequest {
-                identifier: Some(
-                    generated::ark::v1::get_pending_tx_request::Identifier::Intent(intent),
-                ),
+        let res = self
+            .ark()?
+            .request(move |mut client| async move {
+                client
+                    .get_pending_tx(generated::ark::v1::GetPendingTxRequest {
+                        identifier: Some(
+                            generated::ark::v1::get_pending_tx_request::Identifier::Intent(intent),
+                        ),
+                    })
+                    .await
             })
-            .await
-            .map_err(Error::request)?;
+            .await?;
 
         let inner = res.into_inner();
         let base64 = base64::engine::GeneralPurpose::new(
@@ -386,12 +482,13 @@ impl Client {
     }
 
     pub async fn confirm_registration(&self, intent_id: String) -> Result<(), Error> {
-        let mut client = self.ark_client()?;
-
-        client
-            .confirm_registration(ConfirmRegistrationRequest { intent_id })
-            .await
-            .map_err(Error::request)?;
+        self.ark()?
+            .request(move |mut client| async move {
+                client
+                    .confirm_registration(ConfirmRegistrationRequest { intent_id })
+                    .await
+            })
+            .await?;
 
         Ok(())
     }
@@ -402,16 +499,17 @@ impl Client {
         cosigner_pubkey: PublicKey,
         pub_nonce_tree: NoncePks,
     ) -> Result<(), Error> {
-        let mut client = self.ark_client()?;
-
-        client
-            .submit_tree_nonces(SubmitTreeNoncesRequest {
-                batch_id: batch_id.to_string(),
-                pubkey: cosigner_pubkey.to_string(),
-                tree_nonces: pub_nonce_tree.encode(),
+        self.ark()?
+            .request(move |mut client| async move {
+                client
+                    .submit_tree_nonces(SubmitTreeNoncesRequest {
+                        batch_id: batch_id.to_string(),
+                        pubkey: cosigner_pubkey.to_string(),
+                        tree_nonces: pub_nonce_tree.encode(),
+                    })
+                    .await
             })
-            .await
-            .map_err(Error::request)?;
+            .await?;
 
         Ok(())
     }
@@ -422,16 +520,17 @@ impl Client {
         cosigner_pk: PublicKey,
         partial_sig_tree: PartialSigTree,
     ) -> Result<(), Error> {
-        let mut client = self.ark_client()?;
-
-        client
-            .submit_tree_signatures(SubmitTreeSignaturesRequest {
-                batch_id: batch_id.to_string(),
-                pubkey: cosigner_pk.to_string(),
-                tree_signatures: partial_sig_tree.encode(),
+        self.ark()?
+            .request(move |mut client| async move {
+                client
+                    .submit_tree_signatures(SubmitTreeSignaturesRequest {
+                        batch_id: batch_id.to_string(),
+                        pubkey: cosigner_pk.to_string(),
+                        tree_signatures: partial_sig_tree.encode(),
+                    })
+                    .await
             })
-            .await
-            .map_err(Error::request)?;
+            .await?;
 
         Ok(())
     }
@@ -441,8 +540,6 @@ impl Client {
         signed_forfeit_txs: Vec<Psbt>,
         signed_commitment_tx: Option<Psbt>,
     ) -> Result<(), Error> {
-        let mut client = self.ark_client()?;
-
         let base64 = base64::engine::GeneralPurpose::new(
             &base64::alphabet::STANDARD,
             base64::engine::GeneralPurposeConfig::new(),
@@ -452,16 +549,19 @@ impl Client {
             .map(|tx| base64.encode(tx.serialize()))
             .unwrap_or_default();
 
-        client
-            .submit_signed_forfeit_txs(SubmitSignedForfeitTxsRequest {
-                signed_forfeit_txs: signed_forfeit_txs
-                    .iter()
-                    .map(|psbt| base64.encode(psbt.serialize()))
-                    .collect(),
-                signed_commitment_tx,
+        self.ark()?
+            .request(move |mut client| async move {
+                client
+                    .submit_signed_forfeit_txs(SubmitSignedForfeitTxsRequest {
+                        signed_forfeit_txs: signed_forfeit_txs
+                            .iter()
+                            .map(|psbt| base64.encode(psbt.serialize()))
+                            .collect(),
+                        signed_commitment_tx,
+                    })
+                    .await
             })
-            .await
-            .map_err(Error::request)?;
+            .await?;
 
         Ok(())
     }
@@ -470,12 +570,14 @@ impl Client {
         &self,
         topics: Vec<String>,
     ) -> Result<impl Stream<Item = Result<StreamEvent, Error>> + Unpin, Error> {
-        let mut client = self.ark_client()?;
-
-        let response = client
-            .get_event_stream(GetEventStreamRequest { topics })
-            .await
-            .map_err(Error::request)?;
+        let response = self
+            .ark()?
+            .request(move |mut client| async move {
+                client
+                    .get_event_stream(GetEventStreamRequest { topics })
+                    .await
+            })
+            .await?;
         let mut stream = response.into_inner();
 
         let stream = stream! {
@@ -505,12 +607,14 @@ impl Client {
     pub async fn get_tx_stream(
         &self,
     ) -> Result<impl Stream<Item = Result<StreamTransactionData, Error>> + Unpin, Error> {
-        let mut client = self.ark_client()?;
-
-        let response = client
-            .get_transactions_stream(GetTransactionsStreamRequest {})
-            .await
-            .map_err(Error::request)?;
+        let response = self
+            .ark()?
+            .request(|mut client| async move {
+                client
+                    .get_transactions_stream(GetTransactionsStreamRequest {})
+                    .await
+            })
+            .await?;
 
         let mut stream = response.into_inner();
 
@@ -543,18 +647,22 @@ impl Client {
         outpoint: Option<OutPoint>,
         size_and_index: Option<(i32, i32)>,
     ) -> Result<VtxoChainResponse, Error> {
-        let mut client = self.indexer_client()?;
-        let response = client
-            .get_vtxo_chain(generated::ark::v1::GetVtxoChainRequest {
-                outpoint: outpoint.map(|o| generated::ark::v1::IndexerOutpoint {
-                    txid: o.txid.to_string(),
-                    vout: o.vout,
-                }),
-                page: size_and_index
-                    .map(|(size, index)| generated::ark::v1::IndexerPageRequest { size, index }),
+        let response = self
+            .indexer()?
+            .request(move |mut client| async move {
+                client
+                    .get_vtxo_chain(generated::ark::v1::GetVtxoChainRequest {
+                        outpoint: outpoint.map(|o| generated::ark::v1::IndexerOutpoint {
+                            txid: o.txid.to_string(),
+                            vout: o.vout,
+                        }),
+                        page: size_and_index.map(|(size, index)| {
+                            generated::ark::v1::IndexerPageRequest { size, index }
+                        }),
+                    })
+                    .await
             })
-            .await
-            .map_err(Error::request)?;
+            .await?;
         let response = response.into_inner();
         let result = response.try_into()?;
         Ok(result)
@@ -565,15 +673,19 @@ impl Client {
         txids: Vec<String>,
         size_and_index: Option<(i32, i32)>,
     ) -> Result<VirtualTxsResponse, Error> {
-        let mut client = self.indexer_client()?;
-        let response = client
-            .get_virtual_txs(generated::ark::v1::GetVirtualTxsRequest {
-                txids,
-                page: size_and_index
-                    .map(|(size, index)| generated::ark::v1::IndexerPageRequest { size, index }),
+        let response = self
+            .indexer()?
+            .request(move |mut client| async move {
+                client
+                    .get_virtual_txs(generated::ark::v1::GetVirtualTxsRequest {
+                        txids,
+                        page: size_and_index.map(|(size, index)| {
+                            generated::ark::v1::IndexerPageRequest { size, index }
+                        }),
+                    })
+                    .await
             })
-            .await
-            .map_err(Error::request)?;
+            .await?;
         let response = response.into_inner();
         let result = response.try_into()?;
         Ok(result)
@@ -593,7 +705,6 @@ impl Client {
         scripts: Vec<ArkAddress>,
         subscription_id: Option<String>,
     ) -> Result<String, Error> {
-        let mut client = self.indexer_client()?;
         let scripts = scripts
             .iter()
             .map(|address| address.to_p2tr_script_pubkey().to_hex_string())
@@ -602,13 +713,17 @@ impl Client {
         // For new subscription we expect empty string ("") here
         let subscription_id = subscription_id.unwrap_or_default();
 
-        let response = client
-            .subscribe_for_scripts(SubscribeForScriptsRequest {
-                scripts,
-                subscription_id,
+        let response = self
+            .indexer()?
+            .request(move |mut client| async move {
+                client
+                    .subscribe_for_scripts(SubscribeForScriptsRequest {
+                        scripts,
+                        subscription_id,
+                    })
+                    .await
             })
-            .await
-            .map_err(Error::request)?;
+            .await?;
 
         let response = response.into_inner();
 
@@ -621,19 +736,21 @@ impl Client {
         scripts: Vec<ArkAddress>,
         subscription_id: String,
     ) -> Result<(), Error> {
-        let mut client = self.indexer_client()?;
         let scripts = scripts
             .iter()
             .map(|address| address.to_p2tr_script_pubkey().to_hex_string())
             .collect::<Vec<_>>();
 
-        let _ = client
-            .unsubscribe_for_scripts(UnsubscribeForScriptsRequest {
-                subscription_id,
-                scripts,
+        self.indexer()?
+            .request(move |mut client| async move {
+                client
+                    .unsubscribe_for_scripts(UnsubscribeForScriptsRequest {
+                        subscription_id,
+                        scripts,
+                    })
+                    .await
             })
-            .await
-            .map_err(Error::request)?;
+            .await?;
 
         Ok(())
     }
@@ -643,12 +760,14 @@ impl Client {
         &self,
         subscription_id: String,
     ) -> Result<impl Stream<Item = Result<SubscriptionResponse, Error>> + Unpin, Error> {
-        let mut client = self.indexer_client()?;
-
-        let response = client
-            .get_subscription(GetSubscriptionRequest { subscription_id })
-            .await
-            .map_err(Error::request)?;
+        let response = self
+            .indexer()?
+            .request(move |mut client| async move {
+                client
+                    .get_subscription(GetSubscriptionRequest { subscription_id })
+                    .await
+            })
+            .await?;
 
         let mut stream = response.into_inner();
 
@@ -682,29 +801,33 @@ impl Client {
         &self,
         intent: ark_core::intent::Intent,
     ) -> Result<SignedAmount, Error> {
-        let mut client = self.ark_client()?;
-
         let intent = intent.try_into()?;
-        let response = client
-            .estimate_intent_fee(EstimateIntentFeeRequest {
-                intent: Some(intent),
+        let response = self
+            .ark()?
+            .request(move |mut client| async move {
+                client
+                    .estimate_intent_fee(EstimateIntentFeeRequest {
+                        intent: Some(intent),
+                    })
+                    .await
             })
-            .await
-            .map_err(Error::request)?;
+            .await?;
         let response = response.into_inner();
 
         Ok(SignedAmount::from_sat(response.fee))
     }
 
     pub async fn get_asset(&self, asset_id: AssetId) -> Result<AssetInfo, Error> {
-        let mut client = self.indexer_client()?;
-
-        let response = client
-            .get_asset(generated::ark::v1::GetAssetRequest {
-                asset_id: asset_id.to_string(),
+        let response = self
+            .indexer()?
+            .request(move |mut client| async move {
+                client
+                    .get_asset(generated::ark::v1::GetAssetRequest {
+                        asset_id: asset_id.to_string(),
+                    })
+                    .await
             })
-            .await
-            .map_err(Error::request)?;
+            .await?;
 
         let inner = response.into_inner();
 
@@ -725,12 +848,12 @@ impl Client {
         })
     }
 
-    fn ark_client(&self) -> Result<ArkServiceClient<InterceptedChannel>, Error> {
-        // Cloning an `ArkServiceClient<Channel>` is cheap.
-        self.ark_client.clone().ok_or(Error::not_connected())
+    fn ark(&self) -> Result<guarded::Ark, Error> {
+        self.ark.clone().ok_or(Error::not_connected())
     }
-    fn indexer_client(&self) -> Result<IndexerServiceClient<InterceptedChannel>, Error> {
-        self.indexer_client.clone().ok_or(Error::not_connected())
+
+    fn indexer(&self) -> Result<guarded::Indexer, Error> {
+        self.indexer.clone().ok_or(Error::not_connected())
     }
 }
 
@@ -1349,6 +1472,110 @@ impl From<GetVtxosRequest> for generated::ark::v1::GetVtxosRequest {
                 after: value.after().unwrap_or(0) as i64,
                 before: value.before().unwrap_or(0) as i64,
             },
+        }
+    }
+}
+
+mod guarded {
+    //! Guarded wrappers around the generated tonic clients.
+    //!
+    //! `Client` methods use these wrappers instead of storing or cloning generated clients
+    //! directly. `request` is the only normal RPC escape hatch: it clones the generated
+    //! client, runs the closure's future, and routes the result through `SharedState` so a
+    //! digest mismatch refreshes `/info` and updates the shared digest/header state.
+    //!
+    //! Each `request` closure must perform exactly one non-`GetInfo` gRPC call and return
+    //! that call's `tonic::Status` unchanged. Do not batch multiple RPCs, call `GetInfo`,
+    //! swallow errors, or synthesize fallback successes inside the closure. Guarding is
+    //! scoped to a single failed operation, and digest-mismatch refresh intentionally does
+    //! not retry that operation.
+
+    use super::InterceptedChannel;
+    use super::SharedState;
+    use crate::generated::ark::v1::ark_service_client::ArkServiceClient;
+    use crate::generated::ark::v1::indexer_service_client::IndexerServiceClient;
+    use crate::Error;
+    use ark_core::server::Info;
+    use futures::Future;
+
+    #[derive(Clone)]
+    pub(super) struct Ark {
+        raw: ArkServiceClient<InterceptedChannel>,
+        shared: SharedState,
+    }
+
+    impl Ark {
+        pub(super) fn new(raw: ArkServiceClient<InterceptedChannel>, shared: SharedState) -> Self {
+            Self { raw, shared }
+        }
+
+        /// Runs one Ark service RPC through the digest guard.
+        ///
+        /// The closure must perform exactly one non-`GetInfo` gRPC call and return that
+        /// call's `tonic::Status` unchanged. Do not batch multiple RPCs, call `GetInfo`,
+        /// swallow errors, or synthesize fallback successes inside the closure. A digest
+        /// mismatch refreshes `/info` and returns `ServerInfoChanged`; the failed RPC is
+        /// not retried automatically.
+        pub(super) async fn request<T, F, Fut>(&self, f: F) -> Result<T, Error>
+        where
+            F: FnOnce(ArkServiceClient<InterceptedChannel>) -> Fut,
+            Fut: Future<Output = Result<T, tonic::Status>>,
+        {
+            let client = self.raw.clone();
+            let info_client = self.raw.clone();
+
+            self.shared
+                .guarded(info_client, async move {
+                    f(client).await.map_err(Error::request)
+                })
+                .await
+        }
+
+        pub(super) async fn get_info(&self) -> Result<Info, Error> {
+            self.shared.get_info_unguarded(self.raw.clone()).await
+        }
+    }
+
+    #[derive(Clone)]
+    pub(super) struct Indexer {
+        raw: IndexerServiceClient<InterceptedChannel>,
+        info_client: ArkServiceClient<InterceptedChannel>,
+        shared: SharedState,
+    }
+
+    impl Indexer {
+        pub(super) fn new(
+            raw: IndexerServiceClient<InterceptedChannel>,
+            info_client: ArkServiceClient<InterceptedChannel>,
+            shared: SharedState,
+        ) -> Self {
+            Self {
+                raw,
+                info_client,
+                shared,
+            }
+        }
+
+        /// Runs one Indexer service RPC through the digest guard.
+        ///
+        /// The closure must perform exactly one non-`GetInfo` gRPC call and return that
+        /// call's `tonic::Status` unchanged. Do not batch multiple RPCs, call `GetInfo`,
+        /// swallow errors, or synthesize fallback successes inside the closure. A digest
+        /// mismatch refreshes `/info` and returns `ServerInfoChanged`; the failed RPC is
+        /// not retried automatically.
+        pub(super) async fn request<T, F, Fut>(&self, f: F) -> Result<T, Error>
+        where
+            F: FnOnce(IndexerServiceClient<InterceptedChannel>) -> Fut,
+            Fut: Future<Output = Result<T, tonic::Status>>,
+        {
+            let client = self.raw.clone();
+            let info_client = self.info_client.clone();
+
+            self.shared
+                .guarded(info_client, async move {
+                    f(client).await.map_err(Error::request)
+                })
+                .await
         }
     }
 }

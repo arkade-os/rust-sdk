@@ -621,7 +621,15 @@ async fn delegate_vtxos<B, W, S, K>(
         .cloned()
         .collect();
 
-    let groups = group_by_expiry_day(&enriched, script_map, client.server_info.dust);
+    let server_info = match client.server_info() {
+        Ok(server_info) => server_info,
+        Err(e) => {
+            tracing::error!("Failed to read server info for delegation: {e}");
+            return;
+        }
+    };
+
+    let groups = group_by_expiry_day(&enriched, script_map, server_info.dust);
     if groups.is_empty() {
         tracing::debug!("No delegate-eligible VTXOs after enrichment/grouping; skipping");
         return;
@@ -647,7 +655,7 @@ async fn delegate_vtxos<B, W, S, K>(
     let mut handles = Vec::new();
 
     for (_day, group_vtxos) in groups {
-        let valid_at = calculate_valid_at(&group_vtxos, client.server_info.dust);
+        let valid_at = calculate_valid_at(&group_vtxos, server_info.dust);
 
         let mut vtxo_inputs = Vec::new();
         let mut total_amount = Amount::ZERO;
@@ -693,7 +701,7 @@ async fn delegate_vtxos<B, W, S, K>(
         }
         let net_amount = total_amount - fee;
 
-        if net_amount < client.server_info.dust {
+        if net_amount < server_info.dust {
             tracing::warn!(%net_amount, "Net amount after fee is below dust, skipping");
             continue;
         }
@@ -710,8 +718,8 @@ async fn delegate_vtxos<B, W, S, K>(
             script_pubkey: dest_script.clone(),
         }));
 
-        let server_info_forfeit_addr = client.server_info.forfeit_address.clone();
-        let dust = client.server_info.dust;
+        let server_info_forfeit_addr = server_info.forfeit_address.clone();
+        let dust = server_info.dust;
         let ds = Arc::clone(&delegator_state);
 
         let delegator = delegator.clone();
