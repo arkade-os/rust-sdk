@@ -57,7 +57,13 @@ pub async fn e2e_finalize_pending_tx() {
         })
         .collect::<Vec<_>>();
 
-    let selected = select_vtxos(spendable, send_amount, alice.server_info.dust, true).unwrap();
+    let selected = select_vtxos(
+        spendable,
+        send_amount,
+        alice.server_info().unwrap().dust,
+        true,
+    )
+    .unwrap();
 
     let vtxo_inputs: Vec<VtxoInput> = selected
         .into_iter()

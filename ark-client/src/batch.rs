@@ -320,14 +320,10 @@ where
         let (boarding_inputs, vtxo_inputs, total_amount) =
             self.fetch_commitment_transaction_inputs().await?;
 
-        let onchain_fee = self
-            .fee_estimator
-            .eval_onchain_output(ark_fees::Output {
-                amount: to_amount.to_sat(),
-                script: to_address.script_pubkey().to_string(),
-            })
-            .map_err(Error::ad_hoc)?;
-        let onchain_fee = Amount::from_sat(onchain_fee.to_satoshis());
+        let onchain_fee = self.eval_onchain_output_fee(ark_fees::Output {
+            amount: to_amount.to_sat(),
+            script: to_address.script_pubkey().to_string(),
+        })?;
 
         // Fee comes out of change, not the send amount.
         let change_amount = total_amount
@@ -433,14 +429,10 @@ where
             .iter()
             .fold(Amount::ZERO, |acc, vtxo| acc + vtxo.amount());
 
-        let onchain_fee = self
-            .fee_estimator
-            .eval_onchain_output(ark_fees::Output {
-                amount: to_amount.to_sat(),
-                script: to_address.script_pubkey().to_string(),
-            })
-            .map_err(Error::ad_hoc)?;
-        let onchain_fee = Amount::from_sat(onchain_fee.to_satoshis());
+        let onchain_fee = self.eval_onchain_output_fee(ark_fees::Output {
+            amount: to_amount.to_sat(),
+            script: to_address.script_pubkey().to_string(),
+        })?;
 
         // Fee comes out of change, not the send amount.
         let change_amount = total_input_amount
@@ -523,7 +515,7 @@ where
             return Err(Error::ad_hoc("no inputs to settle via delegate"));
         }
 
-        let server_info = &self.server_info;
+        let server_info = &self.server_info()?;
 
         let mut outputs = vec![intent::Output::Offchain(TxOut {
             value: total_amount,
@@ -621,7 +613,7 @@ where
         tracing::debug!(intent_id, "Registered delegated intent");
 
         let network_client = self.network_client();
-        let server_info = &self.server_info;
+        let server_info = &self.server_info()?;
 
         #[derive(Debug, PartialEq, Eq)]
         enum Step {
@@ -1184,7 +1176,7 @@ where
                 .collect::<Vec<_>>()
         };
 
-        let dust = self.server_info.dust;
+        let dust = self.server_info()?.dust;
 
         let mut outputs = vec![];
 
@@ -1193,7 +1185,7 @@ where
                 to_address,
                 to_amount,
             } => {
-                if to_amount < self.server_info.dust {
+                if to_amount < dust {
                     return Err(Error::ad_hoc(format!(
                         "cannot settle into sub-dust VTXO: {to_amount} < {dust}"
                     )));
@@ -1374,7 +1366,7 @@ where
             .map(|i| i.outpoint())
             .collect::<Vec<_>>();
 
-        let server_info = &self.server_info;
+        let server_info = &self.server_info()?;
 
         let own_cosigner_kps = [cosigner_keypair];
         let own_cosigner_pks = own_cosigner_kps

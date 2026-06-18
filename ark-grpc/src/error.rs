@@ -20,6 +20,7 @@ enum Kind {
     Conversion,
     EventStreamDisconnect,
     EventStream,
+    ServerInfoChanged,
 }
 
 impl Error {
@@ -58,6 +59,14 @@ impl Error {
         Error::new(Kind::EventStream).with(source)
     }
 
+    pub(crate) fn server_info_changed(source: impl Into<Source>) -> Self {
+        Error::new(Kind::ServerInfoChanged).with(source)
+    }
+
+    pub fn is_server_info_changed(&self) -> bool {
+        matches!(self.inner.kind, Kind::ServerInfoChanged)
+    }
+
     /// Returns `true` if the server rejected the request because the SDK
     /// version is too old.
     pub fn is_version_mismatch(&self) -> bool {
@@ -65,6 +74,19 @@ impl Error {
             if let Some(status) = source.downcast_ref::<tonic::Status>() {
                 return status.code() == tonic::Code::FailedPrecondition
                     && status.message().contains("BUILD_VERSION_TOO_OLD");
+            }
+        }
+        false
+    }
+
+    /// Returns `true` if the server rejected the request because the cached
+    /// `/info` digest is stale.
+    pub(crate) fn is_digest_mismatch(&self) -> bool {
+        if let Some(source) = &self.inner.source {
+            if let Some(status) = source.downcast_ref::<tonic::Status>() {
+                return status.code() == tonic::Code::FailedPrecondition
+                    && (status.message().contains("DIGEST_MISMATCH")
+                        || status.message().contains("invalid digest header"));
             }
         }
         false
@@ -78,6 +100,7 @@ impl Error {
             Kind::Conversion => "failed to convert between types",
             Kind::EventStreamDisconnect => "got disconnected from event stream",
             Kind::EventStream => "error via event stream",
+            Kind::ServerInfoChanged => "Ark server info changed while processing the request. Server info was refreshed, but the failed operation was not retried. Rebuild the request and retry if safe",
         }
     }
 }
@@ -151,5 +174,26 @@ mod tests {
     fn is_version_mismatch_false_when_no_source() {
         let err = Error::not_connected();
         assert!(!err.is_version_mismatch());
+    }
+
+    #[test]
+    fn is_digest_mismatch_true_for_matching_status() {
+        let status = tonic::Status::failed_precondition("invalid digest header");
+        let err = Error::request(status);
+        assert!(err.is_digest_mismatch());
+    }
+
+    #[test]
+    fn is_digest_mismatch_true_for_error_code_in_message() {
+        let status = tonic::Status::failed_precondition("DIGEST_MISMATCH");
+        let err = Error::request(status);
+        assert!(err.is_digest_mismatch());
+    }
+
+    #[test]
+    fn is_digest_mismatch_false_for_other_failed_precondition() {
+        let status = tonic::Status::failed_precondition("something else");
+        let err = Error::request(status);
+        assert!(!err.is_digest_mismatch());
     }
 }

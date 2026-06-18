@@ -26,7 +26,8 @@ pub async fn send_onchain_boarding_output() {
     // To be able to spend a boarding output it needs to have been confirmed for at least
     // `boarding_exit_delay`.
     match alice
-        .server_info
+        .server_info()
+        .unwrap()
         .boarding_exit_delay
         .to_relative_lock_time()
         .expect("boarding exit delay should be relative")
