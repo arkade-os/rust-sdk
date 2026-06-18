@@ -59,6 +59,7 @@ mod send_vtxo;
 mod unilateral_exit;
 mod utils;
 
+pub use ark_core::server::DeprecatedSignerStatus;
 pub use asset::IssueAssetResult;
 pub use boltz::ChainSwapAmount;
 pub use boltz::ChainSwapData;
@@ -363,36 +364,8 @@ fn signer_holds_funds(
 /// [`DeprecatedSignerStatus::Migratable`] (with a positive `seconds_until_cutoff`); a passed cutoff
 /// is [`DeprecatedSignerStatus::Expired`].
 fn classify_deprecated_signer(cutoff_date: i64, now: i64) -> (DeprecatedSignerStatus, Option<i64>) {
-    if cutoff_date == 0 {
-        (DeprecatedSignerStatus::DueNow, None)
-    } else if cutoff_date > now {
-        (DeprecatedSignerStatus::Migratable, Some(cutoff_date - now))
-    } else {
-        (DeprecatedSignerStatus::Expired, None)
-    }
-}
-
-/// Machine-readable status of a single deprecated server signer the wallet holds funds under.
-///
-/// Derived at read time by [`Client::deprecated_signer_status`] from the advertised
-/// `cutoff_date` and the current time; never persisted. Mirrors ts-sdk's `SignerStatus`
-/// (the non-`CURRENT`/`UNKNOWN_SIGNER` variants) and stays consistent with
-/// [`server::Info::is_signer_past_cutoff_at`]: a `cutoff_date` of `0` is "rotate immediately"
-/// (still co-signable now) and is therefore NOT treated as past-cutoff.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeprecatedSignerStatus {
-    /// The signer is deprecated with a future cutoff (`cutoff_date > now`). The operator still
-    /// co-signs, so these outputs are cooperatively migratable (see
-    /// [`Client::migrate_deprecated_signer_vtxos`]).
-    Migratable,
-    /// The signer is deprecated with no cutoff advertised (`cutoff_date == 0`): rotate
-    /// immediately. The operator still co-signs now, so these outputs are still cooperatively
-    /// migratable, but clients should migrate without delay.
-    DueNow,
-    /// The signer's cutoff has passed (`cutoff_date != 0 && cutoff_date <= now`). The operator
-    /// will no longer co-sign the old key — these funds cannot migrate cooperatively and instead
-    /// drain to the active signer via the recover-on-sweep path once they expire.
-    Expired,
+    let status = DeprecatedSignerStatus::from_cutoff(cutoff_date, now);
+    (status, status.seconds_until_cutoff(cutoff_date, now))
 }
 
 /// Read-only, per-signer status of the deprecated server signers the wallet currently holds funds
