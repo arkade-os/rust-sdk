@@ -1121,6 +1121,8 @@ where
         let now = now_secs;
         let dust = server_info.dust;
 
+        // TODO: Should go in ark-core as a function?
+
         // Exclude VTXOs under a past-cutoff deprecated signer that still require a forfeit.
         // The operator won't co-sign the forfeit for the old key, which would brick the whole
         // batch intent. They wait until expiry (is_recoverable) before joining a batch.

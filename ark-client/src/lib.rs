@@ -93,6 +93,10 @@ pub const DEFAULT_GAP_LIMIT: u32 = 20;
 /// provide one. Identifies traffic originating from this SDK.
 pub const DEFAULT_BOLTZ_REFERRAL_ID: &str = "arkade-rs-SDK";
 
+// TODO: Below constants belong in ark-core.
+
+// TODO: Don't love mentioning other SDKs as a reason for adding things.
+
 /// Maximum number of inputs a single deprecated-signer migration leg will settle in one batch.
 ///
 /// A client-side safeguard mirroring ts-sdk's `MAX_VTXOS_PER_SETTLEMENT`: it bounds the input
@@ -115,6 +119,8 @@ pub const MAX_VTXOS_PER_SETTLEMENT: usize = 50;
 /// widen the candidate set without ever hitting; the candidate-delay helper therefore adds it on
 /// mainnet only (see [`Client::candidate_exit_delays`]).
 const MAINNET_LEGACY_UNILATERAL_EXIT_DELAY_SECS: u32 = 605_184;
+
+// TODO: Migration types/methods deserve own sub-module.
 
 /// A single VTXO or boarding output referenced in a [`DeprecatedSignerMigrationReport`].
 #[derive(Debug, Clone)]
@@ -747,6 +753,10 @@ pub trait Blockchain {
     ) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
+// TODO: Perhaps move to utils?
+
+// TODO: May want to move away from jiff dependency in most of these crates now?
+
 /// Current time as unix seconds. Uses `js_sys::Date` on wasm32, `std::time` elsewhere.
 fn unix_now() -> i64 {
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
@@ -1024,6 +1034,9 @@ where
             tracing::warn!(?error, "Failed during key discovery");
         };
 
+        // TODO: This is ugly. But I guess it's also correct. Not sure how to solve this
+        // differently.
+
         // Eagerly persist boarding rows for the current signer and every deprecated signer (each
         // crossed with the candidate exit delays). Without this, deprecated-signer boarding rows
         // exist only after an integrator calls `get_boarding_addresses()`, and the boarding leg of
@@ -1103,6 +1116,9 @@ where
             .map(|fee| Amount::from_sat(fee.to_satoshis()))
             .map_err(Error::ad_hoc)
     }
+
+    // TODO: Not sure if this should be part of the public API if is only ever used in a test. Do we
+    // need this? We could put it under the test-utils feature flag.
 
     /// Refresh cached `/info` data after the server reports that client state is stale.
     ///
@@ -1365,6 +1381,9 @@ where
         Ok(discovered_count)
     }
 
+    // TODO: No need for this a method, since self is not used. Could go in ark-core, together with
+    // the constant.
+
     /// Candidate exit-delay set for discovery/watch, given the current delay advertised for one
     /// axis (boarding or unilateral-exit).
     ///
@@ -1612,6 +1631,8 @@ where
             asset_balances,
         })
     }
+
+    // TODO: These new methods below should go in a new sub-module.
 
     /// Sweep VTXOs and boarding outputs minted under a *pre-cutoff* deprecated server signer to
     /// the current signer, then report what moved.
@@ -2494,6 +2515,8 @@ mod digest_guard_tests {
         );
     }
 }
+
+// TODO: Move to new sub-module.
 
 /// Unit coverage for the pure deprecated-signer-migration logic: the per-leg sizing pipeline
 /// ([`size_migration_leg`]), the signer classification ([`classify_deprecated_signer`]), and the

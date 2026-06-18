@@ -62,6 +62,8 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 const KEY_DISCOVERY_INTERVAL: Duration = Duration::from_secs(10);
 const KEY_DISCOVERY_GAP_LIMIT: u32 = 20;
 
+// TODO: Let's refrain from mentioning other SDKs as an explanation. That stuff can change.
+
 /// How often the background migration arm fires when healthy. The frequent cadence is safe
 /// because [`Client::migrate_deprecated_signer_vtxos`] short-circuits to a no-op
 /// `NothingMigratable` report when the server advertises no deprecated signers or the wallet holds

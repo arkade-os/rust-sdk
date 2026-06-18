@@ -1,3 +1,5 @@
+// TODO: Are we handling migration of these contracts too?
+
 use crate::batch::BatchOutputType;
 use crate::error::ErrorContext as _;
 use crate::swap_storage::SwapStorage;
@@ -4373,6 +4375,8 @@ struct ChainSwapSideDetails {
     #[serde(default)]
     bip21: Option<String>,
 }
+
+// TODO: Why can we get away with not considering the legacy exit delay for VHTLCs?
 
 /// Iterate `server_keys` in order, building a [`VhtlcScript`] for each one, and return the
 /// first whose address matches `expected_address`.

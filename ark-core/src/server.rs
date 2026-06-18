@@ -512,6 +512,9 @@ impl Info {
         )
     }
 
+    // TODO: Surprising behaviour with 0 meaning rotate immediately (which is not up to us,
+    // obviously). We should model this differently, perhaps with an enum and a different function
+    // name that doesn't just talk about cutoff.
     /// Returns `true` if `server_pk` is a deprecated signer whose cooperative-sign cutoff has
     /// already passed at `now_unix_secs`. A `cutoff_date` of `0` means "rotate immediately" —
     /// the operator still co-signs but clients should migrate without delay. It is therefore
