@@ -242,8 +242,17 @@ where
             .await
             .context("failed to get spendable VTXOs")?;
 
+        let now = crate::unix_now();
+        let server_info = self.server_info()?;
         let spendable = vtxo_list
             .spendable_offchain()
+            // Exclude VTXOs under a past-cutoff deprecated signer: operator won't co-sign.
+            .filter(|v| {
+                !script_pubkey_to_vtxo_map
+                    .get(&v.script)
+                    .map(|vtxo| server_info.is_signer_past_cutoff_at(vtxo.server_pk(), now))
+                    .unwrap_or(false)
+            })
             .map(|vtxo| VirtualTxOutPoint {
                 outpoint: vtxo.outpoint,
                 script_pubkey: vtxo.script.clone(),
@@ -253,7 +262,6 @@ where
             })
             .collect::<Vec<_>>();
 
-        let server_info = self.server_info()?;
         let mut selected_outpoints = HashSet::new();
         let mut selected = Vec::new();
         let mut asset_changes: HashMap<AssetId, u64> = HashMap::new();

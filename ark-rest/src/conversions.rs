@@ -117,11 +117,12 @@ impl TryFrom<crate::models::DeprecatedSigner> for ark_core::server::DeprecatedSi
             .parse::<PublicKey>()
             .map_err(|e| ConversionError(format!("Invalid pubkey '{pubkey_str}': {e}")))?;
 
-        let cutoff_date_str = value.cutoff_date.ok_or_else(|| {
-            ConversionError("Missing cutoff_date in deprecated signer".to_string())
-        })?;
-        let cutoff_date = i64::from_str(&cutoff_date_str)
-            .map_err(|e| ConversionError(format!("Could not parse cutoff_date: {e:#}")))?;
+        // A missing cutoffDate means "rotate immediately" (same as 0).
+        let cutoff_date = match value.cutoff_date {
+            Some(s) => i64::from_str(&s)
+                .map_err(|e| ConversionError(format!("Could not parse cutoff_date: {e:#}")))?,
+            None => 0,
+        };
 
         Ok(ark_core::server::DeprecatedSigner { pk, cutoff_date })
     }
@@ -592,5 +593,63 @@ impl TryFrom<GetSubscriptionResponse> for ark_core::server::SubscriptionResponse
                 "GetSubscriptionResponse must have either event or heartbeat".to_string(),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::models::DeprecatedSigner as ModelDeprecatedSigner;
+
+    fn model(pubkey: Option<&str>, cutoff_date: Option<&str>) -> ModelDeprecatedSigner {
+        ModelDeprecatedSigner {
+            pubkey: pubkey.map(str::to_string),
+            cutoff_date: cutoff_date.map(str::to_string),
+        }
+    }
+
+    const PK_A: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+    // ── DeprecatedSigner conversion ──────────────────────────────────────────
+
+    #[test]
+    fn deprecated_signer_parses_cutoff_date() {
+        let result = ark_core::server::DeprecatedSigner::try_from(model(Some(PK_A), Some("12345")));
+        let ds = result.expect("should succeed");
+        assert_eq!(ds.cutoff_date, 12345);
+        assert_eq!(ds.pk.to_string(), PK_A);
+    }
+
+    #[test]
+    fn deprecated_signer_missing_cutoff_defaults_to_zero() {
+        // A missing cutoffDate means "rotate immediately" (cutoff_date == 0).
+        let result = ark_core::server::DeprecatedSigner::try_from(model(Some(PK_A), None));
+        let ds = result.expect("should succeed");
+        assert_eq!(ds.cutoff_date, 0);
+    }
+
+    #[test]
+    fn deprecated_signer_missing_pubkey_returns_error() {
+        let result = ark_core::server::DeprecatedSigner::try_from(model(None, Some("100")));
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Missing pubkey"), "unexpected: {msg}");
+    }
+
+    #[test]
+    fn deprecated_signer_invalid_pubkey_returns_error() {
+        let result =
+            ark_core::server::DeprecatedSigner::try_from(model(Some("notahex"), Some("100")));
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Invalid pubkey"), "unexpected: {msg}");
+    }
+
+    #[test]
+    fn deprecated_signer_invalid_cutoff_date_returns_error() {
+        let result =
+            ark_core::server::DeprecatedSigner::try_from(model(Some(PK_A), Some("not-a-number")));
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("cutoff_date"), "unexpected: {msg}");
     }
 }

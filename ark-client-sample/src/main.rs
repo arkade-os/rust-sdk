@@ -760,8 +760,12 @@ async fn run_command<K: KeyProvider + 'static>(
                 );
             }
 
-            let _watcher = client.start_vtxo_watcher(delegator);
+            // Default config enables the background deprecated-signer migration arm
+            // (`migrate_deprecated_signers: true`) alongside delegation and self-renewal.
+            let watcher_config = ark_client::vtxo_watcher::VtxoWatcherConfig::default();
+            let _watcher = client.start_vtxo_watcher(delegator, watcher_config);
             tracing::info!(
+                migrate_deprecated_signers = watcher_config.migrate_deprecated_signers,
                 "Watcher running. Keep this process open and run other commands in parallel."
             );
 

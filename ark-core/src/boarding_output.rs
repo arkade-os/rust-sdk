@@ -81,6 +81,10 @@ impl BoardingOutput {
         self.owner
     }
 
+    pub fn server_pk(&self) -> XOnlyPublicKey {
+        self.server
+    }
+
     pub fn script_pubkey(&self) -> ScriptBuf {
         self.address.script_pubkey()
     }

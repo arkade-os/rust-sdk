@@ -330,6 +330,14 @@ impl Regtest {
         *guard = outpoint_block_height_offset;
     }
 
+    /// Rotate the arkd signing key. `cutoff` is passed verbatim to `--cutoff`:
+    /// use `"+86400"` for a future cutoff (regime 1, still cooperative) or
+    /// `"-60"` for a past cutoff (regime 2, operator won't co-sign).
+    #[allow(unused)]
+    pub fn rotate_signer(&self, cutoff: &str) {
+        self.run_regtest(&["rotate-signer", "--cutoff", cutoff]);
+    }
+
     // `mine` stays async (callers `.await` it) even though shelling out to the
     // regtest CLI is synchronous.
     #[allow(unused, clippy::unused_async)]
@@ -676,6 +684,9 @@ macro_rules! wait_until_balance {
     };
     (@check $balance:ident, recoverable, $target:expr) => {
         $balance.recoverable() == $target
+    };
+    (@check $balance:ident, pending_recovery, $target:expr) => {
+        $balance.pending_recovery() == $target
     };
 }
 

@@ -502,6 +502,29 @@ pub struct DeprecatedSigner {
     pub cutoff_date: i64,
 }
 
+impl Info {
+    /// Returns all known server signing keys: the current signer followed by all deprecated ones.
+    pub fn all_server_keys(&self) -> impl Iterator<Item = XOnlyPublicKey> + '_ {
+        std::iter::once(self.signer_pk.x_only_public_key().0).chain(
+            self.deprecated_signers
+                .iter()
+                .map(|ds| ds.pk.x_only_public_key().0),
+        )
+    }
+
+    /// Returns `true` if `server_pk` is a deprecated signer whose cooperative-sign cutoff has
+    /// already passed at `now_unix_secs`. A `cutoff_date` of `0` means "rotate immediately" —
+    /// the operator still co-signs but clients should migrate without delay. It is therefore
+    /// NOT treated as past-cutoff here; use `migrate_deprecated_signer_vtxos` to handle it.
+    pub fn is_signer_past_cutoff_at(&self, server_pk: XOnlyPublicKey, now_unix_secs: i64) -> bool {
+        self.deprecated_signers.iter().any(|ds| {
+            ds.cutoff_date != 0
+                && ds.cutoff_date <= now_unix_secs
+                && ds.pk.x_only_public_key().0 == server_pk
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct StreamStartedEvent {
     pub id: String,
@@ -793,4 +816,138 @@ pub fn parse_fee_amount(amount_str: Option<String>) -> Amount {
         })
         .map(Amount::from_sat)
         .unwrap_or(Amount::ZERO)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin::address::NetworkUnchecked;
+    use bitcoin::secp256k1::PublicKey;
+    use std::collections::HashMap;
+    use std::str::FromStr;
+
+    // Well-known compressed secp256k1 public keys used as test fixtures.
+    const PK_A: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    const PK_B: &str = "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
+    const PK_C: &str = "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9";
+    const PK_UNRELATED: &str = "030192e796452d6df9697c280542e1560557bcf79a347d925895043136225c7cb4";
+
+    fn pk(hex: &str) -> PublicKey {
+        PublicKey::from_str(hex).unwrap()
+    }
+
+    fn xonly(hex: &str) -> XOnlyPublicKey {
+        pk(hex).x_only_public_key().0
+    }
+
+    fn make_info(current_hex: &str, deprecated: Vec<(&str, i64)>) -> Info {
+        let dummy_address: bitcoin::Address<NetworkUnchecked> =
+            "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"
+                .parse()
+                .unwrap();
+        Info {
+            version: "1".into(),
+            signer_pk: pk(current_hex),
+            forfeit_pk: pk(current_hex),
+            forfeit_address: dummy_address.assume_checked(),
+            checkpoint_tapscript: ScriptBuf::new(),
+            network: bitcoin::Network::Testnet,
+            session_duration: 0,
+            unilateral_exit_delay: bitcoin::Sequence::ZERO,
+            boarding_exit_delay: bitcoin::Sequence::ZERO,
+            utxo_min_amount: None,
+            utxo_max_amount: None,
+            vtxo_min_amount: None,
+            vtxo_max_amount: None,
+            dust: Amount::ZERO,
+            fees: None,
+            scheduled_session: None,
+            deprecated_signers: deprecated
+                .into_iter()
+                .map(|(key, cutoff)| DeprecatedSigner {
+                    pk: pk(key),
+                    cutoff_date: cutoff,
+                })
+                .collect(),
+            service_status: HashMap::new(),
+            digest: String::new(),
+            max_tx_weight: 0,
+            max_op_return_outputs: 0,
+        }
+    }
+
+    // ── all_server_keys ──────────────────────────────────────────────────────
+
+    #[test]
+    fn all_server_keys_no_deprecated() {
+        let info = make_info(PK_A, vec![]);
+        let keys: Vec<_> = info.all_server_keys().collect();
+        assert_eq!(keys, vec![xonly(PK_A)]);
+    }
+
+    #[test]
+    fn all_server_keys_includes_deprecated_in_order() {
+        let info = make_info(PK_A, vec![(PK_B, 1000), (PK_C, 2000)]);
+        let keys: Vec<_> = info.all_server_keys().collect();
+        assert_eq!(keys, vec![xonly(PK_A), xonly(PK_B), xonly(PK_C)]);
+    }
+
+    #[test]
+    fn all_server_keys_current_is_always_first() {
+        let info = make_info(PK_C, vec![(PK_A, 500), (PK_B, 600)]);
+        let keys: Vec<_> = info.all_server_keys().collect();
+        assert_eq!(keys[0], xonly(PK_C));
+    }
+
+    // ── is_signer_past_cutoff_at ─────────────────────────────────────────────
+
+    #[test]
+    fn current_signer_key_is_never_past_cutoff() {
+        let info = make_info(PK_A, vec![]);
+        assert!(!info.is_signer_past_cutoff_at(xonly(PK_A), i64::MAX));
+    }
+
+    #[test]
+    fn unknown_key_is_not_past_cutoff() {
+        let info = make_info(PK_A, vec![(PK_B, 100)]);
+        assert!(!info.is_signer_past_cutoff_at(xonly(PK_UNRELATED), 200));
+    }
+
+    #[test]
+    fn cutoff_zero_means_rotate_immediately_not_past_cutoff() {
+        // cutoff_date == 0 means "rotate now" but the operator still co-signs.
+        // is_signer_past_cutoff_at must return false so the key is not excluded from batches.
+        let info = make_info(PK_A, vec![(PK_B, 0)]);
+        assert!(!info.is_signer_past_cutoff_at(xonly(PK_B), 9_999_999));
+    }
+
+    #[test]
+    fn future_cutoff_is_not_past() {
+        let now = 1_000_000i64;
+        let info = make_info(PK_A, vec![(PK_B, now + 1)]);
+        assert!(!info.is_signer_past_cutoff_at(xonly(PK_B), now));
+    }
+
+    #[test]
+    fn exact_cutoff_boundary_is_past() {
+        let now = 1_000_000i64;
+        let info = make_info(PK_A, vec![(PK_B, now)]);
+        assert!(info.is_signer_past_cutoff_at(xonly(PK_B), now));
+    }
+
+    #[test]
+    fn past_cutoff_is_past() {
+        let now = 1_000_000i64;
+        let info = make_info(PK_A, vec![(PK_B, now - 1)]);
+        assert!(info.is_signer_past_cutoff_at(xonly(PK_B), now));
+    }
+
+    #[test]
+    fn multiple_deprecated_only_past_key_is_flagged() {
+        let now = 1_000_000i64;
+        // PK_B: future (not past), PK_C: past
+        let info = make_info(PK_A, vec![(PK_B, now + 100), (PK_C, now - 100)]);
+        assert!(!info.is_signer_past_cutoff_at(xonly(PK_B), now));
+        assert!(info.is_signer_past_cutoff_at(xonly(PK_C), now));
+    }
 }

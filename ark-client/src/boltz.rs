@@ -542,39 +542,35 @@ where
         let timeout_block_heights = swap_data.timeout_block_heights;
         let server_info = self.server_info()?;
 
-        let vhtlc = VhtlcScript::new(
-            VhtlcOptions {
-                sender: swap_data.refund_public_key.into(),
-                receiver: swap_data.claim_public_key.into(),
-                server: server_info.signer_pk.into(),
-                preimage_hash: swap_data.preimage_hash,
-                refund_locktime: timeout_block_heights.refund,
-                unilateral_claim_delay: parse_sequence_number(
-                    timeout_block_heights.unilateral_claim as i64,
-                )
-                .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
-                unilateral_refund_delay: parse_sequence_number(
-                    timeout_block_heights.unilateral_refund as i64,
-                )
-                .map_err(|e| Error::ad_hoc(format!("invalid unilateral refund timeout: {e}")))?,
-                unilateral_refund_without_receiver_delay: parse_sequence_number(
-                    timeout_block_heights.unilateral_refund_without_receiver as i64,
-                )
-                .map_err(|e| {
-                    Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
-                })?,
+        let vhtlc = self.reconstruct_vhtlc_for_address(
+            |server| {
+                Ok(VhtlcOptions {
+                    sender: swap_data.refund_public_key.into(),
+                    receiver: swap_data.claim_public_key.into(),
+                    server,
+                    preimage_hash: swap_data.preimage_hash,
+                    refund_locktime: timeout_block_heights.refund,
+                    unilateral_claim_delay: parse_sequence_number(
+                        timeout_block_heights.unilateral_claim as i64,
+                    )
+                    .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
+                    unilateral_refund_delay: parse_sequence_number(
+                        timeout_block_heights.unilateral_refund as i64,
+                    )
+                    .map_err(|e| {
+                        Error::ad_hoc(format!("invalid unilateral refund timeout: {e}"))
+                    })?,
+                    unilateral_refund_without_receiver_delay: parse_sequence_number(
+                        timeout_block_heights.unilateral_refund_without_receiver as i64,
+                    )
+                    .map_err(|e| {
+                        Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
+                    })?,
+                })
             },
-            server_info.network,
-        )
-        .map_err(Error::ad_hoc)?;
-
+            &swap_data.vhtlc_address,
+        )?;
         let vhtlc_address = vhtlc.address();
-        if vhtlc_address != swap_data.vhtlc_address {
-            return Err(Error::ad_hoc(format!(
-                "VHTLC address ({vhtlc_address}) does not match swap address ({})",
-                swap_data.vhtlc_address
-            )));
-        }
 
         let vhtlc_outpoint = {
             let virtual_tx_outpoints = self
@@ -711,39 +707,35 @@ where
         let timeout_block_heights = swap_data.timeout_block_heights;
         let server_info = self.server_info()?;
 
-        let vhtlc = VhtlcScript::new(
-            VhtlcOptions {
-                sender: swap_data.refund_public_key.into(),
-                receiver: swap_data.claim_public_key.into(),
-                server: server_info.signer_pk.into(),
-                preimage_hash: swap_data.preimage_hash,
-                refund_locktime: timeout_block_heights.refund,
-                unilateral_claim_delay: parse_sequence_number(
-                    timeout_block_heights.unilateral_claim as i64,
-                )
-                .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
-                unilateral_refund_delay: parse_sequence_number(
-                    timeout_block_heights.unilateral_refund as i64,
-                )
-                .map_err(|e| Error::ad_hoc(format!("invalid unilateral refund timeout: {e}")))?,
-                unilateral_refund_without_receiver_delay: parse_sequence_number(
-                    timeout_block_heights.unilateral_refund_without_receiver as i64,
-                )
-                .map_err(|e| {
-                    Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
-                })?,
+        let vhtlc = self.reconstruct_vhtlc_for_address(
+            |server| {
+                Ok(VhtlcOptions {
+                    sender: swap_data.refund_public_key.into(),
+                    receiver: swap_data.claim_public_key.into(),
+                    server,
+                    preimage_hash: swap_data.preimage_hash,
+                    refund_locktime: timeout_block_heights.refund,
+                    unilateral_claim_delay: parse_sequence_number(
+                        timeout_block_heights.unilateral_claim as i64,
+                    )
+                    .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
+                    unilateral_refund_delay: parse_sequence_number(
+                        timeout_block_heights.unilateral_refund as i64,
+                    )
+                    .map_err(|e| {
+                        Error::ad_hoc(format!("invalid unilateral refund timeout: {e}"))
+                    })?,
+                    unilateral_refund_without_receiver_delay: parse_sequence_number(
+                        timeout_block_heights.unilateral_refund_without_receiver as i64,
+                    )
+                    .map_err(|e| {
+                        Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
+                    })?,
+                })
             },
-            server_info.network,
-        )
-        .map_err(Error::ad_hoc)?;
-
+            &swap_data.vhtlc_address,
+        )?;
         let vhtlc_address = vhtlc.address();
-        if vhtlc_address != swap_data.vhtlc_address {
-            return Err(Error::ad_hoc(format!(
-                "VHTLC address ({vhtlc_address}) does not match swap address ({})",
-                swap_data.vhtlc_address
-            )));
-        }
 
         let vhtlc_outpoint = {
             let virtual_tx_outpoints = self
@@ -827,39 +819,35 @@ where
         let timeout_block_heights = swap_data.timeout_block_heights;
         let server_info = self.server_info()?;
 
-        let vhtlc = VhtlcScript::new(
-            VhtlcOptions {
-                sender: swap_data.refund_public_key.into(),
-                receiver: swap_data.claim_public_key.into(),
-                server: server_info.signer_pk.into(),
-                preimage_hash: swap_data.preimage_hash,
-                refund_locktime: timeout_block_heights.refund,
-                unilateral_claim_delay: parse_sequence_number(
-                    timeout_block_heights.unilateral_claim as i64,
-                )
-                .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
-                unilateral_refund_delay: parse_sequence_number(
-                    timeout_block_heights.unilateral_refund as i64,
-                )
-                .map_err(|e| Error::ad_hoc(format!("invalid unilateral refund timeout: {e}")))?,
-                unilateral_refund_without_receiver_delay: parse_sequence_number(
-                    timeout_block_heights.unilateral_refund_without_receiver as i64,
-                )
-                .map_err(|e| {
-                    Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
-                })?,
+        let vhtlc = self.reconstruct_vhtlc_for_address(
+            |server| {
+                Ok(VhtlcOptions {
+                    sender: swap_data.refund_public_key.into(),
+                    receiver: swap_data.claim_public_key.into(),
+                    server,
+                    preimage_hash: swap_data.preimage_hash,
+                    refund_locktime: timeout_block_heights.refund,
+                    unilateral_claim_delay: parse_sequence_number(
+                        timeout_block_heights.unilateral_claim as i64,
+                    )
+                    .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
+                    unilateral_refund_delay: parse_sequence_number(
+                        timeout_block_heights.unilateral_refund as i64,
+                    )
+                    .map_err(|e| {
+                        Error::ad_hoc(format!("invalid unilateral refund timeout: {e}"))
+                    })?,
+                    unilateral_refund_without_receiver_delay: parse_sequence_number(
+                        timeout_block_heights.unilateral_refund_without_receiver as i64,
+                    )
+                    .map_err(|e| {
+                        Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
+                    })?,
+                })
             },
-            server_info.network,
-        )
-        .map_err(Error::ad_hoc)?;
-
+            &swap_data.vhtlc_address,
+        )?;
         let vhtlc_address = vhtlc.address();
-        if vhtlc_address != swap_data.vhtlc_address {
-            return Err(Error::ad_hoc(format!(
-                "VHTLC address ({vhtlc_address}) does not match swap address ({})",
-                swap_data.vhtlc_address
-            )));
-        }
 
         let vhtlc_outpoint = {
             let virtual_tx_outpoints = self
@@ -1436,40 +1424,35 @@ where
         let timeout_block_heights = swap.timeout_block_heights;
         let server_info = self.server_info()?;
 
-        let vhtlc = VhtlcScript::new(
-            VhtlcOptions {
-                sender: swap.refund_public_key.into(),
-                receiver: swap.claim_public_key.into(),
-                server: server_info.signer_pk.into(),
-                preimage_hash: swap.preimage_hash,
-                refund_locktime: timeout_block_heights.refund,
-                unilateral_claim_delay: parse_sequence_number(
-                    timeout_block_heights.unilateral_claim as i64,
-                )
-                .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
-                unilateral_refund_delay: parse_sequence_number(
-                    timeout_block_heights.unilateral_refund as i64,
-                )
-                .map_err(|e| Error::ad_hoc(format!("invalid unilateral refund timeout: {e}")))?,
-                unilateral_refund_without_receiver_delay: parse_sequence_number(
-                    timeout_block_heights.unilateral_refund_without_receiver as i64,
-                )
-                .map_err(|e| {
-                    Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
-                })?,
+        let vhtlc = self.reconstruct_vhtlc_for_address(
+            |server| {
+                Ok(VhtlcOptions {
+                    sender: swap.refund_public_key.into(),
+                    receiver: swap.claim_public_key.into(),
+                    server,
+                    preimage_hash: swap.preimage_hash,
+                    refund_locktime: timeout_block_heights.refund,
+                    unilateral_claim_delay: parse_sequence_number(
+                        timeout_block_heights.unilateral_claim as i64,
+                    )
+                    .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
+                    unilateral_refund_delay: parse_sequence_number(
+                        timeout_block_heights.unilateral_refund as i64,
+                    )
+                    .map_err(|e| {
+                        Error::ad_hoc(format!("invalid unilateral refund timeout: {e}"))
+                    })?,
+                    unilateral_refund_without_receiver_delay: parse_sequence_number(
+                        timeout_block_heights.unilateral_refund_without_receiver as i64,
+                    )
+                    .map_err(|e| {
+                        Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
+                    })?,
+                })
             },
-            server_info.network,
-        )
-        .map_err(Error::ad_hoc)
-        .context("failed to build VHTLC script")?;
-
+            &swap.vhtlc_address,
+        )?;
         let vhtlc_address = vhtlc.address();
-        if vhtlc_address != swap.vhtlc_address {
-            return Err(Error::ad_hoc(format!(
-                "VHTLC address ({vhtlc_address}) does not match swap address ({})",
-                swap.vhtlc_address
-            )));
-        }
 
         // TODO: Ideally we can skip this if the vout is always the same (probably 0).
         let vhtlc_outpoint = {
@@ -1687,40 +1670,35 @@ where
         let timeout_block_heights = swap.timeout_block_heights;
         let server_info = self.server_info()?;
 
-        let vhtlc = VhtlcScript::new(
-            VhtlcOptions {
-                sender: swap.refund_public_key.into(),
-                receiver: swap.claim_public_key.into(),
-                server: server_info.signer_pk.into(),
-                preimage_hash: swap.preimage_hash,
-                refund_locktime: timeout_block_heights.refund,
-                unilateral_claim_delay: parse_sequence_number(
-                    timeout_block_heights.unilateral_claim as i64,
-                )
-                .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
-                unilateral_refund_delay: parse_sequence_number(
-                    timeout_block_heights.unilateral_refund as i64,
-                )
-                .map_err(|e| Error::ad_hoc(format!("invalid unilateral refund timeout: {e}")))?,
-                unilateral_refund_without_receiver_delay: parse_sequence_number(
-                    timeout_block_heights.unilateral_refund_without_receiver as i64,
-                )
-                .map_err(|e| {
-                    Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
-                })?,
+        let vhtlc = self.reconstruct_vhtlc_for_address(
+            |server| {
+                Ok(VhtlcOptions {
+                    sender: swap.refund_public_key.into(),
+                    receiver: swap.claim_public_key.into(),
+                    server,
+                    preimage_hash: swap.preimage_hash,
+                    refund_locktime: timeout_block_heights.refund,
+                    unilateral_claim_delay: parse_sequence_number(
+                        timeout_block_heights.unilateral_claim as i64,
+                    )
+                    .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
+                    unilateral_refund_delay: parse_sequence_number(
+                        timeout_block_heights.unilateral_refund as i64,
+                    )
+                    .map_err(|e| {
+                        Error::ad_hoc(format!("invalid unilateral refund timeout: {e}"))
+                    })?,
+                    unilateral_refund_without_receiver_delay: parse_sequence_number(
+                        timeout_block_heights.unilateral_refund_without_receiver as i64,
+                    )
+                    .map_err(|e| {
+                        Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
+                    })?,
+                })
             },
-            server_info.network,
-        )
-        .map_err(Error::ad_hoc)
-        .context("failed to build VHTLC script")?;
-
+            &swap.vhtlc_address,
+        )?;
         let vhtlc_address = vhtlc.address();
-        if vhtlc_address != swap.vhtlc_address {
-            return Err(Error::ad_hoc(format!(
-                "VHTLC address ({vhtlc_address}) does not match swap address ({})",
-                swap.vhtlc_address
-            )));
-        }
 
         // TODO: Ideally we can skip this if the vout is always the same (probably 0).
         let vhtlc_outpoint = {
@@ -2109,42 +2087,38 @@ where
         })?;
         let server_info = self.server_info()?;
 
-        let vhtlc = VhtlcScript::new(
-            VhtlcOptions {
-                sender: swap.server_refund_public_key.into(),
-                receiver: swap.claim_public_key.into(),
-                server: server_info.signer_pk.into(),
-                preimage_hash,
-                refund_locktime: timeout_block_heights.refund,
-                unilateral_claim_delay: parse_sequence_number(
-                    timeout_block_heights.unilateral_claim as i64,
-                )
-                .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
-                unilateral_refund_delay: parse_sequence_number(
-                    timeout_block_heights.unilateral_refund as i64,
-                )
-                .map_err(|e| Error::ad_hoc(format!("invalid unilateral refund timeout: {e}")))?,
-                unilateral_refund_without_receiver_delay: parse_sequence_number(
-                    timeout_block_heights.unilateral_refund_without_receiver as i64,
-                )
-                .map_err(|e| {
-                    Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
-                })?,
-            },
-            server_info.network,
-        )
-        .map_err(Error::ad_hoc)
-        .context("failed to build VHTLC script")?;
-
-        let vhtlc_address = vhtlc.address();
         let expected_address = ArkAddress::decode(&swap.server_lockup_address)
             .map_err(|e| Error::ad_hoc(format!("invalid server lockup address: {e}")))?;
 
-        if vhtlc_address != expected_address {
-            return Err(Error::ad_hoc(format!(
-                "VHTLC address ({vhtlc_address}) does not match server lockup address ({expected_address})"
-            )));
-        }
+        let vhtlc = self.reconstruct_vhtlc_for_address(
+            |server| {
+                Ok(VhtlcOptions {
+                    sender: swap.server_refund_public_key.into(),
+                    receiver: swap.claim_public_key.into(),
+                    server,
+                    preimage_hash,
+                    refund_locktime: timeout_block_heights.refund,
+                    unilateral_claim_delay: parse_sequence_number(
+                        timeout_block_heights.unilateral_claim as i64,
+                    )
+                    .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
+                    unilateral_refund_delay: parse_sequence_number(
+                        timeout_block_heights.unilateral_refund as i64,
+                    )
+                    .map_err(|e| {
+                        Error::ad_hoc(format!("invalid unilateral refund timeout: {e}"))
+                    })?,
+                    unilateral_refund_without_receiver_delay: parse_sequence_number(
+                        timeout_block_heights.unilateral_refund_without_receiver as i64,
+                    )
+                    .map_err(|e| {
+                        Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
+                    })?,
+                })
+            },
+            &expected_address,
+        )?;
+        let vhtlc_address = vhtlc.address();
 
         let vhtlc_outpoint = {
             let virtual_tx_outpoints = self
@@ -2471,41 +2445,38 @@ where
         let server_info = self.server_info()?;
 
         // User's lockup VHTLC: sender=user(refund), receiver=server(claim)
-        let vhtlc = VhtlcScript::new(
-            VhtlcOptions {
-                sender: swap.refund_public_key.into(),
-                receiver: swap.server_claim_public_key.into(),
-                server: server_info.signer_pk.into(),
-                preimage_hash,
-                refund_locktime: timeout_block_heights.refund,
-                unilateral_claim_delay: parse_sequence_number(
-                    timeout_block_heights.unilateral_claim as i64,
-                )
-                .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
-                unilateral_refund_delay: parse_sequence_number(
-                    timeout_block_heights.unilateral_refund as i64,
-                )
-                .map_err(|e| Error::ad_hoc(format!("invalid unilateral refund timeout: {e}")))?,
-                unilateral_refund_without_receiver_delay: parse_sequence_number(
-                    timeout_block_heights.unilateral_refund_without_receiver as i64,
-                )
-                .map_err(|e| {
-                    Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
-                })?,
-            },
-            server_info.network,
-        )
-        .map_err(Error::ad_hoc)?;
-
-        let vhtlc_address = vhtlc.address();
         let expected_address = ArkAddress::decode(&swap.user_lockup_address)
             .map_err(|e| Error::ad_hoc(format!("invalid user lockup address: {e}")))?;
 
-        if vhtlc_address != expected_address {
-            return Err(Error::ad_hoc(format!(
-                "VHTLC address ({vhtlc_address}) does not match user lockup address ({expected_address})"
-            )));
-        }
+        let vhtlc = self.reconstruct_vhtlc_for_address(
+            |server| {
+                Ok(VhtlcOptions {
+                    sender: swap.refund_public_key.into(),
+                    receiver: swap.server_claim_public_key.into(),
+                    server,
+                    preimage_hash,
+                    refund_locktime: timeout_block_heights.refund,
+                    unilateral_claim_delay: parse_sequence_number(
+                        timeout_block_heights.unilateral_claim as i64,
+                    )
+                    .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
+                    unilateral_refund_delay: parse_sequence_number(
+                        timeout_block_heights.unilateral_refund as i64,
+                    )
+                    .map_err(|e| {
+                        Error::ad_hoc(format!("invalid unilateral refund timeout: {e}"))
+                    })?,
+                    unilateral_refund_without_receiver_delay: parse_sequence_number(
+                        timeout_block_heights.unilateral_refund_without_receiver as i64,
+                    )
+                    .map_err(|e| {
+                        Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
+                    })?,
+                })
+            },
+            &expected_address,
+        )?;
+        let vhtlc_address = vhtlc.address();
 
         let vhtlc_outpoint = {
             let virtual_tx_outpoints = self
@@ -3390,40 +3361,61 @@ where
 
     // Private helpers for pending VHTLC recovery.
 
-    /// Reconstruct a [`VhtlcScript`] from swap data fields.
+    /// Try to reconstruct a [`VhtlcScript`] that matches `expected_address` by trying the current
+    /// server signer and all deprecated signers in order. Returns the first match.
+    ///
+    /// This handles the case where the server rotated its signing key after a swap was created:
+    /// the VHTLC was built with the old key, so we must try deprecated keys to find the right one.
+    fn reconstruct_vhtlc_for_address(
+        &self,
+        mk_opts: impl Fn(XOnlyPublicKey) -> Result<VhtlcOptions, Error>,
+        expected_address: &ArkAddress,
+    ) -> Result<VhtlcScript, Error> {
+        let server_info = self.server_info()?;
+        reconstruct_vhtlc_from_keys(
+            server_info.all_server_keys(),
+            server_info.network,
+            mk_opts,
+            expected_address,
+        )
+    }
+
+    /// Reconstruct a [`VhtlcScript`] from swap data fields, trying current + deprecated signers.
     fn build_vhtlc_script(
         &self,
         claim_public_key: PublicKey,
         refund_public_key: PublicKey,
         preimage_hash: ripemd160::Hash,
         timeout_block_heights: &TimeoutBlockHeights,
+        expected_address: &ArkAddress,
     ) -> Result<VhtlcScript, Error> {
-        let server_info = self.server_info()?;
-        VhtlcScript::new(
-            VhtlcOptions {
-                sender: refund_public_key.inner.x_only_public_key().0,
-                receiver: claim_public_key.inner.x_only_public_key().0,
-                server: server_info.signer_pk.into(),
-                preimage_hash,
-                refund_locktime: timeout_block_heights.refund,
-                unilateral_claim_delay: parse_sequence_number(
-                    timeout_block_heights.unilateral_claim as i64,
-                )
-                .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
-                unilateral_refund_delay: parse_sequence_number(
-                    timeout_block_heights.unilateral_refund as i64,
-                )
-                .map_err(|e| Error::ad_hoc(format!("invalid unilateral refund timeout: {e}")))?,
-                unilateral_refund_without_receiver_delay: parse_sequence_number(
-                    timeout_block_heights.unilateral_refund_without_receiver as i64,
-                )
+        let unilateral_claim_delay =
+            parse_sequence_number(timeout_block_heights.unilateral_claim as i64)
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?;
+        let unilateral_refund_delay =
+            parse_sequence_number(timeout_block_heights.unilateral_refund as i64)
+                .map_err(|e| Error::ad_hoc(format!("invalid unilateral refund timeout: {e}")))?;
+        let unilateral_refund_without_receiver_delay =
+            parse_sequence_number(timeout_block_heights.unilateral_refund_without_receiver as i64)
                 .map_err(|e| {
                     Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
-                })?,
+                })?;
+
+        self.reconstruct_vhtlc_for_address(
+            |server| {
+                Ok(VhtlcOptions {
+                    sender: refund_public_key.inner.x_only_public_key().0,
+                    receiver: claim_public_key.inner.x_only_public_key().0,
+                    server,
+                    preimage_hash,
+                    refund_locktime: timeout_block_heights.refund,
+                    unilateral_claim_delay,
+                    unilateral_refund_delay,
+                    unilateral_refund_without_receiver_delay,
+                })
             },
-            server_info.network,
+            expected_address,
         )
-        .map_err(Error::ad_hoc)
     }
 
     /// Collect info about all active (non-terminal) VHTLCs from swap storage.
@@ -3508,15 +3500,8 @@ where
                 swap.refund_public_key,
                 swap.preimage_hash,
                 &swap.timeout_block_heights,
+                &swap.vhtlc_address,
             )?;
-
-            if vhtlc.address() != swap.vhtlc_address {
-                tracing::warn!(
-                    swap_id = swap.id,
-                    "VHTLC address mismatch for submarine swap, skipping"
-                );
-                continue;
-            }
 
             // For submarine swaps, the user is the sender (refund key).
             // Use refund_without_receiver_script as the intent proof — it only requires
@@ -3558,15 +3543,8 @@ where
                 swap.refund_public_key,
                 swap.preimage_hash,
                 &swap.timeout_block_heights,
+                &swap.vhtlc_address,
             )?;
-
-            if vhtlc.address() != swap.vhtlc_address {
-                tracing::warn!(
-                    swap_id = swap.id,
-                    "VHTLC address mismatch for reverse swap, skipping"
-                );
-                continue;
-            }
 
             // For reverse swaps, the user is the receiver (claim key).
             // Use claim_script as the intent proof — we need to sign with the receiver key.
@@ -4396,6 +4374,30 @@ struct ChainSwapSideDetails {
     bip21: Option<String>,
 }
 
+/// Iterate `server_keys` in order, building a [`VhtlcScript`] for each one, and return the
+/// first whose address matches `expected_address`.
+///
+/// Extracted from [`Client::reconstruct_vhtlc_for_address`] so the key-iteration logic can be
+/// tested without a full [`Client`] instance.
+pub(crate) fn reconstruct_vhtlc_from_keys(
+    server_keys: impl Iterator<Item = XOnlyPublicKey>,
+    network: bitcoin::Network,
+    mk_opts: impl Fn(XOnlyPublicKey) -> Result<VhtlcOptions, Error>,
+    expected_address: &ArkAddress,
+) -> Result<VhtlcScript, Error> {
+    for server_key in server_keys {
+        let opts = mk_opts(server_key)?;
+        let vhtlc = VhtlcScript::new(opts, network).map_err(Error::ad_hoc)?;
+        if &vhtlc.address() == expected_address {
+            return Ok(vhtlc);
+        }
+    }
+    Err(Error::ad_hoc(format!(
+        "VHTLC script could not be reconstructed for address {expected_address}: \
+         does not match current or any deprecated server key"
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4662,5 +4664,171 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("640"), "unexpected error message: {msg}");
         assert!(msg.contains("639"), "unexpected error message: {msg}");
+    }
+
+    // ── reconstruct_vhtlc_from_keys ─────────────────────────────────────────
+
+    /// Build a [`VhtlcOptions`] from the first fixture in vhtlc.json (CSV > 16).
+    /// Keys and expected address are taken verbatim from the JSON fixture so the test
+    /// is independent of any client-side logic.
+    fn fixture_opts(server: XOnlyPublicKey) -> VhtlcOptions {
+        let sender = XOnlyPublicKey::from(
+            PublicKey::from_str(
+                "030192e796452d6df9697c280542e1560557bcf79a347d925895043136225c7cb4",
+            )
+            .unwrap()
+            .inner,
+        );
+        let receiver = XOnlyPublicKey::from(
+            PublicKey::from_str(
+                "021e1bb85455fe3f5aed60d101aa4dbdb9e7714f6226769a97a17a5331dadcd53b",
+            )
+            .unwrap()
+            .inner,
+        );
+        VhtlcOptions {
+            sender,
+            receiver,
+            server,
+            preimage_hash: ripemd160::Hash::from_str("4d487dd3753a89bc9fe98401d1196523058251fc")
+                .unwrap(),
+            refund_locktime: 265,
+            unilateral_claim_delay: bitcoin::Sequence::from_height(17),
+            unilateral_refund_delay: bitcoin::Sequence::from_height(144),
+            unilateral_refund_without_receiver_delay: bitcoin::Sequence::from_height(144),
+        }
+    }
+
+    fn fixture_server_xonly() -> XOnlyPublicKey {
+        XOnlyPublicKey::from(
+            PublicKey::from_str(
+                "03aad52d58162e9eefeafc7ad8a1cdca8060b5f01df1e7583362d052e266208f88",
+            )
+            .unwrap()
+            .inner,
+        )
+    }
+
+    // Expected Ark address from the fixture (vhtlc.json CSV > 16 case, testnet).
+    const FIXTURE_ADDRESS: &str = "tark1qz4d2t2czchfaml2l3ad3gwde2qxpd0srhc7wkpnvtg99cnxyz8c3pnvvhnhumhwhqthmlxmdryakwx99s6508y8dunj9sty2p5mr7unh5re63";
+
+    // A second server key that produces a different address for the same other params.
+    fn wrong_server_xonly() -> XOnlyPublicKey {
+        XOnlyPublicKey::from(
+            PublicKey::from_str(
+                "0206988651c7fbe41747bb21b54ced0a183f4d658e007ee8fdb23fbbfccb8e0c55",
+            )
+            .unwrap()
+            .inner,
+        )
+    }
+
+    #[test]
+    fn reconstruct_matches_with_single_current_key() {
+        let server = fixture_server_xonly();
+        let expected = ArkAddress::decode(FIXTURE_ADDRESS).unwrap();
+
+        let vhtlc = reconstruct_vhtlc_from_keys(
+            std::iter::once(server),
+            bitcoin::Network::Testnet,
+            |sk| Ok(fixture_opts(sk)),
+            &expected,
+        )
+        .unwrap();
+
+        assert_eq!(vhtlc.address(), expected);
+    }
+
+    #[test]
+    fn reconstruct_skips_wrong_key_and_finds_deprecated() {
+        let wrong = wrong_server_xonly();
+        let correct = fixture_server_xonly();
+        let expected = ArkAddress::decode(FIXTURE_ADDRESS).unwrap();
+
+        // Iterator: wrong key first, correct key second (simulates signer rotation).
+        let keys = [wrong, correct].into_iter();
+        let vhtlc = reconstruct_vhtlc_from_keys(
+            keys,
+            bitcoin::Network::Testnet,
+            |sk| Ok(fixture_opts(sk)),
+            &expected,
+        )
+        .unwrap();
+
+        assert_eq!(vhtlc.address(), expected);
+    }
+
+    #[test]
+    fn reconstruct_errors_when_no_key_matches() {
+        let wrong = wrong_server_xonly();
+        let expected = ArkAddress::decode(FIXTURE_ADDRESS).unwrap();
+
+        let err = reconstruct_vhtlc_from_keys(
+            std::iter::once(wrong),
+            bitcoin::Network::Testnet,
+            |sk| Ok(fixture_opts(sk)),
+            &expected,
+        )
+        .err()
+        .expect("should have failed");
+
+        assert!(
+            err.to_string()
+                .contains("does not match current or any deprecated server key"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn reconstruct_propagates_mk_opts_error() {
+        let server = fixture_server_xonly();
+        let expected = ArkAddress::decode(FIXTURE_ADDRESS).unwrap();
+
+        let err = reconstruct_vhtlc_from_keys(
+            std::iter::once(server),
+            bitcoin::Network::Testnet,
+            |_| Err(Error::ad_hoc("options error")),
+            &expected,
+        )
+        .err()
+        .expect("should have failed");
+
+        assert!(
+            err.to_string().contains("options error"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn build_vhtlc_script_sender_is_refund_receiver_is_claim() {
+        // Verify the key-role mapping: build_vhtlc_script(claim, refund, ...) must produce the
+        // same address as a manually-constructed VhtlcOptions{sender=refund, receiver=claim}.
+        let claim_pk = PublicKey::from_str(
+            "021e1bb85455fe3f5aed60d101aa4dbdb9e7714f6226769a97a17a5331dadcd53b",
+        )
+        .unwrap();
+        let refund_pk = PublicKey::from_str(
+            "030192e796452d6df9697c280542e1560557bcf79a347d925895043136225c7cb4",
+        )
+        .unwrap();
+        let server = fixture_server_xonly();
+        let expected = ArkAddress::decode(FIXTURE_ADDRESS).unwrap();
+
+        let opts = VhtlcOptions {
+            sender: refund_pk.inner.x_only_public_key().0,
+            receiver: claim_pk.inner.x_only_public_key().0,
+            server,
+            preimage_hash: ripemd160::Hash::from_str("4d487dd3753a89bc9fe98401d1196523058251fc")
+                .unwrap(),
+            refund_locktime: 265,
+            unilateral_claim_delay: bitcoin::Sequence::from_height(17),
+            unilateral_refund_delay: bitcoin::Sequence::from_height(144),
+            unilateral_refund_without_receiver_delay: bitcoin::Sequence::from_height(144),
+        };
+        let manual_vhtlc =
+            VhtlcScript::new(opts, bitcoin::Network::Testnet).expect("valid options");
+
+        // The manual construction produces the expected fixture address.
+        assert_eq!(manual_vhtlc.address(), expected);
     }
 }

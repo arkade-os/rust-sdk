@@ -45,7 +45,6 @@ use bitcoin::TxOut;
 use bitcoin::Txid;
 use bitcoin::XOnlyPublicKey;
 use futures::StreamExt;
-use jiff::Timestamp;
 use rand::CryptoRng;
 use rand::Rng;
 use std::collections::HashMap;
@@ -66,11 +65,18 @@ where
     where
         R: Rng + CryptoRng + Clone,
     {
+        self.settle_at(super::unix_now(), rng).await
+    }
+
+    pub(crate) async fn settle_at<R>(&self, now: i64, rng: &mut R) -> Result<Option<Txid>, Error>
+    where
+        R: Rng + CryptoRng + Clone,
+    {
         // Get off-chain address and send all funds to this address, no change output 🦄
         let (to_address, _) = self.get_offchain_address()?;
 
         let (boarding_inputs, vtxo_inputs, total_amount) =
-            self.fetch_commitment_transaction_inputs().await?;
+            self.fetch_commitment_transaction_inputs(now).await?;
 
         tracing::debug!(
             offchain_adress = %to_address.encode(),
@@ -133,7 +139,9 @@ where
         let (vtxo_list, _) = self.list_vtxos().await?;
         let vtxo_outpoints: Vec<OutPoint> = vtxo_list.recoverable().map(|v| v.outpoint).collect();
 
-        let (boarding_inputs, _, _) = self.fetch_commitment_transaction_inputs().await?;
+        let (boarding_inputs, _, _) = self
+            .fetch_commitment_transaction_inputs(super::unix_now())
+            .await?;
         let boarding_outpoints: Vec<OutPoint> =
             boarding_inputs.iter().map(|i| i.outpoint()).collect();
 
@@ -167,8 +175,9 @@ where
     {
         let (to_address, _) = self.get_offchain_address()?;
 
-        let (boarding_inputs, vtxo_inputs, mut total_amount) =
-            self.fetch_commitment_transaction_inputs().await?;
+        let (boarding_inputs, vtxo_inputs, mut total_amount) = self
+            .fetch_commitment_transaction_inputs(super::unix_now())
+            .await?;
 
         // Convert arknotes to intent inputs and add their value to total
         let note_inputs: Vec<intent::Input> = notes
@@ -241,8 +250,9 @@ where
         // Get off-chain address and send all funds to this address, no change output.
         let (to_address, _) = self.get_offchain_address()?;
 
-        let (all_boarding_inputs, all_vtxo_inputs, _) =
-            self.fetch_commitment_transaction_inputs().await?;
+        let (all_boarding_inputs, all_vtxo_inputs, _) = self
+            .fetch_commitment_transaction_inputs(super::unix_now())
+            .await?;
 
         // Filter boarding inputs to only those specified.
         let boarding_inputs: Vec<_> = all_boarding_inputs
@@ -317,8 +327,9 @@ where
     {
         let (change_address, _) = self.get_offchain_address()?;
 
-        let (boarding_inputs, vtxo_inputs, total_amount) =
-            self.fetch_commitment_transaction_inputs().await?;
+        let (boarding_inputs, vtxo_inputs, total_amount) = self
+            .fetch_commitment_transaction_inputs(super::unix_now())
+            .await?;
 
         let onchain_fee = self.eval_onchain_output_fee(ark_fees::Output {
             amount: to_amount.to_sat(),
@@ -505,7 +516,9 @@ where
         let (to_address, _) = self.get_offchain_address()?;
 
         // Simply collect all VTXOs that can be settled.
-        let (_, vtxo_inputs, _) = self.fetch_commitment_transaction_inputs().await?;
+        let (_, vtxo_inputs, _) = self
+            .fetch_commitment_transaction_inputs(super::unix_now())
+            .await?;
 
         let total_amount = vtxo_inputs
             .iter()
@@ -1035,6 +1048,7 @@ where
     /// upcoming batch.
     pub(crate) async fn fetch_commitment_transaction_inputs(
         &self,
+        now: i64,
     ) -> Result<(Vec<batch::OnChainInput>, Vec<intent::Input>, Amount), Error> {
         // Get all known boarding outputs.
         let boarding_outputs = self.inner.wallet.get_boarding_outputs()?;
@@ -1045,7 +1059,10 @@ where
         // To track unique outpoints and prevent duplicates
         let mut seen_outpoints = std::collections::HashSet::new();
 
-        let now = Timestamp::now();
+        let now_secs = now;
+        // Snapshot once; reused for the boarding cutoff filter and the VTXO dust/cutoff logic
+        // below.
+        let server_info = self.server_info()?;
 
         // Find outpoints for each boarding output.
         for boarding_output in boarding_outputs {
@@ -1070,9 +1087,16 @@ where
                         continue;
                     }
 
+                    // Skip boarding outputs whose server key is past its cooperative-sign
+                    // cutoff — the operator won't co-sign the old key's forfeit path.
+                    // These must be recovered via unilateral exit (send_on_chain).
+                    if server_info.is_signer_past_cutoff_at(boarding_output.server_pk(), now_secs) {
+                        continue;
+                    }
+
                     // Only include confirmed boarding outputs with an _inactive_ exit path.
                     if !boarding_output.can_be_claimed_unilaterally_by_owner(
-                        now.as_duration().try_into().map_err(Error::ad_hoc)?,
+                        std::time::Duration::from_secs(now_secs as u64),
                         std::time::Duration::from_secs(*confirmation_blocktime),
                         *confirmations,
                     ) {
@@ -1091,13 +1115,33 @@ where
         }
 
         let (vtxo_list, script_pubkey_to_vtxo_map) = self.list_vtxos().await?;
+        // Reuse the caller-supplied timestamp (not a fresh wall-clock) so the VTXO cutoff filter
+        // below is evaluated against the same instant as the boarding filter above, and so a
+        // test-injected `now` deterministically controls both.
+        let now = now_secs;
+        let dust = server_info.dust;
+
+        // Exclude VTXOs under a past-cutoff deprecated signer that still require a forfeit.
+        // The operator won't co-sign the forfeit for the old key, which would brick the whole
+        // batch intent. They wait until expiry (is_recoverable) before joining a batch.
+        let is_excluded = |v: &&ark_core::server::VirtualTxOutPoint| -> bool {
+            if v.is_recoverable(dust) {
+                return false; // recoverable = no forfeit needed, always safe to include
+            }
+            script_pubkey_to_vtxo_map
+                .get(&v.script)
+                .map(|vtxo| server_info.is_signer_past_cutoff_at(vtxo.server_pk(), now))
+                .unwrap_or(false)
+        };
 
         total_amount += vtxo_list
             .all_unspent()
+            .filter(|v| !is_excluded(v))
             .fold(Amount::ZERO, |acc, vtxo| acc + vtxo.amount);
 
         let vtxo_inputs = vtxo_list
             .all_unspent()
+            .filter(|v| !is_excluded(v))
             .map(|virtual_tx_outpoint| {
                 let vtxo = script_pubkey_to_vtxo_map
                     .get(&virtual_tx_outpoint.script)
