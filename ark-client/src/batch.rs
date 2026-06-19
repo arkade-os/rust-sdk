@@ -48,6 +48,7 @@ use futures::StreamExt;
 use rand::CryptoRng;
 use rand::Rng;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 impl<B, W, S, K> Client<B, W, S, K>
 where
@@ -401,35 +402,9 @@ where
     {
         let (change_address, _) = self.get_offchain_address()?;
 
-        let (vtxo_list, script_pubkey_to_vtxo_map) =
-            self.list_vtxos().await.context("failed to get VTXO list")?;
-
-        let vtxo_inputs = vtxo_list
-            .all_unspent()
-            .filter(|v| input_vtxos.clone().any(|outpoint| outpoint == v.outpoint))
-            .map(|v| {
-                let vtxo = script_pubkey_to_vtxo_map.get(&v.script).ok_or_else(|| {
-                    ark_core::Error::ad_hoc(format!("missing VTXO for script pubkey: {}", v.script))
-                })?;
-                let spend_info = vtxo.forfeit_spend_info()?;
-
-                Ok(intent::Input::new(
-                    v.outpoint,
-                    vtxo.exit_delay(),
-                    // NOTE: This only works with default VTXOs (single-sig).
-                    None,
-                    TxOut {
-                        value: v.amount,
-                        script_pubkey: vtxo.script_pubkey(),
-                    },
-                    vtxo.tapscripts(),
-                    spend_info,
-                    false,
-                    v.is_swept,
-                    v.assets.clone(),
-                ))
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
+        let vtxo_inputs = self
+            .selected_batch_settleable_vtxo_inputs(input_vtxos)
+            .await?;
 
         if vtxo_inputs.is_empty() {
             return Err(Error::ad_hoc("no matching VTXO outpoints found"));
@@ -493,6 +468,72 @@ where
         tracing::info!(%commitment_txid, "Collaborative redeem success");
 
         Ok(commitment_txid)
+    }
+
+    pub(crate) async fn selected_batch_settleable_vtxo_inputs(
+        &self,
+        input_vtxos: impl IntoIterator<Item = OutPoint>,
+    ) -> Result<Vec<intent::Input>, Error> {
+        let requested: HashSet<OutPoint> = input_vtxos.into_iter().collect();
+
+        let (vtxo_list, script_pubkey_to_vtxo_map) =
+            self.list_vtxos().await.context("failed to get VTXO list")?;
+        let server_info = self.server_info()?;
+        let now = crate::utils::unix_now()?;
+
+        let matching_unspent = vtxo_list
+            .all_unspent()
+            .filter(|v| requested.contains(&v.outpoint))
+            .collect::<Vec<_>>();
+
+        let settleable_outpoints = vtxo_list
+            .batch_settleable_at(&server_info, now, |script| {
+                script_pubkey_to_vtxo_map
+                    .get(script)
+                    .map(|vtxo| vtxo.server_pk())
+            })
+            .filter(|v| requested.contains(&v.outpoint))
+            .map(|v| v.outpoint)
+            .collect::<HashSet<_>>();
+
+        let blocked = matching_unspent
+            .iter()
+            .filter(|v| !settleable_outpoints.contains(&v.outpoint))
+            .map(|v| v.outpoint.to_string())
+            .collect::<Vec<_>>();
+        if !blocked.is_empty() {
+            return Err(Error::ad_hoc(format!(
+                "selected VTXO outpoints are not batch-settleable because their signer cutoff has passed: {}",
+                blocked.join(", ")
+            )));
+        }
+
+        matching_unspent
+            .into_iter()
+            .filter(|v| settleable_outpoints.contains(&v.outpoint))
+            .map(|v| {
+                let vtxo = script_pubkey_to_vtxo_map.get(&v.script).ok_or_else(|| {
+                    ark_core::Error::ad_hoc(format!("missing VTXO for script pubkey: {}", v.script))
+                })?;
+                let spend_info = vtxo.forfeit_spend_info()?;
+
+                Ok(intent::Input::new(
+                    v.outpoint,
+                    vtxo.exit_delay(),
+                    // NOTE: This only works with default VTXOs (single-sig).
+                    None,
+                    TxOut {
+                        value: v.amount,
+                        script_pubkey: vtxo.script_pubkey(),
+                    },
+                    vtxo.tapscripts(),
+                    spend_info,
+                    false,
+                    v.is_swept,
+                    v.assets.clone(),
+                ))
+            })
+            .collect::<Result<Vec<_>, Error>>()
     }
 
     /// Generate a delegate for settling VTXOs on behalf of the owner.
@@ -1059,7 +1100,7 @@ where
         let mut total_amount = Amount::ZERO;
 
         // To track unique outpoints and prevent duplicates
-        let mut seen_outpoints = std::collections::HashSet::new();
+        let mut seen_outpoints = HashSet::new();
 
         // Snapshot once; reused for the boarding cutoff filter and the VTXO dust/cutoff logic
         // below.

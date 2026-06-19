@@ -1,19 +1,16 @@
 use crate::batch;
 use crate::batch::BatchOutputType;
-use crate::error::ErrorContext;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use crate::Client;
 use crate::Error;
 use crate::KeyProvider;
 use crate::SwapStorage;
-use ark_core::intent;
 use ark_core::ArkAddress;
 use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
 use bitcoin::SignedAmount;
-use bitcoin::TxOut;
 use rand::CryptoRng;
 use rand::Rng;
 
@@ -192,35 +189,9 @@ where
     {
         let (change_address, _) = self.get_offchain_address()?;
 
-        let (vtxo_list, script_pubkey_to_vtxo_map) =
-            self.list_vtxos().await.context("failed to get VTXO list")?;
-
-        let vtxo_inputs = vtxo_list
-            .all_unspent()
-            .filter(|v| input_vtxos.clone().any(|outpoint| outpoint == v.outpoint))
-            .map(|v| {
-                let vtxo = script_pubkey_to_vtxo_map.get(&v.script).ok_or_else(|| {
-                    ark_core::Error::ad_hoc(format!("missing VTXO for script pubkey: {}", v.script))
-                })?;
-                let spend_info = vtxo.forfeit_spend_info()?;
-
-                Ok(intent::Input::new(
-                    v.outpoint,
-                    vtxo.exit_delay(),
-                    // NOTE: This only works with default VTXOs (single-sig).
-                    None,
-                    TxOut {
-                        value: v.amount,
-                        script_pubkey: vtxo.script_pubkey(),
-                    },
-                    vtxo.tapscripts(),
-                    spend_info,
-                    false,
-                    v.is_swept,
-                    v.assets.clone(),
-                ))
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
+        let vtxo_inputs = self
+            .selected_batch_settleable_vtxo_inputs(input_vtxos)
+            .await?;
 
         if vtxo_inputs.is_empty() {
             return Err(Error::ad_hoc("no matching VTXO outpoints found"));
@@ -296,35 +267,9 @@ where
     where
         R: Rng + CryptoRng + Clone,
     {
-        let (vtxo_list, script_pubkey_to_vtxo_map) =
-            self.list_vtxos().await.context("failed to get VTXO list")?;
-
-        let vtxo_inputs = vtxo_list
-            .all_unspent()
-            .filter(|v| input_vtxos.clone().any(|outpoint| outpoint == v.outpoint))
-            .map(|v| {
-                let vtxo = script_pubkey_to_vtxo_map.get(&v.script).ok_or_else(|| {
-                    ark_core::Error::ad_hoc(format!("missing VTXO for script pubkey: {}", v.script))
-                })?;
-                let spend_info = vtxo.forfeit_spend_info()?;
-
-                Ok(intent::Input::new(
-                    v.outpoint,
-                    vtxo.exit_delay(),
-                    // NOTE: This only works with default VTXOs (single-sig).
-                    None,
-                    TxOut {
-                        value: v.amount,
-                        script_pubkey: vtxo.script_pubkey(),
-                    },
-                    vtxo.tapscripts(),
-                    spend_info,
-                    false,
-                    v.is_swept,
-                    v.assets.clone(),
-                ))
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
+        let vtxo_inputs = self
+            .selected_batch_settleable_vtxo_inputs(input_vtxos)
+            .await?;
 
         if vtxo_inputs.is_empty() {
             return Err(Error::ad_hoc("no matching VTXO outpoints found"));
