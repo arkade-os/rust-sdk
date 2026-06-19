@@ -1050,6 +1050,8 @@ where
         &self,
         now: i64,
     ) -> Result<(Vec<batch::OnChainInput>, Vec<intent::Input>, Amount), Error> {
+        let now = u64::try_from(now).map_err(|_| Error::ad_hoc("negative timestamp"))?;
+
         // Get all known boarding outputs.
         let boarding_outputs = self.inner.wallet.get_boarding_outputs()?;
 
@@ -1059,7 +1061,6 @@ where
         // To track unique outpoints and prevent duplicates
         let mut seen_outpoints = std::collections::HashSet::new();
 
-        let now_secs = now;
         // Snapshot once; reused for the boarding cutoff filter and the VTXO dust/cutoff logic
         // below.
         let server_info = self.server_info()?;
@@ -1091,14 +1092,14 @@ where
                     // cutoff — the operator won't co-sign the old key's forfeit path.
                     // These must be recovered via unilateral exit (send_on_chain).
                     if server_info
-                        .signer_requires_recovery_at(boarding_output.server_pk(), now_secs)
+                        .signer_requires_recovery_at(boarding_output.server_pk(), now as i64)
                     {
                         continue;
                     }
 
                     // Only include confirmed boarding outputs with an _inactive_ exit path.
                     if !boarding_output.can_be_claimed_unilaterally_by_owner(
-                        std::time::Duration::from_secs(now_secs as u64),
+                        std::time::Duration::from_secs(now),
                         std::time::Duration::from_secs(*confirmation_blocktime),
                         *confirmations,
                     ) {
@@ -1120,9 +1121,8 @@ where
         // Reuse the caller-supplied timestamp (not a fresh wall-clock) so the VTXO cutoff filter
         // below is evaluated against the same instant as the boarding filter above, and so a
         // test-injected `now` deterministically controls both.
-        let now = now_secs;
         let settleable_vtxos: Vec<_> = vtxo_list
-            .batch_settleable_at(&server_info, now, |script| {
+            .batch_settleable_at(&server_info, now as i64, |script| {
                 script_pubkey_to_vtxo_map
                     .get(script)
                     .map(|vtxo| vtxo.server_pk())
