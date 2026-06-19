@@ -65,7 +65,7 @@ where
     where
         R: Rng + CryptoRng + Clone,
     {
-        self.settle_at(crate::utils::unix_now(), rng).await
+        self.settle_at(crate::utils::unix_now()?, rng).await
     }
 
     pub(crate) async fn settle_at<R>(&self, now: i64, rng: &mut R) -> Result<Option<Txid>, Error>
@@ -140,7 +140,7 @@ where
         let vtxo_outpoints: Vec<OutPoint> = vtxo_list.recoverable().map(|v| v.outpoint).collect();
 
         let (boarding_inputs, _, _) = self
-            .fetch_commitment_transaction_inputs(crate::utils::unix_now())
+            .fetch_commitment_transaction_inputs(crate::utils::unix_now()?)
             .await?;
         let boarding_outpoints: Vec<OutPoint> =
             boarding_inputs.iter().map(|i| i.outpoint()).collect();
@@ -176,7 +176,7 @@ where
         let (to_address, _) = self.get_offchain_address()?;
 
         let (boarding_inputs, vtxo_inputs, mut total_amount) = self
-            .fetch_commitment_transaction_inputs(crate::utils::unix_now())
+            .fetch_commitment_transaction_inputs(crate::utils::unix_now()?)
             .await?;
 
         // Convert arknotes to intent inputs and add their value to total
@@ -251,7 +251,7 @@ where
         let (to_address, _) = self.get_offchain_address()?;
 
         let (all_boarding_inputs, all_vtxo_inputs, _) = self
-            .fetch_commitment_transaction_inputs(crate::utils::unix_now())
+            .fetch_commitment_transaction_inputs(crate::utils::unix_now()?)
             .await?;
 
         // Filter boarding inputs to only those specified.
@@ -328,7 +328,7 @@ where
         let (change_address, _) = self.get_offchain_address()?;
 
         let (boarding_inputs, vtxo_inputs, total_amount) = self
-            .fetch_commitment_transaction_inputs(crate::utils::unix_now())
+            .fetch_commitment_transaction_inputs(crate::utils::unix_now()?)
             .await?;
 
         let onchain_fee = self.eval_onchain_output_fee(ark_fees::Output {
@@ -517,7 +517,7 @@ where
 
         // Simply collect all VTXOs that can be settled.
         let (_, vtxo_inputs, _) = self
-            .fetch_commitment_transaction_inputs(crate::utils::unix_now())
+            .fetch_commitment_transaction_inputs(crate::utils::unix_now()?)
             .await?;
 
         let total_amount = vtxo_inputs

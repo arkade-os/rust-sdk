@@ -355,7 +355,7 @@ where
             return Ok(DeprecatedSignerMigrationReport::nothing_migratable());
         }
 
-        let now = unix_now();
+        let now = unix_now()?;
 
         let is_pre_cutoff_deprecated = |server_pk: XOnlyPublicKey| -> Option<i64> {
             if !server_info
@@ -468,7 +468,7 @@ where
             return Ok(Vec::new());
         }
 
-        let now = unix_now();
+        let now = unix_now()?;
         let dust = server_info.dust;
 
         // Aggregate VTXO holdings per signer in a single pass over all unspent VTXOs, resolving the

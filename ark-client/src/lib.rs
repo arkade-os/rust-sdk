@@ -1185,7 +1185,7 @@ where
 
     pub async fn offchain_balance(&self) -> Result<OffChainBalance, Error> {
         let (vtxo_list, script_map) = self.list_vtxos().await.context("failed to list VTXOs")?;
-        let now = unix_now();
+        let now = unix_now()?;
         let server_info = self.server_info()?;
 
         let spendable_outpoints: HashSet<OutPoint> = vtxo_list
