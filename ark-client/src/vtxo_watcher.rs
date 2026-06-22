@@ -429,8 +429,8 @@ async fn run_watcher_loop<B, W, S, K>(
 /// Errors are swallowed (never propagated — this must never kill the watcher). Cadence is
 /// [`MIGRATION_INTERVAL`] while healthy; a failing pass backs off exponentially between
 /// [`MIGRATION_BASE_COOLDOWN`] and [`MIGRATION_MAX_COOLDOWN`], resetting to the base interval on a
-/// successful or no-op pass. The frequent base cadence is cheap because the migration call is a
-/// no-op (`NothingMigratable`) whenever there is nothing to rotate.
+/// fully successful or no-op pass. The frequent base cadence is cheap because the migration call is
+/// a no-op (`NothingMigratable`) whenever there is nothing to rotate.
 ///
 /// When [`Client::refresh_server_info`] updates the cached `deprecated_signers`, this arm picks up
 /// the freshly advertised deprecated signers on its next pass and migrates.
@@ -444,7 +444,7 @@ async fn run_migration_arm<B, W, S, K>(
     K: KeyProvider + Send + Sync + 'static,
 {
     // Consecutive-failure count drives the exponential cooldown; `0` means healthy (use the base
-    // interval). Reset to `0` on any successful or no-op pass.
+    // interval). Reset to `0` on any fully successful or no-op pass.
     let mut consecutive_failures: u32 = 0;
     loop {
         let delay = migration_delay(consecutive_failures);
@@ -455,16 +455,27 @@ async fn run_migration_arm<B, W, S, K>(
         let mut rng = OsRng;
         match client.migrate_deprecated_signer_vtxos(&mut rng).await {
             Ok(report) => {
-                if report.rotated() {
-                    tracing::info!(
+                if report.failed() {
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    let next = migration_delay(consecutive_failures);
+                    tracing::warn!(
                         txids = ?report.settle_txids(),
-                        "Background migration rotated funds off deprecated signer(s)"
+                        vtxo_error = ?report.vtxo.error.as_deref(),
+                        boarding_error = ?report.boarding.error.as_deref(),
+                        "Background migration pass had leg failure; backing off {next:?}"
                     );
                 } else {
-                    tracing::debug!("Background migration pass: nothing to migrate");
+                    if report.rotated() {
+                        tracing::info!(
+                            txids = ?report.settle_txids(),
+                            "Background migration rotated funds off deprecated signer(s)"
+                        );
+                    } else {
+                        tracing::debug!("Background migration pass: nothing to migrate");
+                    }
+                    // Success or no-op: back to the healthy cadence.
+                    consecutive_failures = 0;
                 }
-                // Success or no-op: back to the healthy cadence.
-                consecutive_failures = 0;
             }
             Err(e) => {
                 // Back off so a persistently failing migration does not retry every interval.

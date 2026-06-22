@@ -95,6 +95,11 @@ impl MigrationLegReport {
             error: None,
         }
     }
+
+    /// Whether this leg attempted settlement and failed.
+    pub fn failed(&self) -> bool {
+        self.error.is_some()
+    }
 }
 
 /// Result of a [`Client::migrate_deprecated_signer_vtxos`] pass, split into two symmetric legs:
@@ -115,6 +120,11 @@ impl DeprecatedSignerMigrationReport {
             vtxo: MigrationLegReport::skipped(MigrationSkipReason::NothingMigratable),
             boarding: MigrationLegReport::skipped(MigrationSkipReason::NothingMigratable),
         }
+    }
+
+    /// Whether any migration leg attempted settlement and failed.
+    pub fn failed(&self) -> bool {
+        self.vtxo.failed() || self.boarding.failed()
     }
 
     /// Whether the wallet was rotated off a deprecated signer this pass — i.e. at least one leg
@@ -887,6 +897,7 @@ mod migration_tests {
         // The report `migrate_deprecated_signer_vtxos` returns when the server advertises no
         // deprecated signers: not rotated, no settle txids, both legs NothingMigratable.
         let report = DeprecatedSignerMigrationReport::nothing_migratable();
+        assert!(!report.failed());
         assert!(!report.rotated());
         assert!(report.settle_txids().is_empty());
         assert_eq!(
@@ -899,5 +910,25 @@ mod migration_tests {
         );
         assert!(report.vtxo.migrated.is_empty());
         assert!(report.boarding.migrated.is_empty());
+    }
+
+    #[test]
+    fn migration_report_failed_tracks_leg_errors() {
+        let report = DeprecatedSignerMigrationReport {
+            vtxo: MigrationLegReport {
+                settle_txid: None,
+                migrated: Vec::new(),
+                deferred: Vec::new(),
+                oversized: Vec::new(),
+                skipped: None,
+                error: Some("settle failed".to_owned()),
+            },
+            boarding: MigrationLegReport::skipped(MigrationSkipReason::NothingMigratable),
+        };
+
+        assert!(report.failed());
+        assert!(report.vtxo.failed());
+        assert!(!report.boarding.failed());
+        assert!(!report.rotated());
     }
 }
