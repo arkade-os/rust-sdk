@@ -1,6 +1,6 @@
 [package]
 name = "ark-client"
-version = "0.9.2"
+version = "0.9.3"
 categories = { workspace = true }
 edition = { workspace = true }
 keywords = { workspace = true }
@@ -13,9 +13,9 @@ description = "Main client library for interacting with Ark servers"
 workspace = true
 
 [dependencies]
-ark-core = { path = "../ark-core", version = "0.9.2" }
-ark-delegator = { path = "../ark-delegator", version = "0.9.2" }
-ark-fees = { path = "../ark-fees", version = "0.9.2" }
+ark-core = { path = "../ark-core", version = "0.9.3" }
+ark-delegator = { path = "../ark-delegator", version = "0.9.3" }
+ark-fees = { path = "../ark-fees", version = "0.9.3" }
 async-stream = "0.3"
 async-trait = "0.1"
 base64 = "0.22.1"
@@ -37,7 +37,7 @@ tokio = { version = "1.41.0", features = ["sync", "rt-multi-thread"] }
 tracing = "0.1.37"
 
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
-ark-grpc = { path = "../ark-grpc", version = "0.9.2", default-features = false }
+ark-grpc = { path = "../ark-grpc", version = "0.9.3", default-features = false }
 backon = { version = "1", features = ["tokio-sleep"] }
 tonic = "0.14"
 
@@ -58,7 +58,7 @@ wasm-bindgen-futures = { version = "0.4" }
 tonic-build = { version = "0.14" }
 
 [dev-dependencies]
-ark-grpc = { path = "../ark-grpc", version = "0.9.2", default-features = false, features = ["test-utils"] }
+ark-grpc = { path = "../ark-grpc", version = "0.9.3", default-features = false, features = ["test-utils"] }
 rustls = { version = "0.23", features = ["ring"] }
 tempfile = "3.8"
 tokio = { version = "1.41.0", features = ["macros", "net", "rt-multi-thread", "sync"] }

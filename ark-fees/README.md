@@ -6,7 +6,7 @@ Fee estimation library using CEL (Common Expression Language) for calculating Ar
 
 ```toml
 [dependencies]
-ark-fees = "0.9.2"
+ark-fees = "0.9.3"
 ```
 
 > **Note:** This is a Rust port of the Go implementation at
