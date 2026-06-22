@@ -1,6 +1,24 @@
 use crate::Error;
 use std::time::Duration;
 
+/// Current time as Unix seconds. Uses `js_sys::Date` on wasm32, `std::time` elsewhere.
+pub(crate) fn unix_now() -> Result<i64, Error> {
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| Error::ad_hoc(format!("system clock before UNIX_EPOCH: {e}")))?
+            .as_secs();
+
+        i64::try_from(secs).map_err(|_| Error::ad_hoc("unix timestamp overflow"))
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        Ok((js_sys::Date::now() / 1000.0) as i64)
+    }
+}
+
 pub(crate) async fn sleep(duration: Duration) {
     #[cfg(target_arch = "wasm32")]
     {

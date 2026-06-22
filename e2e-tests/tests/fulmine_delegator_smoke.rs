@@ -42,7 +42,10 @@ async fn fulmine_delegator_smoke() {
     assert_eq!(next_vtxo.delegator_pk(), Some(delegator_pk));
 
     // Start watcher and keep handle alive for the test duration.
-    let _watcher = client.start_vtxo_watcher(delegator);
+    let _watcher = client.start_vtxo_watcher(
+        delegator,
+        ark_client::vtxo_watcher::VtxoWatcherConfig::default(),
+    );
 
     let boarding_address = client.get_boarding_address().unwrap();
     let fund_amount = Amount::from_sat(100_000);

@@ -68,6 +68,34 @@ pub const VTXO_COSIGNER_PSBT_KEY: [u8; 8] = [99, 111, 115, 105, 103, 110, 101, 1
 
 pub const DEFAULT_DERIVATION_PATH: &str = "m/83696968'/11811'/0";
 
+/// Mainnet's original unilateral-exit delay (~7 days, in seconds).
+///
+/// arkd currently advertises only the active exit delay in `/info`. Clients that need to discover
+/// historical scripts can probe this legacy mainnet delay alongside the advertised one.
+pub const MAINNET_LEGACY_UNILATERAL_EXIT_DELAY_SECS: u32 = 605_184;
+
+/// Candidate exit-delay set for discovery/watch.
+///
+/// Returns `current` plus, on mainnet only, the hardcoded legacy delay used by older outputs. The
+/// result is deduplicated, so if `current` already equals the legacy value it appears only once.
+pub fn candidate_exit_delays(
+    current: bitcoin::Sequence,
+    network: bitcoin::Network,
+) -> Result<Vec<bitcoin::Sequence>, Error> {
+    let mut delays = vec![current];
+
+    if network == bitcoin::Network::Bitcoin {
+        let legacy =
+            bitcoin::Sequence::from_seconds_ceil(MAINNET_LEGACY_UNILATERAL_EXIT_DELAY_SECS)
+                .map_err(Error::ad_hoc)?;
+        if !delays.contains(&legacy) {
+            delays.push(legacy);
+        }
+    }
+
+    Ok(delays)
+}
+
 const ANCHOR_SCRIPT_PUBKEY: [u8; 4] = [0x51, 0x02, 0x4e, 0x73];
 
 /// Information a UTXO that may be extracted from an on-chain explorer.

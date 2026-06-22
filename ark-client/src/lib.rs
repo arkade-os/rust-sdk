@@ -2,6 +2,7 @@ use crate::error::ErrorContext;
 use crate::key_provider::KeypairIndex;
 use crate::utils::sleep;
 use crate::utils::timeout_op;
+use crate::utils::unix_now;
 use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use ark_core::asset::AssetId;
@@ -16,6 +17,7 @@ use ark_core::server::GetVtxosRequest;
 use ark_core::server::SubscriptionResponse;
 use ark_core::server::VirtualTxOutPoint;
 use ark_core::ArkAddress;
+use ark_core::BoardingOutput;
 use ark_core::ExplorerUtxo;
 use ark_core::UtxoCoinSelection;
 use ark_core::Vtxo;
@@ -54,10 +56,12 @@ mod batch;
 mod boltz;
 mod coin_select;
 mod fee_estimation;
+mod migration;
 mod send_vtxo;
 mod unilateral_exit;
 mod utils;
 
+pub use ark_core::server::DeprecatedSignerStatus;
 pub use asset::IssueAssetResult;
 pub use boltz::ChainSwapAmount;
 pub use boltz::ChainSwapData;
@@ -77,6 +81,12 @@ pub use key_provider::Bip32KeyProvider;
 pub use key_provider::KeyProvider;
 pub use key_provider::StaticKeyProvider;
 pub use lightning_invoice;
+pub use migration::DeprecatedSignerMigrationReport;
+pub use migration::DeprecatedSignerReport;
+pub use migration::MigrationLegReport;
+pub use migration::MigrationSkipReason;
+pub use migration::MigrationVtxoRef;
+pub use migration::MAX_VTXOS_PER_SETTLEMENT;
 pub use swap_storage::InMemorySwapStorage;
 #[cfg(feature = "sqlite")]
 pub use swap_storage::SqliteSwapStorage;
@@ -341,6 +351,10 @@ pub struct OffChainBalance {
     pre_confirmed: Amount,
     confirmed: Amount,
     recoverable: Amount,
+    /// Funds under a deprecated server signer whose cooperative-sign cutoff has passed.
+    /// These VTXOs cannot be spent offchain (operator won't co-sign the old key) and are not yet
+    /// recoverable (not expired). They will become recoverable once their VTXO expiry passes.
+    pending_recovery: Amount,
     asset_balances: HashMap<AssetId, u64>,
 }
 
@@ -358,8 +372,14 @@ impl OffChainBalance {
         self.recoverable
     }
 
+    /// Funds locked under a deprecated signer past its cutoff — cannot be spent offchain,
+    /// waiting for VTXO expiry to become recoverable. Still counted in `total()`.
+    pub fn pending_recovery(&self) -> Amount {
+        self.pending_recovery
+    }
+
     pub fn total(&self) -> Amount {
-        self.pre_confirmed + self.confirmed + self.recoverable
+        self.pre_confirmed + self.confirmed + self.recoverable + self.pending_recovery
     }
 
     /// Asset balances keyed by asset ID.
@@ -658,6 +678,24 @@ where
             tracing::warn!(?error, "Failed during key discovery");
         };
 
+        // Eagerly persist boarding rows for every signer/delay candidate the wallet should watch.
+        // The migration boarding leg reads the wallet DB only; without this connect-time seed, a
+        // deprecated-signer boarding UTXO could be invisible until the caller happened to call
+        // `get_boarding_addresses()`. Re-persisting is idempotent, so it is safe on every connect.
+        match client.server_info() {
+            Ok(server_info) => {
+                if let Err(error) = client.persist_watch_boarding_outputs(&server_info) {
+                    tracing::warn!(?error, "Failed to persist boarding outputs at connect");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    "Failed to read server info for boarding persistence"
+                );
+            }
+        }
+
         Ok(client)
     }
 }
@@ -718,6 +756,25 @@ where
             .map_err(Error::ad_hoc)
     }
 
+    /// Refresh cached `/info` data.
+    ///
+    /// Useful after an out-of-band server restart or signer rotation, and also used by guarded RPC
+    /// clients after arkd reports stale client state.
+    ///
+    /// The refreshed snapshot includes the server's current
+    /// [`server::Info::deprecated_signers`]. The background watcher's migration arm then observes
+    /// those freshly advertised deprecated signers on its next pass and rotates funds off them via
+    /// [`Self::migrate_deprecated_signer_vtxos`].
+    pub async fn refresh_server_info(&self) -> Result<(), Error> {
+        let server_info = timeout_op(self.inner.timeout, self.network_client().get_info())
+            .await
+            .context("Failed to refresh Ark server info")??;
+
+        update_server_state(&self.state, server_info)?;
+
+        Ok(())
+    }
+
     /// Returns the currently configured delegator pubkey, if any.
     pub fn delegator_pk(&self) -> Option<XOnlyPublicKey> {
         self.inner.delegator_pk()
@@ -759,38 +816,53 @@ where
     /// [`OfflineClient::new`], addresses for those are included too.
     pub fn get_offchain_addresses(&self) -> Result<Vec<(ArkAddress, Vtxo)>, Error> {
         let server_info = &self.server_info()?;
-        let server_signer = server_info.signer_pk.into();
-
         let pks = self.inner.key_provider.get_cached_pks()?;
+
+        // Build addresses for current signer + all deprecated signers so VTXOs under any
+        // known server key are discovered and visible in the balance.
+        let all_server_keys: Vec<XOnlyPublicKey> = server_info.all_server_keys().collect();
+        // Enumerate under every candidate exit delay (the advertised delay plus, on mainnet, the
+        // legacy delay), mirroring `discover_keys`: a VTXO minted before the operator shortened the
+        // delay lives at a legacy-delay address, so building only the current delay would hide it
+        // from `list_vtxos`/balance/migration even though its key was discovered. Off mainnet this
+        // is just the advertised delay (no behaviour change).
+        let candidate_delays = ark_core::candidate_exit_delays(
+            server_info.unilateral_exit_delay,
+            server_info.network,
+        )?;
 
         let mut results = Vec::new();
 
         for owner_pk in &pks {
-            // Always include the default (2-leaf) address.
-            let default_vtxo = Vtxo::new_default(
-                self.secp(),
-                server_signer,
-                *owner_pk,
-                server_info.unilateral_exit_delay,
-                server_info.network,
-            )?;
-            results.push((default_vtxo.to_ark_address(), default_vtxo));
+            for server_signer in &all_server_keys {
+                for exit_delay in &candidate_delays {
+                    // Default (2-leaf) address.
+                    let default_vtxo = Vtxo::new_default(
+                        self.secp(),
+                        *server_signer,
+                        *owner_pk,
+                        *exit_delay,
+                        server_info.network,
+                    )?;
+                    results.push((default_vtxo.to_ark_address(), default_vtxo));
 
-            // Include delegate addresses for all known delegator keys.
-            let mut seen = HashSet::new();
-            for dpk in &self.inner.historical_delegator_pks {
-                if !seen.insert(dpk) {
-                    continue;
+                    // Delegate addresses for all known delegator keys.
+                    let mut seen = HashSet::new();
+                    for dpk in &self.inner.historical_delegator_pks {
+                        if !seen.insert(dpk) {
+                            continue;
+                        }
+                        let delegate_vtxo = Vtxo::new_with_delegator(
+                            self.secp(),
+                            *server_signer,
+                            *owner_pk,
+                            *dpk,
+                            *exit_delay,
+                            server_info.network,
+                        )?;
+                        results.push((delegate_vtxo.to_ark_address(), delegate_vtxo));
+                    }
                 }
-                let delegate_vtxo = Vtxo::new_with_delegator(
-                    self.secp(),
-                    server_signer,
-                    *owner_pk,
-                    *dpk,
-                    server_info.unilateral_exit_delay,
-                    server_info.network,
-                )?;
-                results.push((delegate_vtxo.to_ark_address(), delegate_vtxo));
             }
         }
 
@@ -843,7 +915,16 @@ where
         }
 
         let server_info = &self.server_info()?;
-        let server_signer: XOnlyPublicKey = server_info.signer_pk.into();
+        // Discover against current + all deprecated signers so that user keys used before a
+        // rotation are still found when recovering from seed.
+        let all_server_keys: Vec<XOnlyPublicKey> = server_info.all_server_keys().collect();
+        // Probe each server key under every candidate exit delay (the advertised delay plus, on
+        // mainnet, the legacy delay), so VTXOs minted before the operator shortened the delay are
+        // still discovered. Off mainnet this is just the advertised delay (no behaviour change).
+        let candidate_delays = ark_core::candidate_exit_delays(
+            server_info.unilateral_exit_delay,
+            server_info.network,
+        )?;
 
         let mut start_index = 0u32;
         let mut discovered_count = 0u32;
@@ -867,30 +948,33 @@ where
 
                 let owner_pk = kp.x_only_public_key().0;
 
-                let mut addresses =
-                    Vec::with_capacity(1 + self.inner.historical_delegator_pks.len());
+                let mut addresses = Vec::new();
 
-                // Default (2-leaf) address.
-                let default_vtxo = Vtxo::new_default(
-                    self.secp(),
-                    server_signer,
-                    owner_pk,
-                    server_info.unilateral_exit_delay,
-                    server_info.network,
-                )?;
-                addresses.push(default_vtxo.to_ark_address());
+                for server_signer in &all_server_keys {
+                    for exit_delay in &candidate_delays {
+                        // Default (2-leaf) address.
+                        let default_vtxo = Vtxo::new_default(
+                            self.secp(),
+                            *server_signer,
+                            owner_pk,
+                            *exit_delay,
+                            server_info.network,
+                        )?;
+                        addresses.push(default_vtxo.to_ark_address());
 
-                // Delegate (3-leaf) addresses for each known delegator.
-                for dpk in &self.inner.historical_delegator_pks {
-                    let delegate_vtxo = Vtxo::new_with_delegator(
-                        self.secp(),
-                        server_signer,
-                        owner_pk,
-                        *dpk,
-                        server_info.unilateral_exit_delay,
-                        server_info.network,
-                    )?;
-                    addresses.push(delegate_vtxo.to_ark_address());
+                        // Delegate (3-leaf) addresses for each known delegator.
+                        for dpk in &self.inner.historical_delegator_pks {
+                            let delegate_vtxo = Vtxo::new_with_delegator(
+                                self.secp(),
+                                *server_signer,
+                                owner_pk,
+                                *dpk,
+                                *exit_delay,
+                                server_info.network,
+                            )?;
+                            addresses.push(delegate_vtxo.to_ark_address());
+                        }
+                    }
                 }
 
                 batch.push((index, kp, addresses));
@@ -958,9 +1042,59 @@ where
     }
 
     pub fn get_boarding_addresses(&self) -> Result<Vec<Address>, Error> {
-        let address = self.get_boarding_address()?;
+        let server_info = &self.server_info()?;
 
-        Ok(vec![address])
+        // Persist a boarding output for every (signer, exit-delay) candidate and return the
+        // de-duplicated addresses. This is the watch/history surface: it covers the current signer
+        // plus all deprecated signers (server-key rotation), each crossed with the candidate
+        // exit-delay set (the advertised delay plus, on mainnet, the legacy delay) so deposits
+        // minted under an older delay or an older key are still visible.
+        //
+        // The spend path (settle) deliberately stays current-signer-only;
+        // deprecated-signer boarding recovery is handled via migrate_deprecated_signer_vtxos().
+        let outputs = self.persist_watch_boarding_outputs(server_info)?;
+
+        let mut seen = HashSet::new();
+        let mut addresses = Vec::with_capacity(outputs.len());
+        for output in &outputs {
+            let address = output.address().clone();
+            if seen.insert(address.clone()) {
+                addresses.push(address);
+            }
+        }
+
+        Ok(addresses)
+    }
+
+    /// Persist (idempotently) a boarding output for each signer the wallet should watch crossed
+    /// with each candidate exit delay, returning the created [`BoardingOutput`]s.
+    ///
+    /// Covers the current signer plus every deprecated signer, each paired with
+    /// [`ark_core::candidate_exit_delays`] (the advertised boarding-exit delay plus, on mainnet,
+    /// the legacy delay). Calling [`BoardingWallet::new_boarding_output`] writes the row to the
+    /// wallet's store; re-persisting the same boarding output is a harmless overwrite (the store
+    /// keys rows by [`BoardingOutput`] identity), so this is safe to call repeatedly — at connect
+    /// time and again from [`Client::get_boarding_addresses`].
+    fn persist_watch_boarding_outputs(
+        &self,
+        server_info: &server::Info,
+    ) -> Result<Vec<BoardingOutput>, Error> {
+        let candidate_delays =
+            ark_core::candidate_exit_delays(server_info.boarding_exit_delay, server_info.network)?;
+
+        let mut outputs = Vec::new();
+        for server_pk in server_info.all_server_keys() {
+            for exit_delay in &candidate_delays {
+                let boarding_output = self.inner.wallet.new_boarding_output(
+                    server_pk,
+                    *exit_delay,
+                    server_info.network,
+                )?;
+                outputs.push(boarding_output);
+            }
+        }
+
+        Ok(outputs)
     }
 
     pub async fn get_virtual_tx_outpoints(
@@ -1050,23 +1184,42 @@ where
     }
 
     pub async fn offchain_balance(&self) -> Result<OffChainBalance, Error> {
-        let (vtxo_list, _) = self.list_vtxos().await.context("failed to list VTXOs")?;
+        let (vtxo_list, script_map) = self.list_vtxos().await.context("failed to list VTXOs")?;
+        let now = unix_now()?;
+        let server_info = self.server_info()?;
+
+        let spendable_outpoints: HashSet<OutPoint> = vtxo_list
+            .spendable_offchain_at(&server_info, now, |script| {
+                script_map.get(script).map(|vtxo| vtxo.server_pk())
+            })
+            .map(|vtxo| vtxo.outpoint)
+            .collect();
 
         let pre_confirmed = vtxo_list
             .pre_confirmed()
+            .filter(|v| spendable_outpoints.contains(&v.outpoint))
             .fold(Amount::ZERO, |acc, x| acc + x.amount);
 
         let confirmed = vtxo_list
             .confirmed()
+            .filter(|v| spendable_outpoints.contains(&v.outpoint))
             .fold(Amount::ZERO, |acc, x| acc + x.amount);
 
         let recoverable = vtxo_list
             .recoverable()
             .fold(Amount::ZERO, |acc, x| acc + x.amount);
 
-        // Aggregate asset balances from all spendable VTXOs.
+        let pending_recovery = vtxo_list
+            .pending_recovery_due_to_signer_at(&server_info, now, |script| {
+                script_map.get(script).map(|vtxo| vtxo.server_pk())
+            })
+            .fold(Amount::ZERO, |acc, x| acc + x.amount);
+
+        // Aggregate asset balances from currently offchain-spendable VTXOs only.
         let mut asset_balances: HashMap<AssetId, u64> = HashMap::new();
-        for vtxo in vtxo_list.spendable_offchain() {
+        for vtxo in vtxo_list.spendable_offchain_at(&server_info, now, |script| {
+            script_map.get(script).map(|vtxo| vtxo.server_pk())
+        }) {
             for asset in &vtxo.assets {
                 let total = asset_balances
                     .get(&asset.asset_id)
@@ -1082,6 +1235,7 @@ where
             pre_confirmed,
             confirmed,
             recoverable,
+            pending_recovery,
             asset_balances,
         })
     }

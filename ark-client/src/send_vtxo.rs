@@ -242,8 +242,14 @@ where
             .await
             .context("failed to get spendable VTXOs")?;
 
+        let now = crate::utils::unix_now()?;
+        let server_info = self.server_info()?;
         let spendable = vtxo_list
-            .spendable_offchain()
+            .spendable_offchain_at(&server_info, now, |script| {
+                script_pubkey_to_vtxo_map
+                    .get(script)
+                    .map(|vtxo| vtxo.server_pk())
+            })
             .map(|vtxo| VirtualTxOutPoint {
                 outpoint: vtxo.outpoint,
                 script_pubkey: vtxo.script.clone(),
@@ -253,7 +259,6 @@ where
             })
             .collect::<Vec<_>>();
 
-        let server_info = self.server_info()?;
         let mut selected_outpoints = HashSet::new();
         let mut selected = Vec::new();
         let mut asset_changes: HashMap<AssetId, u64> = HashMap::new();
@@ -354,8 +359,14 @@ where
             .await
             .context("failed to get VTXO list")?;
 
+        let now = crate::utils::unix_now()?;
+        let server_info = self.server_info()?;
         let selected: Vec<_> = vtxo_list
-            .spendable_offchain()
+            .spendable_offchain_at(&server_info, now, |script| {
+                script_pubkey_to_vtxo_map
+                    .get(script)
+                    .map(|vtxo| vtxo.server_pk())
+            })
             .filter(|vtxo| requested_outpoints.contains(&vtxo.outpoint))
             .map(|vtxo| VirtualTxOutPoint {
                 outpoint: vtxo.outpoint,
