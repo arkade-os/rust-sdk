@@ -40,18 +40,45 @@ pub async fn e2e_signer_rotation_sweep_migration() {
     wait_until_balance!(&client, confirmed: fund_amount);
     tracing::info!("VTXO confirmed under current signer");
 
-    drop(client);
+    let old_digest = client.server_info().unwrap().digest.clone();
 
     // Rotate: future cutoff means the old signer is deprecated but still co-signs (regime 1).
     regtest.rotate_signer("+86400");
     tracing::info!("Signer rotated with future cutoff (+86400)");
 
-    // Reconnect to pick up updated server info (deprecated_signers now populated).
-    let (client2, _wallet2) =
-        set_up_client_with_seed("alice".to_string(), regtest.clone(), secp.clone(), seed).await;
+    // A guarded Ark RPC with the stale digest should refresh cached server_info and return
+    // ServerInfoChanged. The failed estimate is not retried automatically. The first call after
+    // the arkd restart can still hit the old broken HTTP/2 connection, so retry until the
+    // re-dialed channel reaches arkd and gets the digest-mismatch response.
+    let mut refreshed_by_digest_mismatch = false;
+    let mut last_probe_error = None;
+    for _ in 0..30 {
+        let (estimate_address, _) = client.get_offchain_address().unwrap();
+        match client.estimate_batch_fees(&mut rng, estimate_address).await {
+            Ok(_) => panic!("digest refresh probe unexpectedly succeeded"),
+            Err(err) if err.is_server_info_changed() => {
+                refreshed_by_digest_mismatch = true;
+                break;
+            }
+            Err(err) => last_probe_error = Some(format!("{err:?}")),
+        }
 
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
     assert!(
-        !client2.server_info().unwrap().deprecated_signers.is_empty(),
+        refreshed_by_digest_mismatch,
+        "expected digest mismatch / ServerInfoChanged, last probe error: {:?}",
+        last_probe_error
+    );
+
+    let client2 = client;
+    let refreshed_info = client2.server_info().unwrap();
+    assert_ne!(
+        refreshed_info.digest, old_digest,
+        "digest refresh should update cached server_info"
+    );
+    assert!(
+        !refreshed_info.deprecated_signers.is_empty(),
         "server_info should list the old signer as deprecated after rotation"
     );
 
