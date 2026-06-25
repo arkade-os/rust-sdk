@@ -172,12 +172,11 @@ pub struct PendingVhtlcSpendTx {
     pub pending_tx: PendingTx,
 }
 
-impl<B, W, S, K> Client<B, W, S, K>
+impl<B, W, S> Client<B, W, S>
 where
     B: Blockchain,
     W: BoardingWallet + OnchainWallet,
     S: SwapStorage + 'static,
-    K: crate::KeyProvider,
 {
     // Submarine swap.
 

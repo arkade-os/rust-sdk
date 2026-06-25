@@ -33,12 +33,11 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::time::Duration;
 
-impl<B, W, S, K> Client<B, W, S, K>
+impl<B, W, S> Client<B, W, S>
 where
     B: Blockchain,
     W: BoardingWallet + OnchainWallet,
     S: SwapStorage + 'static,
-    K: crate::KeyProvider,
 {
     // Send public APIs
 

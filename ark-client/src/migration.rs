@@ -1,5 +1,4 @@
 use crate::error::ErrorContext;
-use crate::key_provider::KeyProvider;
 use crate::swap_storage::SwapStorage;
 use crate::utils::timeout_op;
 use crate::utils::unix_now;
@@ -321,12 +320,11 @@ pub struct DeprecatedSignerReport {
     pub next_sweep_eta: Option<i64>,
 }
 
-impl<B, W, S, K> Client<B, W, S, K>
+impl<B, W, S> Client<B, W, S>
 where
     B: Blockchain,
     W: BoardingWallet + OnchainWallet,
     S: SwapStorage + 'static,
-    K: KeyProvider,
 {
     /// Sweep VTXOs and boarding outputs minted under a *pre-cutoff* deprecated server signer to
     /// the current signer, then report what moved.

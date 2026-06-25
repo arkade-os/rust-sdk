@@ -10,16 +10,14 @@ use anyhow::Context;
 use anyhow::Result;
 use ark_bdk_wallet::Wallet;
 use ark_client::lightning_invoice::Bolt11Invoice;
-use ark_client::Bip32KeyProvider;
 use ark_client::Blockchain;
 use ark_client::ChainSwapAmount;
 use ark_client::ChainSwapDirection;
 use ark_client::Error;
-use ark_client::KeyProvider;
 use ark_client::OfflineClient;
+use ark_client::OfflineClientConfig;
 use ark_client::SpendStatus;
 use ark_client::SqliteSwapStorage;
-use ark_client::StaticKeyProvider;
 use ark_client::SwapAmount;
 use ark_client::TxStatus;
 use ark_core::asset::ControlAssetConfig;
@@ -54,7 +52,6 @@ use serde::Serialize;
 use std::fs;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -466,19 +463,21 @@ async fn main() -> Result<()> {
             )?;
             let wallet = Arc::new(wallet);
 
-            let client = OfflineClient::<_, _, _, Bip32KeyProvider>::new_with_bip32(
-                "sample-client".to_string(),
+            let client_config = OfflineClientConfig {
+                ark_server_url: config.ark_server_url,
+                boltz_url: config.boltz_url,
+                delegator_pk,
+                historical_delegator_pks: historical_delegator_pks.clone(),
+                ..Default::default()
+            };
+
+            let client = OfflineClient::with_bip32(
+                client_config,
                 xpriv,
                 None,
                 esplora_client.clone(),
                 wallet,
-                config.ark_server_url,
                 storage,
-                config.boltz_url,
-                None,
-                Duration::from_secs(30),
-                delegator_pk,
-                historical_delegator_pks.clone(),
             )
             .connect()
             .await
@@ -495,18 +494,20 @@ async fn main() -> Result<()> {
             let wallet = Wallet::new(kp, secp, Network::Regtest, config.esplora_url.as_str(), db)?;
             let wallet = Arc::new(wallet);
 
-            let client = OfflineClient::<_, _, _, StaticKeyProvider>::new_with_keypair(
-                "sample-client".to_string(),
+            let client_config = OfflineClientConfig {
+                ark_server_url: config.ark_server_url,
+                boltz_url: config.boltz_url,
+                delegator_pk,
+                historical_delegator_pks: historical_delegator_pks.clone(),
+                ..Default::default()
+            };
+
+            let client = OfflineClient::with_keypair(
+                client_config,
                 kp,
                 esplora_client.clone(),
                 wallet,
-                config.ark_server_url,
                 storage,
-                config.boltz_url,
-                None,
-                Duration::from_secs(30),
-                delegator_pk,
-                historical_delegator_pks.clone(),
             )
             .connect()
             .await
@@ -519,9 +520,9 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run_command<K: KeyProvider + 'static>(
+async fn run_command(
     command: Commands,
-    client: ark_client::Client<EsploraClient, Wallet<InMemoryDb>, SqliteSwapStorage, K>,
+    client: ark_client::Client<EsploraClient, Wallet<InMemoryDb>, SqliteSwapStorage>,
     esplora_client: Arc<EsploraClient>,
 ) -> Result<()> {
     let client = Arc::new(client);
