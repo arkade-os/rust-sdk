@@ -699,10 +699,32 @@ pub(crate) use wait_until_balance;
 /// with the same keys.
 #[allow(unused)]
 pub async fn set_up_client_with_seed(
+    name: String,
+    regtest: Arc<Regtest>,
+    secp: Secp256k1<All>,
+    seed: [u8; 32],
+) -> (
+    Client<Regtest, Wallet<InMemoryDb>, InMemorySwapStorage>,
+    Arc<Wallet<InMemoryDb>>,
+) {
+    set_up_client_with_seed_and_server_info_ttl(
+        name,
+        regtest,
+        secp,
+        seed,
+        ark_client::DEFAULT_SERVER_INFO_TTL,
+    )
+    .await
+}
+
+/// Set up a client with a specific seed and server-info TTL.
+#[allow(unused)]
+pub async fn set_up_client_with_seed_and_server_info_ttl(
     _name: String,
     regtest: Arc<Regtest>,
     secp: Secp256k1<All>,
     seed: [u8; 32],
+    server_info_ttl: Duration,
 ) -> (
     Client<Regtest, Wallet<InMemoryDb>, InMemorySwapStorage>,
     Arc<Wallet<InMemoryDb>>,
@@ -724,6 +746,7 @@ pub async fn set_up_client_with_seed(
         OfflineClientConfig {
             ark_server_url: "http://localhost:7070".to_string(),
             boltz_url: "http://localhost:9069".to_string(),
+            server_info_ttl,
             ..Default::default()
         },
         xpriv,
