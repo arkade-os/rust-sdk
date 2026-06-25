@@ -34,7 +34,7 @@ pub async fn send_onchain_vtxo_and_boarding_output() {
 
     assert_eq!(offchain_balance.total(), Amount::ZERO);
 
-    let alice_boarding_address = alice.get_boarding_address().unwrap();
+    let alice_boarding_address = alice.get_boarding_address().await.unwrap();
 
     let fund_amount = Amount::ONE_BTC;
 
@@ -63,7 +63,7 @@ pub async fn send_onchain_vtxo_and_boarding_output() {
     regtest.mine(1).await;
     alice_wallet.sync().await.unwrap();
 
-    let (alice_offchain_address, _) = alice.get_offchain_address().unwrap();
+    let (alice_offchain_address, _) = alice.get_offchain_address().await.unwrap();
 
     alice
         .send(vec![SendReceiver::bitcoin(
@@ -114,7 +114,7 @@ pub async fn send_onchain_vtxo_and_boarding_output() {
 
     wait_until_balance!(&alice, confirmed: Amount::ZERO, pre_confirmed: Amount::ZERO);
 
-    let alice_boarding_address = alice.get_boarding_address().unwrap();
+    let alice_boarding_address = alice.get_boarding_address().await.unwrap();
     regtest
         .faucet_fund(&alice_boarding_address, Amount::ONE_BTC)
         .await;
@@ -129,6 +129,7 @@ pub async fn send_onchain_vtxo_and_boarding_output() {
 
     match alice
         .server_info()
+        .await
         .unwrap()
         .unilateral_exit_delay
         .to_relative_lock_time()
@@ -144,6 +145,7 @@ pub async fn send_onchain_vtxo_and_boarding_output() {
 
     match alice
         .server_info()
+        .await
         .unwrap()
         .boarding_exit_delay
         .to_relative_lock_time()

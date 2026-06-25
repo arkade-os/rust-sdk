@@ -360,7 +360,7 @@ where
         // classification closure, and the leg sizing must all see the same
         // `deprecated_signers`/`vtxo_max_amount`/`dust` even if a concurrent digest-driven
         // `refresh_server_info` swaps the snapshot mid-call.
-        let server_info = self.server_info()?;
+        let server_info = self.server_info().await?;
         if server_info.deprecated_signers.is_empty() {
             return Ok(DeprecatedSignerMigrationReport::nothing_migratable());
         }
@@ -473,7 +473,7 @@ where
     pub async fn deprecated_signer_status(&self) -> Result<Vec<DeprecatedSignerReport>, Error> {
         // Snapshot once (TOCTOU): the empty-check and every per-signer classification must see the
         // same `deprecated_signers`/`dust` even if a concurrent refresh swaps the snapshot.
-        let server_info = self.server_info()?;
+        let server_info = self.server_info().await?;
         if server_info.deprecated_signers.is_empty() {
             return Ok(Vec::new());
         }

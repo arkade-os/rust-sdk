@@ -199,7 +199,7 @@ async fn run_watcher_loop<B, W, S, K>(
         }
 
         // Build the script map and subscription from the same address set.
-        let addresses = match client.get_offchain_addresses() {
+        let addresses = match client.get_offchain_addresses().await {
             Ok(a) => a,
             Err(e) => {
                 tracing::error!("Failed to get offchain addresses: {e}");
@@ -524,7 +524,7 @@ where
 {
     let _discovered = client.discover_keys(KEY_DISCOVERY_GAP_LIMIT).await?;
 
-    let addrs = client.get_offchain_addresses()?;
+    let addrs = client.get_offchain_addresses().await?;
     let new_addrs: Vec<_> = addrs
         .iter()
         .map(|(addr, _)| *addr)
@@ -756,7 +756,7 @@ async fn delegate_vtxos<B, W, S, K>(
         .cloned()
         .collect();
 
-    let server_info = match client.server_info() {
+    let server_info = match client.server_info().await {
         Ok(server_info) => server_info,
         Err(e) => {
             tracing::error!("Failed to read server info for delegation: {e}");
@@ -778,7 +778,7 @@ async fn delegate_vtxos<B, W, S, K>(
         }
     };
 
-    let (to_address, _) = match client.get_offchain_address() {
+    let (to_address, _) = match client.get_offchain_address().await {
         Ok(v) => v,
         Err(e) => {
             tracing::error!("Failed to get offchain address for delegation: {e}");

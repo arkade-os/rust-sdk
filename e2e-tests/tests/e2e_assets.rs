@@ -24,7 +24,7 @@ pub async fn e2e_assets() {
     let (bob, _) = set_up_client("bob".to_string(), regtest.clone(), secp).await;
 
     // Fund Alice with 1 BTC and settle.
-    let alice_boarding_address = alice.get_boarding_address().unwrap();
+    let alice_boarding_address = alice.get_boarding_address().await.unwrap();
     regtest
         .faucet_fund(&alice_boarding_address, Amount::ONE_BTC)
         .await;
@@ -85,7 +85,7 @@ pub async fn e2e_assets() {
         .find(|vtxo| !vtxo.assets.is_empty())
         .unwrap();
 
-    let (bob_address, _) = bob.get_offchain_address().unwrap();
+    let (bob_address, _) = bob.get_offchain_address().await.unwrap();
 
     let err = alice
         .send_selection(
@@ -133,7 +133,7 @@ pub async fn e2e_assets() {
     let send_txid = alice
         .send(vec![SendReceiver {
             address: bob_address,
-            amount: alice.dust().unwrap(),
+            amount: alice.dust().await.unwrap(),
             assets: vec![ark_core::server::Asset {
                 asset_id: issued_asset_id,
                 amount: send_amount,

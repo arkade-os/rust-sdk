@@ -27,6 +27,7 @@ pub async fn send_onchain_boarding_output() {
     // `boarding_exit_delay`.
     match alice
         .server_info()
+        .await
         .unwrap()
         .boarding_exit_delay
         .to_relative_lock_time()
@@ -40,7 +41,7 @@ pub async fn send_onchain_boarding_output() {
         }
     };
 
-    let alice_boarding_address = alice.get_boarding_address().unwrap();
+    let alice_boarding_address = alice.get_boarding_address().await.unwrap();
 
     regtest
         .faucet_fund(&alice_boarding_address, Amount::ONE_BTC)

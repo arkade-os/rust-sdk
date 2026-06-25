@@ -89,7 +89,7 @@ where
 
     let mut selected_vtxo_outputs = HashSet::new();
 
-    for (_, vtxo) in client.get_offchain_addresses()? {
+    for (_, vtxo) in client.get_offchain_addresses().await? {
         if target_amount <= selected_amount {
             return Ok((
                 selected_boarding_outputs.into_iter().collect(),

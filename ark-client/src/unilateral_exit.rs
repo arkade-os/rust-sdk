@@ -245,7 +245,7 @@ where
         to_address: Address,
         to_amount: Amount,
     ) -> Result<(Transaction, Vec<TxOut>), Error> {
-        let dust = self.server_info()?.dust;
+        let dust = self.server_info().await?.dust;
         if to_amount < dust {
             return Err(Error::ad_hoc(format!(
                 "invalid amount {to_amount}, must be greater than dust: {}",

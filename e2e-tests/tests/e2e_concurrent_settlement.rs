@@ -27,9 +27,9 @@ pub async fn concurrent_boarding() {
     let (bob, _) = set_up_client("bob".to_string(), regtest.clone(), secp.clone()).await;
     let (claire, _) = set_up_client("claire".to_string(), regtest.clone(), secp.clone()).await;
 
-    let alice_boarding_address = alice.get_boarding_address().unwrap();
-    let bob_boarding_address = bob.get_boarding_address().unwrap();
-    let claire_boarding_address = claire.get_boarding_address().unwrap();
+    let alice_boarding_address = alice.get_boarding_address().await.unwrap();
+    let bob_boarding_address = bob.get_boarding_address().await.unwrap();
+    let claire_boarding_address = claire.get_boarding_address().await.unwrap();
 
     let alice_offchain_balance = alice.offchain_balance().await.unwrap();
     let bob_offchain_balance = bob.offchain_balance().await.unwrap();
@@ -88,9 +88,9 @@ pub async fn concurrent_boarding() {
     wait_until_balance!(&bob, confirmed: bob_fund_amount, pre_confirmed: Amount::ZERO);
     wait_until_balance!(&claire, confirmed: claire_fund_amount, pre_confirmed: Amount::ZERO);
 
-    let (alice_offchain_address, _) = alice.get_offchain_address().unwrap();
-    let (bob_offchain_address, _) = bob.get_offchain_address().unwrap();
-    let (claire_offchain_address, _) = claire.get_offchain_address().unwrap();
+    let (alice_offchain_address, _) = alice.get_offchain_address().await.unwrap();
+    let (bob_offchain_address, _) = bob.get_offchain_address().await.unwrap();
+    let (claire_offchain_address, _) = claire.get_offchain_address().await.unwrap();
 
     let alice_to_bob_send_amount = Amount::from_sat(100_000);
     let bob_to_claire_send_amount = Amount::from_sat(50_000);

@@ -32,7 +32,7 @@ pub async fn e2e_signer_rotation_sweep_migration() {
     let (client, _wallet) =
         set_up_client_with_seed("alice".to_string(), regtest.clone(), secp.clone(), seed).await;
 
-    let boarding_address = client.get_boarding_address().unwrap();
+    let boarding_address = client.get_boarding_address().await.unwrap();
     regtest.faucet_fund(&boarding_address, fund_amount).await;
 
     client.settle(&mut rng).await.unwrap();
@@ -40,7 +40,7 @@ pub async fn e2e_signer_rotation_sweep_migration() {
     wait_until_balance!(&client, confirmed: fund_amount);
     tracing::info!("VTXO confirmed under current signer");
 
-    let old_digest = client.server_info().unwrap().digest.clone();
+    let old_digest = client.server_info().await.unwrap().digest.clone();
 
     // Rotate: future cutoff means the old signer is deprecated but still co-signs (regime 1).
     regtest.rotate_signer("+86400");
@@ -53,7 +53,7 @@ pub async fn e2e_signer_rotation_sweep_migration() {
     let mut refreshed_by_digest_mismatch = false;
     let mut last_probe_error = None;
     for _ in 0..30 {
-        let (estimate_address, _) = client.get_offchain_address().unwrap();
+        let (estimate_address, _) = client.get_offchain_address().await.unwrap();
         match client.estimate_batch_fees(&mut rng, estimate_address).await {
             Ok(_) => panic!("digest refresh probe unexpectedly succeeded"),
             Err(err) if err.is_server_info_changed() => {
@@ -72,7 +72,7 @@ pub async fn e2e_signer_rotation_sweep_migration() {
     );
 
     let client2 = client;
-    let refreshed_info = client2.server_info().unwrap();
+    let refreshed_info = client2.server_info().await.unwrap();
     assert_ne!(
         refreshed_info.digest, old_digest,
         "digest refresh should update cached server_info"
@@ -141,7 +141,7 @@ pub async fn e2e_signer_rotation_past_cutoff_held_back() {
     let (client, _wallet) =
         set_up_client_with_seed("alice".to_string(), regtest.clone(), secp.clone(), seed).await;
 
-    let boarding_address = client.get_boarding_address().unwrap();
+    let boarding_address = client.get_boarding_address().await.unwrap();
     regtest.faucet_fund(&boarding_address, fund_amount).await;
 
     client.settle(&mut rng).await.unwrap();
@@ -160,7 +160,12 @@ pub async fn e2e_signer_rotation_past_cutoff_held_back() {
         set_up_client_with_seed("alice".to_string(), regtest.clone(), secp.clone(), seed).await;
 
     assert!(
-        !client2.server_info().unwrap().deprecated_signers.is_empty(),
+        !client2
+            .server_info()
+            .await
+            .unwrap()
+            .deprecated_signers
+            .is_empty(),
         "server_info should list the old signer as deprecated after rotation"
     );
 
@@ -200,7 +205,7 @@ pub async fn e2e_signer_rotation_boarding_only_migration() {
 
     // Fund a boarding output under the current signer but deliberately do NOT settle it: this
     // isolates the boarding-input migration path from the VTXO one.
-    let boarding_address = client.get_boarding_address().unwrap();
+    let boarding_address = client.get_boarding_address().await.unwrap();
     regtest.faucet_fund(&boarding_address, fund_amount).await;
 
     // Rotate with a future cutoff: the old signer is deprecated but still co-signs (regime 1), so
@@ -219,7 +224,12 @@ pub async fn e2e_signer_rotation_boarding_only_migration() {
     let mut rotated = false;
     for _ in 0..30 {
         if client.refresh_server_info().await.is_ok()
-            && !client.server_info().unwrap().deprecated_signers.is_empty()
+            && !client
+                .server_info()
+                .await
+                .unwrap()
+                .deprecated_signers
+                .is_empty()
         {
             rotated = true;
             break;
@@ -292,7 +302,7 @@ pub async fn e2e_signer_rotation_status_migratable() {
     let (client, _wallet) =
         set_up_client_with_seed("alice".to_string(), regtest.clone(), secp.clone(), seed).await;
 
-    let boarding_address = client.get_boarding_address().unwrap();
+    let boarding_address = client.get_boarding_address().await.unwrap();
     regtest.faucet_fund(&boarding_address, fund_amount).await;
     client.settle(&mut rng).await.unwrap();
     wait_until_balance!(&client, confirmed: fund_amount);
@@ -359,7 +369,7 @@ pub async fn e2e_signer_rotation_status_due_now() {
     let (client, _wallet) =
         set_up_client_with_seed("alice".to_string(), regtest.clone(), secp.clone(), seed).await;
 
-    let boarding_address = client.get_boarding_address().unwrap();
+    let boarding_address = client.get_boarding_address().await.unwrap();
     regtest.faucet_fund(&boarding_address, fund_amount).await;
     client.settle(&mut rng).await.unwrap();
     wait_until_balance!(&client, confirmed: fund_amount);

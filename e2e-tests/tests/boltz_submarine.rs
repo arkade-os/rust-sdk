@@ -40,7 +40,10 @@ pub async fn submarine_swap() {
     let alice_fund_amount = Amount::ONE_BTC;
 
     regtest
-        .faucet_fund(&alice.get_boarding_address().unwrap(), alice_fund_amount)
+        .faucet_fund(
+            &alice.get_boarding_address().await.unwrap(),
+            alice_fund_amount,
+        )
         .await;
 
     alice.settle(&mut rng).await.unwrap();

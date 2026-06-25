@@ -53,7 +53,7 @@ where
     where
         R: Rng + CryptoRng + Clone,
     {
-        let (change_address, _) = self.get_offchain_address()?;
+        let (change_address, _) = self.get_offchain_address().await?;
 
         let (boarding_inputs, vtxo_inputs, total_amount) = self
             .fetch_commitment_transaction_inputs(crate::utils::unix_now()?)
@@ -85,6 +85,7 @@ where
                 change_amount,
             },
             batch::PrepareIntentKind::EstimateFee,
+            self.server_info().await?.dust,
         )?;
 
         let amount = self.network_client().estimate_fees(intent.intent).await?;
@@ -144,6 +145,7 @@ where
                 to_amount: total_amount,
             },
             batch::PrepareIntentKind::EstimateFee,
+            self.server_info().await?.dust,
         )?;
 
         let amount = self.network_client().estimate_fees(intent.intent).await?;
@@ -187,7 +189,7 @@ where
     where
         R: Rng + CryptoRng + Clone,
     {
-        let (change_address, _) = self.get_offchain_address()?;
+        let (change_address, _) = self.get_offchain_address().await?;
 
         let vtxo_inputs = self
             .selected_batch_settleable_vtxo_inputs(input_vtxos)
@@ -228,6 +230,7 @@ where
                 change_amount,
             },
             batch::PrepareIntentKind::EstimateFee,
+            self.server_info().await?.dust,
         )?;
 
         let amount = self.network_client().estimate_fees(intent.intent).await?;
@@ -295,6 +298,7 @@ where
                 to_amount: total_input_amount,
             },
             batch::PrepareIntentKind::EstimateFee,
+            self.server_info().await?.dust,
         )?;
 
         let amount = self.network_client().estimate_fees(intent.intent).await?;

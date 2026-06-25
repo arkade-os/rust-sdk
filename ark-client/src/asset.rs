@@ -51,8 +51,8 @@ where
             return Err(Error::ad_hoc("asset amount must be > 0"));
         }
 
-        let server_info = self.server_info()?;
-        let (own_address, _) = self.get_offchain_address()?;
+        let server_info = self.server_info().await?;
+        let (own_address, _) = self.get_offchain_address().await?;
         let (spendable, script_pubkey_to_vtxo_map) = self.spendable_virtual_vtxos().await?;
 
         let selected_coins = select_vtxos(spendable, server_info.dust, server_info.dust, true)
@@ -60,7 +60,7 @@ where
             .context("failed to select coins for asset issuance")?;
 
         let issuance_inputs = self.build_vtxo_inputs(selected_coins, &script_pubkey_to_vtxo_map)?;
-        let (change_address, change_address_vtxo) = self.get_offchain_address()?;
+        let (change_address, change_address_vtxo) = self.get_offchain_address().await?;
 
         let SelfAssetIssuanceTransactions {
             ark_tx,
@@ -103,7 +103,7 @@ where
             return Err(Error::ad_hoc("reissue amount must be > 0"));
         }
 
-        let server_info = self.server_info()?;
+        let server_info = self.server_info().await?;
         let asset_info = self
             .get_asset(asset_id)
             .await
@@ -151,8 +151,8 @@ where
         }
 
         let reissuance_inputs = self.build_vtxo_inputs(selected, &script_pubkey_to_vtxo_map)?;
-        let (self_address, _) = self.get_offchain_address()?;
-        let (change_address, change_address_vtxo) = self.get_offchain_address()?;
+        let (self_address, _) = self.get_offchain_address().await?;
+        let (change_address, change_address_vtxo) = self.get_offchain_address().await?;
 
         let AssetReissuanceTransactions {
             ark_tx,
@@ -188,7 +188,7 @@ where
             return Err(Error::ad_hoc("burn amount must be > 0"));
         }
 
-        let server_info = self.server_info()?;
+        let server_info = self.server_info().await?;
         let (spendable, script_pubkey_to_vtxo_map) = self.spendable_virtual_vtxos().await?;
 
         let (asset_coins, asset_change) = select_vtxos_for_asset(&spendable, amount, asset_id)
@@ -233,8 +233,8 @@ where
         }
 
         let burn_inputs = self.build_vtxo_inputs(selected, &script_pubkey_to_vtxo_map)?;
-        let (own_address, _) = self.get_offchain_address()?;
-        let (change_address, change_address_vtxo) = self.get_offchain_address()?;
+        let (own_address, _) = self.get_offchain_address().await?;
+        let (change_address, change_address_vtxo) = self.get_offchain_address().await?;
 
         let offchain = build_asset_burn_transactions(
             &own_address,
@@ -271,7 +271,7 @@ where
             self.list_vtxos().await.context("failed to list VTXOs")?;
 
         let now = crate::utils::unix_now()?;
-        let server_info = self.server_info()?;
+        let server_info = self.server_info().await?;
         let spendable = vtxo_list
             .spendable_offchain_at(&server_info, now, |script| {
                 script_pubkey_to_vtxo_map

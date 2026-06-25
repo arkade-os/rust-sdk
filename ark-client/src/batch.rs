@@ -74,7 +74,7 @@ where
         R: Rng + CryptoRng + Clone,
     {
         // Get off-chain address and send all funds to this address, no change output 🦄
-        let (to_address, _) = self.get_offchain_address()?;
+        let (to_address, _) = self.get_offchain_address().await?;
 
         let (boarding_inputs, vtxo_inputs, total_amount) =
             self.fetch_commitment_transaction_inputs(now).await?;
@@ -174,7 +174,7 @@ where
     where
         R: Rng + CryptoRng + Clone,
     {
-        let (to_address, _) = self.get_offchain_address()?;
+        let (to_address, _) = self.get_offchain_address().await?;
 
         let (boarding_inputs, vtxo_inputs, mut total_amount) = self
             .fetch_commitment_transaction_inputs(crate::utils::unix_now()?)
@@ -249,7 +249,7 @@ where
         R: Rng + CryptoRng + Clone,
     {
         // Get off-chain address and send all funds to this address, no change output.
-        let (to_address, _) = self.get_offchain_address()?;
+        let (to_address, _) = self.get_offchain_address().await?;
 
         let (all_boarding_inputs, all_vtxo_inputs, _) = self
             .fetch_commitment_transaction_inputs(crate::utils::unix_now()?)
@@ -326,7 +326,7 @@ where
     where
         R: Rng + CryptoRng + Clone,
     {
-        let (change_address, _) = self.get_offchain_address()?;
+        let (change_address, _) = self.get_offchain_address().await?;
 
         let (boarding_inputs, vtxo_inputs, total_amount) = self
             .fetch_commitment_transaction_inputs(crate::utils::unix_now()?)
@@ -400,7 +400,7 @@ where
     where
         R: Rng + CryptoRng + Clone,
     {
-        let (change_address, _) = self.get_offchain_address()?;
+        let (change_address, _) = self.get_offchain_address().await?;
 
         let vtxo_inputs = self
             .selected_batch_settleable_vtxo_inputs(input_vtxos)
@@ -478,7 +478,7 @@ where
 
         let (vtxo_list, script_pubkey_to_vtxo_map) =
             self.list_vtxos().await.context("failed to get VTXO list")?;
-        let server_info = self.server_info()?;
+        let server_info = self.server_info().await?;
         let now = crate::utils::unix_now()?;
 
         let matching_unspent = vtxo_list
@@ -554,7 +554,7 @@ where
         delegate_cosigner_pk: PublicKey,
     ) -> Result<Delegate, Error> {
         // Get off-chain address and send all funds to this address.
-        let (to_address, _) = self.get_offchain_address()?;
+        let (to_address, _) = self.get_offchain_address().await?;
 
         // Simply collect all VTXOs that can be settled.
         let (_, vtxo_inputs, _) = self
@@ -569,7 +569,7 @@ where
             return Err(Error::ad_hoc("no inputs to settle via delegate"));
         }
 
-        let server_info = &self.server_info()?;
+        let server_info = &self.server_info().await?;
 
         let mut outputs = vec![intent::Output::Offchain(TxOut {
             value: total_amount,
@@ -667,7 +667,7 @@ where
         tracing::debug!(intent_id, "Registered delegated intent");
 
         let network_client = self.network_client();
-        let server_info = &self.server_info()?;
+        let server_info = &self.server_info().await?;
 
         #[derive(Debug, PartialEq, Eq)]
         enum Step {
@@ -1104,7 +1104,7 @@ where
 
         // Snapshot once; reused for the boarding cutoff filter and the VTXO dust/cutoff logic
         // below.
-        let server_info = self.server_info()?;
+        let server_info = self.server_info().await?;
 
         // Find outpoints for each boarding output.
         for boarding_output in boarding_outputs {
@@ -1218,6 +1218,7 @@ where
         vtxo_inputs: Vec<intent::Input>,
         output_type: BatchOutputType,
         intent_kind: PrepareIntentKind,
+        dust: Amount,
     ) -> Result<PreparedIntent, Error>
     where
         R: Rng + CryptoRng,
@@ -1253,8 +1254,6 @@ where
                 .chain(vtxo_inputs.clone())
                 .collect::<Vec<_>>()
         };
-
-        let dust = self.server_info()?.dust;
 
         let mut outputs = vec![];
 
@@ -1422,12 +1421,14 @@ where
     where
         R: Rng + CryptoRng,
     {
+        let server_info = self.server_info().await?;
         let prepared = self.prepare_intent(
             rng,
             onchain_inputs,
             vtxo_inputs,
             output_type,
             PrepareIntentKind::Register,
+            server_info.dust,
         )?;
 
         let PreparedIntent {
@@ -1444,7 +1445,7 @@ where
             .map(|i| i.outpoint())
             .collect::<Vec<_>>();
 
-        let server_info = &self.server_info()?;
+        let server_info = &server_info;
 
         let own_cosigner_kps = [cosigner_keypair];
         let own_cosigner_pks = own_cosigner_kps

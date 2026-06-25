@@ -44,6 +44,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
+use std::time::Instant;
 
 pub mod error;
 pub mod key_provider;
@@ -101,6 +102,8 @@ pub const DEFAULT_GAP_LIMIT: u32 = 20;
 /// Default Boltz `referralId` sent with swap creation requests when the caller does not
 /// provide one. Identifies traffic originating from this SDK.
 pub const DEFAULT_BOLTZ_REFERRAL_ID: &str = "arkade-rs-SDK";
+
+const SERVER_INFO_TTL: Duration = Duration::from_secs(15 * 60);
 
 /// A client to interact with Ark Server
 ///
@@ -324,11 +327,13 @@ pub struct OfflineClient<B, W, S, K> {
 pub struct Client<B, W, S, K> {
     inner: OfflineClient<B, W, S, K>,
     state: Arc<RwLock<ServerState>>,
+    server_info_refresh_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 struct ServerState {
     server_info: server::Info,
     fee_estimator: ark_fees::Estimator,
+    server_info_refreshed_at: Instant,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -662,8 +667,9 @@ where
 
         let fee_estimator = build_fee_estimator(&server_info)?;
         let state = Arc::new(RwLock::new(ServerState {
-            server_info,
+            server_info: server_info.clone(),
             fee_estimator,
+            server_info_refreshed_at: Instant::now(),
         }));
         let hook_state = state.clone();
         self.network_client
@@ -672,29 +678,23 @@ where
                     .map_err(|err| Box::new(err) as Box<dyn std::error::Error + Send + Sync>)
             });
 
-        let client = Client { inner: self, state };
-
-        if let Err(error) = client.discover_keys(DEFAULT_GAP_LIMIT).await {
-            tracing::warn!(?error, "Failed during key discovery");
+        let client = Client {
+            inner: self,
+            state,
+            server_info_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
 
         // Eagerly persist boarding rows for every signer/delay candidate the wallet should watch.
         // The migration boarding leg reads the wallet DB only; without this connect-time seed, a
         // deprecated-signer boarding UTXO could be invisible until the caller happened to call
         // `get_boarding_addresses()`. Re-persisting is idempotent, so it is safe on every connect.
-        match client.server_info() {
-            Ok(server_info) => {
-                if let Err(error) = client.persist_watch_boarding_outputs(&server_info) {
-                    tracing::warn!(?error, "Failed to persist boarding outputs at connect");
-                }
-            }
-            Err(error) => {
-                tracing::warn!(
-                    ?error,
-                    "Failed to read server info for boarding persistence"
-                );
-            }
+        if let Err(error) = client.persist_watch_boarding_outputs(&server_info) {
+            tracing::warn!(?error, "Failed to persist boarding outputs at connect");
         }
+
+        if let Err(error) = client.discover_keys(DEFAULT_GAP_LIMIT).await {
+            tracing::warn!(?error, "Failed during key discovery");
+        };
 
         Ok(client)
     }
@@ -725,6 +725,7 @@ fn update_server_state(
         .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
     state.server_info = server_info;
     state.fee_estimator = fee_estimator;
+    state.server_info_refreshed_at = Instant::now();
     Ok(())
 }
 
@@ -735,11 +736,29 @@ where
     S: SwapStorage + 'static,
     K: KeyProvider,
 {
-    /// Returns the latest cached Ark server info.
-    pub fn server_info(&self) -> Result<server::Info, Error> {
+    /// Returns Ark server info, refreshing the cached snapshot when its TTL has expired.
+    pub async fn server_info(&self) -> Result<server::Info, Error> {
+        // Fast path avoids taking the async mutex while the cache is fresh.
+        if let Some(server_info) = self.cached_server_info_if_fresh()? {
+            return Ok(server_info);
+        }
+
+        let _guard = self.server_info_refresh_lock.lock().await;
+        // Re-check after acquiring the mutex: another task may have refreshed while we waited.
+        if let Some(server_info) = self.cached_server_info_if_fresh()? {
+            return Ok(server_info);
+        }
+
+        self.refresh_server_info_unlocked().await
+    }
+
+    fn cached_server_info_if_fresh(&self) -> Result<Option<server::Info>, Error> {
         self.state
             .read()
-            .map(|state| state.server_info.clone())
+            .map(|state| {
+                (state.server_info_refreshed_at.elapsed() < SERVER_INFO_TTL)
+                    .then(|| state.server_info.clone())
+            })
             .map_err(|_| Error::ad_hoc("client server state lock poisoned"))
     }
 
@@ -756,23 +775,31 @@ where
             .map_err(Error::ad_hoc)
     }
 
-    /// Refresh cached `/info` data.
+    /// Force-fetch the latest Ark server `/info` and replace the cached server state.
     ///
-    /// Useful after an out-of-band server restart or signer rotation, and also used by guarded RPC
-    /// clients after arkd reports stale client state.
+    /// This bypasses the TTL used by [`Self::server_info`]. Concurrent refreshes are serialized
+    /// with the same refresh gate used by TTL-based refreshes.
     ///
-    /// The refreshed snapshot includes the server's current
-    /// [`server::Info::deprecated_signers`]. The background watcher's migration arm then observes
-    /// those freshly advertised deprecated signers on its next pass and rotates funds off them via
-    /// [`Self::migrate_deprecated_signer_vtxos`].
-    pub async fn refresh_server_info(&self) -> Result<(), Error> {
+    /// Returns the freshly fetched server info. The refreshed snapshot includes the server's
+    /// current [`server::Info::deprecated_signers`], allowing subsequent wallet operations to
+    /// observe signer rotations.
+    pub async fn refresh_server_info(&self) -> Result<server::Info, Error> {
+        let _guard = self.server_info_refresh_lock.lock().await;
+        self.refresh_server_info_unlocked().await
+    }
+
+    /// Fetch `/info` and update cached server state without acquiring the refresh gate.
+    ///
+    /// Callers must already hold `server_info_refresh_lock`, or otherwise guarantee that
+    /// concurrent refreshes are serialized.
+    async fn refresh_server_info_unlocked(&self) -> Result<server::Info, Error> {
         let server_info = timeout_op(self.inner.timeout, self.network_client().get_info())
             .await
             .context("Failed to refresh Ark server info")??;
 
-        update_server_state(&self.state, server_info)?;
+        update_server_state(&self.state, server_info.clone())?;
 
-        Ok(())
+        Ok(server_info)
     }
 
     /// Returns the currently configured delegator pubkey, if any.
@@ -792,8 +819,8 @@ where
     ///
     /// For HD wallets, this will derive a new address each time it's called.
     /// For static key providers, this will always return the same address.
-    pub fn get_offchain_address(&self) -> Result<(ArkAddress, Vtxo), Error> {
-        let server_info = &self.server_info()?;
+    pub async fn get_offchain_address(&self) -> Result<(ArkAddress, Vtxo), Error> {
+        let server_info = self.server_info().await?;
 
         let server_signer = server_info.signer_pk.into();
         let owner = self
@@ -801,7 +828,7 @@ where
             .public_key()
             .into();
 
-        let vtxo = self.make_vtxo(server_signer, owner)?;
+        let vtxo = self.make_vtxo(&server_info, server_signer, owner)?;
 
         let ark_address = vtxo.to_ark_address();
 
@@ -814,8 +841,8 @@ where
     /// (3-leaf) addresses for each key, so that VTXOs at either address are visible. If
     /// historical delegator keys are set via `historical_delegator_pks` passed to
     /// [`OfflineClient::new`], addresses for those are included too.
-    pub fn get_offchain_addresses(&self) -> Result<Vec<(ArkAddress, Vtxo)>, Error> {
-        let server_info = &self.server_info()?;
+    pub async fn get_offchain_addresses(&self) -> Result<Vec<(ArkAddress, Vtxo)>, Error> {
+        let server_info = &self.server_info().await?;
         let pks = self.inner.key_provider.get_cached_pks()?;
 
         // Build addresses for current signer + all deprecated signers so VTXOs under any
@@ -873,10 +900,10 @@ where
     /// configured, otherwise a standard 2-leaf default VTXO.
     fn make_vtxo(
         &self,
+        server_info: &server::Info,
         server_signer: XOnlyPublicKey,
         owner: XOnlyPublicKey,
     ) -> Result<Vtxo, Error> {
-        let server_info = &self.server_info()?;
         match self.inner.delegator_pk {
             Some(delegator) => Vtxo::new_with_delegator(
                 self.secp(),
@@ -914,7 +941,7 @@ where
             return Ok(0);
         }
 
-        let server_info = &self.server_info()?;
+        let server_info = &self.server_info().await?;
         // Discover against current + all deprecated signers so that user keys used before a
         // rotation are still found when recovering from seed.
         let all_server_keys: Vec<XOnlyPublicKey> = server_info.all_server_keys().collect();
@@ -1025,8 +1052,8 @@ where
     }
 
     // At the moment we are always generating the same address.
-    pub fn get_boarding_address(&self) -> Result<Address, Error> {
-        let server_info = &self.server_info()?;
+    pub async fn get_boarding_address(&self) -> Result<Address, Error> {
+        let server_info = &self.server_info().await?;
 
         let boarding_output = self.inner.wallet.new_boarding_output(
             server_info.signer_pk.into(),
@@ -1041,8 +1068,8 @@ where
         self.inner.wallet.get_onchain_address()
     }
 
-    pub fn get_boarding_addresses(&self) -> Result<Vec<Address>, Error> {
-        let server_info = &self.server_info()?;
+    pub async fn get_boarding_addresses(&self) -> Result<Vec<Address>, Error> {
+        let server_info = &self.server_info().await?;
 
         // Persist a boarding output for every (signer, exit-delay) candidate and return the
         // de-duplicated addresses. This is the watch/history surface: it covers the current signer
@@ -1106,7 +1133,7 @@ where
     }
 
     pub async fn list_vtxos(&self) -> Result<(VtxoList, HashMap<ScriptBuf, Vtxo>), Error> {
-        let ark_addresses = self.get_offchain_addresses()?;
+        let ark_addresses = self.get_offchain_addresses().await?;
 
         let script_pubkey_to_vtxo_map = ark_addresses
             .iter()
@@ -1129,7 +1156,7 @@ where
             .await
             .context("failed to get VTXOs for addresses")?;
 
-        let vtxo_list = VtxoList::new(self.server_info()?.dust, virtual_tx_outpoints);
+        let vtxo_list = VtxoList::new(self.server_info().await?.dust, virtual_tx_outpoints);
 
         Ok(vtxo_list)
     }
@@ -1138,7 +1165,7 @@ where
         &self,
         outpoints: Vec<OutPoint>,
     ) -> Result<(VtxoList, HashMap<ScriptBuf, Vtxo>), Error> {
-        let ark_addresses = self.get_offchain_addresses()?;
+        let ark_addresses = self.get_offchain_addresses().await?;
 
         let script_pubkey_to_vtxo_map = ark_addresses
             .iter()
@@ -1161,7 +1188,7 @@ where
             })
             .collect();
 
-        let vtxo_list = VtxoList::new(self.server_info()?.dust, virtual_tx_outpoints);
+        let vtxo_list = VtxoList::new(self.server_info().await?.dust, virtual_tx_outpoints);
 
         Ok((vtxo_list, script_pubkey_to_vtxo_map))
     }
@@ -1186,7 +1213,7 @@ where
     pub async fn offchain_balance(&self) -> Result<OffChainBalance, Error> {
         let (vtxo_list, script_map) = self.list_vtxos().await.context("failed to list VTXOs")?;
         let now = unix_now()?;
-        let server_info = self.server_info()?;
+        let server_info = self.server_info().await?;
 
         let spendable_outpoints: HashSet<OutPoint> = vtxo_list
             .spendable_offchain_at(&server_info, now, |script| {
@@ -1255,7 +1282,7 @@ where
         let mut boarding_transactions = Vec::new();
         let mut boarding_commitment_transactions = Vec::new();
 
-        let boarding_addresses = self.get_boarding_addresses()?;
+        let boarding_addresses = self.get_boarding_addresses().await?;
         for boarding_address in boarding_addresses.iter() {
             let outpoints = timeout_op(
                 self.inner.timeout,
@@ -1368,8 +1395,8 @@ where
     }
 
     /// The server's dust threshold amount.
-    pub fn dust(&self) -> Result<Amount, Error> {
-        Ok(self.server_info()?.dust)
+    pub async fn dust(&self) -> Result<Amount, Error> {
+        Ok(self.server_info().await?.dust)
     }
 
     pub fn network_client(&self) -> ark_grpc::Client {
@@ -1544,6 +1571,9 @@ mod digest_guard_tests {
     use bitcoin::key::Secp256k1;
     use bitcoin::secp256k1::SecretKey;
     use bitcoin::Address;
+    use bitcoin::FeeRate;
+    use bitcoin::Network;
+    use bitcoin::Psbt;
     use std::convert::Infallible;
     use std::future::Future;
     use std::pin::Pin;
@@ -1567,6 +1597,119 @@ mod digest_guard_tests {
     struct MockState {
         get_info_calls: AtomicUsize,
         list_vtxos_calls: AtomicUsize,
+    }
+
+    #[derive(Clone)]
+    struct DummyBlockchain;
+
+    impl Blockchain for DummyBlockchain {
+        async fn find_outpoints(&self, _address: &Address) -> Result<Vec<ExplorerUtxo>, Error> {
+            Ok(Vec::new())
+        }
+
+        async fn find_tx(&self, _txid: &Txid) -> Result<Option<Transaction>, Error> {
+            Ok(None)
+        }
+
+        async fn get_tx_status(&self, _txid: &Txid) -> Result<TxStatus, Error> {
+            Ok(TxStatus { confirmed_at: None })
+        }
+
+        async fn get_output_status(&self, _txid: &Txid, _vout: u32) -> Result<SpendStatus, Error> {
+            Ok(SpendStatus { spend_txid: None })
+        }
+
+        async fn broadcast(&self, _tx: &Transaction) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn get_fee_rate(&self) -> Result<f64, Error> {
+            Ok(1.0)
+        }
+
+        async fn broadcast_package(&self, _txs: &[&Transaction]) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    struct DummyWallet {
+        keypair: Keypair,
+        secp: Secp256k1<All>,
+    }
+
+    impl DummyWallet {
+        fn new() -> Self {
+            let secp = Secp256k1::new();
+            let secret_key = SecretKey::from_slice(&[2; 32]).unwrap();
+            let keypair = Keypair::from_secret_key(&secp, &secret_key);
+            Self { keypair, secp }
+        }
+    }
+
+    impl BoardingWallet for DummyWallet {
+        fn new_boarding_output(
+            &self,
+            server_pubkey: XOnlyPublicKey,
+            exit_delay: bitcoin::Sequence,
+            network: Network,
+        ) -> Result<BoardingOutput, Error> {
+            let owner = self.keypair.x_only_public_key().0;
+            BoardingOutput::new(&self.secp, server_pubkey, owner, exit_delay, network)
+                .map_err(Into::into)
+        }
+
+        fn get_boarding_outputs(&self) -> Result<Vec<BoardingOutput>, Error> {
+            Ok(Vec::new())
+        }
+
+        fn sign_for_pk(
+            &self,
+            _pk: &XOnlyPublicKey,
+            msg: &bitcoin::secp256k1::Message,
+        ) -> Result<bitcoin::secp256k1::schnorr::Signature, Error> {
+            Ok(self.secp.sign_schnorr_no_aux_rand(msg, &self.keypair))
+        }
+    }
+
+    impl OnchainWallet for DummyWallet {
+        fn get_onchain_address(&self) -> Result<Address, Error> {
+            Ok(Address::p2tr(
+                &self.secp,
+                self.keypair.x_only_public_key().0,
+                None,
+                Network::Regtest,
+            ))
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            Ok(())
+        }
+
+        fn balance(&self) -> Result<wallet::Balance, Error> {
+            Ok(wallet::Balance {
+                immature: Amount::ZERO,
+                trusted_pending: Amount::ZERO,
+                untrusted_pending: Amount::ZERO,
+                confirmed: Amount::ZERO,
+            })
+        }
+
+        fn prepare_send_to_address(
+            &self,
+            _address: Address,
+            _amount: Amount,
+            _fee_rate: FeeRate,
+        ) -> Result<Psbt, Error> {
+            Err(Error::wallet("not implemented"))
+        }
+
+        fn sign(&self, _psbt: &mut Psbt) -> Result<bool, Error> {
+            Ok(true)
+        }
+
+        fn select_coins(&self, _target_amount: Amount) -> Result<UtxoCoinSelection, Error> {
+            Err(Error::wallet("not implemented"))
+        }
     }
 
     impl Service<http::Request<Body>> for MockArkServer {
@@ -1675,13 +1818,49 @@ mod digest_guard_tests {
         }
     }
 
+    async fn connect_test_client(
+        mock: MockArkServer,
+    ) -> Client<DummyBlockchain, DummyWallet, InMemorySwapStorage, StaticKeyProvider> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+        let indexer_mock = MockIndexerServer(mock.clone());
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(mock)
+                .add_service(indexer_mock)
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+
+        let secp = Secp256k1::new();
+        let keypair = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[3; 32]).unwrap());
+        OfflineClient::<DummyBlockchain, DummyWallet, InMemorySwapStorage, StaticKeyProvider>::new_with_keypair(
+            "test".to_string(),
+            keypair,
+            Arc::new(DummyBlockchain),
+            Arc::new(DummyWallet::new()),
+            format!("http://{addr}"),
+            Arc::new(InMemorySwapStorage::default()),
+            "http://127.0.0.1:1".to_string(),
+            None,
+            Duration::from_secs(30),
+            None,
+            vec![],
+        )
+        .connect()
+        .await
+        .unwrap()
+    }
+
     fn info_response(digest: &str) -> test_utils::GetInfoResponse {
         let secp = Secp256k1::new();
         let secret_key = SecretKey::from_slice(&[1; 32]).unwrap();
         let keypair = Keypair::from_secret_key(&secp, &secret_key);
         let public_key = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
         let (xonly, _) = keypair.x_only_public_key();
-        let address = Address::p2tr(&secp, xonly, None, bitcoin::Network::Regtest);
+        let address = Address::p2tr(&secp, xonly, None, Network::Regtest);
 
         test_utils::GetInfoResponse {
             version: "0.9.9".to_string(),
@@ -1706,6 +1885,38 @@ mod digest_guard_tests {
             max_tx_weight: 0,
             max_op_return_outputs: 0,
         }
+    }
+
+    #[tokio::test]
+    async fn server_info_uses_fresh_cache_without_refetching() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let mock = MockArkServer::default();
+        let state = mock.state.clone();
+        let client = connect_test_client(mock).await;
+        assert_eq!(state.get_info_calls.load(Ordering::SeqCst), 1);
+
+        let info = client.server_info().await.unwrap();
+        assert_eq!(info.digest, "fresh-digest");
+        assert_eq!(state.get_info_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn server_info_refreshes_expired_cache_once_for_concurrent_callers() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let mock = MockArkServer::default();
+        let state = mock.state.clone();
+        let client = Arc::new(connect_test_client(mock).await);
+        client.state.write().unwrap().server_info_refreshed_at =
+            Instant::now() - SERVER_INFO_TTL - Duration::from_secs(1);
+
+        let a = Arc::clone(&client);
+        let b = Arc::clone(&client);
+        let (info_a, info_b) = tokio::join!(a.server_info(), b.server_info());
+        assert_eq!(info_a.unwrap().digest, "fresh-digest");
+        assert_eq!(info_b.unwrap().digest, "fresh-digest");
+        assert_eq!(state.get_info_calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -1736,6 +1947,7 @@ mod digest_guard_tests {
             server_info: initial_info,
             fee_estimator: build_fee_estimator(&info_response("stale-digest").try_into().unwrap())
                 .unwrap(),
+            server_info_refreshed_at: Instant::now() - SERVER_INFO_TTL - Duration::from_secs(1),
         }));
         let hook_state = cached_state.clone();
         inner.set_info_refresh_hook(move |server_info| {
@@ -1755,9 +1967,8 @@ mod digest_guard_tests {
         assert!(Error::from(err).is_server_info_changed());
         assert_eq!(state.list_vtxos_calls.load(Ordering::SeqCst), 1);
         assert_eq!(state.get_info_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            cached_state.read().unwrap().server_info.digest,
-            "fresh-digest"
-        );
+        let refreshed_state = cached_state.read().unwrap();
+        assert_eq!(refreshed_state.server_info.digest, "fresh-digest");
+        assert!(refreshed_state.server_info_refreshed_at.elapsed() < SERVER_INFO_TTL);
     }
 }

@@ -38,7 +38,7 @@ async fn fulmine_delegator_smoke() {
     let client = Arc::new(client);
 
     // Sanity: configured client returns delegated (3-leaf) addresses.
-    let (_, next_vtxo) = client.get_offchain_address().unwrap();
+    let (_, next_vtxo) = client.get_offchain_address().await.unwrap();
     assert_eq!(next_vtxo.delegator_pk(), Some(delegator_pk));
 
     // Start watcher and keep handle alive for the test duration.
@@ -47,7 +47,7 @@ async fn fulmine_delegator_smoke() {
         ark_client::vtxo_watcher::VtxoWatcherConfig::default(),
     );
 
-    let boarding_address = client.get_boarding_address().unwrap();
+    let boarding_address = client.get_boarding_address().await.unwrap();
     let fund_amount = Amount::from_sat(100_000);
     let _outpoint = regtest.faucet_fund(&boarding_address, fund_amount).await;
 

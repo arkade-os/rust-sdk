@@ -532,7 +532,10 @@ async fn run_command<K: KeyProvider + 'static>(
             let offchain_balance = client.offchain_balance().await.map_err(|e| anyhow!(e))?;
 
             let boarding = {
-                let boarding_output = client.get_boarding_address().map_err(|e| anyhow!(e))?;
+                let boarding_output = client
+                    .get_boarding_address()
+                    .await
+                    .map_err(|e| anyhow!(e))?;
                 let outpoints = esplora_client
                     .find_outpoints(&boarding_output)
                     .await
@@ -567,21 +570,27 @@ async fn run_command<K: KeyProvider + 'static>(
             }
         }
         Commands::BoardingAddress => {
-            let boarding_address = client.get_boarding_address().map_err(|e| anyhow!(e))?;
+            let boarding_address = client
+                .get_boarding_address()
+                .await
+                .map_err(|e| anyhow!(e))?;
             println!(
                 "{}",
                 serde_json::json!({"address": boarding_address.to_string()})
             );
         }
         Commands::OffchainAddress => {
-            let (address, _) = client.get_offchain_address().map_err(|e| anyhow!(e))?;
+            let (address, _) = client
+                .get_offchain_address()
+                .await
+                .map_err(|e| anyhow!(e))?;
             let address = address.encode();
             println!("{}", serde_json::json!({"address": address}));
         }
         Commands::Settle { notes } => {
             let mut rng = thread_rng();
             // we need to call this because how our wallet works
-            let _ = client.get_boarding_address();
+            let _ = client.get_boarding_address().await;
 
             let maybe_batch_tx = match notes {
                 Some(notes_str) => {
@@ -750,10 +759,14 @@ async fn run_command<K: KeyProvider + 'static>(
 
             if client
                 .get_offchain_addresses()
+                .await
                 .map_err(|e| anyhow!(e))?
                 .is_empty()
             {
-                let (addr, _) = client.get_offchain_address().map_err(|e| anyhow!(e))?;
+                let (addr, _) = client
+                    .get_offchain_address()
+                    .await
+                    .map_err(|e| anyhow!(e))?;
                 tracing::info!(
                     address = %addr,
                     "Derived first offchain address so watcher has scripts to subscribe to"
@@ -773,7 +786,7 @@ async fn run_command<K: KeyProvider + 'static>(
             unreachable!("pending future never resolves");
         }
         Commands::SendOnchain { address, amount } => {
-            let network = client.server_info()?.network;
+            let network = client.server_info().await?.network;
             let checked_address = address.clone().require_network(network)?;
 
             let mut rng = thread_rng();
@@ -802,7 +815,7 @@ async fn run_command<K: KeyProvider + 'static>(
                 })
                 .collect::<Result<Vec<_>>>()?;
 
-            let network = client.server_info()?.network;
+            let network = client.server_info().await?.network;
             let checked_address = address.clone().require_network(network)?;
 
             let mut rng = thread_rng();
@@ -1110,7 +1123,10 @@ async fn run_command<K: KeyProvider + 'static>(
             });
 
             // Get boarding outputs
-            let boarding_output = client.get_boarding_address().map_err(|e| anyhow!(e))?;
+            let boarding_output = client
+                .get_boarding_address()
+                .await
+                .map_err(|e| anyhow!(e))?;
             let outpoints = esplora_client
                 .find_outpoints(&boarding_output)
                 .await
@@ -1186,7 +1202,7 @@ async fn run_command<K: KeyProvider + 'static>(
             }
 
             // We need to call this because of how our wallet works
-            let _ = client.get_boarding_address();
+            let _ = client.get_boarding_address().await;
 
             let maybe_batch_tx = client
                 .settle_vtxos(&mut rng, &vtxo_outpoints, &boarding_outpoints)
@@ -1205,7 +1221,7 @@ async fn run_command<K: KeyProvider + 'static>(
             println!("{}", serde_json::to_string_pretty(&output)?);
         }
         Commands::EstimateFees { address, amount } => {
-            let network = client.server_info()?.network;
+            let network = client.server_info().await?.network;
             let mut rng = thread_rng();
 
             // Try parsing as ArkAddress first, then as Bitcoin address
@@ -1297,7 +1313,7 @@ async fn run_command<K: KeyProvider + 'static>(
             let selected = ark_core::coin_select::select_vtxos(
                 spendable,
                 amount,
-                client.server_info()?.dust,
+                client.server_info().await?.dust,
                 true,
             )
             .map_err(|e| anyhow!(e))?;
@@ -1430,7 +1446,7 @@ async fn run_command<K: KeyProvider + 'static>(
 
             let receiver = SendReceiver {
                 address: address.0,
-                amount: client.dust()?,
+                amount: client.dust().await?,
                 assets: vec![ark_core::server::Asset {
                     asset_id,
                     amount: *amount,
