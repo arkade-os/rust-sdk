@@ -773,14 +773,20 @@ where
     /// For static key providers, this will always return the same address.
     pub async fn get_offchain_address(&self) -> Result<(ArkAddress, Vtxo), Error> {
         let server_info = self.server_info().await?;
+        self.get_offchain_address_with_server_info(&server_info)
+    }
 
+    pub(crate) fn get_offchain_address_with_server_info(
+        &self,
+        server_info: &server::Info,
+    ) -> Result<(ArkAddress, Vtxo), Error> {
         let server_signer = server_info.signer_pk.into();
         let owner = self
             .next_keypair(KeypairIndex::LastUnused)?
             .public_key()
             .into();
 
-        let vtxo = self.make_vtxo(&server_info, server_signer, owner)?;
+        let vtxo = self.make_vtxo(server_info, server_signer, owner)?;
 
         let ark_address = vtxo.to_ark_address();
 
@@ -794,7 +800,14 @@ where
     /// historical delegator keys are set via `historical_delegator_pks` passed to
     /// [`OfflineClientConfig::historical_delegator_pks`], addresses for those are included too.
     pub async fn get_offchain_addresses(&self) -> Result<Vec<(ArkAddress, Vtxo)>, Error> {
-        let server_info = &self.server_info().await?;
+        let server_info = self.server_info().await?;
+        self.get_offchain_addresses_with_server_info(&server_info)
+    }
+
+    pub(crate) fn get_offchain_addresses_with_server_info(
+        &self,
+        server_info: &server::Info,
+    ) -> Result<Vec<(ArkAddress, Vtxo)>, Error> {
         let pks = self.inner.key_provider.get_cached_pks()?;
 
         // Build addresses for current signer + all deprecated signers so VTXOs under any
@@ -1085,7 +1098,15 @@ where
     }
 
     pub async fn list_vtxos(&self) -> Result<(VtxoList, HashMap<ScriptBuf, Vtxo>), Error> {
-        let ark_addresses = self.get_offchain_addresses().await?;
+        let server_info = self.server_info().await?;
+        self.list_vtxos_with_server_info(&server_info).await
+    }
+
+    pub(crate) async fn list_vtxos_with_server_info(
+        &self,
+        server_info: &server::Info,
+    ) -> Result<(VtxoList, HashMap<ScriptBuf, Vtxo>), Error> {
+        let ark_addresses = self.get_offchain_addresses_with_server_info(server_info)?;
 
         let script_pubkey_to_vtxo_map = ark_addresses
             .iter()
@@ -1094,7 +1115,9 @@ where
 
         let addresses = ark_addresses.iter().map(|(a, _)| a).copied();
 
-        let vtxo_list = self.list_vtxos_for_addresses(addresses).await?;
+        let vtxo_list = self
+            .list_vtxos_for_addresses_with_server_info(server_info, addresses)
+            .await?;
 
         Ok((vtxo_list, script_pubkey_to_vtxo_map))
     }
@@ -1103,12 +1126,22 @@ where
         &self,
         addresses: impl Iterator<Item = ArkAddress>,
     ) -> Result<VtxoList, Error> {
+        let server_info = self.server_info().await?;
+        self.list_vtxos_for_addresses_with_server_info(&server_info, addresses)
+            .await
+    }
+
+    pub(crate) async fn list_vtxos_for_addresses_with_server_info(
+        &self,
+        server_info: &server::Info,
+        addresses: impl Iterator<Item = ArkAddress>,
+    ) -> Result<VtxoList, Error> {
         let virtual_tx_outpoints = self
             .get_virtual_tx_outpoints(addresses)
             .await
             .context("failed to get VTXOs for addresses")?;
 
-        let vtxo_list = VtxoList::new(self.server_info().await?.dust, virtual_tx_outpoints);
+        let vtxo_list = VtxoList::new(server_info.dust, virtual_tx_outpoints);
 
         Ok(vtxo_list)
     }

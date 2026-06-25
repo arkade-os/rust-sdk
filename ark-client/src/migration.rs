@@ -383,12 +383,13 @@ where
         // `fetch_commitment_transaction_inputs` already drops PAST-cutoff deprecated inputs (the
         // operator won't co-sign the old key). We narrow further to the PRE-cutoff deprecated
         // inputs, which is exactly the cooperatively-migratable set.
-        let (boarding_inputs, vtxo_inputs, _) =
-            self.fetch_commitment_transaction_inputs(now).await?;
+        let (boarding_inputs, vtxo_inputs, _) = self
+            .fetch_commitment_transaction_inputs(&server_info, now)
+            .await?;
 
         // The VTXO inputs only expose their script pubkey, so resolve each one's signer via the
         // script -> VTXO map (the same mapping `offchain_balance`/`settle_at` rely on).
-        let (_, script_map) = self.list_vtxos().await?;
+        let (_, script_map) = self.list_vtxos_with_server_info(&server_info).await?;
 
         // Build the candidate (outpoint, amount, signer, cutoff) list for the VTXO leg.
         let mut vtxo_candidates: Vec<MigrationVtxoRef> = Vec::new();
@@ -440,10 +441,24 @@ where
 
         // Run each leg independently so a failure in one does not suppress the other.
         let vtxo_leg = self
-            .run_migration_leg(rng, vtxo_candidates, vtxo_max_amount, dust, true)
+            .run_migration_leg(
+                rng,
+                &server_info,
+                vtxo_candidates,
+                vtxo_max_amount,
+                dust,
+                true,
+            )
             .await?;
         let boarding_leg = self
-            .run_migration_leg(rng, boarding_candidates, vtxo_max_amount, dust, false)
+            .run_migration_leg(
+                rng,
+                &server_info,
+                boarding_candidates,
+                vtxo_max_amount,
+                dust,
+                false,
+            )
             .await?;
 
         Ok(DeprecatedSignerMigrationReport {
@@ -493,7 +508,10 @@ where
             next_sweep_eta: Option<i64>,
         }
 
-        let (vtxo_list, script_map) = self.list_vtxos().await.context("failed to list VTXOs")?;
+        let (vtxo_list, script_map) = self
+            .list_vtxos_with_server_info(&server_info)
+            .await
+            .context("failed to list VTXOs")?;
         let mut vtxo_aggs: HashMap<XOnlyPublicKey, VtxoAgg> = HashMap::new();
         for v in vtxo_list.all_unspent() {
             let Some(vtxo) = script_map.get(&v.script) else {
@@ -623,6 +641,7 @@ where
     async fn run_migration_leg<R>(
         &self,
         rng: &mut R,
+        server_info: &ark_core::server::Info,
         candidates: Vec<MigrationVtxoRef>,
         vtxo_max_amount: Option<Amount>,
         dust: Amount,
@@ -657,9 +676,11 @@ where
 
         let selected_outpoints: Vec<OutPoint> = selected.iter().map(|c| c.outpoint).collect();
         let settle_result = if is_vtxo_leg {
-            self.settle_vtxos(rng, &selected_outpoints, &[]).await
+            self.settle_vtxos_with_server_info(rng, server_info, &selected_outpoints, &[])
+                .await
         } else {
-            self.settle_vtxos(rng, &[], &selected_outpoints).await
+            self.settle_vtxos_with_server_info(rng, server_info, &[], &selected_outpoints)
+                .await
         };
 
         // Capture (rather than propagate) the settle error so the caller can still run the other

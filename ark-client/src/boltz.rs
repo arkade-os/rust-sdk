@@ -771,7 +771,7 @@ where
 
         let script_pubkey = vhtlc.script_pubkey();
 
-        let (refund_address, _) = self.get_offchain_address().await?;
+        let (refund_address, _) = self.get_offchain_address_with_server_info(&server_info)?;
         let refund_amount = swap_data.amount;
 
         let vhtlc_input = intent::Input::new(
@@ -795,6 +795,7 @@ where
         let commitment_txid = self
             .join_next_batch(
                 rng,
+                &server_info,
                 Vec::new(),
                 vec![vhtlc_input],
                 BatchOutputType::Board {
