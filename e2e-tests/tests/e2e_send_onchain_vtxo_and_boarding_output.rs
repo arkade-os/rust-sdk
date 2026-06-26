@@ -126,11 +126,9 @@ pub async fn send_onchain_vtxo_and_boarding_output() {
 
     let mut max_block_height_offset = 0;
     let mut max_blocktime_offset = 0;
+    let server_info = alice.server_info().await.unwrap();
 
-    match alice
-        .server_info()
-        .await
-        .unwrap()
+    match server_info
         .unilateral_exit_delay
         .to_relative_lock_time()
         .expect("unilateral VTXO exit delay should be relative")
@@ -143,10 +141,7 @@ pub async fn send_onchain_vtxo_and_boarding_output() {
         }
     };
 
-    match alice
-        .server_info()
-        .await
-        .unwrap()
+    match server_info
         .boarding_exit_delay
         .to_relative_lock_time()
         .expect("boarding exit delay should be relative")
