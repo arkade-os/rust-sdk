@@ -40,7 +40,7 @@ pub async fn e2e_multisig_delegate() {
     let bob_delegate_cosigner_kp = Keypair::new(&secp, &mut rng);
     let bob_delegate_cosigner_pk = bob_delegate_cosigner_kp.public_key();
 
-    let alice_boarding_address = alice.get_boarding_address().unwrap();
+    let alice_boarding_address = alice.get_boarding_address().await.unwrap();
     let alice_fund_amount = Amount::ONE_BTC;
 
     let alice_boarding_outpoint = regtest
@@ -80,10 +80,10 @@ pub async fn e2e_multisig_delegate() {
         MsigOutputTaprootOptions {
             alice_pk: alice_msig_output_pk.into(),
             bob_pk: bob_msig_output_pk.into(),
-            server_pk: alice.server_info().unwrap().signer_pk.into(),
-            unilateral_exit_delay: alice.server_info().unwrap().unilateral_exit_delay,
+            server_pk: alice.server_info().await.unwrap().signer_pk.into(),
+            unilateral_exit_delay: alice.server_info().await.unwrap().unilateral_exit_delay,
         },
-        alice.server_info().unwrap().network,
+        alice.server_info().await.unwrap().network,
     )
     .unwrap();
 
@@ -117,7 +117,7 @@ pub async fn e2e_multisig_delegate() {
         OutPoint { txid, vout: 0 },
         // TODO: This should be modelled in the output type. I think it's supposed to be the
         // highest sequence number of all leaves, but I'm not sure.
-        alice.server_info().unwrap().unilateral_exit_delay,
+        alice.server_info().await.unwrap().unilateral_exit_delay,
         None,
         TxOut {
             value: msig_output_amount,
@@ -138,8 +138,8 @@ pub async fn e2e_multisig_delegate() {
             script_pubkey: msig_output.script_pubkey(),
         })],
         bob_delegate_cosigner_pk,
-        &alice.server_info().unwrap().forfeit_address,
-        alice.server_info().unwrap().dust,
+        &alice.server_info().await.unwrap().forfeit_address,
+        alice.server_info().await.unwrap().dust,
     )
     .unwrap();
 
@@ -197,7 +197,10 @@ pub async fn e2e_multisig_delegate() {
         .await
         .unwrap();
 
-    let vtxo_list = VtxoList::new(alice.server_info().unwrap().dust, virtual_tx_outpoints);
+    let vtxo_list = VtxoList::new(
+        alice.server_info().await.unwrap().dust,
+        virtual_tx_outpoints,
+    );
 
     assert_eq!(vtxo_list.all_unspent().count(), 1);
     assert_eq!(vtxo_list.spent().count(), 1);
@@ -208,7 +211,7 @@ pub async fn e2e_multisig_delegate() {
     assert!(settled_msig_outpoint.is_preconfirmed);
     assert!(!settled_msig_outpoint.is_swept);
     assert!(!settled_msig_outpoint.is_unrolled);
-    assert!(!settled_msig_outpoint.is_recoverable(alice.server_info().unwrap().dust));
+    assert!(!settled_msig_outpoint.is_recoverable(alice.server_info().await.unwrap().dust));
     assert_eq!(settled_msig_outpoint.settled_by, Some(commitment_txid));
 
     let new_msig_outpoint = &vtxo_list.all_unspent().next().unwrap();
@@ -217,7 +220,7 @@ pub async fn e2e_multisig_delegate() {
     assert!(!new_msig_outpoint.is_preconfirmed);
     assert!(!new_msig_outpoint.is_swept);
     assert!(!new_msig_outpoint.is_unrolled);
-    assert!(!new_msig_outpoint.is_recoverable(alice.server_info().unwrap().dust));
+    assert!(!new_msig_outpoint.is_recoverable(alice.server_info().await.unwrap().dust));
     assert!(new_msig_outpoint
         .commitment_txids
         .contains(&commitment_txid));

@@ -44,7 +44,7 @@ pub async fn e2e_key_discovery() {
     tracing::info!(?initial_balance, "Initial balance is zero");
 
     // Get a boarding address and fund it
-    let boarding_address = client.get_boarding_address().unwrap();
+    let boarding_address = client.get_boarding_address().await.unwrap();
     let fund_amount = Amount::ONE_BTC;
 
     tracing::info!(%boarding_address, %fund_amount, "Funding boarding output");

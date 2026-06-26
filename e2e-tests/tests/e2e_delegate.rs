@@ -29,7 +29,7 @@ pub async fn e2e_delegate() {
     let bob_delegate_cosigner_kp = Keypair::new(&secp, &mut rng);
     let bob_delegate_cosigner_pk = bob_delegate_cosigner_kp.public_key();
 
-    let alice_boarding_address = alice.get_boarding_address().unwrap();
+    let alice_boarding_address = alice.get_boarding_address().await.unwrap();
     let alice_fund_amount = Amount::ONE_BTC;
 
     let alice_boarding_outpoint = regtest

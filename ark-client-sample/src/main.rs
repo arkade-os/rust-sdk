@@ -10,16 +10,14 @@ use anyhow::Context;
 use anyhow::Result;
 use ark_bdk_wallet::Wallet;
 use ark_client::lightning_invoice::Bolt11Invoice;
-use ark_client::Bip32KeyProvider;
 use ark_client::Blockchain;
 use ark_client::ChainSwapAmount;
 use ark_client::ChainSwapDirection;
 use ark_client::Error;
-use ark_client::KeyProvider;
 use ark_client::OfflineClient;
+use ark_client::OfflineClientConfig;
 use ark_client::SpendStatus;
 use ark_client::SqliteSwapStorage;
-use ark_client::StaticKeyProvider;
 use ark_client::SwapAmount;
 use ark_client::TxStatus;
 use ark_core::asset::ControlAssetConfig;
@@ -54,7 +52,6 @@ use serde::Serialize;
 use std::fs;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -466,19 +463,21 @@ async fn main() -> Result<()> {
             )?;
             let wallet = Arc::new(wallet);
 
-            let client = OfflineClient::<_, _, _, Bip32KeyProvider>::new_with_bip32(
-                "sample-client".to_string(),
+            let client_config = OfflineClientConfig {
+                ark_server_url: config.ark_server_url,
+                boltz_url: config.boltz_url,
+                delegator_pk,
+                historical_delegator_pks: historical_delegator_pks.clone(),
+                ..Default::default()
+            };
+
+            let client = OfflineClient::with_bip32(
+                client_config,
                 xpriv,
                 None,
                 esplora_client.clone(),
                 wallet,
-                config.ark_server_url,
                 storage,
-                config.boltz_url,
-                None,
-                Duration::from_secs(30),
-                delegator_pk,
-                historical_delegator_pks.clone(),
             )
             .connect()
             .await
@@ -495,18 +494,20 @@ async fn main() -> Result<()> {
             let wallet = Wallet::new(kp, secp, Network::Regtest, config.esplora_url.as_str(), db)?;
             let wallet = Arc::new(wallet);
 
-            let client = OfflineClient::<_, _, _, StaticKeyProvider>::new_with_keypair(
-                "sample-client".to_string(),
+            let client_config = OfflineClientConfig {
+                ark_server_url: config.ark_server_url,
+                boltz_url: config.boltz_url,
+                delegator_pk,
+                historical_delegator_pks: historical_delegator_pks.clone(),
+                ..Default::default()
+            };
+
+            let client = OfflineClient::with_keypair(
+                client_config,
                 kp,
                 esplora_client.clone(),
                 wallet,
-                config.ark_server_url,
                 storage,
-                config.boltz_url,
-                None,
-                Duration::from_secs(30),
-                delegator_pk,
-                historical_delegator_pks.clone(),
             )
             .connect()
             .await
@@ -519,9 +520,9 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run_command<K: KeyProvider + 'static>(
+async fn run_command(
     command: Commands,
-    client: ark_client::Client<EsploraClient, Wallet<InMemoryDb>, SqliteSwapStorage, K>,
+    client: ark_client::Client<EsploraClient, Wallet<InMemoryDb>, SqliteSwapStorage>,
     esplora_client: Arc<EsploraClient>,
 ) -> Result<()> {
     let client = Arc::new(client);
@@ -532,7 +533,10 @@ async fn run_command<K: KeyProvider + 'static>(
             let offchain_balance = client.offchain_balance().await.map_err(|e| anyhow!(e))?;
 
             let boarding = {
-                let boarding_output = client.get_boarding_address().map_err(|e| anyhow!(e))?;
+                let boarding_output = client
+                    .get_boarding_address()
+                    .await
+                    .map_err(|e| anyhow!(e))?;
                 let outpoints = esplora_client
                     .find_outpoints(&boarding_output)
                     .await
@@ -567,21 +571,27 @@ async fn run_command<K: KeyProvider + 'static>(
             }
         }
         Commands::BoardingAddress => {
-            let boarding_address = client.get_boarding_address().map_err(|e| anyhow!(e))?;
+            let boarding_address = client
+                .get_boarding_address()
+                .await
+                .map_err(|e| anyhow!(e))?;
             println!(
                 "{}",
                 serde_json::json!({"address": boarding_address.to_string()})
             );
         }
         Commands::OffchainAddress => {
-            let (address, _) = client.get_offchain_address().map_err(|e| anyhow!(e))?;
+            let (address, _) = client
+                .get_offchain_address()
+                .await
+                .map_err(|e| anyhow!(e))?;
             let address = address.encode();
             println!("{}", serde_json::json!({"address": address}));
         }
         Commands::Settle { notes } => {
             let mut rng = thread_rng();
             // we need to call this because how our wallet works
-            let _ = client.get_boarding_address();
+            let _ = client.get_boarding_address().await;
 
             let maybe_batch_tx = match notes {
                 Some(notes_str) => {
@@ -750,10 +760,14 @@ async fn run_command<K: KeyProvider + 'static>(
 
             if client
                 .get_offchain_addresses()
+                .await
                 .map_err(|e| anyhow!(e))?
                 .is_empty()
             {
-                let (addr, _) = client.get_offchain_address().map_err(|e| anyhow!(e))?;
+                let (addr, _) = client
+                    .get_offchain_address()
+                    .await
+                    .map_err(|e| anyhow!(e))?;
                 tracing::info!(
                     address = %addr,
                     "Derived first offchain address so watcher has scripts to subscribe to"
@@ -773,7 +787,7 @@ async fn run_command<K: KeyProvider + 'static>(
             unreachable!("pending future never resolves");
         }
         Commands::SendOnchain { address, amount } => {
-            let network = client.server_info()?.network;
+            let network = client.server_info().await?.network;
             let checked_address = address.clone().require_network(network)?;
 
             let mut rng = thread_rng();
@@ -802,7 +816,7 @@ async fn run_command<K: KeyProvider + 'static>(
                 })
                 .collect::<Result<Vec<_>>>()?;
 
-            let network = client.server_info()?.network;
+            let network = client.server_info().await?.network;
             let checked_address = address.clone().require_network(network)?;
 
             let mut rng = thread_rng();
@@ -1110,7 +1124,10 @@ async fn run_command<K: KeyProvider + 'static>(
             });
 
             // Get boarding outputs
-            let boarding_output = client.get_boarding_address().map_err(|e| anyhow!(e))?;
+            let boarding_output = client
+                .get_boarding_address()
+                .await
+                .map_err(|e| anyhow!(e))?;
             let outpoints = esplora_client
                 .find_outpoints(&boarding_output)
                 .await
@@ -1186,7 +1203,7 @@ async fn run_command<K: KeyProvider + 'static>(
             }
 
             // We need to call this because of how our wallet works
-            let _ = client.get_boarding_address();
+            let _ = client.get_boarding_address().await;
 
             let maybe_batch_tx = client
                 .settle_vtxos(&mut rng, &vtxo_outpoints, &boarding_outpoints)
@@ -1205,7 +1222,7 @@ async fn run_command<K: KeyProvider + 'static>(
             println!("{}", serde_json::to_string_pretty(&output)?);
         }
         Commands::EstimateFees { address, amount } => {
-            let network = client.server_info()?.network;
+            let network = client.server_info().await?.network;
             let mut rng = thread_rng();
 
             // Try parsing as ArkAddress first, then as Bitcoin address
@@ -1297,7 +1314,7 @@ async fn run_command<K: KeyProvider + 'static>(
             let selected = ark_core::coin_select::select_vtxos(
                 spendable,
                 amount,
-                client.server_info()?.dust,
+                client.server_info().await?.dust,
                 true,
             )
             .map_err(|e| anyhow!(e))?;
@@ -1430,7 +1447,7 @@ async fn run_command<K: KeyProvider + 'static>(
 
             let receiver = SendReceiver {
                 address: address.0,
-                amount: client.dust()?,
+                amount: client.dust().await?,
                 assets: vec![ark_core::server::Asset {
                     asset_id,
                     amount: *amount,

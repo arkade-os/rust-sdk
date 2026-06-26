@@ -41,7 +41,7 @@ pub async fn e2e_continue_pending_tx_multi_input() {
 
     // Step 1: Fund Alice via boarding and settle.
     let alice_fund_amount = Amount::ONE_BTC;
-    let alice_boarding_address = alice.get_boarding_address().unwrap();
+    let alice_boarding_address = alice.get_boarding_address().await.unwrap();
     regtest
         .faucet_fund(&alice_boarding_address, alice_fund_amount)
         .await;
@@ -53,7 +53,7 @@ pub async fn e2e_continue_pending_tx_multi_input() {
 
     // Step 2: Alice sends to Bob → Alice gets change VTXO.
     let send_to_bob = Amount::from_sat(40_000_000); // 0.4 BTC
-    let (bob_address, _) = bob.get_offchain_address().unwrap();
+    let (bob_address, _) = bob.get_offchain_address().await.unwrap();
     alice
         .send(vec![SendReceiver::bitcoin(bob_address, send_to_bob)])
         .await
@@ -67,7 +67,7 @@ pub async fn e2e_continue_pending_tx_multi_input() {
 
     // Step 3: Bob sends back to Alice → Alice now has 2 VTXOs.
     let send_back = Amount::from_sat(20_000_000); // 0.2 BTC
-    let (alice_address, _) = alice.get_offchain_address().unwrap();
+    let (alice_address, _) = alice.get_offchain_address().await.unwrap();
     bob.send(vec![SendReceiver::bitcoin(alice_address, send_back)])
         .await
         .unwrap();
@@ -97,7 +97,7 @@ pub async fn e2e_continue_pending_tx_multi_input() {
     // Step 4: Send an amount that requires BOTH VTXOs.
     // Alice has ~0.6 BTC + 0.2 BTC. Send 0.7 BTC to carol (needs both).
     let send_amount = Amount::from_sat(70_000_000); // 0.7 BTC
-    let (carol_address, _) = carol.get_offchain_address().unwrap();
+    let (carol_address, _) = carol.get_offchain_address().await.unwrap();
 
     let spendable_coins = vtxo_list
         .spendable_offchain()
@@ -113,7 +113,7 @@ pub async fn e2e_continue_pending_tx_multi_input() {
     let selected = select_vtxos(
         spendable_coins,
         send_amount,
-        alice.server_info().unwrap().dust,
+        alice.server_info().await.unwrap().dust,
         true,
     )
     .unwrap();

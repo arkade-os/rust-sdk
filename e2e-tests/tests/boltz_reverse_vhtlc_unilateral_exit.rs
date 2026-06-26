@@ -121,6 +121,7 @@ pub async fn reverse_swap_claim_with_vhtlc_ancestor_can_exit_unilaterally() {
 
     match alice
         .server_info()
+        .await
         .unwrap()
         .unilateral_exit_delay
         .to_relative_lock_time()

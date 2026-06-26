@@ -3,11 +3,11 @@
 use ark_bdk_wallet::Wallet;
 use ark_client::error::Error;
 use ark_client::wallet::Persistence;
-use ark_client::Bip32KeyProvider;
 use ark_client::Blockchain;
 use ark_client::Client;
 use ark_client::InMemorySwapStorage;
 use ark_client::OfflineClient;
+use ark_client::OfflineClientConfig;
 use ark_client::SpendStatus;
 use ark_client::TxStatus;
 use ark_core::BoardingOutput;
@@ -542,11 +542,11 @@ impl Persistence for InMemoryDb {
 
 #[allow(unused)]
 pub async fn set_up_client(
-    name: String,
+    _name: String,
     regtest: Arc<Regtest>,
     secp: Secp256k1<All>,
 ) -> (
-    Client<Regtest, Wallet<InMemoryDb>, InMemorySwapStorage, Bip32KeyProvider>,
+    Client<Regtest, Wallet<InMemoryDb>, InMemorySwapStorage>,
     Arc<Wallet<InMemoryDb>>,
 ) {
     let mut rng = thread_rng();
@@ -563,19 +563,17 @@ pub async fn set_up_client(
     let seed: [u8; 32] = rng.r#gen();
     let xpriv = Xpriv::new_master(network, &seed).unwrap();
 
-    let client = OfflineClient::<_, _, _, Bip32KeyProvider>::new_with_bip32(
-        name,
+    let client = OfflineClient::with_bip32(
+        OfflineClientConfig {
+            ark_server_url: "http://localhost:7070".to_string(),
+            boltz_url: "http://localhost:9069".to_string(),
+            ..Default::default()
+        },
         xpriv,
         None,
         regtest,
         wallet.clone(),
-        "http://localhost:7070".to_string(),
         Arc::new(InMemorySwapStorage::default()),
-        "http://localhost:9069".to_string(),
-        None,
-        Duration::from_secs(30),
-        None,
-        vec![],
     )
     .connect_with_retries(5)
     .await
@@ -586,12 +584,12 @@ pub async fn set_up_client(
 
 #[allow(unused)]
 pub async fn set_up_client_with_delegator(
-    name: String,
+    _name: String,
     regtest: Arc<Regtest>,
     secp: Secp256k1<All>,
     delegator_pk: XOnlyPublicKey,
 ) -> (
-    Client<Regtest, Wallet<InMemoryDb>, InMemorySwapStorage, Bip32KeyProvider>,
+    Client<Regtest, Wallet<InMemoryDb>, InMemorySwapStorage>,
     Arc<Wallet<InMemoryDb>>,
 ) {
     let mut rng = thread_rng();
@@ -608,19 +606,21 @@ pub async fn set_up_client_with_delegator(
     let seed: [u8; 32] = rng.r#gen();
     let xpriv = Xpriv::new_master(network, &seed).unwrap();
 
-    let client = OfflineClient::<_, _, _, Bip32KeyProvider>::new_with_bip32(
-        name,
+    let config = OfflineClientConfig {
+        ark_server_url: "http://localhost:7070".to_string(),
+        boltz_url: "http://localhost:9069".to_string(),
+        delegator_pk: Some(delegator_pk),
+        historical_delegator_pks: vec![delegator_pk],
+        ..Default::default()
+    };
+
+    let client = OfflineClient::with_bip32(
+        config,
         xpriv,
         None,
         regtest,
         wallet.clone(),
-        "http://localhost:7070".to_string(),
         Arc::new(InMemorySwapStorage::default()),
-        "http://localhost:9069".to_string(),
-        None,
-        Duration::from_secs(30),
-        Some(delegator_pk),
-        vec![delegator_pk],
     )
     .connect_with_retries(5)
     .await
@@ -704,7 +704,29 @@ pub async fn set_up_client_with_seed(
     secp: Secp256k1<All>,
     seed: [u8; 32],
 ) -> (
-    Client<Regtest, Wallet<InMemoryDb>, InMemorySwapStorage, Bip32KeyProvider>,
+    Client<Regtest, Wallet<InMemoryDb>, InMemorySwapStorage>,
+    Arc<Wallet<InMemoryDb>>,
+) {
+    set_up_client_with_seed_and_server_info_ttl(
+        name,
+        regtest,
+        secp,
+        seed,
+        ark_client::DEFAULT_SERVER_INFO_TTL,
+    )
+    .await
+}
+
+/// Set up a client with a specific seed and server-info TTL.
+#[allow(unused)]
+pub async fn set_up_client_with_seed_and_server_info_ttl(
+    _name: String,
+    regtest: Arc<Regtest>,
+    secp: Secp256k1<All>,
+    seed: [u8; 32],
+    server_info_ttl: Duration,
+) -> (
+    Client<Regtest, Wallet<InMemoryDb>, InMemorySwapStorage>,
     Arc<Wallet<InMemoryDb>>,
 ) {
     let mut rng = thread_rng();
@@ -720,19 +742,18 @@ pub async fn set_up_client_with_seed(
 
     let xpriv = Xpriv::new_master(network, &seed).unwrap();
 
-    let client = OfflineClient::<_, _, _, Bip32KeyProvider>::new_with_bip32(
-        name,
+    let client = OfflineClient::with_bip32(
+        OfflineClientConfig {
+            ark_server_url: "http://localhost:7070".to_string(),
+            boltz_url: "http://localhost:9069".to_string(),
+            server_info_ttl,
+            ..Default::default()
+        },
         xpriv,
         None,
         regtest,
         wallet.clone(),
-        "http://localhost:7070".to_string(),
         Arc::new(InMemorySwapStorage::default()),
-        "http://localhost:9069".to_string(),
-        None,
-        Duration::from_secs(30),
-        None,
-        vec![],
     )
     .connect_with_retries(5)
     .await

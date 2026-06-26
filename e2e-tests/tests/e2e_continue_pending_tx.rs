@@ -30,7 +30,7 @@ pub async fn e2e_continue_pending_tx() {
 
     // Fund Alice via boarding.
     let alice_fund_amount = Amount::ONE_BTC;
-    let alice_boarding_address = alice.get_boarding_address().unwrap();
+    let alice_boarding_address = alice.get_boarding_address().await.unwrap();
     regtest
         .faucet_fund(&alice_boarding_address, alice_fund_amount)
         .await;
@@ -42,7 +42,7 @@ pub async fn e2e_continue_pending_tx() {
 
     // Build VTXO inputs for the offchain tx.
     let send_amount = Amount::from_sat(100_000);
-    let (bob_address, _) = bob.get_offchain_address().unwrap();
+    let (bob_address, _) = bob.get_offchain_address().await.unwrap();
 
     let (vtxo_list, script_pubkey_to_vtxo_map) = alice.list_vtxos().await.unwrap();
 
@@ -60,7 +60,7 @@ pub async fn e2e_continue_pending_tx() {
     let selected = select_vtxos(
         spendable,
         send_amount,
-        alice.server_info().unwrap().dust,
+        alice.server_info().await.unwrap().dust,
         true,
     )
     .unwrap();

@@ -19,6 +19,7 @@ use ark_core::batch::Delegate;
 use ark_core::batch::NonceKps;
 use ark_core::intent;
 use ark_core::script::extract_checksig_pubkeys;
+use ark_core::server;
 use ark_core::server::BatchTreeEventType;
 use ark_core::server::PartialSigTree;
 use ark_core::server::StreamEvent;
@@ -50,12 +51,11 @@ use rand::Rng;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-impl<B, W, S, K> Client<B, W, S, K>
+impl<B, W, S> Client<B, W, S>
 where
     B: Blockchain,
     W: BoardingWallet + OnchainWallet,
     S: SwapStorage + 'static,
-    K: crate::KeyProvider,
 {
     /// Settle _all_ prior VTXOs and boarding outputs into the next batch, generating new confirmed
     /// VTXOs.
@@ -73,11 +73,14 @@ where
     where
         R: Rng + CryptoRng + Clone,
     {
-        // Get off-chain address and send all funds to this address, no change output 🦄
-        let (to_address, _) = self.get_offchain_address()?;
+        let server_info = self.server_info().await?;
 
-        let (boarding_inputs, vtxo_inputs, total_amount) =
-            self.fetch_commitment_transaction_inputs(now).await?;
+        // Get off-chain address and send all funds to this address, no change output 🦄
+        let (to_address, _) = self.get_offchain_address_with_server_info(&server_info)?;
+
+        let (boarding_inputs, vtxo_inputs, total_amount) = self
+            .fetch_commitment_transaction_inputs(&server_info, now)
+            .await?;
 
         tracing::debug!(
             offchain_adress = %to_address.encode(),
@@ -94,6 +97,7 @@ where
         let join_next_batch = || async {
             self.join_next_batch(
                 &mut rng.clone(),
+                &server_info,
                 boarding_inputs.clone(),
                 vtxo_inputs.clone(),
                 BatchOutputType::Board {
@@ -108,7 +112,7 @@ where
         let commitment_txid = join_next_batch
             .retry(ExponentialBuilder::default().with_max_times(0))
             .sleep(sleep)
-            // TODO: Use `when` to only retry certain errors.
+            .when(|err| !err.is_server_info_changed())
             .notify(|err: &Error, dur: std::time::Duration| {
                 tracing::warn!("Retrying joining next batch after {dur:?}. Error: {err}",);
             })
@@ -137,11 +141,13 @@ where
     where
         R: Rng + CryptoRng + Clone,
     {
-        let (vtxo_list, _) = self.list_vtxos().await?;
+        let server_info = self.server_info().await?;
+
+        let (vtxo_list, _) = self.list_vtxos_with_server_info(&server_info).await?;
         let vtxo_outpoints: Vec<OutPoint> = vtxo_list.recoverable().map(|v| v.outpoint).collect();
 
         let (boarding_inputs, _, _) = self
-            .fetch_commitment_transaction_inputs(crate::utils::unix_now()?)
+            .fetch_commitment_transaction_inputs(&server_info, crate::utils::unix_now()?)
             .await?;
         let boarding_outpoints: Vec<OutPoint> =
             boarding_inputs.iter().map(|i| i.outpoint()).collect();
@@ -157,7 +163,7 @@ where
             "Attempting to settle expired/recoverable VTXOs and boarding outputs"
         );
 
-        self.settle_vtxos(rng, &vtxo_outpoints, &boarding_outpoints)
+        self.settle_vtxos_with_server_info(rng, &server_info, &vtxo_outpoints, &boarding_outpoints)
             .await
     }
 
@@ -174,10 +180,12 @@ where
     where
         R: Rng + CryptoRng + Clone,
     {
-        let (to_address, _) = self.get_offchain_address()?;
+        let server_info = self.server_info().await?;
+
+        let (to_address, _) = self.get_offchain_address_with_server_info(&server_info)?;
 
         let (boarding_inputs, vtxo_inputs, mut total_amount) = self
-            .fetch_commitment_transaction_inputs(crate::utils::unix_now()?)
+            .fetch_commitment_transaction_inputs(&server_info, crate::utils::unix_now()?)
             .await?;
 
         // Convert arknotes to intent inputs and add their value to total
@@ -210,6 +218,7 @@ where
         let join_next_batch = || async {
             self.join_next_batch(
                 &mut rng.clone(),
+                &server_info,
                 boarding_inputs.clone(),
                 all_vtxo_inputs.clone(),
                 BatchOutputType::Board {
@@ -223,6 +232,7 @@ where
         let commitment_txid = join_next_batch
             .retry(ExponentialBuilder::default().with_max_times(0))
             .sleep(sleep)
+            .when(|err| !err.is_server_info_changed())
             .notify(|err: &Error, dur: std::time::Duration| {
                 tracing::warn!("Retrying joining next batch after {dur:?}. Error: {err}");
             })
@@ -248,11 +258,26 @@ where
     where
         R: Rng + CryptoRng + Clone,
     {
+        let server_info = self.server_info().await?;
+        self.settle_vtxos_with_server_info(rng, &server_info, vtxo_outpoints, boarding_outpoints)
+            .await
+    }
+
+    pub(crate) async fn settle_vtxos_with_server_info<R>(
+        &self,
+        rng: &mut R,
+        server_info: &server::Info,
+        vtxo_outpoints: &[OutPoint],
+        boarding_outpoints: &[OutPoint],
+    ) -> Result<Option<Txid>, Error>
+    where
+        R: Rng + CryptoRng + Clone,
+    {
         // Get off-chain address and send all funds to this address, no change output.
-        let (to_address, _) = self.get_offchain_address()?;
+        let (to_address, _) = self.get_offchain_address_with_server_info(server_info)?;
 
         let (all_boarding_inputs, all_vtxo_inputs, _) = self
-            .fetch_commitment_transaction_inputs(crate::utils::unix_now()?)
+            .fetch_commitment_transaction_inputs(server_info, crate::utils::unix_now()?)
             .await?;
 
         // Filter boarding inputs to only those specified.
@@ -290,6 +315,7 @@ where
         let join_next_batch = || async {
             self.join_next_batch(
                 &mut rng.clone(),
+                server_info,
                 boarding_inputs.clone(),
                 vtxo_inputs.clone(),
                 BatchOutputType::Board {
@@ -304,6 +330,7 @@ where
         let commitment_txid = join_next_batch
             .retry(ExponentialBuilder::default().with_max_times(0))
             .sleep(sleep)
+            .when(|err| !err.is_server_info_changed())
             .notify(|err: &Error, dur: std::time::Duration| {
                 tracing::warn!("Retrying joining next batch after {dur:?}. Error: {err}",);
             })
@@ -326,10 +353,12 @@ where
     where
         R: Rng + CryptoRng + Clone,
     {
-        let (change_address, _) = self.get_offchain_address()?;
+        let server_info = self.server_info().await?;
+
+        let (change_address, _) = self.get_offchain_address_with_server_info(&server_info)?;
 
         let (boarding_inputs, vtxo_inputs, total_amount) = self
-            .fetch_commitment_transaction_inputs(crate::utils::unix_now()?)
+            .fetch_commitment_transaction_inputs(&server_info, crate::utils::unix_now()?)
             .await?;
 
         let onchain_fee = self.eval_onchain_output_fee(ark_fees::Output {
@@ -360,6 +389,7 @@ where
         let join_next_batch = || async {
             self.join_next_batch(
                 &mut rng.clone(),
+                &server_info,
                 boarding_inputs.clone(),
                 vtxo_inputs.clone(),
                 BatchOutputType::OffBoard {
@@ -376,7 +406,7 @@ where
         let commitment_txid = join_next_batch
             .retry(ExponentialBuilder::default().with_max_times(3))
             .sleep(sleep)
-            // TODO: Use `when` to only retry certain errors.
+            .when(|err| !err.is_server_info_changed())
             .notify(|err: &Error, dur: std::time::Duration| {
                 tracing::warn!("Retrying joining next batch after {dur:?}. Error: {err}");
             })
@@ -400,10 +430,12 @@ where
     where
         R: Rng + CryptoRng + Clone,
     {
-        let (change_address, _) = self.get_offchain_address()?;
+        let server_info = self.server_info().await?;
+
+        let (change_address, _) = self.get_offchain_address_with_server_info(&server_info)?;
 
         let vtxo_inputs = self
-            .selected_batch_settleable_vtxo_inputs(input_vtxos)
+            .selected_batch_settleable_vtxo_inputs(&server_info, input_vtxos)
             .await?;
 
         if vtxo_inputs.is_empty() {
@@ -442,6 +474,7 @@ where
         let join_next_batch = || async {
             self.join_next_batch(
                 &mut rng.clone(),
+                &server_info,
                 Vec::new(),
                 vtxo_inputs.clone(),
                 BatchOutputType::OffBoard {
@@ -458,7 +491,7 @@ where
         let commitment_txid = join_next_batch
             .retry(ExponentialBuilder::default().with_max_times(3))
             .sleep(sleep)
-            // TODO: Use `when` to only retry certain errors.
+            .when(|err| !err.is_server_info_changed())
             .notify(|err: &Error, dur: std::time::Duration| {
                 tracing::warn!("Retrying joining next batch after {dur:?}. Error: {err}");
             })
@@ -472,13 +505,15 @@ where
 
     pub(crate) async fn selected_batch_settleable_vtxo_inputs(
         &self,
+        server_info: &server::Info,
         input_vtxos: impl IntoIterator<Item = OutPoint>,
     ) -> Result<Vec<intent::Input>, Error> {
         let requested: HashSet<OutPoint> = input_vtxos.into_iter().collect();
 
-        let (vtxo_list, script_pubkey_to_vtxo_map) =
-            self.list_vtxos().await.context("failed to get VTXO list")?;
-        let server_info = self.server_info()?;
+        let (vtxo_list, script_pubkey_to_vtxo_map) = self
+            .list_vtxos_with_server_info(server_info)
+            .await
+            .context("failed to get VTXO list")?;
         let now = crate::utils::unix_now()?;
 
         let matching_unspent = vtxo_list
@@ -487,7 +522,7 @@ where
             .collect::<Vec<_>>();
 
         let settleable_outpoints = vtxo_list
-            .batch_settleable_at(&server_info, now, |script| {
+            .batch_settleable_at(server_info, now, |script| {
                 script_pubkey_to_vtxo_map
                     .get(script)
                     .map(|vtxo| vtxo.server_pk())
@@ -553,12 +588,14 @@ where
         &self,
         delegate_cosigner_pk: PublicKey,
     ) -> Result<Delegate, Error> {
+        let server_info = self.server_info().await?;
+
         // Get off-chain address and send all funds to this address.
-        let (to_address, _) = self.get_offchain_address()?;
+        let (to_address, _) = self.get_offchain_address_with_server_info(&server_info)?;
 
         // Simply collect all VTXOs that can be settled.
         let (_, vtxo_inputs, _) = self
-            .fetch_commitment_transaction_inputs(crate::utils::unix_now()?)
+            .fetch_commitment_transaction_inputs(&server_info, crate::utils::unix_now()?)
             .await?;
 
         let total_amount = vtxo_inputs
@@ -568,8 +605,6 @@ where
         if vtxo_inputs.is_empty() {
             return Err(Error::ad_hoc("no inputs to settle via delegate"));
         }
-
-        let server_info = &self.server_info()?;
 
         let mut outputs = vec![intent::Output::Offchain(TxOut {
             value: total_amount,
@@ -655,6 +690,8 @@ where
             ));
         }
 
+        let server_info = self.server_info().await?;
+
         // Register the pre-signed intent
         let intent_id = timeout_op(
             self.inner.timeout,
@@ -667,7 +704,6 @@ where
         tracing::debug!(intent_id, "Registered delegated intent");
 
         let network_client = self.network_client();
-        let server_info = &self.server_info()?;
 
         #[derive(Debug, PartialEq, Eq)]
         enum Step {
@@ -1089,6 +1125,7 @@ where
     /// upcoming batch.
     pub(crate) async fn fetch_commitment_transaction_inputs(
         &self,
+        server_info: &server::Info,
         now: i64,
     ) -> Result<(Vec<batch::OnChainInput>, Vec<intent::Input>, Amount), Error> {
         let now = u64::try_from(now).map_err(|_| Error::ad_hoc("negative timestamp"))?;
@@ -1101,10 +1138,6 @@ where
 
         // To track unique outpoints and prevent duplicates
         let mut seen_outpoints = HashSet::new();
-
-        // Snapshot once; reused for the boarding cutoff filter and the VTXO dust/cutoff logic
-        // below.
-        let server_info = self.server_info()?;
 
         // Find outpoints for each boarding output.
         for boarding_output in boarding_outputs {
@@ -1158,12 +1191,13 @@ where
             }
         }
 
-        let (vtxo_list, script_pubkey_to_vtxo_map) = self.list_vtxos().await?;
+        let (vtxo_list, script_pubkey_to_vtxo_map) =
+            self.list_vtxos_with_server_info(server_info).await?;
         // Reuse the caller-supplied timestamp (not a fresh wall-clock) so the VTXO cutoff filter
         // below is evaluated against the same instant as the boarding filter above, and so a
         // test-injected `now` deterministically controls both.
         let settleable_vtxos: Vec<_> = vtxo_list
-            .batch_settleable_at(&server_info, now as i64, |script| {
+            .batch_settleable_at(server_info, now as i64, |script| {
                 script_pubkey_to_vtxo_map
                     .get(script)
                     .map(|vtxo| vtxo.server_pk())
@@ -1218,6 +1252,7 @@ where
         vtxo_inputs: Vec<intent::Input>,
         output_type: BatchOutputType,
         intent_kind: PrepareIntentKind,
+        dust: Amount,
     ) -> Result<PreparedIntent, Error>
     where
         R: Rng + CryptoRng,
@@ -1253,8 +1288,6 @@ where
                 .chain(vtxo_inputs.clone())
                 .collect::<Vec<_>>()
         };
-
-        let dust = self.server_info()?.dust;
 
         let mut outputs = vec![];
 
@@ -1415,6 +1448,7 @@ where
     pub(crate) async fn join_next_batch<R>(
         &self,
         rng: &mut R,
+        server_info: &server::Info,
         onchain_inputs: Vec<batch::OnChainInput>,
         vtxo_inputs: Vec<intent::Input>,
         output_type: BatchOutputType,
@@ -1428,6 +1462,7 @@ where
             vtxo_inputs,
             output_type,
             PrepareIntentKind::Register,
+            server_info.dust,
         )?;
 
         let PreparedIntent {
@@ -1443,8 +1478,6 @@ where
             .iter()
             .map(|i| i.outpoint())
             .collect::<Vec<_>>();
-
-        let server_info = &self.server_info()?;
 
         let own_cosigner_kps = [cosigner_keypair];
         let own_cosigner_pks = own_cosigner_kps

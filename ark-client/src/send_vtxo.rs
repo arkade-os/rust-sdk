@@ -33,12 +33,11 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::time::Duration;
 
-impl<B, W, S, K> Client<B, W, S, K>
+impl<B, W, S> Client<B, W, S>
 where
     B: Blockchain,
     W: BoardingWallet + OnchainWallet,
     S: SwapStorage + 'static,
-    K: crate::KeyProvider,
 {
     // Send public APIs
 
@@ -193,7 +192,7 @@ where
         address: ark_core::ArkAddress,
         amount: Amount,
     ) -> Result<Txid, Error> {
-        let server_info = self.server_info()?;
+        let server_info = self.server_info().await?;
         let receivers = vec![SendReceiver {
             address,
             amount,
@@ -243,7 +242,7 @@ where
             .context("failed to get spendable VTXOs")?;
 
         let now = crate::utils::unix_now()?;
-        let server_info = self.server_info()?;
+        let server_info = self.server_info().await?;
         let spendable = vtxo_list
             .spendable_offchain_at(&server_info, now, |script| {
                 script_pubkey_to_vtxo_map
@@ -360,7 +359,7 @@ where
             .context("failed to get VTXO list")?;
 
         let now = crate::utils::unix_now()?;
-        let server_info = self.server_info()?;
+        let server_info = self.server_info().await?;
         let selected: Vec<_> = vtxo_list
             .spendable_offchain_at(&server_info, now, |script| {
                 script_pubkey_to_vtxo_map
@@ -517,7 +516,7 @@ where
         vtxo_inputs: Vec<VtxoInput>,
         receivers: Vec<SendReceiver>,
     ) -> Result<Txid, Error> {
-        let server_info = self.server_info()?;
+        let server_info = self.server_info().await?;
         Self::validate_selected_inputs_cover_receivers(&vtxo_inputs, &receivers, server_info.dust)?;
 
         let pending_tx = self
@@ -574,7 +573,7 @@ where
         receivers: Vec<SendReceiver>,
         server_info: &server::Info,
     ) -> Result<PendingTx, Error> {
-        let (change_address, change_address_vtxo) = self.get_offchain_address()?;
+        let (change_address, change_address_vtxo) = self.get_offchain_address().await?;
 
         let OffchainTransactions {
             ark_tx,
@@ -694,7 +693,7 @@ where
     async fn fetch_pending_offchain_txs(&self) -> Result<Vec<PendingTx>, Error> {
         const MAX_INPUTS_PER_INTENT: usize = 20;
 
-        let ark_addresses = self.get_offchain_addresses()?;
+        let ark_addresses = self.get_offchain_addresses().await?;
 
         let script_pubkey_to_vtxo_map: HashMap<_, _> = ark_addresses
             .iter()

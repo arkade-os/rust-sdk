@@ -4,7 +4,6 @@ use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use crate::Client;
 use crate::Error;
-use crate::KeyProvider;
 use crate::SwapStorage;
 use ark_core::ArkAddress;
 use bitcoin::Address;
@@ -14,12 +13,11 @@ use bitcoin::SignedAmount;
 use rand::CryptoRng;
 use rand::Rng;
 
-impl<B, W, S, K> Client<B, W, S, K>
+impl<B, W, S> Client<B, W, S>
 where
     B: crate::Blockchain,
     W: BoardingWallet + OnchainWallet,
     S: SwapStorage + 'static,
-    K: KeyProvider,
 {
     /// Estimates the fee to collaboratively redeem VTXOs to an on-chain Bitcoin address.
     ///
@@ -53,10 +51,12 @@ where
     where
         R: Rng + CryptoRng + Clone,
     {
-        let (change_address, _) = self.get_offchain_address()?;
+        let server_info = self.server_info().await?;
+
+        let (change_address, _) = self.get_offchain_address_with_server_info(&server_info)?;
 
         let (boarding_inputs, vtxo_inputs, total_amount) = self
-            .fetch_commitment_transaction_inputs(crate::utils::unix_now()?)
+            .fetch_commitment_transaction_inputs(&server_info, crate::utils::unix_now()?)
             .await?;
 
         let change_amount = total_amount.checked_sub(to_amount).ok_or_else(|| {
@@ -85,6 +85,7 @@ where
                 change_amount,
             },
             batch::PrepareIntentKind::EstimateFee,
+            server_info.dust,
         )?;
 
         let amount = self.network_client().estimate_fees(intent.intent).await?;
@@ -124,8 +125,10 @@ where
     where
         R: Rng + CryptoRng + Clone,
     {
+        let server_info = self.server_info().await?;
+
         let (boarding_inputs, vtxo_inputs, total_amount) = self
-            .fetch_commitment_transaction_inputs(crate::utils::unix_now()?)
+            .fetch_commitment_transaction_inputs(&server_info, crate::utils::unix_now()?)
             .await?;
 
         tracing::info!(
@@ -144,6 +147,7 @@ where
                 to_amount: total_amount,
             },
             batch::PrepareIntentKind::EstimateFee,
+            server_info.dust,
         )?;
 
         let amount = self.network_client().estimate_fees(intent.intent).await?;
@@ -187,10 +191,12 @@ where
     where
         R: Rng + CryptoRng + Clone,
     {
-        let (change_address, _) = self.get_offchain_address()?;
+        let server_info = self.server_info().await?;
+
+        let (change_address, _) = self.get_offchain_address_with_server_info(&server_info)?;
 
         let vtxo_inputs = self
-            .selected_batch_settleable_vtxo_inputs(input_vtxos)
+            .selected_batch_settleable_vtxo_inputs(&server_info, input_vtxos)
             .await?;
 
         if vtxo_inputs.is_empty() {
@@ -228,6 +234,7 @@ where
                 change_amount,
             },
             batch::PrepareIntentKind::EstimateFee,
+            server_info.dust,
         )?;
 
         let amount = self.network_client().estimate_fees(intent.intent).await?;
@@ -267,8 +274,10 @@ where
     where
         R: Rng + CryptoRng + Clone,
     {
+        let server_info = self.server_info().await?;
+
         let vtxo_inputs = self
-            .selected_batch_settleable_vtxo_inputs(input_vtxos)
+            .selected_batch_settleable_vtxo_inputs(&server_info, input_vtxos)
             .await?;
 
         if vtxo_inputs.is_empty() {
@@ -295,6 +304,7 @@ where
                 to_amount: total_input_amount,
             },
             batch::PrepareIntentKind::EstimateFee,
+            server_info.dust,
         )?;
 
         let amount = self.network_client().estimate_fees(intent.intent).await?;

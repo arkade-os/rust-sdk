@@ -88,7 +88,10 @@ pub async fn settle_arknote() {
     // Fund Charlie with a boarding output
     let boarding_amount = Amount::from_sat(200_000);
     regtest
-        .faucet_fund(&charlie.get_boarding_address().unwrap(), boarding_amount)
+        .faucet_fund(
+            &charlie.get_boarding_address().await.unwrap(),
+            boarding_amount,
+        )
         .await;
 
     // Create a note

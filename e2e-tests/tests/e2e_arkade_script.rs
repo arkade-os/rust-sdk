@@ -69,7 +69,7 @@ pub async fn e2e_arkade_script_submit_tx_to_bob() {
     );
 
     let fund_amount = Amount::ONE_BTC;
-    let alice_boarding_address = alice.get_boarding_address().unwrap();
+    let alice_boarding_address = alice.get_boarding_address().await.unwrap();
     regtest
         .faucet_fund(&alice_boarding_address, fund_amount)
         .await;
@@ -81,8 +81,8 @@ pub async fn e2e_arkade_script_submit_tx_to_bob() {
     let custom_owner_pk = custom_owner_kp.public_key().x_only_public_key().0;
     let arkd_pk = server_info.signer_pk.x_only_public_key().0;
 
-    let (alice_offchain_address, _) = alice.get_offchain_address().unwrap();
-    let (bob_address, _) = bob.get_offchain_address().unwrap();
+    let (alice_offchain_address, _) = alice.get_offchain_address().await.unwrap();
+    let (bob_address, _) = bob.get_offchain_address().await.unwrap();
     let receiver_amount = Amount::from_sat(100_000);
     let expected_receiver_script = bob_address.to_p2tr_script_pubkey();
     let expected_receiver_program = &expected_receiver_script.as_bytes()[2..];

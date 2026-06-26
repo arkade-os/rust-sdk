@@ -28,7 +28,10 @@ pub async fn send_subdust_amount() {
     let alice_fund_amount = Amount::ONE_BTC;
 
     regtest
-        .faucet_fund(&alice.get_boarding_address().unwrap(), alice_fund_amount)
+        .faucet_fund(
+            &alice.get_boarding_address().await.unwrap(),
+            alice_fund_amount,
+        )
         .await;
 
     alice.settle(&mut rng).await.unwrap();
@@ -39,7 +42,7 @@ pub async fn send_subdust_amount() {
 
     // Send Bob a sub-dust amount.
     let sub_dust_amount = Amount::ONE_SAT;
-    let (bob_offchain_address, _) = bob.get_offchain_address().unwrap();
+    let (bob_offchain_address, _) = bob.get_offchain_address().await.unwrap();
 
     alice
         .send(vec![SendReceiver::bitcoin(
@@ -52,7 +55,7 @@ pub async fn send_subdust_amount() {
     wait_until_balance!(&alice, confirmed: Amount::ZERO, pre_confirmed: alice_fund_amount - sub_dust_amount);
     wait_until_balance!(&bob, confirmed: Amount::ZERO, pre_confirmed: Amount::ZERO, recoverable: sub_dust_amount);
 
-    let (alice_offchain_address, _) = alice.get_offchain_address().unwrap();
+    let (alice_offchain_address, _) = alice.get_offchain_address().await.unwrap();
 
     bob.send(vec![SendReceiver::bitcoin(
         alice_offchain_address,

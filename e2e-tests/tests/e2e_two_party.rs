@@ -27,7 +27,7 @@ pub async fn e2e() {
 
     let alice_offchain_balance = alice.offchain_balance().await.unwrap();
     let bob_offchain_balance = bob.offchain_balance().await.unwrap();
-    let alice_boarding_address = alice.get_boarding_address().unwrap();
+    let alice_boarding_address = alice.get_boarding_address().await.unwrap();
 
     tracing::info!(
         ?alice_boarding_address,
@@ -75,7 +75,7 @@ pub async fn e2e() {
     assert_eq!(bob_offchain_balance.total(), Amount::ZERO);
 
     let send_to_bob_vtxo_amount = Amount::from_sat(100_000);
-    let (bob_offchain_address, _) = bob.get_offchain_address().unwrap();
+    let (bob_offchain_address, _) = bob.get_offchain_address().await.unwrap();
 
     tracing::info!(
         %send_to_bob_vtxo_amount,

@@ -20,6 +20,7 @@ use ark_core::send::OffchainTransactions;
 use ark_core::send::SendReceiver;
 use ark_core::send::VtxoInput;
 use ark_core::server::parse_sequence_number;
+use ark_core::server::Info;
 use ark_core::server::PendingTx;
 use ark_core::vhtlc::VhtlcOptions;
 use ark_core::vhtlc::VhtlcScript;
@@ -171,12 +172,11 @@ pub struct PendingVhtlcSpendTx {
     pub pending_tx: PendingTx,
 }
 
-impl<B, W, S, K> Client<B, W, S, K>
+impl<B, W, S> Client<B, W, S>
 where
     B: Blockchain,
     W: BoardingWallet + OnchainWallet,
     S: SwapStorage + 'static,
-    K: crate::KeyProvider,
 {
     // Submarine swap.
 
@@ -544,9 +544,10 @@ where
             .ok_or(Error::ad_hoc("Submarine swap not found"))?;
 
         let timeout_block_heights = swap_data.timeout_block_heights;
-        let server_info = self.server_info()?;
+        let server_info = self.server_info().await?;
 
         let vhtlc = self.reconstruct_vhtlc_for_address(
+            &server_info,
             |server| {
                 Ok(VhtlcOptions {
                     sender: swap_data.refund_public_key.into(),
@@ -592,7 +593,7 @@ where
             vhtlc_outpoint.clone()
         };
 
-        let (refund_address, _) = self.get_offchain_address()?;
+        let (refund_address, _) = self.get_offchain_address().await?;
         let refund_amount = swap_data.amount;
 
         let outputs = vec![SendReceiver {
@@ -709,9 +710,10 @@ where
             .ok_or(Error::ad_hoc("Submarine swap not found"))?;
 
         let timeout_block_heights = swap_data.timeout_block_heights;
-        let server_info = self.server_info()?;
+        let server_info = self.server_info().await?;
 
         let vhtlc = self.reconstruct_vhtlc_for_address(
+            &server_info,
             |server| {
                 Ok(VhtlcOptions {
                     sender: swap_data.refund_public_key.into(),
@@ -769,7 +771,7 @@ where
 
         let script_pubkey = vhtlc.script_pubkey();
 
-        let (refund_address, _) = self.get_offchain_address()?;
+        let (refund_address, _) = self.get_offchain_address_with_server_info(&server_info)?;
         let refund_amount = swap_data.amount;
 
         let vhtlc_input = intent::Input::new(
@@ -793,6 +795,7 @@ where
         let commitment_txid = self
             .join_next_batch(
                 rng,
+                &server_info,
                 Vec::new(),
                 vec![vhtlc_input],
                 BatchOutputType::Board {
@@ -821,9 +824,10 @@ where
             .ok_or(Error::ad_hoc("submarine swap not found"))?;
 
         let timeout_block_heights = swap_data.timeout_block_heights;
-        let server_info = self.server_info()?;
+        let server_info = self.server_info().await?;
 
         let vhtlc = self.reconstruct_vhtlc_for_address(
+            &server_info,
             |server| {
                 Ok(VhtlcOptions {
                     sender: swap_data.refund_public_key.into(),
@@ -869,7 +873,7 @@ where
             vhtlc_outpoint.clone()
         };
 
-        let (refund_address, _) = self.get_offchain_address()?;
+        let (refund_address, _) = self.get_offchain_address().await?;
         let refund_amount = swap_data.amount;
 
         let outputs = vec![SendReceiver {
@@ -1045,7 +1049,7 @@ where
 
     // Reverse submarine swap.
 
-    fn validate_reverse_recipient_address(
+    async fn validate_reverse_recipient_address(
         &self,
         recipient_address: Option<&ArkAddress>,
     ) -> Result<(), Error> {
@@ -1053,7 +1057,7 @@ where
             return Ok(());
         };
 
-        let server_info = self.server_info()?;
+        let server_info = self.server_info().await?;
         let server_signer: XOnlyPublicKey = server_info.signer_pk.into();
         if recipient_address.server() != server_signer {
             return Err(Error::consumer(format!(
@@ -1065,14 +1069,16 @@ where
         Ok(())
     }
 
-    fn reverse_claim_address(&self, swap: &ReverseSwapData) -> Result<ArkAddress, Error> {
+    async fn reverse_claim_address(&self, swap: &ReverseSwapData) -> Result<ArkAddress, Error> {
         if let Some(address) = swap.claim_address {
-            self.validate_reverse_recipient_address(Some(&address))?;
+            self.validate_reverse_recipient_address(Some(&address))
+                .await?;
             return Ok(address);
         }
 
         let (address, _) = self
             .get_offchain_address()
+            .await
             .context("failed to get offchain address")?;
 
         Ok(address)
@@ -1233,7 +1239,8 @@ where
         description: Option<String>,
     ) -> Result<ReverseSwapResult, Error> {
         validate_invoice_description(description.as_deref())?;
-        self.validate_reverse_recipient_address(recipient_address.as_ref())?;
+        self.validate_reverse_recipient_address(recipient_address.as_ref())
+            .await?;
 
         let preimage_hash = ripemd160::Hash::hash(preimage_hash_sha256.as_byte_array());
 
@@ -1426,9 +1433,10 @@ where
         tracing::debug!(swap_id, "Claiming VHTLC with verified preimage");
 
         let timeout_block_heights = swap.timeout_block_heights;
-        let server_info = self.server_info()?;
+        let server_info = self.server_info().await?;
 
         let vhtlc = self.reconstruct_vhtlc_for_address(
+            &server_info,
             |server| {
                 Ok(VhtlcOptions {
                     sender: swap.refund_public_key.into(),
@@ -1475,7 +1483,7 @@ where
             vhtlc_outpoint.clone()
         };
 
-        let claim_address = self.reverse_claim_address(&swap)?;
+        let claim_address = self.reverse_claim_address(&swap).await?;
         let claim_amount = swap.amount;
 
         let outputs = vec![SendReceiver {
@@ -1672,9 +1680,10 @@ where
         tracing::debug!("Ark transaction for swap found");
 
         let timeout_block_heights = swap.timeout_block_heights;
-        let server_info = self.server_info()?;
+        let server_info = self.server_info().await?;
 
         let vhtlc = self.reconstruct_vhtlc_for_address(
+            &server_info,
             |server| {
                 Ok(VhtlcOptions {
                     sender: swap.refund_public_key.into(),
@@ -1721,7 +1730,7 @@ where
             vhtlc_outpoint.clone()
         };
 
-        let claim_address = self.reverse_claim_address(&swap)?;
+        let claim_address = self.reverse_claim_address(&swap).await?;
         let claim_amount = swap.amount;
 
         let outputs = vec![SendReceiver {
@@ -2089,12 +2098,13 @@ where
                  (this swap's server lockup is on-chain BTC, not an Ark VHTLC)"
             ))
         })?;
-        let server_info = self.server_info()?;
+        let server_info = self.server_info().await?;
 
         let expected_address = ArkAddress::decode(&swap.server_lockup_address)
             .map_err(|e| Error::ad_hoc(format!("invalid server lockup address: {e}")))?;
 
         let vhtlc = self.reconstruct_vhtlc_for_address(
+            &server_info,
             |server| {
                 Ok(VhtlcOptions {
                     sender: swap.server_refund_public_key.into(),
@@ -2141,6 +2151,7 @@ where
 
         let (claim_address, _) = self
             .get_offchain_address()
+            .await
             .context("failed to get offchain address")?;
         let claim_amount = swap.server_lockup_amount;
 
@@ -2446,13 +2457,14 @@ where
         })?;
 
         let preimage_hash = ripemd160::Hash::hash(swap.preimage_hash.as_byte_array());
-        let server_info = self.server_info()?;
+        let server_info = self.server_info().await?;
 
         // User's lockup VHTLC: sender=user(refund), receiver=server(claim)
         let expected_address = ArkAddress::decode(&swap.user_lockup_address)
             .map_err(|e| Error::ad_hoc(format!("invalid user lockup address: {e}")))?;
 
         let vhtlc = self.reconstruct_vhtlc_for_address(
+            &server_info,
             |server| {
                 Ok(VhtlcOptions {
                     sender: swap.refund_public_key.into(),
@@ -2498,7 +2510,7 @@ where
                 .clone()
         };
 
-        let (refund_address, _) = self.get_offchain_address()?;
+        let (refund_address, _) = self.get_offchain_address().await?;
         let refund_amount = swap.user_lockup_amount;
 
         let outputs = vec![SendReceiver::bitcoin(refund_address, refund_amount)];
@@ -3372,10 +3384,10 @@ where
     /// the VHTLC was built with the old key, so we must try deprecated keys to find the right one.
     fn reconstruct_vhtlc_for_address(
         &self,
+        server_info: &Info,
         mk_opts: impl Fn(XOnlyPublicKey) -> Result<VhtlcOptions, Error>,
         expected_address: &ArkAddress,
     ) -> Result<VhtlcScript, Error> {
-        let server_info = self.server_info()?;
         reconstruct_vhtlc_from_keys(
             server_info.all_server_keys(),
             server_info.network,
@@ -3387,6 +3399,7 @@ where
     /// Reconstruct a [`VhtlcScript`] from swap data fields, trying current + deprecated signers.
     fn build_vhtlc_script(
         &self,
+        server_info: &Info,
         claim_public_key: PublicKey,
         refund_public_key: PublicKey,
         preimage_hash: ripemd160::Hash,
@@ -3406,6 +3419,7 @@ where
                 })?;
 
         self.reconstruct_vhtlc_for_address(
+            server_info,
             |server| {
                 Ok(VhtlcOptions {
                     sender: refund_public_key.inner.x_only_public_key().0,
@@ -3483,6 +3497,7 @@ where
             .await
             .context("failed to list reverse swaps")?;
 
+        let server_info = self.server_info().await?;
         let mut infos = Vec::new();
 
         for swap in &submarine_swaps {
@@ -3500,6 +3515,7 @@ where
             }
 
             let vhtlc = self.build_vhtlc_script(
+                &server_info,
                 swap.claim_public_key,
                 swap.refund_public_key,
                 swap.preimage_hash,
@@ -3543,6 +3559,7 @@ where
             }
 
             let vhtlc = self.build_vhtlc_script(
+                &server_info,
                 swap.claim_public_key,
                 swap.refund_public_key,
                 swap.preimage_hash,

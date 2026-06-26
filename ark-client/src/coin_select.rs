@@ -23,8 +23,8 @@ use std::time::Duration;
 /// https://github.com/bitcoindevkit/coin-select.
 ///
 /// TODO: Part of this logic needs to be extracted into `ark-core`.
-pub async fn coin_select_for_onchain<B, W, S, K>(
-    client: &Client<B, W, S, K>,
+pub async fn coin_select_for_onchain<B, W, S>(
+    client: &Client<B, W, S>,
     target_amount: Amount,
 ) -> Result<
     (
@@ -37,7 +37,6 @@ where
     B: Blockchain,
     W: BoardingWallet + OnchainWallet,
     S: SwapStorage + 'static,
-    K: crate::KeyProvider,
 {
     let boarding_outputs = client.inner.wallet.get_boarding_outputs()?;
 
@@ -89,7 +88,7 @@ where
 
     let mut selected_vtxo_outputs = HashSet::new();
 
-    for (_, vtxo) in client.get_offchain_addresses()? {
+    for (_, vtxo) in client.get_offchain_addresses().await? {
         if target_amount <= selected_amount {
             return Ok((
                 selected_boarding_outputs.into_iter().collect(),
