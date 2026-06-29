@@ -400,7 +400,7 @@ mod tests {
             .spendable_paths_for_script(&stored.script_pubkey)
             .unwrap();
         assert_eq!(paths.len(), 2);
-        assert!(paths.iter().all(|path| path.control_block.is_some()));
+        assert!(paths.iter().all(|path| !path.script.is_empty()));
     }
 
     #[test]

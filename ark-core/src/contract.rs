@@ -116,7 +116,7 @@ impl SpendPathKind {
 pub struct SpendPath {
     pub kind: SpendPathKind,
     pub script: ScriptBuf,
-    pub control_block: Option<ControlBlock>,
+    pub control_block: ControlBlock,
 }
 
 impl SpendPath {
@@ -124,7 +124,7 @@ impl SpendPath {
         Self {
             kind,
             script,
-            control_block: Some(control_block),
+            control_block,
         }
     }
 }
@@ -326,19 +326,20 @@ impl ContractSpec for VhtlcContract {
     fn spendable_paths(&self, ctx: &ContractContext) -> Result<Vec<SpendPath>, Error> {
         let script = crate::vhtlc::VhtlcScript::new(self.options.clone(), ctx.network())
             .map_err(|e| Error::ad_hoc(format!("failed to build vhtlc: {e}")))?;
-        Ok(script
+        script
             .get_script_map()
             .into_iter()
             .map(|(name, tapscript)| {
                 let control_block = script
                     .taproot_spend_info()
-                    .control_block(&(tapscript.clone(), bitcoin::taproot::LeafVersion::TapScript));
-                SpendPath {
+                    .control_block(&(tapscript.clone(), bitcoin::taproot::LeafVersion::TapScript))
+                    .ok_or_else(|| Error::ad_hoc("missing vhtlc control block"))?;
+                Ok(SpendPath {
                     kind: SpendPathKind::from_vhtlc_name(name),
                     script: tapscript,
                     control_block,
-                }
+                })
             })
-            .collect())
+            .collect()
     }
 }

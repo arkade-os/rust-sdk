@@ -1499,10 +1499,7 @@ where
             .into_iter()
             .find(|path| path.kind == kind)
             .ok_or_else(|| Error::ad_hoc(format!("missing {kind:?} spend path")))?;
-        let control_block = path.control_block.ok_or_else(|| {
-            Error::ad_hoc(format!("missing control block for {kind:?} spend path"))
-        })?;
-        Ok((path.script, control_block))
+        Ok((path.script, path.control_block))
     }
 
     fn derivation_index_for_pk(&self, pk: &XOnlyPublicKey) -> Option<u32> {
