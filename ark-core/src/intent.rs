@@ -34,6 +34,7 @@ use bitcoin::XOnlyPublicKey;
 use serde::Deserialize;
 use serde::Serialize;
 
+/// A UTXO input that proves coin ownership inside an intent proof.
 #[derive(Clone, Debug)]
 pub struct Input {
     // The TXID of this outpoint is a hash of the TXID of the actual outpoint.
@@ -55,6 +56,7 @@ pub struct Input {
 }
 
 impl Input {
+    /// Construct a new `Input` from the given outpoint, spend metadata, and coin value.
     pub fn new(
         outpoint: OutPoint,
         sequence: Sequence,
@@ -151,6 +153,7 @@ pub enum Output {
     AssetPacket(TxOut),
 }
 
+/// A fully-signed BIP-322-style intent proof paired with its intent message.
 #[derive(Debug, Clone)]
 pub struct Intent {
     pub proof: Psbt,
@@ -158,10 +161,12 @@ pub struct Intent {
 }
 
 impl Intent {
+    /// Create an `Intent` from a finalized proof PSBT and an `IntentMessage`.
     pub fn new(proof: Psbt, message: IntentMessage) -> Self {
         Self { proof, message }
     }
 
+    /// Serialize the proof PSBT as a standard Base64 string.
     pub fn serialize_proof(&self) -> String {
         let base64 = base64::engine::GeneralPurpose::new(
             &base64::alphabet::STANDARD,
@@ -173,11 +178,16 @@ impl Intent {
         base64.encode(&bytes)
     }
 
+    /// Serialize the intent message as a JSON string.
     pub fn serialize_message(&self) -> Result<String, Error> {
         self.message.encode()
     }
 }
 
+/// Build and sign a BIP-322-style intent proof for the given inputs, outputs, and message.
+///
+/// `sign_for_vtxo_fn` and `sign_for_onchain_fn` are caller-supplied signing callbacks used for
+/// off-chain VTXOs and on-chain UTXOs respectively.
 pub fn make_intent<SV, SO>(
     sign_for_vtxo_fn: SV,
     sign_for_onchain_fn: SO,
@@ -431,6 +441,7 @@ fn message_hash(message: &[u8]) -> sha256::Hash {
     sha256::Hash::hash(&v)
 }
 
+/// The JSON payload embedded in an intent proof, discriminated by the `type` field.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
 pub enum IntentMessage {
@@ -457,6 +468,7 @@ pub enum IntentMessage {
 }
 
 impl IntentMessage {
+    /// Serialize this message to a JSON string.
     pub fn encode(&self) -> Result<String, Error> {
         serde_json::to_string(self)
             .map_err(Error::ad_hoc)
@@ -630,6 +642,7 @@ pub(crate) mod taptree {
 mod tests {
     use super::*;
     use bitcoin::key::Secp256k1;
+    use bitcoin::opcodes::all::OP_TRUE;
     use bitcoin::taproot::{LeafVersion, TaprootBuilder};
     use std::str::FromStr;
 
@@ -644,7 +657,7 @@ mod tests {
             0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98,
         ])
         .unwrap();
-        let leaf = ScriptBuf::new_op_return([0x01]);
+        let leaf = ScriptBuf::builder().push_opcode(OP_TRUE).into_script();
         let spend_info = TaprootBuilder::new()
             .add_leaf_with_ver(0, leaf.clone(), LeafVersion::TapScript)
             .unwrap()
