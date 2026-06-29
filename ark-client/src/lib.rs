@@ -10,6 +10,8 @@ use ark_core::contract::BoardingContract;
 use ark_core::contract::ContractContext;
 use ark_core::contract::ContractState;
 use ark_core::contract::ContractType;
+use ark_core::contract::DefaultVtxoContract;
+use ark_core::contract::DelegateVtxoContract;
 use ark_core::contract::SpendPathKind;
 use ark_core::history;
 use ark_core::history::generate_incoming_vtxo_transaction_history;
@@ -37,6 +39,7 @@ use bitcoin::secp256k1::All;
 use bitcoin::secp256k1::Message;
 use bitcoin::Address;
 use bitcoin::Amount;
+use bitcoin::Network;
 use bitcoin::OutPoint;
 use bitcoin::Script;
 use bitcoin::ScriptBuf;
@@ -761,11 +764,7 @@ where
             .public_key()
             .into();
 
-        let vtxo = self.make_vtxo(server_info, server_signer, owner)?;
-
-        let ark_address = vtxo.to_ark_address();
-
-        Ok((ark_address, vtxo))
+        self.persist_offchain_vtxo_contract(server_info, server_signer, owner)
     }
 
     /// Get all known offchain addresses for this wallet.
@@ -803,15 +802,12 @@ where
         for owner_pk in &pks {
             for server_signer in &all_server_keys {
                 for exit_delay in &candidate_delays {
-                    // Default (2-leaf) address.
-                    let default_vtxo = Vtxo::new_default(
-                        self.secp(),
+                    results.push(self.persist_default_vtxo_contract(
+                        server_info.network,
                         *server_signer,
                         *owner_pk,
                         *exit_delay,
-                        server_info.network,
-                    )?;
-                    results.push((default_vtxo.to_ark_address(), default_vtxo));
+                    )?);
 
                     // Delegate addresses for all known delegator keys.
                     let mut seen = HashSet::new();
@@ -819,15 +815,13 @@ where
                         if !seen.insert(dpk) {
                             continue;
                         }
-                        let delegate_vtxo = Vtxo::new_with_delegator(
-                            self.secp(),
+                        results.push(self.persist_delegate_vtxo_contract(
+                            server_info.network,
                             *server_signer,
                             *owner_pk,
                             *dpk,
                             *exit_delay,
-                            server_info.network,
-                        )?;
-                        results.push((delegate_vtxo.to_ark_address(), delegate_vtxo));
+                        )?);
                     }
                 }
             }
@@ -836,33 +830,89 @@ where
         Ok(results)
     }
 
-    /// Build a [`Vtxo`] for the given owner key, using a 3-leaf delegate VTXO if a delegator is
-    /// configured, otherwise a standard 2-leaf default VTXO.
-    fn make_vtxo(
+    fn persist_offchain_vtxo_contract(
         &self,
         server_info: &server::Info,
         server_signer: XOnlyPublicKey,
         owner: XOnlyPublicKey,
-    ) -> Result<Vtxo, Error> {
+    ) -> Result<(ArkAddress, Vtxo), Error> {
         match self.inner.delegator_pk {
-            Some(delegator) => Vtxo::new_with_delegator(
-                self.secp(),
+            Some(delegator) => self.persist_delegate_vtxo_contract(
+                server_info.network,
                 server_signer,
                 owner,
                 delegator,
                 server_info.unilateral_exit_delay,
+            ),
+            None => self.persist_default_vtxo_contract(
                 server_info.network,
-            )
-            .map_err(Into::into),
-            None => Vtxo::new_default(
-                self.secp(),
                 server_signer,
                 owner,
                 server_info.unilateral_exit_delay,
-                server_info.network,
-            )
-            .map_err(Into::into),
+            ),
         }
+    }
+
+    fn persist_default_vtxo_contract(
+        &self,
+        network: Network,
+        server: XOnlyPublicKey,
+        owner: XOnlyPublicKey,
+        exit_delay: bitcoin::Sequence,
+    ) -> Result<(ArkAddress, Vtxo), Error> {
+        let key_index = self.derivation_index_for_pk(&owner);
+        let contract = DefaultVtxoContract {
+            server,
+            owner,
+            exit_delay,
+        };
+        let state = self
+            .state
+            .read()
+            .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+        let mut manager = state
+            .contract_manager
+            .lock()
+            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?;
+        let stored = manager.insert_or_get(contract, ContractState::Active, key_index)?;
+        let contract = manager
+            .get_typed::<DefaultVtxoContract>(&stored.script_pubkey)?
+            .ok_or_else(|| Error::ad_hoc("missing default vtxo contract"))?;
+        let ctx = ContractContext::new(network);
+        let vtxo = contract.vtxo(&ctx)?;
+        Ok((vtxo.to_ark_address(), vtxo))
+    }
+
+    fn persist_delegate_vtxo_contract(
+        &self,
+        network: Network,
+        server: XOnlyPublicKey,
+        owner: XOnlyPublicKey,
+        delegator: XOnlyPublicKey,
+        exit_delay: bitcoin::Sequence,
+    ) -> Result<(ArkAddress, Vtxo), Error> {
+        let key_index = self.derivation_index_for_pk(&owner);
+        let contract = DelegateVtxoContract {
+            server,
+            owner,
+            delegator,
+            exit_delay,
+        };
+        let state = self
+            .state
+            .read()
+            .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+        let mut manager = state
+            .contract_manager
+            .lock()
+            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?;
+        let stored = manager.insert_or_get(contract, ContractState::Active, key_index)?;
+        let contract = manager
+            .get_typed::<DelegateVtxoContract>(&stored.script_pubkey)?
+            .ok_or_else(|| Error::ad_hoc("missing delegate vtxo contract"))?;
+        let ctx = ContractContext::new(network);
+        let vtxo = contract.vtxo(&ctx)?;
+        Ok((vtxo.to_ark_address(), vtxo))
     }
 
     /// Discover and cache used keys using BIP44-style gap limit
@@ -986,6 +1036,10 @@ where
                 .ok_or_else(|| Error::ad_hoc("Key discovery index overflow"))?;
         }
 
+        if discovered_count > 0 {
+            let _ = self.get_offchain_addresses_with_server_info(server_info)?;
+        }
+
         tracing::info!(discovered_count, "Key discovery completed");
 
         Ok(discovered_count)
@@ -1080,7 +1134,7 @@ where
         for server_pk in server_info.all_server_keys() {
             for exit_delay in &candidate_delays {
                 let contract = BoardingContract {
-                    server: server_pk.into(),
+                    server: server_pk,
                     owner,
                     exit_delay: *exit_delay,
                 };

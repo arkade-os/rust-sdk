@@ -196,7 +196,7 @@ impl ContractSpec for DefaultVtxoContract {
 }
 
 impl DefaultVtxoContract {
-    fn vtxo(&self, ctx: &ContractContext) -> Result<Vtxo, Error> {
+    pub fn vtxo(&self, ctx: &ContractContext) -> Result<Vtxo, Error> {
         Vtxo::new_default(
             ctx.secp(),
             self.server,
@@ -248,7 +248,7 @@ impl ContractSpec for DelegateVtxoContract {
 }
 
 impl DelegateVtxoContract {
-    fn vtxo(&self, ctx: &ContractContext) -> Result<Vtxo, Error> {
+    pub fn vtxo(&self, ctx: &ContractContext) -> Result<Vtxo, Error> {
         Vtxo::new_with_delegator(
             ctx.secp(),
             self.server,

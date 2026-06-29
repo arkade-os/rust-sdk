@@ -550,7 +550,7 @@ where
                 let vtxo = script_pubkey_to_vtxo_map.get(&v.script).ok_or_else(|| {
                     ark_core::Error::ad_hoc(format!("missing VTXO for script pubkey: {}", v.script))
                 })?;
-                let spend_info = vtxo.forfeit_spend_info()?;
+                let spend_info = self.spend_info_for_script(&v.script, SpendPathKind::Forfeit)?;
 
                 Ok(intent::Input::new(
                     v.outpoint,
@@ -1227,12 +1227,13 @@ where
                 let vtxo = script_pubkey_to_vtxo_map
                     .get(&virtual_tx_outpoint.script)
                     .ok_or_else(|| {
-                        ark_core::Error::ad_hoc(format!(
+                        Error::ad_hoc(format!(
                             "missing VTXO for script pubkey: {}",
                             virtual_tx_outpoint.script
                         ))
                     })?;
-                let spend_info = vtxo.forfeit_spend_info()?;
+                let spend_info = self
+                    .spend_info_for_script(&virtual_tx_outpoint.script, SpendPathKind::Forfeit)?;
 
                 Ok(intent::Input::new(
                     virtual_tx_outpoint.outpoint,
@@ -1249,7 +1250,7 @@ where
                     virtual_tx_outpoint.assets.clone(),
                 ))
             })
-            .collect::<Result<Vec<_>, ark_core::Error>>()?;
+            .collect::<Result<Vec<_>, Error>>()?;
 
         Ok((boarding_inputs, vtxo_inputs, total_amount))
     }

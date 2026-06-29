@@ -9,6 +9,7 @@ use ark_core::asset::AssetId;
 use ark_core::coin_select::select_vtxos;
 use ark_core::coin_select::select_vtxos_for_asset;
 use ark_core::coin_select::VirtualTxOutPoint;
+use ark_core::contract::SpendPathKind;
 use ark_core::intent;
 use ark_core::script::extract_checksig_pubkeys;
 use ark_core::send::build_asset_send_transactions;
@@ -415,15 +416,19 @@ where
                         ))
                     })?;
 
-                let (forfeit_script, control_block) = vtxo
-                    .forfeit_spend_info()
-                    .context("failed to get forfeit spend info")?;
+                let spend_paths = self.spend_paths_for_script(&vtp.script_pubkey)?;
+                let tapscripts = spend_paths
+                    .iter()
+                    .map(|path| path.script.clone())
+                    .collect::<Vec<_>>();
+                let (forfeit_script, control_block) =
+                    self.spend_info_for_script(&vtp.script_pubkey, SpendPathKind::Forfeit)?;
 
                 Ok(VtxoInput::new(
                     forfeit_script,
                     None,
                     control_block,
-                    vtxo.tapscripts(),
+                    tapscripts,
                     vtxo.script_pubkey(),
                     vtp.amount,
                     vtp.outpoint,

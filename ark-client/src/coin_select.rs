@@ -122,14 +122,18 @@ where
                 ) {
                     tracing::debug!(?outpoint, %amount, ?vtxo, "Selected VTXO");
 
+                    let script_pubkey = vtxo.script_pubkey();
+                    let spend_info =
+                        client.spend_info_for_script(&script_pubkey, SpendPathKind::Exit)?;
+
                     selected_vtxo_outputs.insert(unilateral_exit::VtxoInput::new(
                         *outpoint,
                         vtxo.exit_delay(),
                         TxOut {
                             value: *amount,
-                            script_pubkey: vtxo.script_pubkey(),
+                            script_pubkey,
                         },
-                        vtxo.exit_spend_info()?,
+                        spend_info,
                     ));
                     selected_amount += *amount;
                 }
