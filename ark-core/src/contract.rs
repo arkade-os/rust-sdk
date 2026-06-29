@@ -89,24 +89,24 @@ pub enum SpendPathKind {
     Forfeit,
     Exit,
     Delegate,
-    Claim,
-    Refund,
-    RefundWithoutReceiver,
-    UnilateralClaim,
-    UnilateralRefund,
-    UnilateralRefundWithoutReceiver,
+    VhtlcClaim,
+    VhtlcRefund,
+    VhtlcRefundWithoutReceiver,
+    VhtlcUnilateralClaim,
+    VhtlcUnilateralRefund,
+    VhtlcUnilateralRefundWithoutReceiver,
     Custom(String),
 }
 
 impl SpendPathKind {
     pub fn from_vhtlc_name(name: String) -> Self {
         match name.as_str() {
-            "claim" => Self::Claim,
-            "refund" => Self::Refund,
-            "refund_without_receiver" => Self::RefundWithoutReceiver,
-            "unilateral_claim" => Self::UnilateralClaim,
-            "unilateral_refund" => Self::UnilateralRefund,
-            "unilateral_refund_without_receiver" => Self::UnilateralRefundWithoutReceiver,
+            "claim" => Self::VhtlcClaim,
+            "refund" => Self::VhtlcRefund,
+            "refund_without_receiver" => Self::VhtlcRefundWithoutReceiver,
+            "unilateral_claim" => Self::VhtlcUnilateralClaim,
+            "unilateral_refund" => Self::VhtlcUnilateralRefund,
+            "unilateral_refund_without_receiver" => Self::VhtlcUnilateralRefundWithoutReceiver,
             _ => Self::Custom(name),
         }
     }
