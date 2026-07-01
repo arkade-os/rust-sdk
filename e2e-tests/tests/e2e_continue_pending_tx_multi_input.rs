@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use ark_core::coin_select::select_vtxos;
+use ark_core::contract::SpendPathKind;
 use ark_core::send::SendReceiver;
 use ark_core::send::VtxoInput;
 use bitcoin::key::Secp256k1;
@@ -78,7 +79,7 @@ pub async fn e2e_continue_pending_tx_multi_input() {
     tracing::info!(%alice_total, "Alice has 2 VTXOs");
 
     // Verify Alice has exactly 2 spendable VTXOs.
-    let (vtxo_list, script_pubkey_to_vtxo_map) = alice.list_vtxos().await.unwrap();
+    let vtxo_list = alice.list_vtxos().await.unwrap();
     let spendable: Vec<_> = vtxo_list.spendable_offchain().collect();
     assert_eq!(
         spendable.len(),
@@ -87,10 +88,10 @@ pub async fn e2e_continue_pending_tx_multi_input() {
         spendable.len()
     );
     tracing::info!(
-        vtxo_1 = %spendable[0].outpoint,
-        vtxo_1_amount = %spendable[0].amount,
-        vtxo_2 = %spendable[1].outpoint,
-        vtxo_2_amount = %spendable[1].amount,
+        vtxo_1 = %spendable[0].vtxo.outpoint,
+        vtxo_1_amount = %spendable[0].vtxo.amount,
+        vtxo_2 = %spendable[1].vtxo.outpoint,
+        vtxo_2_amount = %spendable[1].vtxo.amount,
         "Alice has 2 spendable VTXOs"
     );
 
@@ -101,11 +102,11 @@ pub async fn e2e_continue_pending_tx_multi_input() {
 
     let spendable_coins = vtxo_list
         .spendable_offchain()
-        .map(|vtxo| ark_core::coin_select::VirtualTxOutPoint {
-            outpoint: vtxo.outpoint,
-            script_pubkey: vtxo.script.clone(),
-            expire_at: vtxo.expires_at,
-            amount: vtxo.amount,
+        .map(|entry| ark_core::coin_select::VirtualTxOutPoint {
+            outpoint: entry.vtxo.outpoint,
+            script_pubkey: entry.vtxo.script.clone(),
+            expire_at: entry.vtxo.expires_at,
+            amount: entry.vtxo.amount,
             assets: Vec::new(),
         })
         .collect::<Vec<_>>();
@@ -127,14 +128,17 @@ pub async fn e2e_continue_pending_tx_multi_input() {
     let vtxo_inputs: Vec<VtxoInput> = selected
         .into_iter()
         .map(|coin| {
-            let vtxo = script_pubkey_to_vtxo_map.get(&coin.script_pubkey).unwrap();
-            let (forfeit_script, control_block) = vtxo.forfeit_spend_info().unwrap();
+            let entry = vtxo_list
+                .all()
+                .find(|entry| entry.vtxo.outpoint == coin.outpoint)
+                .unwrap();
+            let (forfeit_script, control_block) = entry.spend_info(SpendPathKind::Forfeit).unwrap();
             VtxoInput::new(
                 forfeit_script,
                 None,
                 control_block,
-                vtxo.tapscripts(),
-                vtxo.script_pubkey(),
+                entry.tapscripts(),
+                entry.script_pubkey(),
                 coin.amount,
                 coin.outpoint,
                 coin.assets,

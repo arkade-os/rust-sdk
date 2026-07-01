@@ -386,25 +386,27 @@ where
             .fetch_commitment_transaction_inputs(&server_info, now)
             .await?;
 
-        // The VTXO inputs only expose their script pubkey, so resolve each one's signer via the
-        // script -> VTXO map (the same mapping `offchain_balance`/`settle_at` rely on).
-        let (_, script_map) = self.list_vtxos_with_server_info(&server_info).await?;
+        let contract_vtxos = self.list_vtxos_with_server_info(&server_info).await?;
 
         // Build the candidate (outpoint, amount, signer, cutoff) list for the VTXO leg.
         let mut vtxo_candidates: Vec<MigrationVtxoRef> = Vec::new();
         for input in &vtxo_inputs {
-            let Some(vtxo) = script_map.get(input.script_pubkey()) else {
+            let Some(contract_vtxo) = contract_vtxos
+                .all()
+                .find(|entry| entry.vtxo.outpoint == input.outpoint())
+            else {
                 tracing::debug!(
                     outpoint = %input.outpoint(),
-                    "Skipping VTXO with no spend info during migration"
+                    "Skipping VTXO with no contract during migration"
                 );
                 continue;
             };
-            if let Some(cutoff_date) = is_pre_cutoff_deprecated(vtxo.server_pk()) {
+            let signer_pk = contract_vtxo.server_pk()?;
+            if let Some(cutoff_date) = is_pre_cutoff_deprecated(signer_pk) {
                 vtxo_candidates.push(MigrationVtxoRef {
                     outpoint: input.outpoint(),
                     amount: input.amount(),
-                    signer_pk: vtxo.server_pk(),
+                    signer_pk,
                     cutoff_date,
                 });
             }
@@ -506,8 +508,7 @@ where
         let now = unix_now()?;
         let dust = server_info.dust;
 
-        // Aggregate VTXO holdings per signer in a single pass over all unspent VTXOs, resolving the
-        // signer via the script -> VTXO map (the same mapping `offchain_balance` relies on).
+        // Aggregate VTXO holdings per signer in a single pass over all unspent VTXOs.
         #[derive(Default)]
         struct VtxoAgg {
             // Spendable (non-recoverable) VTXOs.
@@ -520,25 +521,22 @@ where
             next_sweep_eta: Option<i64>,
         }
 
-        let (vtxo_list, script_map) = self
+        let vtxo_list = self
             .list_vtxos_with_server_info(&server_info)
             .await
             .context("failed to list VTXOs")?;
         let mut vtxo_aggs: HashMap<XOnlyPublicKey, VtxoAgg> = HashMap::new();
-        for v in vtxo_list.all_unspent() {
-            let Some(vtxo) = script_map.get(&v.script) else {
-                continue;
-            };
-            let agg = vtxo_aggs.entry(vtxo.server_pk()).or_default();
-            if v.is_recoverable(dust) {
+        for entry in vtxo_list.all_unspent() {
+            let agg = vtxo_aggs.entry(entry.server_pk()?).or_default();
+            if entry.vtxo.is_recoverable(dust) {
                 agg.recoverable_count += 1;
-                agg.recoverable_value += v.amount;
+                agg.recoverable_value += entry.vtxo.amount;
             } else {
                 agg.spendable_count += 1;
-                agg.spendable_value += v.amount;
+                agg.spendable_value += entry.vtxo.amount;
                 agg.next_sweep_eta = Some(match agg.next_sweep_eta {
-                    Some(eta) => eta.min(v.expires_at),
-                    None => v.expires_at,
+                    Some(eta) => eta.min(entry.vtxo.expires_at),
+                    None => entry.vtxo.expires_at,
                 });
             }
         }

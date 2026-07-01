@@ -18,6 +18,7 @@ use ark_client::SqliteSwapStorage;
 use ark_client::SwapAmount;
 use ark_client::TxStatus;
 use ark_core::asset::ControlAssetConfig;
+use ark_core::contract::SpendPathKind;
 use ark_core::history;
 use ark_core::send::SendReceiver;
 use ark_core::send::VtxoInput;
@@ -1069,39 +1070,39 @@ async fn run_command(
         }
         Commands::ListVtxos => {
             // Get VTXOs
-            let (vtxo_list, _) = client.list_vtxos().await.map_err(|e| anyhow!(e))?;
+            let vtxo_list = client.list_vtxos().await.map_err(|e| anyhow!(e))?;
 
             let mut vtxo_entries: Vec<VtxoEntry> = Vec::new();
 
             // Collect pre-confirmed VTXOs
-            for v in vtxo_list.pre_confirmed() {
+            for entry in vtxo_list.pre_confirmed() {
                 vtxo_entries.push(VtxoEntry {
-                    outpoint: v.outpoint.to_string(),
-                    amount_sats: v.amount.to_sat(),
-                    created_at: format_timestamp(v.created_at)?,
-                    expires_at: format_timestamp(v.expires_at)?,
+                    outpoint: entry.vtxo.outpoint.to_string(),
+                    amount_sats: entry.vtxo.amount.to_sat(),
+                    created_at: format_timestamp(entry.vtxo.created_at)?,
+                    expires_at: format_timestamp(entry.vtxo.expires_at)?,
                     status: "pre_confirmed".to_string(),
                 });
             }
 
             // Collect confirmed VTXOs
-            for v in vtxo_list.confirmed() {
+            for entry in vtxo_list.confirmed() {
                 vtxo_entries.push(VtxoEntry {
-                    outpoint: v.outpoint.to_string(),
-                    amount_sats: v.amount.to_sat(),
-                    created_at: format_timestamp(v.created_at)?,
-                    expires_at: format_timestamp(v.expires_at)?,
+                    outpoint: entry.vtxo.outpoint.to_string(),
+                    amount_sats: entry.vtxo.amount.to_sat(),
+                    created_at: format_timestamp(entry.vtxo.created_at)?,
+                    expires_at: format_timestamp(entry.vtxo.expires_at)?,
                     status: "confirmed".to_string(),
                 });
             }
 
             // Collect recoverable VTXOs
-            for v in vtxo_list.recoverable() {
+            for entry in vtxo_list.recoverable() {
                 vtxo_entries.push(VtxoEntry {
-                    outpoint: v.outpoint.to_string(),
-                    amount_sats: v.amount.to_sat(),
-                    created_at: format_timestamp(v.created_at)?,
-                    expires_at: format_timestamp(v.expires_at)?,
+                    outpoint: entry.vtxo.outpoint.to_string(),
+                    amount_sats: entry.vtxo.amount.to_sat(),
+                    created_at: format_timestamp(entry.vtxo.created_at)?,
+                    expires_at: format_timestamp(entry.vtxo.expires_at)?,
                     status: "recoverable".to_string(),
                 });
             }
@@ -1287,16 +1288,15 @@ async fn run_command(
         Commands::SubmitOnly { address, amount } => {
             let amount = Amount::from_sat(*amount);
 
-            let (vtxo_list, script_pubkey_to_vtxo_map) =
-                client.list_vtxos().await.map_err(|e| anyhow!(e))?;
+            let vtxo_list = client.list_vtxos().await.map_err(|e| anyhow!(e))?;
 
             let spendable = vtxo_list
                 .spendable_offchain()
-                .map(|vtxo| ark_core::coin_select::VirtualTxOutPoint {
-                    outpoint: vtxo.outpoint,
-                    script_pubkey: vtxo.script.clone(),
-                    expire_at: vtxo.expires_at,
-                    amount: vtxo.amount,
+                .map(|entry| ark_core::coin_select::VirtualTxOutPoint {
+                    outpoint: entry.vtxo.outpoint,
+                    script_pubkey: entry.vtxo.script.clone(),
+                    expire_at: entry.vtxo.expires_at,
+                    amount: entry.vtxo.amount,
                     assets: Vec::new(),
                 })
                 .collect::<Vec<_>>();
@@ -1312,20 +1312,19 @@ async fn run_command(
             let vtxo_inputs: Vec<VtxoInput> = selected
                 .into_iter()
                 .map(|coin| {
-                    let vtxo = script_pubkey_to_vtxo_map
-                        .get(&coin.script_pubkey)
-                        .ok_or_else(|| {
-                            anyhow!("missing VTXO for script pubkey: {}", coin.script_pubkey)
-                        })?;
-                    let (forfeit_script, control_block) = vtxo
-                        .forfeit_spend_info()
+                    let entry = vtxo_list
+                        .all()
+                        .find(|entry| entry.vtxo.outpoint == coin.outpoint)
+                        .ok_or_else(|| anyhow!("missing VTXO for outpoint: {}", coin.outpoint))?;
+                    let (forfeit_script, control_block) = entry
+                        .spend_info(SpendPathKind::Forfeit)
                         .context("failed to get forfeit spend info")?;
                     Ok(VtxoInput::new(
                         forfeit_script,
                         None,
                         control_block,
-                        vtxo.tapscripts(),
-                        vtxo.script_pubkey(),
+                        entry.tapscripts(),
+                        entry.script_pubkey(),
                         coin.amount,
                         coin.outpoint,
                         coin.assets,

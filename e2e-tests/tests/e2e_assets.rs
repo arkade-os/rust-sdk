@@ -79,20 +79,20 @@ pub async fn e2e_assets() {
 
     tracing::info!("=== Step 2: Manual selection rejects missing asset-change dust ===");
 
-    let (vtxos_after_issuance, _) = alice.list_vtxos().await.unwrap();
+    let vtxos_after_issuance = alice.list_vtxos().await.unwrap();
     let asset_vtxo = vtxos_after_issuance
         .all_unspent()
-        .find(|vtxo| !vtxo.assets.is_empty())
+        .find(|entry| !entry.vtxo.assets.is_empty())
         .unwrap();
 
     let (bob_address, _) = bob.get_offchain_address().await.unwrap();
 
     let err = alice
         .send_selection(
-            &[asset_vtxo.outpoint],
+            &[asset_vtxo.vtxo.outpoint],
             vec![SendReceiver {
                 address: bob_address,
-                amount: asset_vtxo.amount,
+                amount: asset_vtxo.vtxo.amount,
                 assets: Vec::new(),
             }],
         )

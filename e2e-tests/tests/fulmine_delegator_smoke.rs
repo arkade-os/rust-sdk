@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
+use ark_core::contract::ContractType;
 use ark_delegator::DelegatorClient;
 use bitcoin::key::Secp256k1;
 use bitcoin::Amount;
@@ -56,15 +57,13 @@ async fn fulmine_delegator_smoke() {
 
     tokio::time::sleep(Duration::from_secs(5)).await;
 
-    let (vtxo_list, script_map) = client.list_vtxos().await.unwrap();
+    let vtxo_list = client.list_vtxos().await.unwrap();
 
     tracing::info!(?vtxo_list, "VTXOs after settlement");
 
-    let has_unspent_delegated_vtxo = vtxo_list.all_unspent().any(|v| {
-        script_map
-            .get(&v.script)
-            .is_some_and(|full_vtxo| full_vtxo.delegator_pk() == Some(delegator_pk))
-    });
+    let has_unspent_delegated_vtxo = vtxo_list
+        .all_unspent()
+        .any(|entry| entry.contract.contract_type == ContractType::delegate_vtxo());
 
     assert!(
         has_unspent_delegated_vtxo,

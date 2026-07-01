@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 use ark_core::coin_select::select_vtxos;
+use ark_core::contract::SpendPathKind;
 use ark_core::send::VtxoInput;
 use bitcoin::key::Secp256k1;
 use bitcoin::Amount;
@@ -44,16 +45,16 @@ pub async fn e2e_finalize_pending_tx() {
     let send_amount = Amount::from_sat(100_000);
     let (bob_address, _) = bob.get_offchain_address().await.unwrap();
 
-    let (vtxo_list, script_pubkey_to_vtxo_map) = alice.list_vtxos().await.unwrap();
+    let vtxo_list = alice.list_vtxos().await.unwrap();
 
     let spendable = vtxo_list
         .spendable_offchain()
-        .map(|vtxo| ark_core::coin_select::VirtualTxOutPoint {
-            outpoint: vtxo.outpoint,
-            script_pubkey: vtxo.script.clone(),
-            expire_at: vtxo.expires_at,
-            amount: vtxo.amount,
-            assets: vtxo.assets.clone(),
+        .map(|entry| ark_core::coin_select::VirtualTxOutPoint {
+            outpoint: entry.vtxo.outpoint,
+            script_pubkey: entry.vtxo.script.clone(),
+            expire_at: entry.vtxo.expires_at,
+            amount: entry.vtxo.amount,
+            assets: entry.vtxo.assets.clone(),
         })
         .collect::<Vec<_>>();
 
@@ -68,14 +69,17 @@ pub async fn e2e_finalize_pending_tx() {
     let vtxo_inputs: Vec<VtxoInput> = selected
         .into_iter()
         .map(|coin| {
-            let vtxo = script_pubkey_to_vtxo_map.get(&coin.script_pubkey).unwrap();
-            let (forfeit_script, control_block) = vtxo.forfeit_spend_info().unwrap();
+            let entry = vtxo_list
+                .all()
+                .find(|entry| entry.vtxo.outpoint == coin.outpoint)
+                .unwrap();
+            let (forfeit_script, control_block) = entry.spend_info(SpendPathKind::Forfeit).unwrap();
             VtxoInput::new(
                 forfeit_script,
                 None,
                 control_block,
-                vtxo.tapscripts(),
-                vtxo.script_pubkey(),
+                entry.tapscripts(),
+                entry.script_pubkey(),
                 coin.amount,
                 coin.outpoint,
                 coin.assets,

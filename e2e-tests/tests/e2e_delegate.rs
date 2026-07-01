@@ -68,7 +68,7 @@ pub async fn e2e_delegate() {
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     let alice_offchain_balance = alice.offchain_balance().await.unwrap();
-    let (vtxos_before, _) = alice.list_vtxos().await.unwrap();
+    let vtxos_before = alice.list_vtxos().await.unwrap();
 
     tracing::info!(
         ?alice_offchain_balance,
@@ -119,7 +119,7 @@ pub async fn e2e_delegate() {
 
     let alice_offchain_balance_after = alice.offchain_balance().await.unwrap();
 
-    let (vtxos_after, _) = alice.list_vtxos().await.unwrap();
+    let vtxos_after = alice.list_vtxos().await.unwrap();
 
     tracing::info!(
         %commitment_txid,
@@ -153,10 +153,11 @@ pub async fn e2e_delegate() {
     for pre in vtxos_pre_settlement {
         assert!(
             vtxos_post_settlement.iter().any(|post| {
-                post.outpoint == pre.outpoint && post.settled_by == Some(commitment_txid)
+                post.vtxo.outpoint == pre.vtxo.outpoint
+                    && post.vtxo.settled_by == Some(commitment_txid)
             }),
             "expected pre-settlement VTXO {} to be marked spent by delegated settlement {}",
-            pre.outpoint,
+            pre.vtxo.outpoint,
             commitment_txid
         );
     }

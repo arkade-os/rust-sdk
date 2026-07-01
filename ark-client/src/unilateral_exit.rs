@@ -40,7 +40,7 @@ where
     /// commitment transaction output to a spendable VTXO. Every transaction is finalized, but
     /// requires fee bumping through a P2A output.
     pub async fn build_unilateral_exit_trees(&self) -> Result<Vec<Vec<Transaction>>, Error> {
-        let (vtxo_list, _) = self
+        let vtxo_list = self
             .list_vtxos()
             .await
             .context("failed to get spendable VTXOs")?;
@@ -48,7 +48,8 @@ where
         let mut unilateral_exit_trees = Vec::new();
 
         // For each spendable VTXO, generate its unilateral exit tree.
-        for virtual_tx_outpoint in vtxo_list.could_exit_unilaterally() {
+        for contract_vtxo in vtxo_list.could_exit_unilaterally() {
+            let virtual_tx_outpoint = &contract_vtxo.vtxo;
             let vtxo_chain_response = timeout_op(
                 self.inner.timeout,
                 self.network_client()

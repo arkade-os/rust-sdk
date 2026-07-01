@@ -10,6 +10,7 @@ use crate::swap_storage::SwapStorage;
 use crate::wallet::OnchainWallet;
 use crate::Blockchain;
 use crate::Client;
+use crate::ContractVtxo;
 use crate::Error;
 use ark_core::intent;
 use ark_core::server::SubscriptionResponse;
@@ -96,23 +97,17 @@ impl Default for VtxoWatcherConfig {
 /// Built once per (re)connection from `get_offchain_addresses()`. Used both for the subscription
 /// and for resolving VTXO metadata from subscription events, so they can never diverge.
 struct ScriptMap {
-    vtxo_by_script: HashMap<ScriptBuf, Vtxo>,
     addr_by_script: HashMap<ScriptBuf, ArkAddress>,
 }
 
 impl ScriptMap {
     fn from_addresses(addresses: &[(ArkAddress, Vtxo)]) -> Self {
-        let mut vtxo_by_script = HashMap::with_capacity(addresses.len());
         let mut addr_by_script = HashMap::with_capacity(addresses.len());
-        for (addr, vtxo) in addresses {
+        for (addr, _) in addresses {
             let script = addr.to_p2tr_script_pubkey();
-            vtxo_by_script.insert(script.clone(), vtxo.clone());
             addr_by_script.insert(script, *addr);
         }
-        Self {
-            vtxo_by_script,
-            addr_by_script,
-        }
+        Self { addr_by_script }
     }
 
     /// Get the unique ArkAddresses that appear in the given VTXO outpoints.
@@ -194,11 +189,15 @@ async fn run_watcher_loop<B, W, S>(
             return;
         }
 
-        // Build the script map and subscription from the same address set.
-        let addresses = match client.get_offchain_addresses().await {
+        // Seed address contracts, then build the subscription from the active contract set.
+        if let Err(e) = client.get_offchain_addresses().await {
+            tracing::error!("Failed to seed offchain address contracts: {e}");
+            return;
+        }
+        let addresses = match client.active_offchain_contract_addresses() {
             Ok(a) => a,
             Err(e) => {
-                tracing::error!("Failed to get offchain addresses: {e}");
+                tracing::error!("Failed to get active offchain contracts: {e}");
                 return;
             }
         };
@@ -516,7 +515,7 @@ where
 {
     let _discovered = client.discover_keys(KEY_DISCOVERY_GAP_LIMIT).await?;
 
-    let addrs = client.get_offchain_addresses().await?;
+    let addrs = client.active_offchain_contract_addresses()?;
     let new_addrs: Vec<_> = addrs
         .iter()
         .map(|(addr, _)| *addr)
@@ -535,7 +534,7 @@ where
     subscribed_addrs.extend(new_addrs);
     tracing::info!(
         added,
-        "Updated watcher subscription with newly derived addresses"
+        "Updated watcher subscription with newly active contract addresses"
     );
 
     Ok(Some(Arc::new(ScriptMap::from_addresses(&addrs))))
@@ -546,7 +545,7 @@ where
 /// This is a failsafe path to catch outputs that may have been missed by subscription timing.
 async fn collect_new_delegation_candidates<B, W, S>(
     client: &Client<B, W, S>,
-    script_map: &ScriptMap,
+    _script_map: &ScriptMap,
     seen_unspent_outpoints: &mut HashSet<OutPoint>,
 ) -> Result<Vec<VirtualTxOutPoint>, Error>
 where
@@ -554,24 +553,20 @@ where
     W: OnchainWallet + Send + Sync + 'static,
     S: SwapStorage + 'static,
 {
-    let (vtxo_list, _) = client.list_vtxos().await?;
+    let vtxo_list = client.list_vtxos().await?;
 
     let mut current_outpoints = HashSet::new();
     let mut newly_seen = Vec::new();
 
-    for vtp in vtxo_list.all_unspent() {
-        let Some(vtxo) = script_map.vtxo_by_script.get(&vtp.script) else {
-            continue;
-        };
-
-        if vtxo.delegator_pk().is_none() {
+    for entry in vtxo_list.all_unspent() {
+        if entry.contract.contract_type != ark_core::contract::ContractType::delegate_vtxo() {
             continue;
         }
 
-        current_outpoints.insert(vtp.outpoint);
+        current_outpoints.insert(entry.vtxo.outpoint);
 
-        if !seen_unspent_outpoints.contains(&vtp.outpoint) {
-            newly_seen.push(vtp.clone());
+        if !seen_unspent_outpoints.contains(&entry.vtxo.outpoint) {
+            newly_seen.push(entry.vtxo.clone());
         }
     }
 
@@ -630,33 +625,24 @@ fn day_timestamp(ts: i64) -> i64 {
 ///
 /// Recoverable VTXOs (expired or sub-dust) are collected separately and merged into the earliest
 /// non-recoverable group.
-fn group_by_expiry_day<'a>(
-    vtxos: &'a [VirtualTxOutPoint],
-    script_map: &'a ScriptMap,
-    dust: Amount,
-) -> Vec<(i64, Vec<(&'a VirtualTxOutPoint, &'a Vtxo)>)> {
-    let mut groups: BTreeMap<i64, Vec<(&'a VirtualTxOutPoint, &'a Vtxo)>> = BTreeMap::new();
-    let mut recoverable: Vec<(&'a VirtualTxOutPoint, &'a Vtxo)> = Vec::new();
+fn group_by_expiry_day(vtxos: &[ContractVtxo], dust: Amount) -> Vec<(i64, Vec<&ContractVtxo>)> {
+    let mut groups: BTreeMap<i64, Vec<&ContractVtxo>> = BTreeMap::new();
+    let mut recoverable: Vec<&ContractVtxo> = Vec::new();
 
-    for vtp in vtxos {
-        if vtp.is_spent {
+    for entry in vtxos {
+        if entry.vtxo.is_spent {
             continue;
         }
 
-        let vtxo = match script_map.vtxo_by_script.get(&vtp.script) {
-            Some(v) => v,
-            None => continue,
-        };
-
-        if vtxo.delegator_pk().is_none() {
+        if entry.contract.contract_type != ark_core::contract::ContractType::delegate_vtxo() {
             continue;
         }
 
-        if vtp.is_recoverable(dust) {
-            recoverable.push((vtp, vtxo));
-        } else if vtp.expires_at > 0 {
-            let day = day_timestamp(vtp.expires_at);
-            groups.entry(day).or_default().push((vtp, vtxo));
+        if entry.vtxo.is_recoverable(dust) {
+            recoverable.push(entry);
+        } else if entry.vtxo.expires_at > 0 {
+            let day = day_timestamp(entry.vtxo.expires_at);
+            groups.entry(day).or_default().push(entry);
         }
     }
 
@@ -678,7 +664,7 @@ fn group_by_expiry_day<'a>(
 ///
 /// If the group only contains recoverable/expired VTXOs (or activation is already in the past),
 /// schedule soon (`now + 60s`).
-fn calculate_valid_at(group_vtxos: &[(&VirtualTxOutPoint, &Vtxo)], dust: Amount) -> u64 {
+fn calculate_valid_at(group_vtxos: &[&ContractVtxo], dust: Amount) -> u64 {
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -686,15 +672,15 @@ fn calculate_valid_at(group_vtxos: &[(&VirtualTxOutPoint, &Vtxo)], dust: Amount)
 
     let earliest_activation = group_vtxos
         .iter()
-        .filter(|(vtp, _)| {
-            !vtp.is_recoverable(dust)
-                && vtp.created_at > 0
-                && vtp.expires_at > 0
-                && vtp.expires_at > vtp.created_at
+        .filter(|entry| {
+            !entry.vtxo.is_recoverable(dust)
+                && entry.vtxo.created_at > 0
+                && entry.vtxo.expires_at > 0
+                && entry.vtxo.expires_at > entry.vtxo.created_at
         })
-        .map(|(vtp, _)| {
-            let created_at = vtp.created_at as u64;
-            let lifetime = (vtp.expires_at - vtp.created_at) as u64;
+        .map(|entry| {
+            let created_at = entry.vtxo.created_at as u64;
+            let lifetime = (entry.vtxo.expires_at - entry.vtxo.created_at) as u64;
             created_at + (lifetime * 9 / 10)
         })
         .min();
@@ -707,8 +693,7 @@ fn calculate_valid_at(group_vtxos: &[(&VirtualTxOutPoint, &Vtxo)], dust: Amount)
 
 /// Submit newly received VTXOs to the delegator service for future auto-renewal.
 ///
-/// The `script_map` provides VTXO metadata (tapscripts, spend info) without a network call.
-/// Only the affected addresses are queried for expiry data.
+/// Only the affected outpoints are delegated; spend metadata is resolved through contracts.
 async fn delegate_vtxos<B, W, S>(
     client: &Arc<Client<B, W, S>>,
     delegator: &DelegatorClient,
@@ -726,10 +711,7 @@ async fn delegate_vtxos<B, W, S>(
         return;
     }
 
-    let vtxo_list = match client
-        .list_vtxos_for_addresses(affected_addresses.into_iter())
-        .await
-    {
+    let vtxo_list = match client.list_vtxos().await {
         Ok(v) => v,
         Err(e) => {
             tracing::error!("Failed to list VTXOs for delegation: {e}");
@@ -742,7 +724,7 @@ async fn delegate_vtxos<B, W, S>(
     let new_outpoints: HashSet<_> = new_vtxos.iter().map(|v| v.outpoint).collect();
     let enriched: Vec<_> = vtxo_list
         .all_unspent()
-        .filter(|vtp| new_outpoints.contains(&vtp.outpoint))
+        .filter(|entry| new_outpoints.contains(&entry.vtxo.outpoint))
         .cloned()
         .collect();
 
@@ -754,7 +736,7 @@ async fn delegate_vtxos<B, W, S>(
         }
     };
 
-    let groups = group_by_expiry_day(&enriched, script_map, server_info.dust);
+    let groups = group_by_expiry_day(&enriched, server_info.dust);
     if groups.is_empty() {
         tracing::debug!("No delegate-eligible VTXOs after enrichment/grouping; skipping");
         return;
@@ -785,31 +767,39 @@ async fn delegate_vtxos<B, W, S>(
         let mut vtxo_inputs = Vec::new();
         let mut total_amount = Amount::ZERO;
 
-        for (vtp, vtxo) in &group_vtxos {
-            let spend_info = match vtxo.delegate_spend_info() {
+        for entry in &group_vtxos {
+            let spend_info = match entry.spend_info(ark_core::contract::SpendPathKind::Delegate) {
                 Ok(info) => info,
                 Err(e) => {
-                    tracing::warn!(outpoint = %vtp.outpoint, "Cannot get delegate spend info: {e}");
+                    tracing::warn!(outpoint = %entry.vtxo.outpoint, "Cannot get delegate spend info: {e}");
+                    continue;
+                }
+            };
+
+            let exit_delay = match entry.exit_delay() {
+                Ok(exit_delay) => exit_delay,
+                Err(e) => {
+                    tracing::warn!(outpoint = %entry.vtxo.outpoint, "Cannot get delegate exit delay: {e}");
                     continue;
                 }
             };
 
             vtxo_inputs.push(intent::Input::new(
-                vtp.outpoint,
-                vtxo.exit_delay(),
+                entry.vtxo.outpoint,
+                exit_delay,
                 None,
                 TxOut {
-                    value: vtp.amount,
-                    script_pubkey: vtp.script.clone(),
+                    value: entry.vtxo.amount,
+                    script_pubkey: entry.script_pubkey(),
                 },
-                vtxo.tapscripts(),
+                entry.tapscripts(),
                 spend_info,
-                vtp.is_spent,
+                entry.vtxo.is_spent,
                 false,
-                vtp.assets.clone(),
+                entry.vtxo.assets.clone(),
             ));
 
-            total_amount += vtp.amount;
+            total_amount += entry.vtxo.amount;
         }
 
         if vtxo_inputs.is_empty() {
@@ -936,7 +926,7 @@ where
     W: OnchainWallet + Send + Sync + 'static,
     S: SwapStorage + 'static,
 {
-    let (vtxo_list, _) = match client.list_vtxos().await {
+    let vtxo_list = match client.list_vtxos().await {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!("Failed to list VTXOs for renewal check: {e}");
@@ -951,16 +941,16 @@ where
 
     let expiring_outpoints: Vec<OutPoint> = vtxo_list
         .all_unspent()
-        .filter(|vtp| {
-            if vtp.expires_at <= 0 || vtp.created_at <= 0 {
+        .filter(|entry| {
+            if entry.vtxo.expires_at <= 0 || entry.vtxo.created_at <= 0 {
                 return false;
             }
-            let total_lifetime = vtp.expires_at - vtp.created_at;
-            let remaining = vtp.expires_at - now;
+            let total_lifetime = entry.vtxo.expires_at - entry.vtxo.created_at;
+            let remaining = entry.vtxo.expires_at - now;
             remaining > 0
                 && (remaining as f64) < (total_lifetime as f64 * SELF_RENEW_REMAINING_FRACTION)
         })
-        .map(|vtp| vtp.outpoint)
+        .map(|entry| entry.vtxo.outpoint)
         .collect();
 
     if expiring_outpoints.is_empty() {
@@ -1029,13 +1019,32 @@ mod tests {
         (vtxo.to_ark_address(), vtxo)
     }
 
-    fn mk_vtp(script: ScriptBuf, amount_sat: u64, expires_at: i64, vout: u32) -> VirtualTxOutPoint {
-        VirtualTxOutPoint {
+    fn mk_contract_vtxo(
+        script: ScriptBuf,
+        amount_sat: u64,
+        expires_at: i64,
+        vout: u32,
+    ) -> ContractVtxo {
+        use ark_core::contract::ContractState;
+        use ark_core::contract::ContractType;
+        use ark_core::contract::DelegateVtxoContract;
+        use ark_core::contract::SpendPath;
+        use ark_core::contract::SpendPathKind;
+        use ark_core::contract::StoredContract;
+
+        let (server, owner, delegator) = test_keys();
+        let contract = DelegateVtxoContract {
+            server,
+            owner,
+            delegator,
+            exit_delay: Sequence::from_seconds_ceil(86400).unwrap(),
+        };
+        let vtxo = VirtualTxOutPoint {
             outpoint: OutPoint::new(Txid::all_zeros(), vout),
             created_at: expires_at - 1000,
             expires_at,
             amount: Amount::from_sat(amount_sat),
-            script,
+            script: script.clone(),
             is_preconfirmed: false,
             is_swept: false,
             is_unrolled: false,
@@ -1045,7 +1054,37 @@ mod tests {
             settled_by: None,
             ark_txid: None,
             assets: vec![],
+        };
+        ContractVtxo {
+            contract: StoredContract {
+                contract_type: ContractType::delegate_vtxo(),
+                contract_version: 1,
+                script_pubkey: script,
+                state: ContractState::Active,
+                created_at: 0,
+                key_index: None,
+                data: serde_json::to_value(contract).unwrap(),
+            },
+            vtxo,
+            spend_paths: vec![SpendPath::new(
+                SpendPathKind::Delegate,
+                ScriptBuf::new(),
+                dummy_control_block(),
+            )],
         }
+    }
+
+    fn dummy_control_block() -> bitcoin::taproot::ControlBlock {
+        let secp = Secp256k1::new();
+        let internal_key = test_keys().0;
+        let spend_info = bitcoin::taproot::TaprootBuilder::new()
+            .add_leaf(0, ScriptBuf::new())
+            .unwrap()
+            .finalize(&secp, internal_key)
+            .unwrap();
+        spend_info
+            .control_block(&(ScriptBuf::new(), bitcoin::taproot::LeafVersion::TapScript))
+            .unwrap()
     }
 
     #[test]
@@ -1083,9 +1122,8 @@ mod tests {
 
     #[test]
     fn group_by_expiry_day_merges_recoverable_into_earliest_group() {
-        let (addr, vtxo) = delegated_vtxo();
+        let (addr, _) = delegated_vtxo();
         let script = addr.to_p2tr_script_pubkey();
-        let script_map = ScriptMap::from_addresses(&[(addr, vtxo)]);
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1094,12 +1132,12 @@ mod tests {
         let day1_midnight = day_timestamp(now) + SECONDS_PER_DAY;
         let day2_midnight = day1_midnight + SECONDS_PER_DAY;
 
-        let recoverable = mk_vtp(script.clone(), 100, day1_midnight + 500, 0); // sub-dust
-        let non_recoverable_day1 = mk_vtp(script.clone(), 10_000, day1_midnight + 800, 1);
-        let non_recoverable_day2 = mk_vtp(script, 10_000, day2_midnight + 800, 2);
+        let recoverable = mk_contract_vtxo(script.clone(), 100, day1_midnight + 500, 0); // sub-dust
+        let non_recoverable_day1 = mk_contract_vtxo(script.clone(), 10_000, day1_midnight + 800, 1);
+        let non_recoverable_day2 = mk_contract_vtxo(script, 10_000, day2_midnight + 800, 2);
 
         let vtxos = [non_recoverable_day2, recoverable, non_recoverable_day1];
-        let groups = group_by_expiry_day(&vtxos, &script_map, Amount::from_sat(500));
+        let groups = group_by_expiry_day(&vtxos, Amount::from_sat(500));
 
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].0, day_timestamp(day1_midnight + 800));
@@ -1110,7 +1148,6 @@ mod tests {
 
     #[test]
     fn calculate_valid_at_for_non_recoverable_group_is_before_expiry() {
-        let (_addr, vtxo) = delegated_vtxo();
         let script = ScriptBuf::new();
 
         let now = std::time::SystemTime::now()
@@ -1118,18 +1155,17 @@ mod tests {
             .unwrap()
             .as_secs() as i64;
 
-        let later = mk_vtp(script, 10_000, now + 10_000, 1);
-        let group = vec![(&later, &vtxo)];
+        let later = mk_contract_vtxo(script, 10_000, now + 10_000, 1);
+        let group = vec![&later];
 
         let valid_at = calculate_valid_at(&group, Amount::from_sat(500));
 
         assert!(valid_at > now as u64);
-        assert!(valid_at < later.expires_at as u64);
+        assert!(valid_at < later.vtxo.expires_at as u64);
     }
 
     #[test]
     fn calculate_valid_at_for_recoverable_only_group_is_soon() {
-        let (_addr, vtxo) = delegated_vtxo();
         let script = ScriptBuf::new();
 
         let now = std::time::SystemTime::now()
@@ -1137,8 +1173,8 @@ mod tests {
             .unwrap()
             .as_secs() as i64;
 
-        let recoverable = mk_vtp(script, 100, now + 5_000, 0); // sub-dust at dust=500
-        let group = vec![(&recoverable, &vtxo)];
+        let recoverable = mk_contract_vtxo(script, 100, now + 5_000, 0); // sub-dust at dust=500
+        let group = vec![&recoverable];
 
         let start = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

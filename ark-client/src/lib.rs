@@ -93,6 +93,7 @@ pub use contract::ContractManager;
 pub use contract::ContractRegistry;
 pub use contract::ContractStore;
 pub use contract::ContractVtxo;
+pub use contract::ContractVtxoList;
 pub use contract::MemoryContractStore;
 pub use error::Error;
 pub use key_provider::Bip32KeyProvider;
@@ -1158,50 +1159,30 @@ where
         self.fetch_all_vtxos(request).await
     }
 
-    pub async fn list_vtxos(&self) -> Result<(VtxoList, HashMap<ScriptBuf, Vtxo>), Error> {
+    pub async fn list_vtxos(&self) -> Result<ContractVtxoList, Error> {
         let server_info = self.server_info().await?;
         self.list_vtxos_with_server_info(&server_info).await
-    }
-
-    pub async fn list_contract_vtxos(&self) -> Result<Vec<ContractVtxo>, Error> {
-        let server_info = self.server_info().await?;
-        let (contract_vtxos, _) = self
-            .list_contract_vtxos_with_server_info(&server_info)
-            .await?;
-        Ok(contract_vtxos)
     }
 
     pub(crate) async fn list_vtxos_with_server_info(
         &self,
         server_info: &server::Info,
-    ) -> Result<(VtxoList, HashMap<ScriptBuf, Vtxo>), Error> {
-        let (contract_vtxos, script_pubkey_to_vtxo_map) = self
+    ) -> Result<ContractVtxoList, Error> {
+        let contract_vtxos = self
             .list_contract_vtxos_with_server_info(server_info)
             .await?;
-        let vtxo_list = VtxoList::new(
-            server_info.dust,
-            contract_vtxos.into_iter().map(|entry| entry.vtxo).collect(),
-        );
-
-        Ok((vtxo_list, script_pubkey_to_vtxo_map))
+        Ok(ContractVtxoList::new(server_info.dust, contract_vtxos))
     }
 
     async fn list_contract_vtxos_with_server_info(
         &self,
         server_info: &server::Info,
-    ) -> Result<(Vec<ContractVtxo>, HashMap<ScriptBuf, Vtxo>), Error> {
+    ) -> Result<Vec<ContractVtxo>, Error> {
         let ark_addresses = self.get_offchain_addresses_with_server_info(server_info)?;
-
-        let script_pubkey_to_vtxo_map = ark_addresses
-            .iter()
-            .map(|(a, v)| (a.to_p2tr_script_pubkey(), v.clone()))
-            .collect();
 
         let addresses = ark_addresses.iter().map(|(a, _)| a).copied();
         let virtual_tx_outpoints = self.get_virtual_tx_outpoints(addresses).await?;
-        let contract_vtxos = self.annotate_vtxos(virtual_tx_outpoints)?;
-
-        Ok((contract_vtxos, script_pubkey_to_vtxo_map))
+        self.annotate_vtxos(virtual_tx_outpoints)
     }
 
     pub async fn list_vtxos_for_addresses(
@@ -1231,38 +1212,15 @@ where
     pub async fn list_vtxos_for_outpoints(
         &self,
         outpoints: Vec<OutPoint>,
-    ) -> Result<(VtxoList, HashMap<ScriptBuf, Vtxo>), Error> {
-        let ark_addresses = self.get_offchain_addresses().await?;
-
-        let script_pubkey_to_vtxo_map = ark_addresses
-            .iter()
-            .map(|(a, v)| (a.to_p2tr_script_pubkey(), v.clone()))
-            .collect::<HashMap<_, _>>();
-
+    ) -> Result<ContractVtxoList, Error> {
+        let _ = self.get_offchain_addresses().await?;
         let request = GetVtxosRequest::new_for_outpoints(&outpoints);
         let virtual_tx_outpoints = self.fetch_all_vtxos(request).await?;
-
-        // Filter out outpoints for which we don't have spend info.
-        let virtual_tx_outpoints = virtual_tx_outpoints
-            .into_iter()
-            .filter(|v| match script_pubkey_to_vtxo_map.get(&v.script) {
-                Some(_) => true,
-                None => {
-                    tracing::debug!(outpoint = %v.outpoint, "Missing spend info for VTXO");
-
-                    false
-                }
-            })
-            .collect();
-
         let contract_vtxos = self.annotate_vtxos(virtual_tx_outpoints)?;
-
-        let vtxo_list = VtxoList::new(
+        Ok(ContractVtxoList::new(
             self.server_info().await?.dust,
-            contract_vtxos.into_iter().map(|entry| entry.vtxo).collect(),
-        );
-
-        Ok((vtxo_list, script_pubkey_to_vtxo_map))
+            contract_vtxos,
+        ))
     }
 
     pub async fn get_vtxo_chain(
@@ -1283,43 +1241,37 @@ where
     }
 
     pub async fn offchain_balance(&self) -> Result<OffChainBalance, Error> {
-        let (vtxo_list, script_map) = self.list_vtxos().await.context("failed to list VTXOs")?;
+        let vtxo_list = self.list_vtxos().await.context("failed to list VTXOs")?;
         let now = unix_now()?;
         let server_info = self.server_info().await?;
 
         let spendable_outpoints: HashSet<OutPoint> = vtxo_list
-            .spendable_offchain_at(&server_info, now, |script| {
-                script_map.get(script).map(|vtxo| vtxo.server_pk())
-            })
-            .map(|vtxo| vtxo.outpoint)
+            .spendable_offchain_at(&server_info, now)
+            .map(|entry| entry.vtxo.outpoint)
             .collect();
 
         let pre_confirmed = vtxo_list
             .pre_confirmed()
-            .filter(|v| spendable_outpoints.contains(&v.outpoint))
-            .fold(Amount::ZERO, |acc, x| acc + x.amount);
+            .filter(|entry| spendable_outpoints.contains(&entry.vtxo.outpoint))
+            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo.amount);
 
         let confirmed = vtxo_list
             .confirmed()
-            .filter(|v| spendable_outpoints.contains(&v.outpoint))
-            .fold(Amount::ZERO, |acc, x| acc + x.amount);
+            .filter(|entry| spendable_outpoints.contains(&entry.vtxo.outpoint))
+            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo.amount);
 
         let recoverable = vtxo_list
             .recoverable()
-            .fold(Amount::ZERO, |acc, x| acc + x.amount);
+            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo.amount);
 
         let pending_recovery = vtxo_list
-            .pending_recovery_due_to_signer_at(&server_info, now, |script| {
-                script_map.get(script).map(|vtxo| vtxo.server_pk())
-            })
-            .fold(Amount::ZERO, |acc, x| acc + x.amount);
+            .pending_recovery_due_to_signer_at(&server_info, now)
+            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo.amount);
 
         // Aggregate asset balances from currently offchain-spendable VTXOs only.
         let mut asset_balances: HashMap<AssetId, u64> = HashMap::new();
-        for vtxo in vtxo_list.spendable_offchain_at(&server_info, now, |script| {
-            script_map.get(script).map(|vtxo| vtxo.server_pk())
-        }) {
-            for asset in &vtxo.assets {
+        for entry in vtxo_list.spendable_offchain_at(&server_info, now) {
+            for asset in &entry.vtxo.assets {
                 let total = asset_balances
                     .get(&asset.asset_id)
                     .copied()
@@ -1392,10 +1344,16 @@ where
             }
         }
 
-        let (vtxo_list, _) = self.list_vtxos().await?;
+        let vtxo_list = self.list_vtxos().await?;
 
-        let spent_outpoints = vtxo_list.spent().cloned().collect::<Vec<_>>();
-        let unspent_outpoints = vtxo_list.all_unspent().cloned().collect::<Vec<_>>();
+        let spent_outpoints = vtxo_list
+            .spent()
+            .map(|entry| entry.vtxo.clone())
+            .collect::<Vec<_>>();
+        let unspent_outpoints = vtxo_list
+            .all_unspent()
+            .map(|entry| entry.vtxo.clone())
+            .collect::<Vec<_>>();
 
         let incoming_transactions = generate_incoming_vtxo_transaction_history(
             &spent_outpoints,
@@ -1533,6 +1491,35 @@ where
             .into_iter()
             .map(|contract| contract.boarding_output(&ctx).map_err(Into::into))
             .collect()
+    }
+
+    fn active_offchain_contract_addresses(&self) -> Result<Vec<(ArkAddress, Vtxo)>, Error> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+        let ctx = ContractContext::new(state.server_info.network);
+        let manager = state
+            .contract_manager
+            .lock()
+            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?;
+
+        let mut addresses = Vec::new();
+        for stored in manager.list_active_by_type(ContractType::default_vtxo())? {
+            let contract = manager
+                .get_typed::<DefaultVtxoContract>(&stored.script_pubkey)?
+                .ok_or_else(|| Error::ad_hoc("missing default vtxo contract"))?;
+            let vtxo = contract.vtxo(&ctx)?;
+            addresses.push((vtxo.to_ark_address(), vtxo));
+        }
+        for stored in manager.list_active_by_type(ContractType::delegate_vtxo())? {
+            let contract = manager
+                .get_typed::<DelegateVtxoContract>(&stored.script_pubkey)?
+                .ok_or_else(|| Error::ad_hoc("missing delegate vtxo contract"))?;
+            let vtxo = contract.vtxo(&ctx)?;
+            addresses.push((vtxo.to_ark_address(), vtxo));
+        }
+        Ok(addresses)
     }
 
     fn boarding_contracts_with_state(

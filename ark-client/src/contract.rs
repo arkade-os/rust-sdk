@@ -10,11 +10,15 @@ use ark_core::contract::DelegateVtxoContract;
 use ark_core::contract::SpendPath;
 use ark_core::contract::StoredContract;
 use ark_core::contract::VhtlcContract;
+use ark_core::server;
 use ark_core::server::VirtualTxOutPoint;
 use bitcoin::Address;
+use bitcoin::Amount;
 use bitcoin::Network;
 use bitcoin::Script;
 use bitcoin::ScriptBuf;
+use bitcoin::Sequence;
+use bitcoin::XOnlyPublicKey;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::time::SystemTime;
@@ -162,6 +166,194 @@ pub struct ContractVtxo {
     pub contract: StoredContract,
     pub vtxo: VirtualTxOutPoint,
     pub spend_paths: Vec<SpendPath>,
+}
+
+impl ContractVtxo {
+    pub fn spend_info(
+        &self,
+        kind: ark_core::contract::SpendPathKind,
+    ) -> Result<(ScriptBuf, bitcoin::taproot::ControlBlock), Error> {
+        let path = self
+            .spend_paths
+            .iter()
+            .find(|path| path.kind == kind)
+            .ok_or_else(|| Error::ad_hoc(format!("missing {kind:?} spend path")))?;
+        Ok((path.script.clone(), path.control_block.clone()))
+    }
+
+    pub fn tapscripts(&self) -> Vec<ScriptBuf> {
+        self.spend_paths
+            .iter()
+            .map(|path| path.script.clone())
+            .collect()
+    }
+
+    pub fn script_pubkey(&self) -> ScriptBuf {
+        self.contract.script_pubkey.clone()
+    }
+
+    pub fn server_pk(&self) -> Result<XOnlyPublicKey, Error> {
+        Ok(self.vtxo_contract_data()?.server)
+    }
+
+    pub fn owner_pk(&self) -> Result<XOnlyPublicKey, Error> {
+        Ok(self.vtxo_contract_data()?.owner)
+    }
+
+    pub fn exit_delay(&self) -> Result<Sequence, Error> {
+        Ok(self.vtxo_contract_data()?.exit_delay)
+    }
+
+    fn vtxo_contract_data(&self) -> Result<VtxoContractData, Error> {
+        if self.contract.contract_type == ContractType::default_vtxo() {
+            let data: DefaultVtxoContract = serde_json::from_value(self.contract.data.clone())
+                .map_err(|e| {
+                    Error::ad_hoc(format!("failed to decode default vtxo contract: {e}"))
+                })?;
+            return Ok(VtxoContractData {
+                server: data.server,
+                owner: data.owner,
+                exit_delay: data.exit_delay,
+            });
+        }
+        if self.contract.contract_type == ContractType::delegate_vtxo() {
+            let data: DelegateVtxoContract = serde_json::from_value(self.contract.data.clone())
+                .map_err(|e| {
+                    Error::ad_hoc(format!("failed to decode delegate vtxo contract: {e}"))
+                })?;
+            return Ok(VtxoContractData {
+                server: data.server,
+                owner: data.owner,
+                exit_delay: data.exit_delay,
+            });
+        }
+        Err(Error::ad_hoc(format!(
+            "contract type {} is not an offchain vtxo contract",
+            self.contract.contract_type
+        )))
+    }
+}
+
+struct VtxoContractData {
+    server: XOnlyPublicKey,
+    owner: XOnlyPublicKey,
+    exit_delay: Sequence,
+}
+
+#[derive(Clone, Debug)]
+pub struct ContractVtxoList {
+    dust: Amount,
+    vtxos: Vec<ContractVtxo>,
+}
+
+impl ContractVtxoList {
+    pub fn new(dust: Amount, vtxos: Vec<ContractVtxo>) -> Self {
+        Self { dust, vtxos }
+    }
+
+    pub fn into_inner(self) -> Vec<ContractVtxo> {
+        self.vtxos
+    }
+
+    pub fn all(&self) -> impl Iterator<Item = &ContractVtxo> {
+        self.vtxos.iter()
+    }
+
+    pub fn all_unspent(&self) -> impl Iterator<Item = &ContractVtxo> {
+        let dust = self.dust;
+        self.vtxos.iter().filter(move |entry| {
+            !entry.vtxo.is_unrolled && !entry.vtxo.is_spent && !entry.vtxo.is_swept
+                || entry.vtxo.is_recoverable(dust)
+        })
+    }
+
+    pub fn spendable_offchain(&self) -> impl Iterator<Item = &ContractVtxo> {
+        self.vtxos.iter().filter(|entry| {
+            !entry.vtxo.is_recoverable(self.dust)
+                && !entry.vtxo.is_unrolled
+                && !entry.vtxo.is_spent
+                && !entry.vtxo.is_swept
+        })
+    }
+
+    pub fn spendable_offchain_at<'a>(
+        &'a self,
+        server_info: &'a server::Info,
+        now_unix_secs: i64,
+    ) -> impl Iterator<Item = &'a ContractVtxo> + 'a {
+        self.spendable_offchain().filter(move |entry| {
+            !entry
+                .server_pk()
+                .map(|server_pk| server_info.signer_requires_recovery_at(server_pk, now_unix_secs))
+                .unwrap_or(false)
+        })
+    }
+
+    pub fn pending_recovery_due_to_signer_at<'a>(
+        &'a self,
+        server_info: &'a server::Info,
+        now_unix_secs: i64,
+    ) -> impl Iterator<Item = &'a ContractVtxo> + 'a {
+        self.spendable_offchain().filter(move |entry| {
+            entry
+                .server_pk()
+                .map(|server_pk| server_info.signer_requires_recovery_at(server_pk, now_unix_secs))
+                .unwrap_or(false)
+        })
+    }
+
+    pub fn batch_settleable_at<'a>(
+        &'a self,
+        server_info: &'a server::Info,
+        now_unix_secs: i64,
+    ) -> impl Iterator<Item = &'a ContractVtxo> + 'a {
+        self.all_unspent().filter(move |entry| {
+            entry.vtxo.is_recoverable(server_info.dust)
+                || !entry
+                    .server_pk()
+                    .map(|server_pk| {
+                        server_info.signer_requires_recovery_at(server_pk, now_unix_secs)
+                    })
+                    .unwrap_or(false)
+        })
+    }
+
+    pub fn pre_confirmed(&self) -> impl Iterator<Item = &ContractVtxo> {
+        self.vtxos.iter().filter(|entry| {
+            !entry.vtxo.is_recoverable(self.dust)
+                && !entry.vtxo.is_unrolled
+                && !entry.vtxo.is_spent
+                && !entry.vtxo.is_swept
+                && entry.vtxo.is_preconfirmed
+        })
+    }
+
+    pub fn confirmed(&self) -> impl Iterator<Item = &ContractVtxo> {
+        self.vtxos.iter().filter(|entry| {
+            !entry.vtxo.is_recoverable(self.dust)
+                && !entry.vtxo.is_unrolled
+                && !entry.vtxo.is_spent
+                && !entry.vtxo.is_swept
+                && !entry.vtxo.is_preconfirmed
+        })
+    }
+
+    pub fn recoverable(&self) -> impl Iterator<Item = &ContractVtxo> {
+        self.vtxos
+            .iter()
+            .filter(move |entry| entry.vtxo.is_recoverable(self.dust))
+    }
+
+    pub fn could_exit_unilaterally(&self) -> impl Iterator<Item = &ContractVtxo> {
+        self.pre_confirmed().chain(self.confirmed())
+    }
+
+    pub fn spent(&self) -> impl Iterator<Item = &ContractVtxo> {
+        self.vtxos.iter().filter(|entry| {
+            !entry.vtxo.is_recoverable(self.dust)
+                && (entry.vtxo.is_unrolled || entry.vtxo.is_spent || entry.vtxo.is_swept)
+        })
+    }
 }
 
 pub struct ContractManager {
