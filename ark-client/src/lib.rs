@@ -92,6 +92,7 @@ pub use boltz::TimeoutBlockHeights;
 pub use contract::ContractManager;
 pub use contract::ContractRegistry;
 pub use contract::ContractStore;
+pub use contract::ContractVtxo;
 pub use contract::MemoryContractStore;
 pub use error::Error;
 pub use key_provider::Bip32KeyProvider;
@@ -1162,10 +1163,33 @@ where
         self.list_vtxos_with_server_info(&server_info).await
     }
 
+    pub async fn list_contract_vtxos(&self) -> Result<Vec<ContractVtxo>, Error> {
+        let server_info = self.server_info().await?;
+        let (contract_vtxos, _) = self
+            .list_contract_vtxos_with_server_info(&server_info)
+            .await?;
+        Ok(contract_vtxos)
+    }
+
     pub(crate) async fn list_vtxos_with_server_info(
         &self,
         server_info: &server::Info,
     ) -> Result<(VtxoList, HashMap<ScriptBuf, Vtxo>), Error> {
+        let (contract_vtxos, script_pubkey_to_vtxo_map) = self
+            .list_contract_vtxos_with_server_info(server_info)
+            .await?;
+        let vtxo_list = VtxoList::new(
+            server_info.dust,
+            contract_vtxos.into_iter().map(|entry| entry.vtxo).collect(),
+        );
+
+        Ok((vtxo_list, script_pubkey_to_vtxo_map))
+    }
+
+    async fn list_contract_vtxos_with_server_info(
+        &self,
+        server_info: &server::Info,
+    ) -> Result<(Vec<ContractVtxo>, HashMap<ScriptBuf, Vtxo>), Error> {
         let ark_addresses = self.get_offchain_addresses_with_server_info(server_info)?;
 
         let script_pubkey_to_vtxo_map = ark_addresses
@@ -1174,12 +1198,10 @@ where
             .collect();
 
         let addresses = ark_addresses.iter().map(|(a, _)| a).copied();
+        let virtual_tx_outpoints = self.get_virtual_tx_outpoints(addresses).await?;
+        let contract_vtxos = self.annotate_vtxos(virtual_tx_outpoints)?;
 
-        let vtxo_list = self
-            .list_vtxos_for_addresses_with_server_info(server_info, addresses)
-            .await?;
-
-        Ok((vtxo_list, script_pubkey_to_vtxo_map))
+        Ok((contract_vtxos, script_pubkey_to_vtxo_map))
     }
 
     pub async fn list_vtxos_for_addresses(
@@ -1233,7 +1255,12 @@ where
             })
             .collect();
 
-        let vtxo_list = VtxoList::new(self.server_info().await?.dust, virtual_tx_outpoints);
+        let contract_vtxos = self.annotate_vtxos(virtual_tx_outpoints)?;
+
+        let vtxo_list = VtxoList::new(
+            self.server_info().await?.dust,
+            contract_vtxos.into_iter().map(|entry| entry.vtxo).collect(),
+        );
 
         Ok((vtxo_list, script_pubkey_to_vtxo_map))
     }
@@ -1525,6 +1552,19 @@ where
                     .ok_or_else(|| Error::ad_hoc("missing boarding contract"))
             })
             .collect()
+    }
+
+    fn annotate_vtxos(&self, vtxos: Vec<VirtualTxOutPoint>) -> Result<Vec<ContractVtxo>, Error> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+        let annotated = state
+            .contract_manager
+            .lock()
+            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?
+            .annotate_vtxos(vtxos)?;
+        Ok(annotated)
     }
 
     fn spend_paths_for_script(

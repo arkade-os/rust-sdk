@@ -10,6 +10,7 @@ use ark_core::contract::DelegateVtxoContract;
 use ark_core::contract::SpendPath;
 use ark_core::contract::StoredContract;
 use ark_core::contract::VhtlcContract;
+use ark_core::server::VirtualTxOutPoint;
 use bitcoin::Address;
 use bitcoin::Network;
 use bitcoin::Script;
@@ -154,6 +155,13 @@ impl ContractStore for MemoryContractStore {
         contract.state = state;
         Ok(())
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContractVtxo {
+    pub contract: StoredContract,
+    pub vtxo: VirtualTxOutPoint,
+    pub spend_paths: Vec<SpendPath>,
 }
 
 pub struct ContractManager {
@@ -336,6 +344,27 @@ impl ContractManager {
         let handler = self.registry.handler_for(&stored.contract_type)?;
         handler.spendable_paths(stored, &ctx)
     }
+
+    pub fn annotate_vtxos(
+        &self,
+        vtxos: Vec<VirtualTxOutPoint>,
+    ) -> Result<Vec<ContractVtxo>, Error> {
+        vtxos
+            .into_iter()
+            .map(|vtxo| {
+                let contract = self
+                    .store
+                    .get_by_script(&vtxo.script)?
+                    .ok_or_else(|| Error::ad_hoc("unknown contract script"))?;
+                let spend_paths = self.spendable_paths(&contract)?;
+                Ok(ContractVtxo {
+                    contract,
+                    vtxo,
+                    spend_paths,
+                })
+            })
+            .collect()
+    }
 }
 
 fn now_secs() -> Result<u64, Error> {
@@ -348,6 +377,8 @@ fn now_secs() -> Result<u64, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bitcoin::Amount;
+    use bitcoin::OutPoint;
     use bitcoin::Sequence;
     use bitcoin::XOnlyPublicKey;
     use std::str::FromStr;
@@ -401,6 +432,45 @@ mod tests {
             .unwrap();
         assert_eq!(paths.len(), 2);
         assert!(paths.iter().all(|path| !path.script.is_empty()));
+    }
+
+    #[test]
+    fn annotates_vtxos_with_contract_spend_paths() {
+        let (server, owner, _) = test_keys();
+        let mut manager = ContractManager::in_memory(Network::Regtest);
+        manager.register_builtins().unwrap();
+
+        let contract = DefaultVtxoContract {
+            server,
+            owner,
+            exit_delay: Sequence::from_seconds_ceil(86400).unwrap(),
+        };
+        let stored = manager
+            .insert(contract, ContractState::Active, Some(7))
+            .unwrap();
+        let vtxo = VirtualTxOutPoint {
+            outpoint: OutPoint::null(),
+            created_at: 0,
+            expires_at: 0,
+            amount: Amount::from_sat(42_000),
+            script: stored.script_pubkey.clone(),
+            is_preconfirmed: false,
+            is_swept: false,
+            is_unrolled: false,
+            is_spent: false,
+            spent_by: None,
+            commitment_txids: Vec::new(),
+            settled_by: None,
+            ark_txid: None,
+            assets: Vec::new(),
+        };
+
+        let annotated = manager.annotate_vtxos(vec![vtxo.clone()]).unwrap();
+
+        assert_eq!(annotated.len(), 1);
+        assert_eq!(annotated[0].contract, stored);
+        assert_eq!(annotated[0].vtxo, vtxo);
+        assert_eq!(annotated[0].spend_paths.len(), 2);
     }
 
     #[test]
