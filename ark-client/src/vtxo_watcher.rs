@@ -993,11 +993,12 @@ mod tests {
                 data: serde_json::to_value(contract).unwrap(),
             },
             vtxo,
-            spend_paths: vec![SpendPath::new(
+            spend_selections: vec![SpendPath::new(
                 SpendPathKind::Delegate,
                 ScriptBuf::new(),
                 dummy_control_block(),
-            )],
+            )
+            .select()],
         }
     }
 

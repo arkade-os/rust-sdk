@@ -8,6 +8,7 @@ use ark_core::contract::ContractView;
 use ark_core::contract::DefaultVtxoContract;
 use ark_core::contract::DelegateVtxoContract;
 use ark_core::contract::SpendPath;
+use ark_core::contract::SpendSelection;
 use ark_core::contract::StoredContract;
 use ark_core::contract::VhtlcContract;
 use ark_core::server;
@@ -34,6 +35,11 @@ trait DynContractHandler: Send + Sync {
         stored: &StoredContract,
         ctx: &ContractContext,
     ) -> Result<Vec<SpendPath>, Error>;
+    fn spendable_selections(
+        &self,
+        stored: &StoredContract,
+        ctx: &ContractContext,
+    ) -> Result<Vec<SpendSelection>, Error>;
 }
 
 struct ContractHandler<T> {
@@ -83,6 +89,17 @@ impl<T: ContractSpec> DynContractHandler for ContractHandler<T> {
         let data: T = serde_json::from_value(stored.data.clone())
             .map_err(|e| Error::ad_hoc(format!("failed to decode contract data: {e}")))?;
         data.spendable_paths(ctx).map_err(Into::into)
+    }
+
+    fn spendable_selections(
+        &self,
+        stored: &StoredContract,
+        ctx: &ContractContext,
+    ) -> Result<Vec<SpendSelection>, Error> {
+        self.validate(stored, ctx)?;
+        let data: T = serde_json::from_value(stored.data.clone())
+            .map_err(|e| Error::ad_hoc(format!("failed to decode contract data: {e}")))?;
+        data.spendable_selections(ctx).map_err(Into::into)
     }
 }
 
@@ -167,26 +184,36 @@ impl ContractStore for MemoryContractStore {
 pub struct ContractVtxo {
     pub contract: StoredContract,
     pub vtxo: VirtualTxOutPoint,
-    pub spend_paths: Vec<SpendPath>,
+    pub spend_selections: Vec<SpendSelection>,
 }
 
 impl ContractVtxo {
+    pub fn spend_path(&self, kind: ark_core::contract::SpendPathKind) -> Result<SpendPath, Error> {
+        self.spend_selection(kind).map(|selection| selection.path)
+    }
+
+    pub fn spend_selection(
+        &self,
+        kind: ark_core::contract::SpendPathKind,
+    ) -> Result<SpendSelection, Error> {
+        self.spend_selections
+            .iter()
+            .find(|selection| selection.path.kind == kind)
+            .cloned()
+            .ok_or_else(|| Error::ad_hoc(format!("missing {kind:?} spend path")))
+    }
+
     pub fn spend_info(
         &self,
         kind: ark_core::contract::SpendPathKind,
     ) -> Result<(ScriptBuf, bitcoin::taproot::ControlBlock), Error> {
-        let path = self
-            .spend_paths
-            .iter()
-            .find(|path| path.kind == kind)
-            .ok_or_else(|| Error::ad_hoc(format!("missing {kind:?} spend path")))?;
-        Ok((path.script.clone(), path.control_block.clone()))
+        Ok(self.spend_selection(kind)?.spend_info())
     }
 
     pub fn tapscripts(&self) -> Vec<ScriptBuf> {
-        self.spend_paths
+        self.spend_selections
             .iter()
-            .map(|path| path.script.clone())
+            .map(|selection| selection.path.script.clone())
             .collect()
     }
 
@@ -246,20 +273,26 @@ struct VtxoContractData {
 pub(crate) struct ActiveOffchainContract {
     pub address: ArkAddress,
     pub vtxo: Vtxo,
-    pub spend_paths: Vec<SpendPath>,
+    pub spend_selections: Vec<SpendSelection>,
 }
 
 impl ActiveOffchainContract {
+    pub fn spend_selection(
+        &self,
+        kind: ark_core::contract::SpendPathKind,
+    ) -> Result<SpendSelection, Error> {
+        self.spend_selections
+            .iter()
+            .find(|selection| selection.path.kind == kind)
+            .cloned()
+            .ok_or_else(|| Error::ad_hoc(format!("missing {kind:?} spend path")))
+    }
+
     pub fn spend_info(
         &self,
         kind: ark_core::contract::SpendPathKind,
     ) -> Result<(ScriptBuf, bitcoin::taproot::ControlBlock), Error> {
-        let path = self
-            .spend_paths
-            .iter()
-            .find(|path| path.kind == kind)
-            .ok_or_else(|| Error::ad_hoc(format!("missing {kind:?} spend path")))?;
-        Ok((path.script.clone(), path.control_block.clone()))
+        Ok(self.spend_selection(kind)?.spend_info())
     }
 }
 
@@ -551,6 +584,15 @@ impl ContractManager {
         handler.spendable_paths(stored, &ctx)
     }
 
+    pub fn spendable_selections(
+        &self,
+        stored: &StoredContract,
+    ) -> Result<Vec<SpendSelection>, Error> {
+        let ctx = ContractContext::new(self.network);
+        let handler = self.registry.handler_for(&stored.contract_type)?;
+        handler.spendable_selections(stored, &ctx)
+    }
+
     pub fn annotate_vtxos(
         &self,
         vtxos: Vec<VirtualTxOutPoint>,
@@ -562,11 +604,11 @@ impl ContractManager {
                     .store
                     .get_by_script(&vtxo.script)?
                     .ok_or_else(|| Error::ad_hoc("unknown contract script"))?;
-                let spend_paths = self.spendable_paths(&contract)?;
+                let spend_selections = self.spendable_selections(&contract)?;
                 Ok(ContractVtxo {
                     contract,
                     vtxo,
-                    spend_paths,
+                    spend_selections,
                 })
             })
             .collect()
@@ -676,7 +718,7 @@ mod tests {
         assert_eq!(annotated.len(), 1);
         assert_eq!(annotated[0].contract, stored);
         assert_eq!(annotated[0].vtxo, vtxo);
-        assert_eq!(annotated[0].spend_paths.len(), 2);
+        assert_eq!(annotated[0].spend_selections.len(), 2);
     }
 
     #[test]

@@ -2,6 +2,7 @@ use crate::boarding_output::BoardingOutput;
 use crate::vhtlc::VhtlcOptions;
 use crate::vtxo::Vtxo;
 use crate::Error;
+use bitcoin::absolute;
 use bitcoin::key::Secp256k1;
 use bitcoin::secp256k1::All;
 use bitcoin::taproot::ControlBlock;
@@ -127,6 +128,48 @@ impl SpendPath {
             control_block,
         }
     }
+
+    pub fn select(self) -> SpendSelection {
+        SpendSelection::new(self)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpendSelection {
+    pub path: SpendPath,
+    pub sequence: Option<Sequence>,
+    pub locktime: Option<absolute::LockTime>,
+    pub extra_witness: Vec<Vec<u8>>,
+}
+
+impl SpendSelection {
+    pub fn new(path: SpendPath) -> Self {
+        Self {
+            path,
+            sequence: None,
+            locktime: None,
+            extra_witness: Vec::new(),
+        }
+    }
+
+    pub fn with_sequence(mut self, sequence: Sequence) -> Self {
+        self.sequence = Some(sequence);
+        self
+    }
+
+    pub fn with_locktime(mut self, locktime: absolute::LockTime) -> Self {
+        self.locktime = Some(locktime);
+        self
+    }
+
+    pub fn with_extra_witness(mut self, extra_witness: Vec<Vec<u8>>) -> Self {
+        self.extra_witness = extra_witness;
+        self
+    }
+
+    pub fn spend_info(&self) -> (ScriptBuf, ControlBlock) {
+        (self.path.script.clone(), self.path.control_block.clone())
+    }
 }
 
 #[derive(Clone)]
@@ -160,6 +203,14 @@ pub trait ContractSpec:
     fn contract_type() -> ContractType;
     fn script_pubkey(&self, ctx: &ContractContext) -> Result<ScriptBuf, Error>;
     fn spendable_paths(&self, ctx: &ContractContext) -> Result<Vec<SpendPath>, Error>;
+
+    fn spendable_selections(&self, ctx: &ContractContext) -> Result<Vec<SpendSelection>, Error> {
+        Ok(self
+            .spendable_paths(ctx)?
+            .into_iter()
+            .map(SpendPath::select)
+            .collect())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,6 +243,20 @@ impl ContractSpec for DefaultVtxoContract {
             ),
             SpendPath::new(SpendPathKind::Exit, exit_script, exit_control_block),
         ])
+    }
+
+    fn spendable_selections(&self, ctx: &ContractContext) -> Result<Vec<SpendSelection>, Error> {
+        Ok(self
+            .spendable_paths(ctx)?
+            .into_iter()
+            .map(|path| {
+                if path.kind == SpendPathKind::Exit {
+                    path.select().with_sequence(self.exit_delay)
+                } else {
+                    path.select()
+                }
+            })
+            .collect())
     }
 }
 
@@ -245,6 +310,20 @@ impl ContractSpec for DelegateVtxoContract {
             ),
         ])
     }
+
+    fn spendable_selections(&self, ctx: &ContractContext) -> Result<Vec<SpendSelection>, Error> {
+        Ok(self
+            .spendable_paths(ctx)?
+            .into_iter()
+            .map(|path| {
+                if path.kind == SpendPathKind::Exit {
+                    path.select().with_sequence(self.exit_delay)
+                } else {
+                    path.select()
+                }
+            })
+            .collect())
+    }
 }
 
 impl DelegateVtxoContract {
@@ -290,6 +369,20 @@ impl ContractSpec for BoardingContract {
             ),
             SpendPath::new(SpendPathKind::Exit, exit_script, exit_control_block),
         ])
+    }
+
+    fn spendable_selections(&self, ctx: &ContractContext) -> Result<Vec<SpendSelection>, Error> {
+        Ok(self
+            .spendable_paths(ctx)?
+            .into_iter()
+            .map(|path| {
+                if path.kind == SpendPathKind::Exit {
+                    path.select().with_sequence(self.exit_delay)
+                } else {
+                    path.select()
+                }
+            })
+            .collect())
     }
 }
 

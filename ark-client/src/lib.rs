@@ -1530,11 +1530,11 @@ where
                 .get_typed::<DefaultVtxoContract>(&stored.script_pubkey)?
                 .ok_or_else(|| Error::ad_hoc("missing default vtxo contract"))?;
             let vtxo = contract.vtxo(&ctx)?;
-            let spend_paths = manager.spendable_paths_for_script(&stored.script_pubkey)?;
+            let spend_selections = manager.spendable_selections(&stored)?;
             contracts.push(contract::ActiveOffchainContract {
                 address: vtxo.to_ark_address(),
                 vtxo,
-                spend_paths,
+                spend_selections,
             });
         }
         for stored in manager.list_active_by_type(ContractType::delegate_vtxo())? {
@@ -1542,11 +1542,11 @@ where
                 .get_typed::<DelegateVtxoContract>(&stored.script_pubkey)?
                 .ok_or_else(|| Error::ad_hoc("missing delegate vtxo contract"))?;
             let vtxo = contract.vtxo(&ctx)?;
-            let spend_paths = manager.spendable_paths_for_script(&stored.script_pubkey)?;
+            let spend_selections = manager.spendable_selections(&stored)?;
             contracts.push(contract::ActiveOffchainContract {
                 address: vtxo.to_ark_address(),
                 vtxo,
-                spend_paths,
+                spend_selections,
             });
         }
         Ok(contracts)

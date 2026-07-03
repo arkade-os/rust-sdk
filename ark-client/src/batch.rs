@@ -548,19 +548,17 @@ where
         settleable
             .into_iter()
             .map(|entry| {
-                let spend_info = entry.spend_info(SpendPathKind::Forfeit)?;
+                let spend_selection = entry.spend_selection(SpendPathKind::Forfeit)?;
 
-                Ok(intent::Input::new(
+                Ok(intent::Input::new_with_spend_selection(
                     entry.vtxo.outpoint,
                     entry.exit_delay()?,
-                    // NOTE: This only works with default VTXOs (single-sig).
-                    None,
                     TxOut {
                         value: entry.vtxo.amount,
                         script_pubkey: entry.script_pubkey(),
                     },
                     entry.tapscripts(),
-                    spend_info,
+                    spend_selection,
                     false,
                     entry.vtxo.is_swept,
                     entry.vtxo.assets.clone(),

@@ -1,3 +1,4 @@
+use crate::contract::SpendSelection;
 use crate::Asset;
 use crate::Error;
 use crate::ErrorContext;
@@ -77,6 +78,31 @@ impl Input {
             is_swept,
             assets,
             extra_witness: None,
+        }
+    }
+
+    pub fn new_with_spend_selection(
+        outpoint: OutPoint,
+        default_sequence: Sequence,
+        witness_utxo: TxOut,
+        tapscripts: Vec<ScriptBuf>,
+        spend_selection: SpendSelection,
+        is_onchain: bool,
+        is_swept: bool,
+        assets: Vec<Asset>,
+    ) -> Self {
+        Self {
+            outpoint,
+            sequence: spend_selection.sequence.unwrap_or(default_sequence),
+            locktime: spend_selection.locktime.unwrap_or(absolute::LockTime::ZERO),
+            witness_utxo,
+            tapscripts,
+            spend_info: spend_selection.spend_info(),
+            is_onchain,
+            is_swept,
+            assets,
+            extra_witness: (!spend_selection.extra_witness.is_empty())
+                .then_some(spend_selection.extra_witness),
         }
     }
 
