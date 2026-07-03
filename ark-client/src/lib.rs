@@ -22,7 +22,6 @@ use ark_core::server::GetVtxosRequest;
 use ark_core::server::SubscriptionResponse;
 use ark_core::server::VirtualTxOutPoint;
 use ark_core::ArkAddress;
-use ark_core::BoardingOutput;
 use ark_core::ExplorerUtxo;
 use ark_core::UtxoCoinSelection;
 use ark_core::Vtxo;
@@ -1180,7 +1179,7 @@ where
     fn persist_watch_boarding_outputs(
         &self,
         server_info: &server::Info,
-    ) -> Result<Vec<BoardingOutput>, Error> {
+    ) -> Result<Vec<contract::ContractBoardingOutput>, Error> {
         let candidate_delays =
             ark_core::candidate_exit_delays(server_info.boarding_exit_delay, server_info.network)?;
         let owner = self
@@ -1188,7 +1187,6 @@ where
             .x_only_public_key()
             .0;
         let key_index = self.derivation_index_for_pk(&owner);
-        let ctx = ContractContext::new(server_info.network);
         let state = self
             .state
             .read()
@@ -1198,7 +1196,6 @@ where
             .lock()
             .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?;
 
-        let mut outputs = Vec::new();
         for server_pk in server_info.all_server_keys() {
             for exit_delay in &candidate_delays {
                 let contract = BoardingContract {
@@ -1206,15 +1203,11 @@ where
                     owner,
                     exit_delay: *exit_delay,
                 };
-                let stored = manager.insert_or_get(contract, ContractState::Active, key_index)?;
-                let contract = manager
-                    .get_typed::<BoardingContract>(&stored.script_pubkey)?
-                    .ok_or_else(|| Error::ad_hoc("missing boarding contract"))?;
-                outputs.push(contract.boarding_output(&ctx)?);
+                manager.insert_or_get(contract, ContractState::Active, key_index)?;
             }
         }
 
-        Ok(outputs)
+        manager.annotated_boarding_outputs()
     }
 
     pub async fn get_virtual_tx_outpoints(
@@ -1536,16 +1529,17 @@ where
         Ok(self.secp().sign_schnorr_no_aux_rand(msg, &keypair))
     }
 
-    fn boarding_outputs(&self) -> Result<Vec<BoardingOutput>, Error> {
+    fn boarding_outputs(&self) -> Result<Vec<contract::ContractBoardingOutput>, Error> {
         let state = self
             .state
             .read()
             .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
-        let ctx = ContractContext::new(state.server_info.network);
-        self.boarding_contracts_with_state(&state)?
-            .into_iter()
-            .map(|contract| contract.boarding_output(&ctx).map_err(Into::into))
-            .collect()
+        let outputs = state
+            .contract_manager
+            .lock()
+            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?
+            .annotated_boarding_outputs()?;
+        Ok(outputs)
     }
 
     fn active_offchain_contract_addresses(&self) -> Result<Vec<ArkAddress>, Error> {
@@ -1594,25 +1588,6 @@ where
             });
         }
         Ok(contracts)
-    }
-
-    fn boarding_contracts_with_state(
-        &self,
-        state: &ServerState,
-    ) -> Result<Vec<BoardingContract>, Error> {
-        let manager = state
-            .contract_manager
-            .lock()
-            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?;
-        manager
-            .list_active_by_type(ContractType::boarding())?
-            .into_iter()
-            .map(|stored| {
-                manager
-                    .get_typed::<BoardingContract>(&stored.script_pubkey)?
-                    .ok_or_else(|| Error::ad_hoc("missing boarding contract"))
-            })
-            .collect()
     }
 
     fn annotate_vtxos(&self, vtxos: Vec<VirtualTxOutPoint>) -> Result<Vec<ContractVtxo>, Error> {

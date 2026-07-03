@@ -1178,7 +1178,7 @@ where
 
                         let script_pubkey = boarding_output.script_pubkey();
                         let tapscripts = boarding_output.tapscripts();
-                        let spend_info = boarding_output.forfeit_spend_info();
+                        let spend_info = boarding_output.spend_info(SpendPathKind::Forfeit)?;
 
                         boarding_inputs.push(batch::OnChainInput::new(
                             boarding_output.exit_delay(),

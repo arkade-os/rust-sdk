@@ -75,7 +75,7 @@ where
                     tracing::debug!(?outpoint, %amount, ?boarding_output, "Selected boarding output");
 
                     let script_pubkey = boarding_output.script_pubkey();
-                    let spend_info = boarding_output.exit_spend_info();
+                    let spend_info = boarding_output.spend_info(SpendPathKind::Exit)?;
 
                     if selected_boarding_outputs.insert(unilateral_exit::OnChainInput::new(
                         boarding_output.exit_delay(),

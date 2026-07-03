@@ -14,6 +14,7 @@ use ark_core::contract::VhtlcContract;
 use ark_core::server;
 use ark_core::server::VirtualTxOutPoint;
 use ark_core::ArkAddress;
+use ark_core::BoardingOutput;
 use ark_core::Vtxo;
 use bitcoin::Address;
 use bitcoin::Amount;
@@ -488,6 +489,74 @@ struct VtxoContractData {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct ContractBoardingOutput {
+    pub contract: StoredContract,
+    pub output: BoardingOutput,
+    pub spend_selections: Vec<SpendSelection>,
+}
+
+impl ContractBoardingOutput {
+    pub fn spend_path(&self, kind: ark_core::contract::SpendPathKind) -> Result<SpendPath, Error> {
+        self.spend_selection(kind).map(|selection| selection.path)
+    }
+
+    pub fn spend_selection(
+        &self,
+        kind: ark_core::contract::SpendPathKind,
+    ) -> Result<SpendSelection, Error> {
+        self.spend_selections
+            .iter()
+            .find(|selection| selection.path.kind == kind)
+            .cloned()
+            .ok_or_else(|| Error::ad_hoc(format!("missing {kind:?} spend path")))
+    }
+
+    pub fn spend_info(
+        &self,
+        kind: ark_core::contract::SpendPathKind,
+    ) -> Result<(ScriptBuf, bitcoin::taproot::ControlBlock), Error> {
+        Ok(self.spend_selection(kind)?.spend_info())
+    }
+
+    pub fn tapscripts(&self) -> Vec<ScriptBuf> {
+        self.spend_selections
+            .iter()
+            .map(|selection| selection.path.script.clone())
+            .collect()
+    }
+
+    pub fn address(&self) -> &Address {
+        self.output.address()
+    }
+
+    pub fn script_pubkey(&self) -> ScriptBuf {
+        self.contract.script_pubkey.clone()
+    }
+
+    pub fn server_pk(&self) -> XOnlyPublicKey {
+        self.output.server_pk()
+    }
+
+    pub fn owner_pk(&self) -> XOnlyPublicKey {
+        self.output.owner_pk()
+    }
+
+    pub fn exit_delay(&self) -> Sequence {
+        self.output.exit_delay()
+    }
+
+    pub fn can_be_claimed_unilaterally_by_owner(
+        &self,
+        now: std::time::Duration,
+        confirmation_blocktime: std::time::Duration,
+        confirmations: u64,
+    ) -> bool {
+        self.output
+            .can_be_claimed_unilaterally_by_owner(now, confirmation_blocktime, confirmations)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ActiveOffchainContract {
     pub address: ArkAddress,
     pub vtxo: Vtxo,
@@ -831,6 +900,26 @@ impl ContractManager {
             })
             .collect()
     }
+
+    pub fn annotated_boarding_outputs(&self) -> Result<Vec<ContractBoardingOutput>, Error> {
+        let ctx = ContractContext::new(self.network);
+        self.list_active_by_type(ContractType::boarding())?
+            .into_iter()
+            .map(|stored| {
+                let contract: BoardingContract = serde_json::from_value(stored.data.clone())
+                    .map_err(|e| {
+                        Error::ad_hoc(format!("failed to decode boarding contract: {e}"))
+                    })?;
+                let output = contract.boarding_output(&ctx)?;
+                let spend_selections = self.spendable_selections(&stored)?;
+                Ok(ContractBoardingOutput {
+                    contract: stored,
+                    output,
+                    spend_selections,
+                })
+            })
+            .collect()
+    }
 }
 
 fn now_secs() -> Result<u64, Error> {
@@ -843,6 +932,7 @@ fn now_secs() -> Result<u64, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ark_core::contract::SpendPathKind;
     use bitcoin::Amount;
     use bitcoin::OutPoint;
     use bitcoin::Sequence;
@@ -937,6 +1027,33 @@ mod tests {
         assert_eq!(annotated[0].contract, stored);
         assert_eq!(annotated[0].vtxo, vtxo);
         assert_eq!(annotated[0].spend_selections.len(), 2);
+    }
+
+    #[test]
+    fn annotates_boarding_outputs_with_contract_spend_paths() {
+        let (server, owner, _) = test_keys();
+        let mut manager = ContractManager::in_memory(Network::Regtest);
+        manager.register_builtins().unwrap();
+
+        let contract = BoardingContract {
+            server,
+            owner,
+            exit_delay: Sequence::from_seconds_ceil(86400).unwrap(),
+        };
+        let stored = manager
+            .insert(contract, ContractState::Active, Some(7))
+            .unwrap();
+
+        let annotated = manager.annotated_boarding_outputs().unwrap();
+
+        assert_eq!(annotated.len(), 1);
+        assert_eq!(annotated[0].contract, stored);
+        assert_eq!(annotated[0].script_pubkey(), stored.script_pubkey);
+        assert_eq!(annotated[0].server_pk(), server);
+        assert_eq!(annotated[0].owner_pk(), owner);
+        assert_eq!(annotated[0].spend_selections.len(), 2);
+        assert!(annotated[0].spend_info(SpendPathKind::Forfeit).is_ok());
+        assert!(annotated[0].spend_info(SpendPathKind::Exit).is_ok());
     }
 
     #[cfg(feature = "sqlite")]
