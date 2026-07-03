@@ -780,6 +780,19 @@ where
         self.get_offchain_addresses_with_server_info(&server_info)
     }
 
+    pub(crate) async fn ensure_offchain_contracts_seeded(&self) -> Result<(), Error> {
+        let server_info = self.server_info().await?;
+        self.ensure_offchain_contracts_seeded_with_server_info(&server_info)
+    }
+
+    pub(crate) fn ensure_offchain_contracts_seeded_with_server_info(
+        &self,
+        server_info: &server::Info,
+    ) -> Result<(), Error> {
+        self.get_offchain_addresses_with_server_info(server_info)?;
+        Ok(())
+    }
+
     pub(crate) fn get_offchain_addresses_with_server_info(
         &self,
         server_info: &server::Info,
@@ -1039,7 +1052,7 @@ where
         }
 
         if discovered_count > 0 {
-            let _ = self.get_offchain_addresses_with_server_info(server_info)?;
+            self.ensure_offchain_contracts_seeded_with_server_info(server_info)?;
         }
 
         tracing::info!(discovered_count, "Key discovery completed");
@@ -1178,10 +1191,10 @@ where
         &self,
         server_info: &server::Info,
     ) -> Result<Vec<ContractVtxo>, Error> {
-        let ark_addresses = self.get_offchain_addresses_with_server_info(server_info)?;
+        self.ensure_offchain_contracts_seeded_with_server_info(server_info)?;
 
-        let addresses = ark_addresses.iter().map(|(a, _)| a).copied();
-        let virtual_tx_outpoints = self.get_virtual_tx_outpoints(addresses).await?;
+        let addresses = self.active_offchain_contract_addresses()?;
+        let virtual_tx_outpoints = self.get_virtual_tx_outpoints(addresses.into_iter()).await?;
         self.annotate_vtxos(virtual_tx_outpoints)
     }
 
@@ -1213,7 +1226,7 @@ where
         &self,
         outpoints: Vec<OutPoint>,
     ) -> Result<ContractVtxoList, Error> {
-        let _ = self.get_offchain_addresses().await?;
+        self.ensure_offchain_contracts_seeded().await?;
         let request = GetVtxosRequest::new_for_outpoints(&outpoints);
         let virtual_tx_outpoints = self.fetch_all_vtxos(request).await?;
         let contract_vtxos = self.annotate_vtxos(virtual_tx_outpoints)?;
@@ -1493,7 +1506,7 @@ where
             .collect()
     }
 
-    fn active_offchain_contract_addresses(&self) -> Result<Vec<(ArkAddress, Vtxo)>, Error> {
+    fn active_offchain_contract_addresses(&self) -> Result<Vec<ArkAddress>, Error> {
         let state = self
             .state
             .read()
@@ -1509,15 +1522,13 @@ where
             let contract = manager
                 .get_typed::<DefaultVtxoContract>(&stored.script_pubkey)?
                 .ok_or_else(|| Error::ad_hoc("missing default vtxo contract"))?;
-            let vtxo = contract.vtxo(&ctx)?;
-            addresses.push((vtxo.to_ark_address(), vtxo));
+            addresses.push(contract.vtxo(&ctx)?.to_ark_address());
         }
         for stored in manager.list_active_by_type(ContractType::delegate_vtxo())? {
             let contract = manager
                 .get_typed::<DelegateVtxoContract>(&stored.script_pubkey)?
                 .ok_or_else(|| Error::ad_hoc("missing delegate vtxo contract"))?;
-            let vtxo = contract.vtxo(&ctx)?;
-            addresses.push((vtxo.to_ark_address(), vtxo));
+            addresses.push(contract.vtxo(&ctx)?.to_ark_address());
         }
         Ok(addresses)
     }

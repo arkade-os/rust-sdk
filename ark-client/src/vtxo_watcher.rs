@@ -16,6 +16,7 @@ use ark_core::intent;
 use ark_core::server::SubscriptionResponse;
 use ark_core::server::VirtualTxOutPoint;
 use ark_core::ArkAddress;
+#[cfg(test)]
 use ark_core::Vtxo;
 use ark_delegator::DelegatorClient;
 use bitcoin::secp256k1::PublicKey;
@@ -26,7 +27,6 @@ use bitcoin::TxOut;
 use futures::StreamExt;
 use rand::rngs::OsRng;
 use std::collections::BTreeMap;
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -92,47 +92,9 @@ impl Default for VtxoWatcherConfig {
     }
 }
 
-/// Pre-computed mapping from script pubkeys to their Vtxo metadata and ArkAddress.
-///
-/// Built once per (re)connection from `get_offchain_addresses()`. Used both for the subscription
-/// and for resolving VTXO metadata from subscription events, so they can never diverge.
-struct ScriptMap {
-    addr_by_script: HashMap<ScriptBuf, ArkAddress>,
-}
-
-impl ScriptMap {
-    fn from_addresses(addresses: &[(ArkAddress, Vtxo)]) -> Self {
-        let mut addr_by_script = HashMap::with_capacity(addresses.len());
-        for (addr, _) in addresses {
-            let script = addr.to_p2tr_script_pubkey();
-            addr_by_script.insert(script, *addr);
-        }
-        Self { addr_by_script }
-    }
-
-    /// Get the unique ArkAddresses that appear in the given VTXO outpoints.
-    fn addresses_for(&self, vtxos: &[VirtualTxOutPoint]) -> Vec<ArkAddress> {
-        let mut seen = HashSet::new();
-        let mut result = Vec::new();
-        for vtp in vtxos {
-            if let Some(addr) = self.addr_by_script.get(&vtp.script) {
-                if seen.insert(&vtp.script) {
-                    result.push(*addr);
-                }
-            }
-        }
-        result
-    }
-}
-
 enum WatcherWork {
-    NewVtxos {
-        vtxos: Vec<VirtualTxOutPoint>,
-        script_map: Arc<ScriptMap>,
-    },
-    RenewTick {
-        script_map: Arc<ScriptMap>,
-    },
+    NewVtxos { vtxos: Vec<VirtualTxOutPoint> },
+    RenewTick,
 }
 
 impl<B, W, S> Client<B, W, S>
@@ -189,9 +151,8 @@ async fn run_watcher_loop<B, W, S>(
             return;
         }
 
-        // Seed address contracts, then build the subscription from the active contract set.
-        if let Err(e) = client.get_offchain_addresses().await {
-            tracing::error!("Failed to seed offchain address contracts: {e}");
+        if let Err(e) = client.ensure_offchain_contracts_seeded().await {
+            tracing::error!("Failed to seed offchain contracts: {e}");
             return;
         }
         let addresses = match client.active_offchain_contract_addresses() {
@@ -201,10 +162,8 @@ async fn run_watcher_loop<B, W, S>(
                 return;
             }
         };
-        let script_map = Arc::new(ScriptMap::from_addresses(&addresses));
-        let ark_addresses: Vec<_> = addresses.iter().map(|(addr, _)| *addr).collect();
 
-        let subscription_id = match client.subscribe_to_scripts(ark_addresses, None).await {
+        let subscription_id = match client.subscribe_to_scripts(addresses.clone(), None).await {
             Ok(id) => id,
             Err(e) => {
                 tracing::warn!("Failed to subscribe: {e}, retrying in {backoff:?}");
@@ -230,9 +189,7 @@ async fn run_watcher_loop<B, W, S>(
 
         tracing::info!("VTXO watcher connected");
         backoff = INITIAL_BACKOFF;
-        let mut subscribed_addrs: HashSet<ArkAddress> =
-            addresses.iter().map(|(addr, _)| *addr).collect();
-        let mut script_map = script_map;
+        let mut subscribed_addrs: HashSet<ArkAddress> = addresses.into_iter().collect();
         let mut renew_interval = tokio::time::interval(Duration::from_secs(60));
         let mut discovery_interval = tokio::time::interval(KEY_DISCOVERY_INTERVAL);
         let (work_tx, mut work_rx) = mpsc::channel::<WatcherWork>(128);
@@ -245,40 +202,28 @@ async fn run_watcher_loop<B, W, S>(
 
                 while let Some(first) = work_rx.recv().await {
                     // Handle one guaranteed message to start the batch.
-                    let (
-                        mut pending_vtxos,
-                        mut latest_script_map,
-                        mut should_renew,
-                        mut should_sync,
-                    ) = match first {
-                        WatcherWork::NewVtxos { vtxos, script_map } => {
-                            (vtxos, Some(script_map), true, false)
-                        }
-                        WatcherWork::RenewTick { script_map } => {
-                            (Vec::new(), Some(script_map), true, true)
-                        }
+                    let (mut pending_vtxos, mut should_renew, mut should_sync) = match first {
+                        WatcherWork::NewVtxos { vtxos } => (vtxos, true, false),
+                        WatcherWork::RenewTick => (Vec::new(), true, true),
                     };
 
                     // Drain whatever else is already queued without waiting.
                     while let Ok(work) = work_rx.try_recv() {
                         match work {
-                            WatcherWork::NewVtxos { vtxos, script_map } => {
+                            WatcherWork::NewVtxos { vtxos } => {
                                 pending_vtxos.extend(vtxos);
-                                latest_script_map = Some(script_map);
                                 should_renew = true;
                             }
-                            WatcherWork::RenewTick { script_map } => {
-                                latest_script_map = Some(script_map);
+                            WatcherWork::RenewTick => {
                                 should_renew = true;
                                 should_sync = true;
                             }
                         }
                     }
 
-                    if let (true, Some(script_map)) = (should_sync, latest_script_map.as_deref()) {
+                    if should_sync {
                         match collect_new_delegation_candidates(
                             &client,
-                            script_map,
                             &mut seen_unspent_outpoints,
                         )
                         .await
@@ -308,9 +253,7 @@ async fn run_watcher_loop<B, W, S>(
                         }
 
                         tracing::debug!(count = deduped.len(), "Processing VTXOs for delegation");
-                        if let Some(script_map) = latest_script_map {
-                            delegate_vtxos(&client, &delegator, &deduped, &script_map).await;
-                        }
+                        delegate_vtxos(&client, &delegator, &deduped).await;
                     }
 
                     if should_renew {
@@ -344,9 +287,7 @@ async fn run_watcher_loop<B, W, S>(
                     return;
                 }
                 _ = renew_interval.tick() => {
-                    if work_tx.send(WatcherWork::RenewTick {
-                        script_map: Arc::clone(&script_map),
-                    }).await.is_err() {
+                    if work_tx.send(WatcherWork::RenewTick).await.is_err() {
                         tracing::warn!("VTXO worker channel closed, reconnecting in {backoff:?}");
                         break;
                     }
@@ -359,10 +300,7 @@ async fn run_watcher_loop<B, W, S>(
                     )
                     .await
                     {
-                        Ok(Some(new_script_map)) => {
-                            script_map = new_script_map;
-                        }
-                        Ok(None) => {}
+                        Ok(()) => {}
                         Err(e) => {
                             tracing::warn!("Failed to refresh script subscription: {e}");
                         }
@@ -381,7 +319,6 @@ async fn run_watcher_loop<B, W, S>(
 
                                 if work_tx.send(WatcherWork::NewVtxos {
                                     vtxos: event.new_vtxos,
-                                    script_map: Arc::clone(&script_map),
                                 })
                                 .await.is_err()
                                 {
@@ -507,7 +444,7 @@ async fn refresh_subscription_scripts<B, W, S>(
     client: &Client<B, W, S>,
     subscription_id: &str,
     subscribed_addrs: &mut HashSet<ArkAddress>,
-) -> Result<Option<Arc<ScriptMap>>, Error>
+) -> Result<(), Error>
 where
     B: Blockchain + Send + Sync + 'static,
     W: OnchainWallet + Send + Sync + 'static,
@@ -517,13 +454,12 @@ where
 
     let addrs = client.active_offchain_contract_addresses()?;
     let new_addrs: Vec<_> = addrs
-        .iter()
-        .map(|(addr, _)| *addr)
+        .into_iter()
         .filter(|addr| !subscribed_addrs.contains(addr))
         .collect();
 
     if new_addrs.is_empty() {
-        return Ok(None);
+        return Ok(());
     }
 
     client
@@ -537,7 +473,7 @@ where
         "Updated watcher subscription with newly active contract addresses"
     );
 
-    Ok(Some(Arc::new(ScriptMap::from_addresses(&addrs))))
+    Ok(())
 }
 
 /// Enumerate newly seen unspent delegate-eligible VTXOs from wallet state.
@@ -545,7 +481,6 @@ where
 /// This is a failsafe path to catch outputs that may have been missed by subscription timing.
 async fn collect_new_delegation_candidates<B, W, S>(
     client: &Client<B, W, S>,
-    _script_map: &ScriptMap,
     seen_unspent_outpoints: &mut HashSet<OutPoint>,
 ) -> Result<Vec<VirtualTxOutPoint>, Error>
 where
@@ -698,19 +633,11 @@ async fn delegate_vtxos<B, W, S>(
     client: &Arc<Client<B, W, S>>,
     delegator: &DelegatorClient,
     new_vtxos: &[VirtualTxOutPoint],
-    script_map: &ScriptMap,
 ) where
     B: Blockchain + Send + Sync + 'static,
     W: OnchainWallet + Send + Sync + 'static,
     S: SwapStorage + 'static,
 {
-    // Query only the addresses that appear in the event, not all wallet addresses.
-    let affected_addresses = script_map.addresses_for(new_vtxos);
-    if affected_addresses.is_empty() {
-        tracing::debug!("No affected addresses resolved from new VTXOs; skipping delegation");
-        return;
-    }
-
     let vtxo_list = match client.list_vtxos().await {
         Ok(v) => v,
         Err(e) => {
