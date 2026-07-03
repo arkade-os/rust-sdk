@@ -524,9 +524,12 @@ where
             .filter(|entry| requested.contains(&entry.vtxo.outpoint))
             .collect::<Vec<_>>();
 
-        let settleable_outpoints = vtxo_list
+        let settleable = vtxo_list
             .batch_settleable_at(server_info, now)
             .filter(|entry| requested.contains(&entry.vtxo.outpoint))
+            .collect::<Vec<_>>();
+        let settleable_outpoints = settleable
+            .iter()
             .map(|entry| entry.vtxo.outpoint)
             .collect::<HashSet<_>>();
 
@@ -542,9 +545,8 @@ where
             )));
         }
 
-        matching_unspent
+        settleable
             .into_iter()
-            .filter(|entry| settleable_outpoints.contains(&entry.vtxo.outpoint))
             .map(|entry| {
                 let spend_info = entry.spend_info(SpendPathKind::Forfeit)?;
 
