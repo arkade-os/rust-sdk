@@ -12,6 +12,8 @@ use ark_core::contract::StoredContract;
 use ark_core::contract::VhtlcContract;
 use ark_core::server;
 use ark_core::server::VirtualTxOutPoint;
+use ark_core::ArkAddress;
+use ark_core::Vtxo;
 use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::Network;
@@ -238,6 +240,27 @@ struct VtxoContractData {
     server: XOnlyPublicKey,
     owner: XOnlyPublicKey,
     exit_delay: Sequence,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ActiveOffchainContract {
+    pub address: ArkAddress,
+    pub vtxo: Vtxo,
+    pub spend_paths: Vec<SpendPath>,
+}
+
+impl ActiveOffchainContract {
+    pub fn spend_info(
+        &self,
+        kind: ark_core::contract::SpendPathKind,
+    ) -> Result<(ScriptBuf, bitcoin::taproot::ControlBlock), Error> {
+        let path = self
+            .spend_paths
+            .iter()
+            .find(|path| path.kind == kind)
+            .ok_or_else(|| Error::ad_hoc(format!("missing {kind:?} spend path")))?;
+        Ok((path.script.clone(), path.control_block.clone()))
+    }
 }
 
 #[derive(Clone, Debug)]

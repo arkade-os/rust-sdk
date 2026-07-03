@@ -12,7 +12,6 @@ use ark_core::contract::ContractState;
 use ark_core::contract::ContractType;
 use ark_core::contract::DefaultVtxoContract;
 use ark_core::contract::DelegateVtxoContract;
-use ark_core::contract::SpendPathKind;
 use ark_core::history;
 use ark_core::history::generate_incoming_vtxo_transaction_history;
 use ark_core::history::generate_outgoing_vtxo_transaction_history;
@@ -41,7 +40,6 @@ use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::Network;
 use bitcoin::OutPoint;
-use bitcoin::Script;
 use bitcoin::ScriptBuf;
 use bitcoin::Transaction;
 use bitcoin::Txid;
@@ -1507,6 +1505,15 @@ where
     }
 
     fn active_offchain_contract_addresses(&self) -> Result<Vec<ArkAddress>, Error> {
+        self.active_offchain_contracts().map(|contracts| {
+            contracts
+                .into_iter()
+                .map(|contract| contract.address)
+                .collect()
+        })
+    }
+
+    fn active_offchain_contracts(&self) -> Result<Vec<contract::ActiveOffchainContract>, Error> {
         let state = self
             .state
             .read()
@@ -1517,20 +1524,32 @@ where
             .lock()
             .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?;
 
-        let mut addresses = Vec::new();
+        let mut contracts = Vec::new();
         for stored in manager.list_active_by_type(ContractType::default_vtxo())? {
             let contract = manager
                 .get_typed::<DefaultVtxoContract>(&stored.script_pubkey)?
                 .ok_or_else(|| Error::ad_hoc("missing default vtxo contract"))?;
-            addresses.push(contract.vtxo(&ctx)?.to_ark_address());
+            let vtxo = contract.vtxo(&ctx)?;
+            let spend_paths = manager.spendable_paths_for_script(&stored.script_pubkey)?;
+            contracts.push(contract::ActiveOffchainContract {
+                address: vtxo.to_ark_address(),
+                vtxo,
+                spend_paths,
+            });
         }
         for stored in manager.list_active_by_type(ContractType::delegate_vtxo())? {
             let contract = manager
                 .get_typed::<DelegateVtxoContract>(&stored.script_pubkey)?
                 .ok_or_else(|| Error::ad_hoc("missing delegate vtxo contract"))?;
-            addresses.push(contract.vtxo(&ctx)?.to_ark_address());
+            let vtxo = contract.vtxo(&ctx)?;
+            let spend_paths = manager.spendable_paths_for_script(&stored.script_pubkey)?;
+            contracts.push(contract::ActiveOffchainContract {
+                address: vtxo.to_ark_address(),
+                vtxo,
+                spend_paths,
+            });
         }
-        Ok(addresses)
+        Ok(contracts)
     }
 
     fn boarding_contracts_with_state(
@@ -1563,35 +1582,6 @@ where
             .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?
             .annotate_vtxos(vtxos)?;
         Ok(annotated)
-    }
-
-    fn spend_paths_for_script(
-        &self,
-        script_pubkey: &Script,
-    ) -> Result<Vec<ark_core::contract::SpendPath>, Error> {
-        let state = self
-            .state
-            .read()
-            .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
-        let paths = state
-            .contract_manager
-            .lock()
-            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?
-            .spendable_paths_for_script(script_pubkey)?;
-        Ok(paths)
-    }
-
-    fn spend_info_for_script(
-        &self,
-        script_pubkey: &Script,
-        kind: SpendPathKind,
-    ) -> Result<(ScriptBuf, bitcoin::taproot::ControlBlock), Error> {
-        let path = self
-            .spend_paths_for_script(script_pubkey)?
-            .into_iter()
-            .find(|path| path.kind == kind)
-            .ok_or_else(|| Error::ad_hoc(format!("missing {kind:?} spend path")))?;
-        Ok((path.script, path.control_block))
     }
 
     fn derivation_index_for_pk(&self, pk: &XOnlyPublicKey) -> Option<u32> {

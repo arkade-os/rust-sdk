@@ -75,8 +75,7 @@ where
                     tracing::debug!(?outpoint, %amount, ?boarding_output, "Selected boarding output");
 
                     let script_pubkey = boarding_output.script_pubkey();
-                    let spend_info =
-                        client.spend_info_for_script(&script_pubkey, SpendPathKind::Exit)?;
+                    let spend_info = boarding_output.exit_spend_info();
 
                     if selected_boarding_outputs.insert(unilateral_exit::OnChainInput::new(
                         boarding_output.exit_delay(),
@@ -94,7 +93,8 @@ where
 
     let mut selected_vtxo_outputs = HashSet::new();
 
-    for (_, vtxo) in client.get_offchain_addresses().await? {
+    for contract in client.active_offchain_contracts()? {
+        let vtxo = &contract.vtxo;
         if target_amount <= selected_amount {
             return Ok((
                 selected_boarding_outputs.into_iter().collect(),
@@ -123,8 +123,7 @@ where
                     tracing::debug!(?outpoint, %amount, ?vtxo, "Selected VTXO");
 
                     let script_pubkey = vtxo.script_pubkey();
-                    let spend_info =
-                        client.spend_info_for_script(&script_pubkey, SpendPathKind::Exit)?;
+                    let spend_info = contract.spend_info(SpendPathKind::Exit)?;
 
                     selected_vtxo_outputs.insert(unilateral_exit::VtxoInput::new(
                         *outpoint,

@@ -1177,13 +1177,8 @@ where
                         seen_outpoints.insert(*outpoint);
 
                         let script_pubkey = boarding_output.script_pubkey();
-                        let spend_paths = self.spend_paths_for_script(&script_pubkey)?;
-                        let tapscripts = spend_paths
-                            .iter()
-                            .map(|path| path.script.clone())
-                            .collect::<Vec<_>>();
-                        let spend_info =
-                            self.spend_info_for_script(&script_pubkey, SpendPathKind::Forfeit)?;
+                        let tapscripts = boarding_output.tapscripts();
+                        let spend_info = boarding_output.forfeit_spend_info();
 
                         boarding_inputs.push(batch::OnChainInput::new(
                             boarding_output.exit_delay(),
