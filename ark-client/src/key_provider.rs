@@ -118,6 +118,17 @@ pub trait KeyProvider: Send + Sync {
         Ok(())
     }
 
+    /// Derive and cache the keypair at a persisted derivation index.
+    ///
+    /// This is used after loading persisted contracts so HD wallets can sign for stored
+    /// contracts immediately after restart, without running a full restore scan.
+    fn cache_keypair_at_index(&self, index: u32) -> Result<(), Error> {
+        if let Some(kp) = self.derive_at_discovery_index(index)? {
+            self.cache_discovered_keypair(index, kp)?;
+        }
+        Ok(())
+    }
+
     fn mark_as_used(&self, _pk: &bitcoin::XOnlyPublicKey) -> Result<(), Error> {
         Ok(())
     }
@@ -580,7 +591,38 @@ impl<T: KeyProvider> KeyProvider for Arc<T> {
         (**self).cache_discovered_keypair(index, kp)
     }
 
+    fn cache_keypair_at_index(&self, index: u32) -> Result<(), Error> {
+        (**self).cache_keypair_at_index(index)
+    }
+
     fn mark_as_used(&self, pk: &bitcoin::XOnlyPublicKey) -> Result<(), Error> {
         (**self).mark_as_used(pk)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin::Network;
+    use std::str::FromStr;
+
+    #[test]
+    fn cache_keypair_at_index_hydrates_hd_lookup_after_restart() {
+        let seed = [7_u8; 32];
+        let master = Xpriv::new_master(Network::Regtest, &seed).unwrap();
+        let base_path = DerivationPath::from_str("m/86'/1'/0'/0").unwrap();
+
+        let original = Bip32KeyProvider::new(master, base_path.clone());
+        let expected = original.derive_at_discovery_index(7).unwrap().unwrap();
+        let expected_pk = expected.x_only_public_key().0;
+
+        let restarted = Bip32KeyProvider::new(master, base_path);
+        assert!(restarted.get_keypair_for_pk(&expected_pk).is_err());
+
+        restarted.cache_keypair_at_index(7).unwrap();
+        let actual = restarted.get_keypair_for_pk(&expected_pk).unwrap();
+
+        assert_eq!(actual.x_only_public_key().0, expected_pk);
+        assert_eq!(restarted.get_derivation_index_for_pk(&expected_pk), Some(7));
     }
 }

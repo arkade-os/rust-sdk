@@ -640,6 +640,8 @@ where
             server_info_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
 
+        client.hydrate_persisted_contract_keys()?;
+
         // Eagerly persist the bounded baseline contract set. This mirrors the TS SDK split:
         // connect() registers the always-watched index-0/current-key surface, while full
         // gap-limit wallet regeneration is explicit via restore_contracts().
@@ -801,6 +803,31 @@ where
     fn persist_baseline_contracts(&self, server_info: &server::Info) -> Result<(), Error> {
         self.persist_baseline_offchain_contracts(server_info)?;
         self.persist_watch_boarding_outputs(server_info)?;
+        Ok(())
+    }
+
+    fn hydrate_persisted_contract_keys(&self) -> Result<(), Error> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+        let contracts = state
+            .contract_manager
+            .lock()
+            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?
+            .list()?;
+
+        let mut indices: Vec<u32> = contracts
+            .into_iter()
+            .filter_map(|contract| contract.key_index)
+            .collect();
+        indices.sort_unstable();
+        indices.dedup();
+
+        for index in indices {
+            self.inner.key_provider.cache_keypair_at_index(index)?;
+        }
+
         Ok(())
     }
 
