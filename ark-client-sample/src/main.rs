@@ -14,6 +14,9 @@ use ark_client::Error;
 use ark_client::OfflineClient;
 use ark_client::OfflineClientConfig;
 use ark_client::SpendStatus;
+#[cfg(feature = "sqlite")]
+use ark_client::SqliteContractStore;
+#[cfg(feature = "sqlite")]
 use ark_client::SqliteSwapStorage;
 use ark_client::SwapAmount;
 use ark_client::TxStatus;
@@ -52,6 +55,11 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+
+#[cfg(feature = "sqlite")]
+type SampleSwapStorage = SqliteSwapStorage;
+#[cfg(not(feature = "sqlite"))]
+type SampleSwapStorage = ark_client::InMemorySwapStorage;
 
 #[derive(Parser)]
 #[command(name = "ark-sample")]
@@ -319,7 +327,10 @@ impl FromStr for AddressesAndAmounts {
 struct Config {
     ark_server_url: String,
     esplora_url: String,
+    #[cfg(feature = "sqlite")]
     swap_storage_path: String,
+    #[cfg(feature = "sqlite")]
+    contract_store_path: Option<String>,
     boltz_url: String,
     delegator_pubkey: Option<String>,
     historical_delegator_pubkeys: Option<Vec<String>>,
@@ -364,6 +375,25 @@ struct ListPendingTxsOutput {
 fn format_timestamp(unix_secs: i64) -> Result<String> {
     let ts = Timestamp::from_second(unix_secs)?;
     Ok(ts.to_string())
+}
+
+#[cfg(feature = "sqlite")]
+fn apply_contract_store_path<B, W, S>(
+    config: &Config,
+    offline_client: OfflineClient<B, W, S>,
+) -> Result<OfflineClient<B, W, S>>
+where
+    B: Blockchain,
+    W: ark_client::wallet::OnchainWallet,
+    S: ark_client::SwapStorage + 'static,
+{
+    if let Some(path) = &config.contract_store_path {
+        return Ok(offline_client.with_contract_store(Box::new(
+            SqliteContractStore::new(path).map_err(|e| anyhow!(e))?,
+        )));
+    }
+
+    Ok(offline_client)
 }
 
 fn parse_delegator_pubkey(pk: &str) -> Result<bitcoin::XOnlyPublicKey> {
@@ -421,11 +451,14 @@ async fn main() -> Result<()> {
     let esplora_client = EsploraClient::new(&config.esplora_url)?;
     let esplora_client = Arc::new(esplora_client);
 
+    #[cfg(feature = "sqlite")]
     let storage = Arc::new(
         SqliteSwapStorage::new(&config.swap_storage_path)
             .await
             .map_err(|e| anyhow!(e))?,
     );
+    #[cfg(not(feature = "sqlite"))]
+    let storage = Arc::new(ark_client::InMemorySwapStorage::new());
 
     let delegator_pk = config
         .delegator_pubkey
@@ -456,24 +489,24 @@ async fn main() -> Result<()> {
             let wallet = Arc::new(wallet);
 
             let client_config = OfflineClientConfig {
-                ark_server_url: config.ark_server_url,
-                boltz_url: config.boltz_url,
+                ark_server_url: config.ark_server_url.clone(),
+                boltz_url: config.boltz_url.clone(),
                 delegator_pk,
                 historical_delegator_pks: historical_delegator_pks.clone(),
                 ..Default::default()
             };
 
-            let client = OfflineClient::with_bip32(
+            let offline_client = OfflineClient::with_bip32(
                 client_config,
                 xpriv,
                 None,
                 esplora_client.clone(),
                 wallet,
                 storage,
-            )
-            .connect()
-            .await
-            .map_err(|e| anyhow!(e))?;
+            );
+            #[cfg(feature = "sqlite")]
+            let offline_client = apply_contract_store_path(&config, offline_client)?;
+            let client = offline_client.connect().await.map_err(|e| anyhow!(e))?;
 
             run_command(cli.command, client, esplora_client).await?;
         }
@@ -486,23 +519,23 @@ async fn main() -> Result<()> {
             let wallet = Arc::new(wallet);
 
             let client_config = OfflineClientConfig {
-                ark_server_url: config.ark_server_url,
-                boltz_url: config.boltz_url,
+                ark_server_url: config.ark_server_url.clone(),
+                boltz_url: config.boltz_url.clone(),
                 delegator_pk,
                 historical_delegator_pks: historical_delegator_pks.clone(),
                 ..Default::default()
             };
 
-            let client = OfflineClient::with_keypair(
+            let offline_client = OfflineClient::with_keypair(
                 client_config,
                 kp,
                 esplora_client.clone(),
                 wallet,
                 storage,
-            )
-            .connect()
-            .await
-            .map_err(|e| anyhow!(e))?;
+            );
+            #[cfg(feature = "sqlite")]
+            let offline_client = apply_contract_store_path(&config, offline_client)?;
+            let client = offline_client.connect().await.map_err(|e| anyhow!(e))?;
 
             run_command(cli.command, client, esplora_client).await?;
         }
@@ -513,7 +546,7 @@ async fn main() -> Result<()> {
 
 async fn run_command(
     command: Commands,
-    client: ark_client::Client<EsploraClient, Wallet, SqliteSwapStorage>,
+    client: ark_client::Client<EsploraClient, Wallet, SampleSwapStorage>,
     esplora_client: Arc<EsploraClient>,
 ) -> Result<()> {
     let client = Arc::new(client);
