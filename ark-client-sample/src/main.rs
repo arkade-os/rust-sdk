@@ -199,6 +199,12 @@ enum Commands {
     RefundSwapWithoutReceiver { swap_id: String },
     /// List all VTXOs and boarding outputs sorted by expiry, then amount.
     ListVtxos,
+    /// Restore wallet contracts by scanning derived keys up to the gap limit.
+    RestoreContracts {
+        /// Number of consecutive unused keys before stopping.
+        #[arg(long, default_value = "20")]
+        gap_limit: u32,
+    },
     /// Settle specific VTXOs and/or boarding outputs by outpoint.
     SettleVtxos {
         /// VTXO outpoints to settle (format: txid:vout, comma-separated).
@@ -550,7 +556,6 @@ async fn run_command(
     esplora_client: Arc<EsploraClient>,
 ) -> Result<()> {
     let client = Arc::new(client);
-    client.discover_keys(20).await.map_err(|e| anyhow!(e))?;
 
     match &command {
         Commands::Balance => {
@@ -1100,6 +1105,13 @@ async fn run_command(
                 .map_err(|e| anyhow!(e))?;
 
             tracing::info!(?txid, swap_id, "Swap refunded");
+        }
+        Commands::RestoreContracts { gap_limit } => {
+            let restored = client
+                .restore_contracts(*gap_limit)
+                .await
+                .map_err(|e| anyhow!(e))?;
+            tracing::info!(restored, gap_limit, "Restored wallet contracts");
         }
         Commands::ListVtxos => {
             // Get VTXOs

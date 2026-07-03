@@ -59,7 +59,6 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 /// Periodic key discovery settings for keeping script subscriptions fresh.
 const KEY_DISCOVERY_INTERVAL: Duration = Duration::from_secs(10);
-const KEY_DISCOVERY_GAP_LIMIT: u32 = 20;
 
 /// How often the background migration arm fires when healthy. The frequent cadence is safe
 /// because [`Client::migrate_deprecated_signer_vtxos`] short-circuits to a no-op
@@ -151,10 +150,6 @@ async fn run_watcher_loop<B, W, S>(
             return;
         }
 
-        if let Err(e) = client.ensure_offchain_contracts_seeded().await {
-            tracing::error!("Failed to seed offchain contracts: {e}");
-            return;
-        }
         let addresses = match client.active_offchain_contract_addresses() {
             Ok(a) => a,
             Err(e) => {
@@ -439,7 +434,7 @@ async fn wait_or_stop(stop_rx: &mut watch::Receiver<bool>, duration: Duration) -
     }
 }
 
-/// Discover keys and add newly derived scripts to an existing subscription.
+/// Add newly persisted active contract scripts to an existing subscription.
 async fn refresh_subscription_scripts<B, W, S>(
     client: &Client<B, W, S>,
     subscription_id: &str,
@@ -450,8 +445,6 @@ where
     W: OnchainWallet + Send + Sync + 'static,
     S: SwapStorage + 'static,
 {
-    let _discovered = client.discover_keys(KEY_DISCOVERY_GAP_LIMIT).await?;
-
     let addrs = client.active_offchain_contract_addresses()?;
     let new_addrs: Vec<_> = addrs
         .into_iter()

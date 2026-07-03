@@ -641,17 +641,12 @@ where
             server_info_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
 
-        // Eagerly persist boarding rows for every signer/delay candidate the wallet should watch.
-        // The migration boarding leg reads the wallet DB only; without this connect-time seed, a
-        // deprecated-signer boarding UTXO could be invisible until the caller happened to call
-        // `get_boarding_addresses()`. Re-persisting is idempotent, so it is safe on every connect.
-        if let Err(error) = client.persist_watch_boarding_outputs(&server_info) {
-            tracing::warn!(?error, "Failed to persist boarding outputs at connect");
+        // Eagerly persist the bounded baseline contract set. This mirrors the TS SDK split:
+        // connect() registers the always-watched index-0/current-key surface, while full
+        // gap-limit wallet regeneration is explicit via restore_contracts().
+        if let Err(error) = client.persist_baseline_contracts(&server_info) {
+            tracing::warn!(?error, "Failed to persist baseline contracts at connect");
         }
-
-        if let Err(error) = client.discover_keys(DEFAULT_GAP_LIMIT).await {
-            tracing::warn!(?error, "Failed during key discovery");
-        };
 
         Ok(client)
     }
@@ -804,17 +799,51 @@ where
         self.get_offchain_addresses_with_server_info(&server_info)
     }
 
-    pub(crate) async fn ensure_offchain_contracts_seeded(&self) -> Result<(), Error> {
-        let server_info = self.server_info().await?;
-        self.ensure_offchain_contracts_seeded_with_server_info(&server_info)
+    fn persist_baseline_contracts(&self, server_info: &server::Info) -> Result<(), Error> {
+        self.persist_baseline_offchain_contracts(server_info)?;
+        self.persist_watch_boarding_outputs(server_info)?;
+        Ok(())
     }
 
-    pub(crate) fn ensure_offchain_contracts_seeded_with_server_info(
+    fn persist_baseline_offchain_contracts(
         &self,
         server_info: &server::Info,
-    ) -> Result<(), Error> {
-        self.get_offchain_addresses_with_server_info(server_info)?;
-        Ok(())
+    ) -> Result<Vec<(ArkAddress, Vtxo)>, Error> {
+        let owner = self
+            .next_keypair(KeypairIndex::LastUnused)?
+            .x_only_public_key()
+            .0;
+        let candidate_delays = ark_core::candidate_exit_delays(
+            server_info.unilateral_exit_delay,
+            server_info.network,
+        )?;
+
+        let mut results = Vec::new();
+        for server_signer in server_info.all_server_keys() {
+            for exit_delay in &candidate_delays {
+                results.push(self.persist_default_vtxo_contract(
+                    server_info.network,
+                    server_signer,
+                    owner,
+                    *exit_delay,
+                )?);
+
+                let mut seen = HashSet::new();
+                for dpk in &self.inner.historical_delegator_pks {
+                    if !seen.insert(dpk) {
+                        continue;
+                    }
+                    results.push(self.persist_delegate_vtxo_contract(
+                        server_info.network,
+                        server_signer,
+                        owner,
+                        *dpk,
+                        *exit_delay,
+                    )?);
+                }
+            }
+        }
+        Ok(results)
     }
 
     pub(crate) fn get_offchain_addresses_with_server_info(
@@ -827,10 +856,10 @@ where
         // known server key are discovered and visible in the balance.
         let all_server_keys: Vec<XOnlyPublicKey> = server_info.all_server_keys().collect();
         // Enumerate under every candidate exit delay (the advertised delay plus, on mainnet, the
-        // legacy delay), mirroring `discover_keys`: a VTXO minted before the operator shortened the
-        // delay lives at a legacy-delay address, so building only the current delay would hide it
-        // from `list_vtxos`/balance/migration even though its key was discovered. Off mainnet this
-        // is just the advertised delay (no behaviour change).
+        // legacy delay), mirroring `restore_contracts`: a VTXO minted before the operator shortened
+        // the delay lives at a legacy-delay address, so building only the current delay
+        // would hide it from `list_vtxos`/balance/migration even though its key was
+        // discovered. Off mainnet this is just the advertised delay (no behaviour change).
         let candidate_delays = ark_core::candidate_exit_delays(
             server_info.unilateral_exit_delay,
             server_info.network,
@@ -954,17 +983,17 @@ where
         Ok((vtxo.to_ark_address(), vtxo))
     }
 
-    /// Discover and cache used keys using BIP44-style gap limit
+    /// Restore persisted contracts using BIP44-style gap-limit key discovery.
     ///
     /// This method derives keys in batches, checks all at once via list_vtxos,
-    /// caches used ones, and stops when a full batch has no used keys.
+    /// caches used ones, persists their contracts, and stops when a full batch has no used keys.
     ///
     /// Returns the number of discovered keys. No-op for StaticKeyProvider.
     ///
     /// # Arguments
     ///
     /// * `gap_limit` - Number of consecutive unused addresses before stopping
-    pub async fn discover_keys(&self, gap_limit: u32) -> Result<u32, Error> {
+    pub async fn restore_contracts(&self, gap_limit: u32) -> Result<u32, Error> {
         if !self.inner.key_provider.supports_discovery() {
             tracing::debug!("Key provider does not support discovery, skipping");
             return Ok(0);
@@ -985,7 +1014,7 @@ where
         let mut start_index = 0u32;
         let mut discovered_count = 0u32;
 
-        tracing::info!(gap_limit, "Starting key discovery");
+        tracing::info!(gap_limit, "Starting contract restore");
 
         loop {
             // Generate a batch of gap_limit keys
@@ -1076,10 +1105,10 @@ where
         }
 
         if discovered_count > 0 {
-            self.ensure_offchain_contracts_seeded_with_server_info(server_info)?;
+            self.get_offchain_addresses_with_server_info(server_info)?;
         }
 
-        tracing::info!(discovered_count, "Key discovery completed");
+        tracing::info!(discovered_count, "Contract restore completed");
 
         Ok(discovered_count)
     }
@@ -1205,21 +1234,11 @@ where
         &self,
         server_info: &server::Info,
     ) -> Result<ContractVtxoList, Error> {
-        let contract_vtxos = self
-            .list_contract_vtxos_with_server_info(server_info)
-            .await?;
-        Ok(ContractVtxoList::new(server_info.dust, contract_vtxos))
-    }
-
-    async fn list_contract_vtxos_with_server_info(
-        &self,
-        server_info: &server::Info,
-    ) -> Result<Vec<ContractVtxo>, Error> {
-        self.ensure_offchain_contracts_seeded_with_server_info(server_info)?;
-
         let addresses = self.active_offchain_contract_addresses()?;
         let virtual_tx_outpoints = self.get_virtual_tx_outpoints(addresses.into_iter()).await?;
-        self.annotate_vtxos(virtual_tx_outpoints)
+        let contract_vtxos = self.annotate_vtxos(virtual_tx_outpoints)?;
+
+        Ok(ContractVtxoList::new(server_info.dust, contract_vtxos))
     }
 
     pub async fn list_vtxos_for_addresses(
@@ -1250,7 +1269,6 @@ where
         &self,
         outpoints: Vec<OutPoint>,
     ) -> Result<ContractVtxoList, Error> {
-        self.ensure_offchain_contracts_seeded().await?;
         let request = GetVtxosRequest::new_for_outpoints(&outpoints);
         let virtual_tx_outpoints = self.fetch_all_vtxos(request).await?;
         let contract_vtxos = self.annotate_vtxos(virtual_tx_outpoints)?;

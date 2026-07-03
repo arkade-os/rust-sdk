@@ -18,7 +18,7 @@ mod common;
 /// 2. Funds and settles a boarding output to give the client a VTXO
 /// 3. Checks the balance
 /// 4. Recreates the client from the same seed (simulating a restart)
-/// 5. Verifies that discover_keys (called during connect) repopulates the cache
+/// 5. Explicitly restores contracts to repopulate the cache
 /// 6. Checks that the balance is the same before and after restarting the client
 #[tokio::test]
 #[ignore = "requires regtest"]
@@ -67,11 +67,12 @@ pub async fn e2e_key_discovery() {
     drop(client);
     tracing::info!("Dropped first client, simulating restart");
 
-    // Create a new client with the same seed
-    // The discover_keys method should be called during connect and repopulate the cache
+    // Create a new client with the same seed and explicitly restore contracts.
     tracing::info!("Creating new client with same seed");
     let (client2, _wallet2) =
         set_up_client_with_seed("alice-restored".to_string(), regtest.clone(), secp, seed).await;
+
+    client2.restore_contracts(20).await.unwrap();
 
     // Check the balance - it should be the same as before
     let balance_after_restore = client2.offchain_balance().await.unwrap();
