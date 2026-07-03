@@ -93,6 +93,8 @@ pub use contract::ContractStore;
 pub use contract::ContractVtxo;
 pub use contract::ContractVtxoList;
 pub use contract::MemoryContractStore;
+#[cfg(feature = "sqlite")]
+pub use contract::SqliteContractStore;
 pub use error::Error;
 pub use key_provider::Bip32KeyProvider;
 pub use key_provider::KeyProvider;
@@ -342,6 +344,7 @@ pub struct OfflineClient<B, W, S> {
     boltz_referral_id: Option<String>,
     timeout: Duration,
     server_info_ttl: Duration,
+    contract_store: Arc<Mutex<Option<Box<dyn ContractStore>>>>,
     delegator_pk: Option<XOnlyPublicKey>,
     historical_delegator_pks: Vec<XOnlyPublicKey>,
 }
@@ -484,7 +487,6 @@ where
             BoltzReferralId::Disabled => None,
             BoltzReferralId::Custom(referral_id) => Some(referral_id),
         };
-
         Self {
             network_client,
             key_provider,
@@ -496,6 +498,7 @@ where
             boltz_referral_id,
             timeout: config.timeout,
             server_info_ttl: config.server_info_ttl,
+            contract_store: Arc::new(Mutex::new(None)),
             delegator_pk: config.delegator_pk,
             historical_delegator_pks,
         }
@@ -529,6 +532,19 @@ where
         Self::with_key_provider(config, key_provider, blockchain, wallet, swap_storage)
     }
 
+    /// Use a custom contract store for the connected client.
+    ///
+    /// If unset, the client uses an in-memory contract store.
+    pub fn with_contract_store(self, store: Box<dyn ContractStore>) -> Self {
+        let mut contract_store = self
+            .contract_store
+            .lock()
+            .expect("contract store lock should not be poisoned");
+        *contract_store = Some(store);
+        drop(contract_store);
+        self
+    }
+
     /// Returns the currently configured delegator pubkey, if any.
     pub fn delegator_pk(&self) -> Option<XOnlyPublicKey> {
         self.delegator_pk
@@ -537,6 +553,16 @@ where
     /// Returns the Boltz referral ID sent with all swap creation requests, if any.
     pub fn boltz_referral_id(&self) -> Option<&str> {
         self.boltz_referral_id.as_deref()
+    }
+
+    fn contract_manager(&self, network: Network) -> Result<ContractManager, Error> {
+        let store = self
+            .contract_store
+            .lock()
+            .map_err(|_| Error::ad_hoc("contract store lock poisoned"))?
+            .take()
+            .unwrap_or_else(|| Box::new(MemoryContractStore::new()));
+        Ok(ContractManager::new(network, store))
     }
 
     /// Connects to the Ark server and retrieves server information.
@@ -594,7 +620,7 @@ where
         tracing::debug!(ark_server_url = ?self.network_client, "Connected to Ark server");
 
         let fee_estimator = build_fee_estimator(&server_info)?;
-        let mut contract_manager = ContractManager::in_memory(server_info.network);
+        let mut contract_manager = self.contract_manager(server_info.network)?;
         contract_manager.register_builtins()?;
         let state = Arc::new(RwLock::new(ServerState {
             server_info: server_info.clone(),

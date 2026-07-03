@@ -24,6 +24,10 @@ use bitcoin::Sequence;
 use bitcoin::XOnlyPublicKey;
 use std::collections::HashMap;
 use std::marker::PhantomData;
+#[cfg(feature = "sqlite")]
+use std::path::Path;
+#[cfg(feature = "sqlite")]
+use std::sync::Mutex;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -176,6 +180,220 @@ impl ContractStore for MemoryContractStore {
             .get_mut(script_pubkey)
             .ok_or_else(|| Error::ad_hoc("unknown contract script"))?;
         contract.state = state;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "sqlite")]
+pub struct SqliteContractStore {
+    connection: Mutex<rusqlite::Connection>,
+}
+
+#[cfg(feature = "sqlite")]
+impl SqliteContractStore {
+    pub fn new<P: AsRef<Path>>(db_path: P) -> Result<Self, Error> {
+        let db_path = db_path.as_ref();
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                Error::consumer(format!("failed to create contract store directory: {e}"))
+            })?;
+        }
+
+        let connection = rusqlite::Connection::open(db_path)
+            .map_err(|e| Error::consumer(format!("failed to open contract store: {e}")))?;
+        let store = Self {
+            connection: Mutex::new(connection),
+        };
+        store.initialize()?;
+        Ok(store)
+    }
+
+    pub fn new_default() -> Result<Self, Error> {
+        Self::new("contracts.db")
+    }
+
+    fn initialize(&self) -> Result<(), Error> {
+        let connection = self.connection()?;
+        connection
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS contracts (
+                    script_pubkey BLOB PRIMARY KEY NOT NULL,
+                    contract_type TEXT NOT NULL,
+                    contract_version INTEGER NOT NULL,
+                    state TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    key_index INTEGER,
+                    data TEXT NOT NULL
+                );",
+            )
+            .map_err(|e| Error::consumer(format!("failed to initialize contract store: {e}")))?;
+        Ok(())
+    }
+
+    fn connection(&self) -> Result<std::sync::MutexGuard<'_, rusqlite::Connection>, Error> {
+        self.connection
+            .lock()
+            .map_err(|_| Error::ad_hoc("contract store connection lock poisoned"))
+    }
+
+    fn state_to_str(state: ContractState) -> &'static str {
+        match state {
+            ContractState::Active => "active",
+            ContractState::Inactive => "inactive",
+        }
+    }
+
+    fn state_from_str(value: &str) -> Result<ContractState, Error> {
+        match value {
+            "active" => Ok(ContractState::Active),
+            "inactive" => Ok(ContractState::Inactive),
+            _ => Err(Error::ad_hoc(format!("unknown contract state: {value}"))),
+        }
+    }
+
+    fn row_to_contract(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredContract> {
+        let script_pubkey: Vec<u8> = row.get("script_pubkey")?;
+        let contract_type: String = row.get("contract_type")?;
+        let contract_version: i64 = row.get("contract_version")?;
+        let state: String = row.get("state")?;
+        let created_at: i64 = row.get("created_at")?;
+        let key_index: Option<i64> = row.get("key_index")?;
+        let data: String = row.get("data")?;
+
+        let contract_type = ContractType::new(contract_type).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e))
+        })?;
+        let state = Self::state_from_str(&state).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(e))
+        })?;
+        let data = serde_json::from_str(&data).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(e))
+        })?;
+
+        Ok(StoredContract {
+            contract_type,
+            contract_version: u32::try_from(contract_version).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    2,
+                    rusqlite::types::Type::Integer,
+                    Box::new(e),
+                )
+            })?,
+            script_pubkey: ScriptBuf::from_bytes(script_pubkey),
+            state,
+            created_at: u64::try_from(created_at).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    4,
+                    rusqlite::types::Type::Integer,
+                    Box::new(e),
+                )
+            })?,
+            key_index: key_index
+                .map(|value| {
+                    u32::try_from(value).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            5,
+                            rusqlite::types::Type::Integer,
+                            Box::new(e),
+                        )
+                    })
+                })
+                .transpose()?,
+            data,
+        })
+    }
+}
+
+#[cfg(feature = "sqlite")]
+impl ContractStore for SqliteContractStore {
+    fn insert(&mut self, contract: StoredContract) -> Result<(), Error> {
+        let data = serde_json::to_string(&contract.data)
+            .map_err(|e| Error::ad_hoc(format!("failed to encode contract data: {e}")))?;
+        let connection = self.connection()?;
+        connection
+            .execute(
+                "INSERT INTO contracts (
+                    script_pubkey,
+                    contract_type,
+                    contract_version,
+                    state,
+                    created_at,
+                    key_index,
+                    data
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    contract.script_pubkey.as_bytes(),
+                    contract.contract_type.as_str(),
+                    i64::from(contract.contract_version),
+                    Self::state_to_str(contract.state),
+                    i64::try_from(contract.created_at).map_err(|e| Error::ad_hoc(format!(
+                        "contract created_at does not fit sqlite integer: {e}"
+                    )))?,
+                    contract.key_index.map(i64::from),
+                    data,
+                ],
+            )
+            .map_err(|e| {
+                if matches!(e, rusqlite::Error::SqliteFailure(ref err, _) if err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY)
+                {
+                    Error::ad_hoc("contract script already exists")
+                } else {
+                    Error::consumer(format!("failed to insert contract: {e}"))
+                }
+            })?;
+        Ok(())
+    }
+
+    fn get_by_script(&self, script_pubkey: &Script) -> Result<Option<StoredContract>, Error> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT script_pubkey, contract_type, contract_version, state, created_at, key_index, data
+                 FROM contracts
+                 WHERE script_pubkey = ?1",
+            )
+            .map_err(|e| Error::consumer(format!("failed to prepare contract lookup: {e}")))?;
+        let mut rows = statement
+            .query(rusqlite::params![script_pubkey.as_bytes()])
+            .map_err(|e| Error::consumer(format!("failed to lookup contract: {e}")))?;
+        let Some(row) = rows
+            .next()
+            .map_err(|e| Error::consumer(format!("failed to read contract: {e}")))?
+        else {
+            return Ok(None);
+        };
+        Self::row_to_contract(row)
+            .map(Some)
+            .map_err(|e| Error::consumer(format!("failed to decode contract: {e}")))
+    }
+
+    fn list(&self) -> Result<Vec<StoredContract>, Error> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT script_pubkey, contract_type, contract_version, state, created_at, key_index, data
+                 FROM contracts
+                 ORDER BY created_at, rowid",
+            )
+            .map_err(|e| Error::consumer(format!("failed to prepare contract list: {e}")))?;
+        let rows = statement
+            .query_map([], Self::row_to_contract)
+            .map_err(|e| Error::consumer(format!("failed to list contracts: {e}")))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| Error::consumer(format!("failed to decode contracts: {e}")))
+    }
+
+    fn update_state(&mut self, script_pubkey: &Script, state: ContractState) -> Result<(), Error> {
+        let connection = self.connection()?;
+        let updated = connection
+            .execute(
+                "UPDATE contracts SET state = ?1 WHERE script_pubkey = ?2",
+                rusqlite::params![Self::state_to_str(state), script_pubkey.as_bytes()],
+            )
+            .map_err(|e| Error::consumer(format!("failed to update contract state: {e}")))?;
+        if updated == 0 {
+            return Err(Error::ad_hoc("unknown contract script"));
+        }
         Ok(())
     }
 }
@@ -719,6 +937,44 @@ mod tests {
         assert_eq!(annotated[0].contract, stored);
         assert_eq!(annotated[0].vtxo, vtxo);
         assert_eq!(annotated[0].spend_selections.len(), 2);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_store_persists_contracts() {
+        let (server, owner, _) = test_keys();
+        let tempdir = tempfile::tempdir().unwrap();
+        let db_path = tempdir.path().join("contracts.db");
+        let mut manager = ContractManager::new(
+            Network::Regtest,
+            Box::new(SqliteContractStore::new(&db_path).unwrap()),
+        );
+        manager.register_builtins().unwrap();
+
+        let contract = DefaultVtxoContract {
+            server,
+            owner,
+            exit_delay: Sequence::from_seconds_ceil(86400).unwrap(),
+        };
+        let stored = manager
+            .insert(contract, ContractState::Active, Some(7))
+            .unwrap();
+        manager
+            .update_state(&stored.script_pubkey, ContractState::Inactive)
+            .unwrap();
+
+        let mut reopened = ContractManager::new(
+            Network::Regtest,
+            Box::new(SqliteContractStore::new(&db_path).unwrap()),
+        );
+        reopened.register_builtins().unwrap();
+
+        let persisted = reopened.get(&stored.script_pubkey).unwrap().unwrap();
+        assert_eq!(persisted.state, ContractState::Inactive);
+        assert_eq!(persisted.contract_type, ContractType::default_vtxo());
+        assert_eq!(persisted.key_index, Some(7));
+        assert_eq!(persisted.data, stored.data);
+        assert_eq!(reopened.list().unwrap().len(), 1);
     }
 
     #[test]
