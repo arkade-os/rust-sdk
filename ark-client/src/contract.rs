@@ -284,19 +284,16 @@ impl ContractVtxoList {
 
     pub fn all_unspent(&self) -> impl Iterator<Item = &ContractVtxo> {
         let dust = self.dust;
-        self.vtxos.iter().filter(move |entry| {
-            !entry.vtxo.is_unrolled && !entry.vtxo.is_spent && !entry.vtxo.is_swept
-                || entry.vtxo.is_recoverable(dust)
-        })
+        self.vtxos
+            .iter()
+            .filter(move |entry| entry.vtxo.is_unspent(dust))
     }
 
     pub fn spendable_offchain(&self) -> impl Iterator<Item = &ContractVtxo> {
-        self.vtxos.iter().filter(|entry| {
-            !entry.vtxo.is_recoverable(self.dust)
-                && !entry.vtxo.is_unrolled
-                && !entry.vtxo.is_spent
-                && !entry.vtxo.is_swept
-        })
+        let dust = self.dust;
+        self.vtxos
+            .iter()
+            .filter(move |entry| entry.vtxo.is_spendable_offchain(dust))
     }
 
     pub fn spendable_offchain_at<'a>(
@@ -342,23 +339,17 @@ impl ContractVtxoList {
     }
 
     pub fn pre_confirmed(&self) -> impl Iterator<Item = &ContractVtxo> {
-        self.vtxos.iter().filter(|entry| {
-            !entry.vtxo.is_recoverable(self.dust)
-                && !entry.vtxo.is_unrolled
-                && !entry.vtxo.is_spent
-                && !entry.vtxo.is_swept
-                && entry.vtxo.is_preconfirmed
-        })
+        let dust = self.dust;
+        self.vtxos
+            .iter()
+            .filter(move |entry| entry.vtxo.is_pre_confirmed_spendable(dust))
     }
 
     pub fn confirmed(&self) -> impl Iterator<Item = &ContractVtxo> {
-        self.vtxos.iter().filter(|entry| {
-            !entry.vtxo.is_recoverable(self.dust)
-                && !entry.vtxo.is_unrolled
-                && !entry.vtxo.is_spent
-                && !entry.vtxo.is_swept
-                && !entry.vtxo.is_preconfirmed
-        })
+        let dust = self.dust;
+        self.vtxos
+            .iter()
+            .filter(move |entry| entry.vtxo.is_confirmed_spendable(dust))
     }
 
     pub fn recoverable(&self) -> impl Iterator<Item = &ContractVtxo> {
@@ -372,10 +363,10 @@ impl ContractVtxoList {
     }
 
     pub fn spent(&self) -> impl Iterator<Item = &ContractVtxo> {
-        self.vtxos.iter().filter(|entry| {
-            !entry.vtxo.is_recoverable(self.dust)
-                && (entry.vtxo.is_unrolled || entry.vtxo.is_spent || entry.vtxo.is_swept)
-        })
+        let dust = self.dust;
+        self.vtxos
+            .iter()
+            .filter(move |entry| entry.vtxo.is_spent_status(dust))
     }
 }
 

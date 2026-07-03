@@ -32,14 +32,11 @@ impl VtxoList {
         for virtual_tx_outpoint in virtual_tx_outpoints {
             if virtual_tx_outpoint.is_recoverable(dust) {
                 recoverable.push(virtual_tx_outpoint);
-            } else if virtual_tx_outpoint.is_unrolled
-                || virtual_tx_outpoint.is_spent
-                || virtual_tx_outpoint.is_swept
-            {
+            } else if virtual_tx_outpoint.is_spent_status(dust) {
                 spent.push(virtual_tx_outpoint);
-            } else if virtual_tx_outpoint.is_preconfirmed {
+            } else if virtual_tx_outpoint.is_pre_confirmed_spendable(dust) {
                 pre_confirmed.push(virtual_tx_outpoint);
-            } else {
+            } else if virtual_tx_outpoint.is_confirmed_spendable(dust) {
                 confirmed.push(virtual_tx_outpoint);
             }
         }
