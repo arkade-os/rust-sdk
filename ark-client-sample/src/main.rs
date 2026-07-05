@@ -51,6 +51,8 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::fs;
+#[cfg(feature = "sqlite")]
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 use tracing_subscriber::layer::SubscriberExt;
@@ -393,13 +395,24 @@ where
     W: ark_client::wallet::OnchainWallet,
     S: ark_client::SwapStorage + 'static,
 {
-    if let Some(path) = &config.contract_store_path {
-        return Ok(offline_client.with_contract_store(Box::new(
-            SqliteContractStore::new(path).map_err(|e| anyhow!(e))?,
-        )));
-    }
+    let contract_store_path = config
+        .contract_store_path
+        .clone()
+        .unwrap_or_else(|| default_contract_store_path(&config.swap_storage_path));
 
-    Ok(offline_client)
+    Ok(offline_client.with_contract_store(Box::new(
+        SqliteContractStore::new(contract_store_path).map_err(|e| anyhow!(e))?,
+    )))
+}
+
+#[cfg(feature = "sqlite")]
+fn default_contract_store_path(swap_storage_path: &str) -> String {
+    Path::new(swap_storage_path)
+        .parent()
+        .map(|parent| parent.join("contracts.sqlite"))
+        .unwrap_or_else(|| Path::new("contracts.sqlite").to_path_buf())
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn parse_delegator_pubkey(pk: &str) -> Result<bitcoin::XOnlyPublicKey> {
