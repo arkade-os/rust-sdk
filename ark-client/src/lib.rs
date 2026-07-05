@@ -9,7 +9,6 @@ use ark_core::build_anchor_tx;
 use ark_core::contract::BoardingContract;
 use ark_core::contract::ContractContext;
 use ark_core::contract::ContractState;
-use ark_core::contract::ContractType;
 use ark_core::contract::DefaultVtxoContract;
 use ark_core::contract::DelegateVtxoContract;
 use ark_core::history;
@@ -968,11 +967,11 @@ where
             .contract_manager
             .lock()
             .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?;
-        let stored = manager.insert_or_get(contract, ContractState::Active, key_index)?;
-        let contract = manager
-            .get_typed::<DefaultVtxoContract>(&stored.script_pubkey)?
-            .ok_or_else(|| Error::ad_hoc("missing default vtxo contract"))?;
+        manager.insert_or_get(contract.clone(), ContractState::Active, key_index)?;
         let ctx = ContractContext::new(network);
+        // Derive from the requested default VTXO contract, not from the stored row: the store may
+        // already contain an equivalent boarding row for this script, but the caller still needs
+        // the offchain Arkade address for this default VTXO script.
         let vtxo = contract.vtxo(&ctx)?;
         Ok((vtxo.to_ark_address(), vtxo))
     }
@@ -1561,11 +1560,19 @@ where
             .state
             .read()
             .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+        // Include default VTXO rows only when their CSV delay matches a boarding delay candidate.
+        // This covers the equal-delay case where a default VTXO row is the stored row for a script
+        // that can also be used for boarding, without turning every default VTXO receive script
+        // into a boarding watch.
+        let candidate_delays = ark_core::candidate_exit_delays(
+            state.server_info.boarding_exit_delay,
+            state.server_info.network,
+        )?;
         let outputs = state
             .contract_manager
             .lock()
             .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?
-            .annotated_boarding_outputs()?;
+            .annotated_boarding_outputs_for_exit_delays(&candidate_delays)?;
         Ok(outputs)
     }
 
@@ -1583,37 +1590,15 @@ where
             .state
             .read()
             .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
-        let ctx = ContractContext::new(state.server_info.network);
-        let manager = state
+        let candidate_delays = ark_core::candidate_exit_delays(
+            state.server_info.unilateral_exit_delay,
+            state.server_info.network,
+        )?;
+        let contracts = state
             .contract_manager
             .lock()
-            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?;
-
-        let mut contracts = Vec::new();
-        for stored in manager.list_active_by_type(ContractType::default_vtxo())? {
-            let contract = manager
-                .get_typed::<DefaultVtxoContract>(&stored.script_pubkey)?
-                .ok_or_else(|| Error::ad_hoc("missing default vtxo contract"))?;
-            let vtxo = contract.vtxo(&ctx)?;
-            let spend_selections = manager.spendable_selections(&stored)?;
-            contracts.push(contract::ActiveOffchainContract {
-                address: vtxo.to_ark_address(),
-                vtxo,
-                spend_selections,
-            });
-        }
-        for stored in manager.list_active_by_type(ContractType::delegate_vtxo())? {
-            let contract = manager
-                .get_typed::<DelegateVtxoContract>(&stored.script_pubkey)?
-                .ok_or_else(|| Error::ad_hoc("missing delegate vtxo contract"))?;
-            let vtxo = contract.vtxo(&ctx)?;
-            let spend_selections = manager.spendable_selections(&stored)?;
-            contracts.push(contract::ActiveOffchainContract {
-                address: vtxo.to_ark_address(),
-                vtxo,
-                spend_selections,
-            });
-        }
+            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?
+            .active_offchain_contracts(&candidate_delays)?;
         Ok(contracts)
     }
 

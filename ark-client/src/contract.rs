@@ -453,35 +453,11 @@ impl ContractVtxo {
     }
 
     fn vtxo_contract_data(&self) -> Result<VtxoContractData, Error> {
-        if self.contract.contract_type == ContractType::default_vtxo() {
-            let data: DefaultVtxoContract = serde_json::from_value(self.contract.data.clone())
-                .map_err(|e| {
-                    Error::ad_hoc(format!("failed to decode default vtxo contract: {e}"))
-                })?;
-            return Ok(VtxoContractData {
-                server: data.server,
-                owner: data.owner,
-                exit_delay: data.exit_delay,
-            });
-        }
-        if self.contract.contract_type == ContractType::delegate_vtxo() {
-            let data: DelegateVtxoContract = serde_json::from_value(self.contract.data.clone())
-                .map_err(|e| {
-                    Error::ad_hoc(format!("failed to decode delegate vtxo contract: {e}"))
-                })?;
-            return Ok(VtxoContractData {
-                server: data.server,
-                owner: data.owner,
-                exit_delay: data.exit_delay,
-            });
-        }
-        Err(Error::ad_hoc(format!(
-            "contract type {} is not an offchain vtxo contract",
-            self.contract.contract_type
-        )))
+        offchain_vtxo_data(&self.contract)
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct VtxoContractData {
     server: XOnlyPublicKey,
     owner: XOnlyPublicKey,
@@ -742,19 +718,18 @@ impl ContractManager {
         key_index: Option<u32>,
     ) -> Result<StoredContract, Error> {
         let stored = self.stored_contract(contract, state, key_index)?;
-        if let Some(existing) = self.store.get_by_script(&stored.script_pubkey)? {
-            if existing.contract_type != stored.contract_type
-                || existing.contract_version != stored.contract_version
-                || existing.data != stored.data
-            {
-                return Err(Error::ad_hoc(
-                    "contract script already exists with different data",
-                ));
+
+        match self.store.get_by_script(&stored.script_pubkey)? {
+            None => {
+                self.store.insert(stored.clone())?;
+                Ok(stored)
             }
-            return Ok(existing);
+            Some(existing) if same_stored_contract(&existing, &stored) => Ok(existing),
+            Some(existing) if can_share_script_row(&existing, &stored)? => Ok(existing),
+            Some(_) => Err(Error::ad_hoc(
+                "contract script already exists with different data",
+            )),
         }
-        self.store.insert(stored.clone())?;
-        Ok(stored)
     }
 
     fn stored_contract<T: ContractSpec>(
@@ -880,6 +855,30 @@ impl ContractManager {
         handler.spendable_selections(stored, &ctx)
     }
 
+    pub(crate) fn active_offchain_contracts(
+        &self,
+        unilateral_exit_delay_candidates: &[Sequence],
+    ) -> Result<Vec<ActiveOffchainContract>, Error> {
+        let ctx = ContractContext::new(self.network);
+        self.store
+            .list()?
+            .into_iter()
+            .filter(|stored| stored.state == ContractState::Active)
+            .filter_map(|stored| {
+                match active_offchain_contract_from_stored(
+                    self,
+                    &ctx,
+                    stored,
+                    unilateral_exit_delay_candidates,
+                ) {
+                    Ok(Some(contract)) => Some(Ok(contract)),
+                    Ok(None) => None,
+                    Err(e) => Some(Err(e)),
+                }
+            })
+            .collect()
+    }
+
     pub fn annotate_vtxos(
         &self,
         vtxos: Vec<VirtualTxOutPoint>,
@@ -901,15 +900,26 @@ impl ContractManager {
             .collect()
     }
 
-    pub fn annotated_boarding_outputs(&self) -> Result<Vec<ContractBoardingOutput>, Error> {
+    /// Return active boarding outputs, including compatible default VTXO rows.
+    ///
+    /// The store keeps one row per script. If a default VTXO row was stored before an equivalent
+    /// boarding row, on-chain boarding discovery must still see it as a boarding output. Default
+    /// VTXO rows are included only when their CSV delay is one of the caller's boarding delay
+    /// candidates. Passing an empty slice means "strict boarding rows only".
+    pub fn annotated_boarding_outputs_for_exit_delays(
+        &self,
+        compatible_default_exit_delays: &[Sequence],
+    ) -> Result<Vec<ContractBoardingOutput>, Error> {
         let ctx = ContractContext::new(self.network);
-        self.list_active_by_type(ContractType::boarding())?
+        self.store
+            .list()?
             .into_iter()
-            .map(|stored| {
-                let contract: BoardingContract = serde_json::from_value(stored.data.clone())
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("failed to decode boarding contract: {e}"))
-                    })?;
+            .filter(|stored| stored.state == ContractState::Active)
+            .filter_map(|stored| {
+                boarding_contract_from_stored(&stored, compatible_default_exit_delays)
+                    .map(|contract| (stored, contract))
+            })
+            .map(|(stored, contract)| {
                 let output = contract.boarding_output(&ctx)?;
                 let spend_selections = self.spendable_selections(&stored)?;
                 Ok(ContractBoardingOutput {
@@ -920,6 +930,165 @@ impl ContractManager {
             })
             .collect()
     }
+
+    pub fn annotated_boarding_outputs(&self) -> Result<Vec<ContractBoardingOutput>, Error> {
+        self.annotated_boarding_outputs_for_exit_delays(&[])
+    }
+}
+
+fn same_stored_contract(a: &StoredContract, b: &StoredContract) -> bool {
+    a.contract_type == b.contract_type
+        && a.contract_version == b.contract_version
+        && a.data == b.data
+}
+
+/// Whether two same-script rows may use the row that was stored first.
+///
+/// This is intentionally limited to default VTXO/boarding rows that decode to the same two-leaf
+/// server+owner/CSV template. Delegate and VHTLC scripts carry different leaves/semantics and a
+/// same-script collision with them should remain a hard error.
+fn can_share_script_row(a: &StoredContract, b: &StoredContract) -> Result<bool, Error> {
+    let default_vtxo_boarding = a.contract_type == ContractType::default_vtxo()
+        && b.contract_type == ContractType::boarding();
+    let boarding_default_vtxo = a.contract_type == ContractType::boarding()
+        && b.contract_type == ContractType::default_vtxo();
+    if !default_vtxo_boarding && !boarding_default_vtxo {
+        return Ok(false);
+    }
+
+    // Store only one row for a script. Allow default VTXO and boarding to share that row only
+    // when the decoded script template is identical.
+    Ok(two_leaf_vtxo_data(a)? == two_leaf_vtxo_data(b)?)
+}
+
+fn active_offchain_contract_from_stored(
+    manager: &ContractManager,
+    ctx: &ContractContext,
+    stored: StoredContract,
+    unilateral_exit_delay_candidates: &[Sequence],
+) -> Result<Option<ActiveOffchainContract>, Error> {
+    if stored.contract_type == ContractType::delegate_vtxo() {
+        let contract: DelegateVtxoContract = serde_json::from_value(stored.data.clone())
+            .map_err(|e| Error::ad_hoc(format!("failed to decode delegate vtxo contract: {e}")))?;
+        return Ok(Some(active_offchain_contract(
+            manager,
+            &stored,
+            contract.vtxo(ctx)?,
+        )?));
+    }
+
+    let data = match two_leaf_vtxo_data(&stored) {
+        Ok(data) => data,
+        Err(_) => return Ok(None),
+    };
+
+    // A boarding row can also represent an offchain default VTXO row for the same script, but only
+    // when its CSV delay is one of the delays used for unilateral-exit VTXOs. Other boarding rows
+    // must not be queried as Arkade receive addresses.
+    if stored.contract_type == ContractType::boarding()
+        && !unilateral_exit_delay_candidates.contains(&data.exit_delay)
+    {
+        return Ok(None);
+    }
+
+    let contract = DefaultVtxoContract {
+        server: data.server,
+        owner: data.owner,
+        exit_delay: data.exit_delay,
+    };
+    Ok(Some(active_offchain_contract(
+        manager,
+        &stored,
+        contract.vtxo(ctx)?,
+    )?))
+}
+
+fn active_offchain_contract(
+    manager: &ContractManager,
+    stored: &StoredContract,
+    vtxo: Vtxo,
+) -> Result<ActiveOffchainContract, Error> {
+    Ok(ActiveOffchainContract {
+        address: vtxo.to_ark_address(),
+        vtxo,
+        spend_selections: manager.spendable_selections(stored)?,
+    })
+}
+
+fn offchain_vtxo_data(stored: &StoredContract) -> Result<VtxoContractData, Error> {
+    two_leaf_vtxo_data(stored).or_else(|_| delegate_vtxo_data(stored))
+}
+
+fn delegate_vtxo_data(stored: &StoredContract) -> Result<VtxoContractData, Error> {
+    if stored.contract_type != ContractType::delegate_vtxo() {
+        return Err(Error::ad_hoc(format!(
+            "contract type {} is not a delegate vtxo contract",
+            stored.contract_type
+        )));
+    }
+    let contract: DelegateVtxoContract = serde_json::from_value(stored.data.clone())
+        .map_err(|e| Error::ad_hoc(format!("failed to decode delegate vtxo contract: {e}")))?;
+    Ok(VtxoContractData {
+        server: contract.server,
+        owner: contract.owner,
+        exit_delay: contract.exit_delay,
+    })
+}
+
+/// Decode rows that use the shared two-leaf default VTXO/boarding template.
+///
+/// Both contract types produce the same spend paths when server, owner and CSV delay match. This
+/// helper is the single place that treats them as the same template; callers decide whether that
+/// template is being used as an offchain VTXO or as an on-chain boarding output.
+fn two_leaf_vtxo_data(stored: &StoredContract) -> Result<VtxoContractData, Error> {
+    if stored.contract_type == ContractType::default_vtxo() {
+        let contract: DefaultVtxoContract = serde_json::from_value(stored.data.clone())
+            .map_err(|e| Error::ad_hoc(format!("failed to decode default vtxo contract: {e}")))?;
+        return Ok(VtxoContractData {
+            server: contract.server,
+            owner: contract.owner,
+            exit_delay: contract.exit_delay,
+        });
+    }
+    if stored.contract_type == ContractType::boarding() {
+        let contract: BoardingContract = serde_json::from_value(stored.data.clone())
+            .map_err(|e| Error::ad_hoc(format!("failed to decode boarding contract: {e}")))?;
+        return Ok(VtxoContractData {
+            server: contract.server,
+            owner: contract.owner,
+            exit_delay: contract.exit_delay,
+        });
+    }
+    Err(Error::ad_hoc(format!(
+        "contract type {} is not a two-leaf vtxo contract",
+        stored.contract_type
+    )))
+}
+
+/// Resolve a stored row into boarding semantics when safe.
+///
+/// Real boarding rows always qualify. Default VTXO rows qualify only as a script-sharing fallback
+/// and only for the boarding exit-delay candidates supplied by the caller; otherwise every default
+/// VTXO row would incorrectly appear as an on-chain boarding address.
+fn boarding_contract_from_stored(
+    stored: &StoredContract,
+    compatible_default_vtxo_exit_delays: &[Sequence],
+) -> Option<BoardingContract> {
+    let data = two_leaf_vtxo_data(stored).ok()?;
+
+    // A default VTXO row can also represent a boarding row for the same script, but only when the
+    // caller is explicitly watching that CSV delay as a boarding delay.
+    if stored.contract_type == ContractType::boarding()
+        || compatible_default_vtxo_exit_delays.contains(&data.exit_delay)
+    {
+        return Some(BoardingContract {
+            server: data.server,
+            owner: data.owner,
+            exit_delay: data.exit_delay,
+        });
+    }
+
+    None
 }
 
 fn now_secs() -> Result<u64, Error> {
@@ -1054,6 +1223,88 @@ mod tests {
         assert_eq!(annotated[0].spend_selections.len(), 2);
         assert!(annotated[0].spend_info(SpendPathKind::Forfeit).is_ok());
         assert!(annotated[0].spend_info(SpendPathKind::Exit).is_ok());
+    }
+
+    #[test]
+    fn default_vtxo_and_boarding_can_share_script_row() {
+        let (server, owner, _) = test_keys();
+        let mut manager = ContractManager::in_memory(Network::Regtest);
+        manager.register_builtins().unwrap();
+        let exit_delay = Sequence::from_seconds_ceil(86400).unwrap();
+
+        let default = DefaultVtxoContract {
+            server,
+            owner,
+            exit_delay,
+        };
+        let boarding = BoardingContract {
+            server,
+            owner,
+            exit_delay,
+        };
+
+        let stored_default = manager
+            .insert_or_get(default, ContractState::Active, Some(7))
+            .unwrap();
+        let stored_boarding = manager
+            .insert_or_get(boarding, ContractState::Active, Some(7))
+            .unwrap();
+
+        assert_eq!(stored_boarding, stored_default);
+        assert_eq!(stored_default.contract_type, ContractType::default_vtxo());
+        assert_eq!(manager.list().unwrap().len(), 1);
+
+        let boarding_outputs = manager
+            .annotated_boarding_outputs_for_exit_delays(&[exit_delay])
+            .unwrap();
+        assert_eq!(boarding_outputs.len(), 1);
+        assert_eq!(boarding_outputs[0].contract, stored_default);
+        assert_eq!(boarding_outputs[0].server_pk(), server);
+        assert_eq!(boarding_outputs[0].owner_pk(), owner);
+    }
+
+    #[test]
+    fn boarding_contract_can_annotate_offchain_vtxo() {
+        let (server, owner, _) = test_keys();
+        let mut manager = ContractManager::in_memory(Network::Regtest);
+        manager.register_builtins().unwrap();
+        let exit_delay = Sequence::from_seconds_ceil(86400).unwrap();
+
+        let stored = manager
+            .insert_or_get(
+                BoardingContract {
+                    server,
+                    owner,
+                    exit_delay,
+                },
+                ContractState::Active,
+                Some(7),
+            )
+            .unwrap();
+        let vtxo = VirtualTxOutPoint {
+            outpoint: OutPoint::null(),
+            created_at: 0,
+            expires_at: 0,
+            amount: Amount::from_sat(42_000),
+            script: stored.script_pubkey.clone(),
+            is_preconfirmed: false,
+            is_swept: false,
+            is_unrolled: false,
+            is_spent: false,
+            spent_by: None,
+            commitment_txids: Vec::new(),
+            settled_by: None,
+            ark_txid: None,
+            assets: Vec::new(),
+        };
+
+        let annotated = manager.annotate_vtxos(vec![vtxo]).unwrap();
+
+        assert_eq!(annotated.len(), 1);
+        assert_eq!(annotated[0].contract, stored);
+        assert_eq!(annotated[0].server_pk().unwrap(), server);
+        assert_eq!(annotated[0].owner_pk().unwrap(), owner);
+        assert_eq!(annotated[0].exit_delay().unwrap(), exit_delay);
     }
 
     #[cfg(feature = "sqlite")]
