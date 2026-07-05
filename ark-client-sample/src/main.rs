@@ -44,12 +44,12 @@ use bitcoin::Transaction;
 use bitcoin::Txid;
 use clap::Parser;
 use clap::Subcommand;
-use esplora_client::OutputStatus;
 use futures::StreamExt;
 use jiff::Timestamp;
 use rand::thread_rng;
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::HashSet;
 use std::fs;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -1614,7 +1614,25 @@ impl Blockchain for EsploraClient {
             .await
             .map_err(Error::consumer)?;
 
-        let outputs = txs
+        let spent_outpoints: HashSet<OutPoint> = txs
+            .iter()
+            .flat_map(|tx| {
+                tx.vin
+                    .iter()
+                    .filter(|input| {
+                        input
+                            .prevout
+                            .as_ref()
+                            .is_some_and(|prevout| prevout.scriptpubkey == script_pubkey)
+                    })
+                    .map(|input| OutPoint {
+                        txid: input.txid,
+                        vout: input.vout,
+                    })
+            })
+            .collect();
+
+        let utxos = txs
             .into_iter()
             .flat_map(|tx| {
                 let txid = tx.txid;
@@ -1623,6 +1641,10 @@ impl Blockchain for EsploraClient {
                     .enumerate()
                     .filter(|(_, v)| v.scriptpubkey == script_pubkey)
                     .map(|(i, v)| {
+                        let outpoint = OutPoint {
+                            txid,
+                            vout: i as u32,
+                        };
                         let confirmations = match tx.status.block_height {
                             Some(confirmation_block_height) => {
                                 match current_block_height.checked_sub(confirmation_block_height) {
@@ -1634,42 +1656,16 @@ impl Blockchain for EsploraClient {
                         };
 
                         ExplorerUtxo {
-                            outpoint: OutPoint {
-                                txid,
-                                vout: i as u32,
-                            },
+                            outpoint,
                             amount: Amount::from_sat(v.value),
                             confirmation_blocktime: tx.status.block_time,
                             confirmations: confirmations as u64,
-                            // Assume the output is unspent until we dig deeper, further down.
-                            is_spent: false,
+                            is_spent: spent_outpoints.contains(&outpoint),
                         }
                     })
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-
-        let mut utxos = Vec::new();
-        for output in outputs.iter() {
-            let outpoint = output.outpoint;
-            let status = self
-                .esplora_client
-                .get_output_status(&outpoint.txid, outpoint.vout as u64)
-                .await
-                .map_err(Error::consumer)?;
-
-            match status {
-                Some(OutputStatus { spent: false, .. }) | None => {
-                    utxos.push(*output);
-                }
-                Some(OutputStatus { spent: true, .. }) => {
-                    utxos.push(ExplorerUtxo {
-                        is_spent: true,
-                        ..*output
-                    });
-                }
-            }
-        }
 
         Ok(utxos)
     }
