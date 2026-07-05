@@ -338,10 +338,20 @@ struct Config {
     #[cfg(feature = "sqlite")]
     swap_storage_path: String,
     #[cfg(feature = "sqlite")]
+    contract_store: Option<ContractStoreConfig>,
+    #[cfg(feature = "sqlite")]
     contract_store_path: Option<String>,
     boltz_url: String,
     delegator_pubkey: Option<String>,
     historical_delegator_pubkeys: Option<Vec<String>>,
+}
+
+#[cfg(feature = "sqlite")]
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ContractStoreConfig {
+    Memory,
+    Sqlite,
 }
 
 #[derive(Serialize)]
@@ -395,14 +405,19 @@ where
     W: ark_client::wallet::OnchainWallet,
     S: ark_client::SwapStorage + 'static,
 {
-    let contract_store_path = config
-        .contract_store_path
-        .clone()
-        .unwrap_or_else(|| default_contract_store_path(&config.swap_storage_path));
+    match config.contract_store.unwrap_or(ContractStoreConfig::Sqlite) {
+        ContractStoreConfig::Memory => Ok(offline_client),
+        ContractStoreConfig::Sqlite => {
+            let contract_store_path = config
+                .contract_store_path
+                .clone()
+                .unwrap_or_else(|| default_contract_store_path(&config.swap_storage_path));
 
-    Ok(offline_client.with_contract_store(Box::new(
-        SqliteContractStore::new(contract_store_path).map_err(|e| anyhow!(e))?,
-    )))
+            Ok(offline_client.with_contract_store(Box::new(
+                SqliteContractStore::new(contract_store_path).map_err(|e| anyhow!(e))?,
+            )))
+        }
+    }
 }
 
 #[cfg(feature = "sqlite")]
