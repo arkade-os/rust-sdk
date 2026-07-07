@@ -716,7 +716,7 @@ async fn delegate_vtxos<B, W, S>(
                 entry.tapscripts(),
                 spend_selection,
                 entry.vtxo().is_spent,
-                false,
+                entry.vtxo().is_swept,
                 entry.vtxo().assets.clone(),
             ));
 
