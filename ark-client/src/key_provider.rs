@@ -122,6 +122,7 @@ pub trait KeyProvider: Send + Sync {
     ///
     /// This is used after loading persisted contracts so HD wallets can sign for stored
     /// contracts immediately after restart, without running a full restore scan.
+    /// Implementations should not advance receive-key discovery state here.
     fn cache_keypair_at_index(&self, index: u32) -> Result<(), Error> {
         if let Some(kp) = self.derive_at_discovery_index(index)? {
             self.cache_discovered_keypair(index, kp)?;
@@ -476,6 +477,24 @@ impl KeyProvider for Bip32KeyProvider {
         Ok(())
     }
 
+    fn cache_keypair_at_index(&self, index: u32) -> Result<(), Error> {
+        let kp = self.derive_at_index(index)?;
+        let pk = kp.x_only_public_key().0;
+        let mut cache = self
+            .key_cache
+            .write()
+            .map_err(|e| Error::ad_hoc(format!("Failed to lock key_cache: {e}")))?;
+        cache.insert(
+            pk,
+            KeyCacheValue {
+                path_index: index,
+                kp,
+                used: true,
+            },
+        );
+        Ok(())
+    }
+
     fn mark_as_used(&self, pk: &bitcoin::XOnlyPublicKey) -> Result<(), Error> {
         // First check the cache
         {
@@ -615,6 +634,12 @@ mod tests {
         let original = Bip32KeyProvider::new(master, base_path.clone());
         let expected = original.derive_at_discovery_index(7).unwrap().unwrap();
         let expected_pk = expected.x_only_public_key().0;
+        let first_receive_pk = original
+            .derive_at_discovery_index(0)
+            .unwrap()
+            .unwrap()
+            .x_only_public_key()
+            .0;
 
         let restarted = Bip32KeyProvider::new(master, base_path);
         assert!(restarted.get_keypair_for_pk(&expected_pk).is_err());
@@ -624,5 +649,13 @@ mod tests {
 
         assert_eq!(actual.x_only_public_key().0, expected_pk);
         assert_eq!(restarted.get_derivation_index_for_pk(&expected_pk), Some(7));
+        assert_eq!(
+            restarted
+                .get_next_keypair(KeypairIndex::LastUnused)
+                .unwrap()
+                .x_only_public_key()
+                .0,
+            first_receive_pk
+        );
     }
 }
