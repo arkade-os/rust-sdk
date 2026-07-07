@@ -1416,7 +1416,7 @@ where
             }
         }
 
-        manager.annotated_boarding_outputs()
+        manager.annotated_boarding_outputs_for_exit_delays(&candidate_delays)
     }
 
     pub async fn get_virtual_tx_outpoints(
@@ -2224,6 +2224,16 @@ mod digest_guard_tests {
         let info = client.server_info().await.unwrap();
         assert_eq!(info.digest, "fresh-digest");
         assert_eq!(state.get_info_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn boarding_addresses_include_default_row_when_scripts_overlap() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let client = connect_test_client(MockArkServer::default()).await;
+        let addresses = client.get_boarding_addresses().await.unwrap();
+
+        assert_eq!(addresses.len(), 1);
     }
 
     #[tokio::test]
