@@ -2,7 +2,7 @@
 
 use ark_bdk_wallet::Wallet;
 use ark_client::error::Error;
-use ark_client::wallet::Persistence;
+use ark_client::lightning_invoice::Bolt11Invoice;
 use ark_client::Blockchain;
 use ark_client::Client;
 use ark_client::InMemorySwapStorage;
@@ -10,7 +10,6 @@ use ark_client::OfflineClient;
 use ark_client::OfflineClientConfig;
 use ark_client::SpendStatus;
 use ark_client::TxStatus;
-use ark_core::BoardingOutput;
 use ark_core::ExplorerUtxo;
 use base64::Engine;
 use bitcoin::bip32::Xpriv;
@@ -28,14 +27,15 @@ use bitcoin::Txid;
 use bitcoin::XOnlyPublicKey;
 use rand::thread_rng;
 use rand::Rng;
-use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+use std::process::Output;
 use std::sync::Arc;
 use std::sync::Once;
 use std::sync::RwLock;
 use std::time::Duration;
+use tokio::task::JoinHandle;
 
 pub struct BitcoinRpc {
     url: String,
@@ -264,7 +264,7 @@ impl Regtest {
 
     /// Run a `regtest.mjs` subcommand, asserting it succeeds.
     #[allow(unused)]
-    fn run_regtest(&self, args: &[&str]) -> std::process::Output {
+    fn run_regtest(&self, args: &[&str]) -> Output {
         let script = regtest_mjs_path();
         let output = Command::new("node")
             .arg(&script)
@@ -496,59 +496,12 @@ impl Blockchain for Regtest {
     }
 }
 
-#[derive(Default)]
-pub struct InMemoryDb {
-    boarding_outputs: RwLock<HashMap<BoardingOutput, SecretKey>>,
-}
-
-impl Persistence for InMemoryDb {
-    fn save_boarding_output(
-        &self,
-        sk: SecretKey,
-        boarding_output: BoardingOutput,
-    ) -> Result<(), Error> {
-        self.boarding_outputs
-            .write()
-            .map_err(|e| Error::consumer(format!("failed to get write lock: {e}")))?
-            .insert(boarding_output, sk);
-
-        Ok(())
-    }
-
-    fn load_boarding_outputs(&self) -> Result<Vec<BoardingOutput>, Error> {
-        Ok(self
-            .boarding_outputs
-            .read()
-            .map_err(|e| Error::consumer(format!("failed to get read lock: {e}")))?
-            .keys()
-            .cloned()
-            .collect())
-    }
-
-    fn sk_for_pk(&self, pk: &XOnlyPublicKey) -> Result<SecretKey, Error> {
-        let maybe_sk = self
-            .boarding_outputs
-            .read()
-            .map_err(|e| Error::consumer(format!("failed to get read lock: {e}")))?
-            .iter()
-            .find_map(|(b, sk)| if b.owner_pk() == *pk { Some(*sk) } else { None });
-
-        let secret_key =
-            maybe_sk.ok_or_else(|| Error::consumer(format!("failed to find SK for PK: {pk}")))?;
-
-        Ok(secret_key)
-    }
-}
-
 #[allow(unused)]
 pub async fn set_up_client(
     _name: String,
     regtest: Arc<Regtest>,
     secp: Secp256k1<All>,
-) -> (
-    Client<Regtest, Wallet<InMemoryDb>, InMemorySwapStorage>,
-    Arc<Wallet<InMemoryDb>>,
-) {
+) -> (Client<Regtest, Wallet, InMemorySwapStorage>, Arc<Wallet>) {
     let mut rng = thread_rng();
 
     let sk = SecretKey::new(&mut rng);
@@ -556,8 +509,7 @@ pub async fn set_up_client(
 
     let network = Network::Regtest;
 
-    let db = InMemoryDb::default();
-    let wallet = Wallet::new(kp, secp, network, "http://localhost:3000/api", db).unwrap();
+    let wallet = Wallet::new(kp, network, "http://localhost:3000/api").unwrap();
     let wallet = Arc::new(wallet);
 
     let seed: [u8; 32] = rng.r#gen();
@@ -588,10 +540,7 @@ pub async fn set_up_client_with_delegator(
     regtest: Arc<Regtest>,
     secp: Secp256k1<All>,
     delegator_pk: XOnlyPublicKey,
-) -> (
-    Client<Regtest, Wallet<InMemoryDb>, InMemorySwapStorage>,
-    Arc<Wallet<InMemoryDb>>,
-) {
+) -> (Client<Regtest, Wallet, InMemorySwapStorage>, Arc<Wallet>) {
     let mut rng = thread_rng();
 
     let sk = SecretKey::new(&mut rng);
@@ -599,8 +548,7 @@ pub async fn set_up_client_with_delegator(
 
     let network = Network::Regtest;
 
-    let db = InMemoryDb::default();
-    let wallet = Wallet::new(kp, secp, network, "http://localhost:3000/api", db).unwrap();
+    let wallet = Wallet::new(kp, network, "http://localhost:3000/api").unwrap();
     let wallet = Arc::new(wallet);
 
     let seed: [u8; 32] = rng.r#gen();
@@ -703,10 +651,7 @@ pub async fn set_up_client_with_seed(
     regtest: Arc<Regtest>,
     secp: Secp256k1<All>,
     seed: [u8; 32],
-) -> (
-    Client<Regtest, Wallet<InMemoryDb>, InMemorySwapStorage>,
-    Arc<Wallet<InMemoryDb>>,
-) {
+) -> (Client<Regtest, Wallet, InMemorySwapStorage>, Arc<Wallet>) {
     set_up_client_with_seed_and_server_info_ttl(
         name,
         regtest,
@@ -725,10 +670,7 @@ pub async fn set_up_client_with_seed_and_server_info_ttl(
     secp: Secp256k1<All>,
     seed: [u8; 32],
     server_info_ttl: Duration,
-) -> (
-    Client<Regtest, Wallet<InMemoryDb>, InMemorySwapStorage>,
-    Arc<Wallet<InMemoryDb>>,
-) {
+) -> (Client<Regtest, Wallet, InMemorySwapStorage>, Arc<Wallet>) {
     let mut rng = thread_rng();
 
     let sk = SecretKey::new(&mut rng);
@@ -736,8 +678,7 @@ pub async fn set_up_client_with_seed_and_server_info_ttl(
 
     let network = Network::Regtest;
 
-    let db = InMemoryDb::default();
-    let wallet = Wallet::new(kp, secp, network, "http://localhost:3000/api", db).unwrap();
+    let wallet = Wallet::new(kp, network, "http://localhost:3000/api").unwrap();
     let wallet = Arc::new(wallet);
 
     let xpriv = Xpriv::new_master(network, &seed).unwrap();
@@ -760,6 +701,85 @@ pub async fn set_up_client_with_seed_and_server_info_ttl(
     .unwrap();
 
     (client, wallet)
+}
+
+#[derive(serde::Deserialize)]
+struct LnAddInvoiceResponse {
+    payment_request: String,
+}
+
+#[allow(unused)]
+pub async fn create_lnd_invoice(amount: Amount) -> Bolt11Invoice {
+    let output = tokio::process::Command::new("docker")
+        .args([
+            "exec",
+            "lnd",
+            "lncli",
+            "--network=regtest",
+            "addinvoice",
+            "--amt",
+            &amount.to_sat().to_string(),
+        ])
+        .output()
+        .await
+        .expect("failed to run lncli addinvoice");
+
+    assert!(
+        output.status.success(),
+        "failed to create LND invoice: {}",
+        format_command_output(&output)
+    );
+
+    let response: LnAddInvoiceResponse = serde_json::from_slice(&output.stdout)
+        .expect("lncli addinvoice should return JSON with payment_request");
+    response
+        .payment_request
+        .parse()
+        .expect("lncli should return a valid BOLT11 invoice")
+}
+
+#[allow(unused)]
+pub fn start_lnd_payment(invoice: &str) -> JoinHandle<std::io::Result<Output>> {
+    let invoice = invoice.to_string();
+    tokio::spawn(async move {
+        tokio::process::Command::new("docker")
+            .args([
+                "exec",
+                "lnd",
+                "lncli",
+                "--network=regtest",
+                "payinvoice",
+                "--force",
+                &invoice,
+            ])
+            .output()
+            .await
+    })
+}
+
+#[allow(unused)]
+pub async fn wait_for_lnd_payment(payment: JoinHandle<std::io::Result<Output>>) {
+    let output = tokio::time::timeout(Duration::from_secs(30), payment)
+        .await
+        .expect("LN payment did not complete")
+        .expect("lncli payinvoice task panicked")
+        .expect("failed to wait for lncli payinvoice");
+
+    assert!(
+        output.status.success(),
+        "failed to pay invoice: {}",
+        format_command_output(&output)
+    );
+}
+
+#[allow(unused)]
+pub fn format_command_output(output: &Output) -> String {
+    format!(
+        "status={} stdout={} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
 }
 
 pub fn init_tracing() {

@@ -1,8 +1,8 @@
 use crate::error::ErrorContext;
 use crate::swap_storage::SwapStorage;
 use crate::utils::timeout_op;
-use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
+use crate::AnnotatedVtxo;
 use crate::Blockchain;
 use crate::Client;
 use crate::Error;
@@ -10,6 +10,7 @@ use ark_core::asset::AssetId;
 use ark_core::coin_select::select_vtxos;
 use ark_core::coin_select::select_vtxos_for_asset;
 use ark_core::coin_select::VirtualTxOutPoint;
+use ark_core::contract::SpendPathKind;
 use ark_core::intent;
 use ark_core::script::extract_checksig_pubkeys;
 use ark_core::send::build_asset_send_transactions;
@@ -33,10 +34,35 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::time::Duration;
 
+pub(crate) fn coin_select_vtxo(entry: &AnnotatedVtxo) -> VirtualTxOutPoint {
+    VirtualTxOutPoint {
+        outpoint: entry.vtxo().outpoint,
+        script_pubkey: entry.vtxo().script.clone(),
+        expire_at: entry.vtxo().expires_at,
+        amount: entry.vtxo().amount,
+        assets: entry.vtxo().assets.clone(),
+    }
+}
+
+pub(crate) fn select_contract_vtxos(
+    available: &[AnnotatedVtxo],
+    selected: &[VirtualTxOutPoint],
+) -> Vec<AnnotatedVtxo> {
+    selected
+        .iter()
+        .filter_map(|coin| {
+            available
+                .iter()
+                .find(|entry| entry.vtxo().outpoint == coin.outpoint)
+                .cloned()
+        })
+        .collect()
+}
+
 impl<B, W, S> Client<B, W, S>
 where
     B: Blockchain,
-    W: BoardingWallet + OnchainWallet,
+    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     // Send public APIs
@@ -95,7 +121,7 @@ where
         vtxo_outpoints: &[OutPoint],
         receivers: Vec<SendReceiver>,
     ) -> Result<Txid, Error> {
-        // Fetch spend information for the `vtxo_outpoints` chosen by the caller.
+        // Resolve contract-annotated inputs for the `vtxo_outpoints` chosen by the caller.
         let selected = self
             .resolve_selected_send_inputs(vtxo_outpoints)
             .await
@@ -236,26 +262,20 @@ where
         &self,
         receivers: &[SendReceiver],
     ) -> Result<Vec<VtxoInput>, Error> {
-        let (vtxo_list, script_pubkey_to_vtxo_map) = self
+        let vtxo_list = self
             .list_vtxos()
             .await
             .context("failed to get spendable VTXOs")?;
 
         let now = crate::utils::unix_now()?;
         let server_info = self.server_info().await?;
-        let spendable = vtxo_list
-            .spendable_offchain_at(&server_info, now, |script| {
-                script_pubkey_to_vtxo_map
-                    .get(script)
-                    .map(|vtxo| vtxo.server_pk())
-            })
-            .map(|vtxo| VirtualTxOutPoint {
-                outpoint: vtxo.outpoint,
-                script_pubkey: vtxo.script.clone(),
-                expire_at: vtxo.expires_at,
-                amount: vtxo.amount,
-                assets: vtxo.assets.clone(),
-            })
+        let spendable_contracts = vtxo_list
+            .spendable_offchain_at(&server_info, now)
+            .cloned()
+            .collect::<Vec<_>>();
+        let spendable = spendable_contracts
+            .iter()
+            .map(coin_select_vtxo)
             .collect::<Vec<_>>();
 
         let mut selected_outpoints = HashSet::new();
@@ -342,7 +362,8 @@ where
             }
         }
 
-        let inputs = self.build_vtxo_inputs(selected.clone(), &script_pubkey_to_vtxo_map)?;
+        let inputs =
+            self.build_vtxo_inputs(select_contract_vtxos(&spendable_contracts, &selected))?;
 
         Ok(inputs)
     }
@@ -353,28 +374,19 @@ where
     ) -> Result<Vec<VtxoInput>, Error> {
         let requested_outpoints: HashSet<_> = vtxo_outpoints.iter().copied().collect();
 
-        let (vtxo_list, script_pubkey_to_vtxo_map) = self
+        let vtxo_list = self
             .list_vtxos_for_outpoints(vtxo_outpoints.to_vec())
             .await
             .context("failed to get VTXO list")?;
 
         let now = crate::utils::unix_now()?;
         let server_info = self.server_info().await?;
-        let selected: Vec<_> = vtxo_list
-            .spendable_offchain_at(&server_info, now, |script| {
-                script_pubkey_to_vtxo_map
-                    .get(script)
-                    .map(|vtxo| vtxo.server_pk())
-            })
-            .filter(|vtxo| requested_outpoints.contains(&vtxo.outpoint))
-            .map(|vtxo| VirtualTxOutPoint {
-                outpoint: vtxo.outpoint,
-                script_pubkey: vtxo.script.clone(),
-                expire_at: vtxo.expires_at,
-                amount: vtxo.amount,
-                assets: vtxo.assets.clone(),
-            })
+        let selected_contracts: Vec<_> = vtxo_list
+            .spendable_offchain_at(&server_info, now)
+            .filter(|entry| requested_outpoints.contains(&entry.vtxo().outpoint))
+            .cloned()
             .collect();
+        let selected: Vec<_> = selected_contracts.iter().map(coin_select_vtxo).collect();
 
         if selected.is_empty() {
             return Err(Error::ad_hoc("no matching VTXO outpoints found"));
@@ -393,7 +405,7 @@ where
             )));
         }
 
-        let inputs = self.build_vtxo_inputs(selected, &script_pubkey_to_vtxo_map)?;
+        let inputs = self.build_vtxo_inputs(selected_contracts)?;
 
         Ok(inputs)
     }
@@ -401,34 +413,20 @@ where
     /// Convert selected [`VirtualTxOutPoint`]s into [`send::VtxoInput`]s.
     pub(crate) fn build_vtxo_inputs(
         &self,
-        selected: Vec<VirtualTxOutPoint>,
-        script_pubkey_to_vtxo_map: &HashMap<bitcoin::ScriptBuf, ark_core::Vtxo>,
+        selected: Vec<AnnotatedVtxo>,
     ) -> Result<Vec<VtxoInput>, Error> {
         selected
             .into_iter()
-            .map(|vtp| {
-                let vtxo = script_pubkey_to_vtxo_map
-                    .get(&vtp.script_pubkey)
-                    .ok_or_else(|| {
-                        ark_core::Error::ad_hoc(format!(
-                            "missing VTXO for script pubkey: {}",
-                            vtp.script_pubkey
-                        ))
-                    })?;
+            .map(|entry| {
+                let spend_selection = entry.spend_selection(SpendPathKind::Forfeit)?;
 
-                let (forfeit_script, control_block) = vtxo
-                    .forfeit_spend_info()
-                    .context("failed to get forfeit spend info")?;
-
-                Ok(VtxoInput::new(
-                    forfeit_script,
-                    None,
-                    control_block,
-                    vtxo.tapscripts(),
-                    vtxo.script_pubkey(),
-                    vtp.amount,
-                    vtp.outpoint,
-                    vtp.assets,
+                Ok(VtxoInput::new_with_spend_selection(
+                    spend_selection,
+                    entry.tapscripts(),
+                    entry.script_pubkey(),
+                    entry.vtxo().amount,
+                    entry.vtxo().outpoint,
+                    entry.vtxo().assets.clone(),
                 ))
             })
             .collect()
@@ -556,11 +554,13 @@ where
             signed_checkpoint_txs: res.signed_checkpoint_txs,
         };
 
-        if let Err(err) = self.inner.key_provider.mark_as_used(&used_pk) {
-            tracing::warn!(
-                "Failed updating keypair cache for used change address: {:?}",
-                err
-            );
+        if let Some(key_provider) = self.inner.discoverable_key_provider.as_ref() {
+            if let Err(err) = key_provider.mark_as_used(&used_pk) {
+                tracing::warn!(
+                    "Failed updating keypair cache for used change address: {:?}",
+                    err
+                );
+            }
         }
 
         Ok(pending_tx)
@@ -695,11 +695,6 @@ where
 
         let ark_addresses = self.get_offchain_addresses().await?;
 
-        let script_pubkey_to_vtxo_map: HashMap<_, _> = ark_addresses
-            .iter()
-            .map(|(a, v)| (a.to_p2tr_script_pubkey(), v.clone()))
-            .collect();
-
         // Use pending_only filter to only fetch VTXOs that are spent but not
         // finalized. This is much cheaper than fetching all VTXOs when there
         // are no pending transactions (common case).
@@ -712,6 +707,7 @@ where
             .fetch_all_vtxos(request)
             .await
             .context("failed to fetch pending VTXOs")?;
+        let vtxos = self.annotate_vtxos(vtxos)?;
 
         tracing::debug!(num_pending_vtxos = vtxos.len(), "Fetched pending VTXOs");
 
@@ -726,35 +722,23 @@ where
         // Batch inputs to avoid oversized intents.
         for (batch_idx, batch) in vtxos.chunks(MAX_INPUTS_PER_INTENT).enumerate() {
             let mut vtxo_inputs = Vec::new();
-            for virtual_tx_outpoint in batch {
-                let vtxo = match script_pubkey_to_vtxo_map.get(&virtual_tx_outpoint.script) {
-                    Some(v) => v,
-                    None => {
-                        tracing::warn!(
-                            outpoint = %virtual_tx_outpoint.outpoint,
-                            script = %virtual_tx_outpoint.script,
-                            "Skipping VTXO with unknown script"
-                        );
-                        continue;
-                    }
-                };
-                let spend_info = vtxo
-                    .forfeit_spend_info()
-                    .context("failed to get forfeit spend info")?;
+            for entry in batch {
+                let spend_selection = entry
+                    .spend_selection(SpendPathKind::Forfeit)
+                    .context("failed to get forfeit spend selection")?;
 
-                vtxo_inputs.push(intent::Input::new(
-                    virtual_tx_outpoint.outpoint,
-                    vtxo.exit_delay(),
-                    None,
+                vtxo_inputs.push(intent::Input::new_with_spend_selection(
+                    entry.vtxo().outpoint,
+                    entry.exit_delay()?,
                     TxOut {
-                        value: virtual_tx_outpoint.amount,
-                        script_pubkey: vtxo.script_pubkey(),
+                        value: entry.vtxo().amount,
+                        script_pubkey: entry.script_pubkey(),
                     },
-                    vtxo.tapscripts(),
-                    spend_info,
+                    entry.tapscripts(),
+                    spend_selection,
                     false,
-                    virtual_tx_outpoint.is_swept,
-                    virtual_tx_outpoint.assets.clone(),
+                    entry.vtxo().is_swept,
+                    entry.vtxo().assets.clone(),
                 ));
             }
 

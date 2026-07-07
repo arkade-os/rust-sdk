@@ -6,7 +6,6 @@ use crate::batch::BatchOutputType;
 use crate::error::ErrorContext as _;
 use crate::swap_storage::SwapStorage;
 use crate::timeout_op;
-use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use crate::Blockchain;
 use crate::Client;
@@ -175,7 +174,7 @@ pub struct PendingVhtlcSpendTx {
 impl<B, W, S> Client<B, W, S>
 where
     B: Blockchain,
-    W: BoardingWallet + OnchainWallet,
+    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     // Submarine swap.
@@ -3461,9 +3460,13 @@ where
             return false;
         };
 
-        match self.inner.key_provider.derive_at_discovery_index(index) {
+        let Some(key_provider) = self.inner.discoverable_key_provider.as_ref() else {
+            return false;
+        };
+
+        match key_provider.derive_at_discovery_index(index) {
             Ok(Some(kp)) if kp.x_only_public_key().0 == *pk => {
-                if let Err(e) = self.inner.key_provider.cache_discovered_keypair(index, kp) {
+                if let Err(e) = key_provider.cache_discovered_keypair(index, kp) {
                     tracing::warn!(swap_id, %e, "Failed to cache swap key");
                     return false;
                 }

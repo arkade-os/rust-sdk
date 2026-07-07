@@ -74,53 +74,30 @@ pub trait KeyProvider: Send + Sync {
     ///
     /// A vector of X-only public keys known to this provider
     fn get_cached_pks(&self) -> Result<Vec<bitcoin::XOnlyPublicKey>, Error>;
+}
 
-    /// Returns true if this provider supports key discovery
-    ///
-    /// HD wallets return true since they can derive and discover previously used keys.
-    /// Static key providers return false (single key, nothing to discover).
-    fn supports_discovery(&self) -> bool {
-        false
-    }
-
+/// Key provider extension for index-based discovery and restore.
+pub trait DiscoverableKeyProvider: KeyProvider {
     /// Get the derivation index for a cached public key.
-    ///
-    /// Returns `None` if the provider doesn't support index-based derivation
-    /// or if the key is not in the cache.
-    fn get_derivation_index_for_pk(&self, _pk: &bitcoin::XOnlyPublicKey) -> Option<u32> {
-        None
-    }
+    fn get_derivation_index_for_pk(&self, pk: &bitcoin::XOnlyPublicKey) -> Option<u32>;
 
-    /// Derive a keypair at a specific index without caching
-    ///
-    /// This is used during discovery to check keys without affecting the provider's state.
-    /// Returns `None` if the provider doesn't support index-based derivation.
-    ///
-    /// # Arguments
-    ///
-    /// * `index` - The derivation index (appended to base path for HD wallets)
-    fn derive_at_discovery_index(&self, _index: u32) -> Result<Option<Keypair>, Error> {
-        Ok(None)
-    }
+    /// Derive a keypair at a specific index without caching.
+    fn derive_at_discovery_index(&self, index: u32) -> Result<Option<Keypair>, Error>;
 
-    /// Cache a discovered keypair at the given index
+    /// Cache a discovered keypair at the given index.
     ///
     /// This is called after discovery determines a key is "used" (has VTXOs).
-    /// Also updates next_index if index >= current next_index to avoid collisions.
-    ///
-    /// No-op for providers that don't support discovery.
-    ///
-    /// # Arguments
-    ///
-    /// * `index` - The derivation index
-    /// * `kp` - The keypair to cache
-    fn cache_discovered_keypair(&self, _index: u32, _kp: Keypair) -> Result<(), Error> {
-        Ok(())
-    }
+    /// Implementations should also advance receive-key state to avoid reuse.
+    fn cache_discovered_keypair(&self, index: u32, kp: Keypair) -> Result<(), Error>;
 
-    fn mark_as_used(&self, _pk: &bitcoin::XOnlyPublicKey) -> Result<(), Error> {
-        Ok(())
-    }
+    /// Derive and cache the keypair at a persisted derivation index.
+    ///
+    /// This is used after loading persisted contracts so HD wallets can sign for stored
+    /// contracts immediately after restart, without running a full restore scan.
+    /// Implementations must not advance receive-key discovery state here.
+    fn cache_keypair_at_index(&self, index: u32) -> Result<(), Error>;
+
+    fn mark_as_used(&self, pk: &bitcoin::XOnlyPublicKey) -> Result<(), Error>;
 }
 
 /// A simple key provider that uses a static keypair
@@ -416,11 +393,9 @@ impl KeyProvider for Bip32KeyProvider {
 
         Ok(cache.keys().copied().collect())
     }
+}
 
-    fn supports_discovery(&self) -> bool {
-        true
-    }
-
+impl DiscoverableKeyProvider for Bip32KeyProvider {
     fn get_derivation_index_for_pk(&self, pk: &bitcoin::XOnlyPublicKey) -> Option<u32> {
         let cache = self.key_cache.read().ok()?;
         cache.get(pk).map(|v| v.path_index)
@@ -462,6 +437,24 @@ impl KeyProvider for Bip32KeyProvider {
             }
         }
 
+        Ok(())
+    }
+
+    fn cache_keypair_at_index(&self, index: u32) -> Result<(), Error> {
+        let kp = self.derive_at_index(index)?;
+        let pk = kp.x_only_public_key().0;
+        let mut cache = self
+            .key_cache
+            .write()
+            .map_err(|e| Error::ad_hoc(format!("Failed to lock key_cache: {e}")))?;
+        cache.insert(
+            pk,
+            KeyCacheValue {
+                path_index: index,
+                kp,
+                used: true,
+            },
+        );
         Ok(())
     }
 
@@ -547,7 +540,7 @@ impl KeyProvider for Bip32KeyProvider {
 }
 
 // Implement KeyProvider for Arc<T> where T: KeyProvider
-impl<T: KeyProvider> KeyProvider for Arc<T> {
+impl<T: KeyProvider + ?Sized> KeyProvider for Arc<T> {
     fn get_next_keypair(&self, keypair_index: KeypairIndex) -> Result<Keypair, Error> {
         (**self).get_next_keypair(keypair_index)
     }
@@ -563,11 +556,9 @@ impl<T: KeyProvider> KeyProvider for Arc<T> {
     fn get_cached_pks(&self) -> Result<Vec<bitcoin::XOnlyPublicKey>, Error> {
         (**self).get_cached_pks()
     }
+}
 
-    fn supports_discovery(&self) -> bool {
-        (**self).supports_discovery()
-    }
-
+impl<T: DiscoverableKeyProvider + ?Sized> DiscoverableKeyProvider for Arc<T> {
     fn get_derivation_index_for_pk(&self, pk: &bitcoin::XOnlyPublicKey) -> Option<u32> {
         (**self).get_derivation_index_for_pk(pk)
     }
@@ -580,7 +571,52 @@ impl<T: KeyProvider> KeyProvider for Arc<T> {
         (**self).cache_discovered_keypair(index, kp)
     }
 
+    fn cache_keypair_at_index(&self, index: u32) -> Result<(), Error> {
+        (**self).cache_keypair_at_index(index)
+    }
+
     fn mark_as_used(&self, pk: &bitcoin::XOnlyPublicKey) -> Result<(), Error> {
         (**self).mark_as_used(pk)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin::Network;
+    use std::str::FromStr;
+
+    #[test]
+    fn cache_keypair_at_index_hydrates_hd_lookup_after_restart() {
+        let seed = [7_u8; 32];
+        let master = Xpriv::new_master(Network::Regtest, &seed).unwrap();
+        let base_path = DerivationPath::from_str("m/86'/1'/0'/0").unwrap();
+
+        let original = Bip32KeyProvider::new(master, base_path.clone());
+        let expected = original.derive_at_discovery_index(7).unwrap().unwrap();
+        let expected_pk = expected.x_only_public_key().0;
+        let first_receive_pk = original
+            .derive_at_discovery_index(0)
+            .unwrap()
+            .unwrap()
+            .x_only_public_key()
+            .0;
+
+        let restarted = Bip32KeyProvider::new(master, base_path);
+        assert!(restarted.get_keypair_for_pk(&expected_pk).is_err());
+
+        restarted.cache_keypair_at_index(7).unwrap();
+        let actual = restarted.get_keypair_for_pk(&expected_pk).unwrap();
+
+        assert_eq!(actual.x_only_public_key().0, expected_pk);
+        assert_eq!(restarted.get_derivation_index_for_pk(&expected_pk), Some(7));
+        assert_eq!(
+            restarted
+                .get_next_keypair(KeypairIndex::LastUnused)
+                .unwrap()
+                .x_only_public_key()
+                .0,
+            first_receive_pk
+        );
     }
 }

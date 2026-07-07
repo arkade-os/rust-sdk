@@ -3,10 +3,17 @@ use crate::key_provider::KeypairIndex;
 use crate::utils::sleep;
 use crate::utils::timeout_op;
 use crate::utils::unix_now;
-use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use ark_core::asset::AssetId;
 use ark_core::build_anchor_tx;
+use ark_core::contract::BoardingContract;
+use ark_core::contract::ContractContext;
+use ark_core::contract::ContractState;
+use ark_core::contract::ContractType;
+use ark_core::contract::DefaultVtxoContract;
+use ark_core::contract::DelegateVtxoContract;
+use ark_core::contract::StoredContract;
+use ark_core::contract::VhtlcContract;
 use ark_core::history;
 use ark_core::history::generate_incoming_vtxo_transaction_history;
 use ark_core::history::generate_outgoing_vtxo_transaction_history;
@@ -17,7 +24,6 @@ use ark_core::server::GetVtxosRequest;
 use ark_core::server::SubscriptionResponse;
 use ark_core::server::VirtualTxOutPoint;
 use ark_core::ArkAddress;
-use ark_core::BoardingOutput;
 use ark_core::ExplorerUtxo;
 use ark_core::UtxoCoinSelection;
 use ark_core::Vtxo;
@@ -28,9 +34,12 @@ use bitcoin::bip32::DerivationPath;
 use bitcoin::bip32::Xpriv;
 use bitcoin::key::Keypair;
 use bitcoin::key::Secp256k1;
+use bitcoin::secp256k1::schnorr::Signature;
 use bitcoin::secp256k1::All;
+use bitcoin::secp256k1::Message;
 use bitcoin::Address;
 use bitcoin::Amount;
+use bitcoin::Network;
 use bitcoin::OutPoint;
 use bitcoin::ScriptBuf;
 use bitcoin::Transaction;
@@ -42,10 +51,12 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::RwLock;
 use std::time::Duration;
 use std::time::Instant;
 
+pub mod contract;
 pub mod error;
 pub mod key_provider;
 pub mod swap_storage;
@@ -63,6 +74,7 @@ mod unilateral_exit;
 mod utils;
 
 pub use ark_core::server::DeprecatedSignerStatus;
+pub use ark_core::server::ServerSignerStatus;
 pub use asset::IssueAssetResult;
 pub use boltz::ChainSwapAmount;
 pub use boltz::ChainSwapData;
@@ -77,8 +89,18 @@ pub use boltz::SwapStatus;
 pub use boltz::SwapStatusInfo;
 pub use boltz::SwapType;
 pub use boltz::TimeoutBlockHeights;
+pub use contract::AnnotatedBoardingOutput;
+pub use contract::AnnotatedVtxo;
+pub use contract::AnnotatedVtxoList;
+pub use contract::ContractManager;
+pub use contract::ContractRegistry;
+pub use contract::ContractStore;
+pub use contract::MemoryContractStore;
+#[cfg(feature = "sqlite")]
+pub use contract::SqliteContractStore;
 pub use error::Error;
 pub use key_provider::Bip32KeyProvider;
+pub use key_provider::DiscoverableKeyProvider;
 pub use key_provider::KeyProvider;
 pub use key_provider::StaticKeyProvider;
 pub use lightning_invoice;
@@ -102,6 +124,108 @@ pub const DEFAULT_GAP_LIMIT: u32 = 20;
 /// Default Boltz `referralId` sent with swap creation requests when the caller does not
 /// provide one. Identifies traffic originating from this SDK.
 pub const DEFAULT_BOLTZ_REFERRAL_ID: &str = "arkade-rs-SDK";
+
+/// Summary returned by [`Client::restore_contracts`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ContractRestoreReport {
+    /// Gap limit used for this scan.
+    pub gap_limit: u32,
+    /// First derived key index that was probed, if any.
+    pub scanned_from: Option<u32>,
+    /// One past the last derived key index that was probed, if any.
+    pub scanned_to_exclusive: Option<u32>,
+    /// Derived key indexes that were probed.
+    pub scanned_keys: u32,
+    /// Key indexes where at least one contract had activity.
+    pub discovered_key_indexes: Vec<u32>,
+    /// Highest discovered key index, if any.
+    pub last_used_key_index: Option<u32>,
+    /// Suggested next receive key index, if any.
+    pub next_key_index: Option<u32>,
+    /// Offchain default/delegate contracts with VTXO activity.
+    pub offchain_contracts: u32,
+    /// Boarding contracts with on-chain UTXO activity.
+    pub boarding_contracts: u32,
+    /// Contracts that were not already in the store.
+    pub inserted_contracts: u32,
+    /// Discovered contracts that were already present in the store.
+    pub known_contracts: u32,
+    /// Per-contract discovery details for caller UX.
+    pub entries: Vec<ContractRestoreEntry>,
+}
+
+impl ContractRestoreReport {
+    pub fn discovered_keys(&self) -> u32 {
+        self.discovered_key_indexes.len() as u32
+    }
+
+    pub fn discovered_contracts(&self) -> u32 {
+        self.entries.len() as u32
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContractRestoreEntry {
+    pub key_index: u32,
+    pub contract_type: ContractType,
+    pub script_pubkey: ScriptBuf,
+    pub status: ContractRestoreEntryStatus,
+    pub discovery: ContractRestoreDiscovery,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContractRestoreEntryStatus {
+    Inserted,
+    Known,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ContractRestoreDiscovery {
+    Offchain {
+        vtxos: Vec<ContractRestoreVtxo>,
+    },
+    Boarding {
+        outpoints: Vec<ContractRestoreOutpoint>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContractRestoreVtxo {
+    pub outpoint: OutPoint,
+    pub amount: Amount,
+    pub is_spent: bool,
+    pub is_swept: bool,
+    pub is_unrolled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContractRestoreOutpoint {
+    pub outpoint: OutPoint,
+    pub amount: Amount,
+    pub confirmation_blocktime: Option<u64>,
+    pub confirmations: u64,
+}
+
+/// Wallet-facing view of a stored contract.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContractInfo {
+    /// The validated stored contract row.
+    pub contract: StoredContract,
+    /// Address derived from the contract, when the SDK knows how to derive one.
+    pub address: Option<String>,
+    /// Kind of address in [`Self::address`].
+    pub address_kind: Option<ContractAddressKind>,
+    /// Server signer encoded in this contract, when the SDK knows how to decode it.
+    pub server_pk: Option<XOnlyPublicKey>,
+    /// Rotation status of [`Self::server_pk`] against the current server info.
+    pub signer_status: Option<ServerSignerStatus>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContractAddressKind {
+    Ark,
+    Bitcoin,
+}
 
 /// Default mainnet Arkade server URL.
 pub const ARKADE_MAINNET_URL: &str = "https://arkade.computer";
@@ -173,13 +297,13 @@ impl Default for OfflineClientConfig {
 /// # use ark_client::OfflineClient;
 /// # use ark_client::OfflineClientConfig;
 /// # use bitcoin::key::Keypair;
-/// # use bitcoin::secp256k1::{Message, SecretKey};
+/// # use bitcoin::secp256k1::SecretKey;
 /// # use std::sync::Arc;
-/// # use bitcoin::{Address, Amount, FeeRate, Network, Psbt, Transaction, Txid, XOnlyPublicKey};
-/// # use bitcoin::secp256k1::schnorr::Signature;
-/// # use ark_client::wallet::{Balance, BoardingWallet, OnchainWallet, Persistence};
+/// # use bitcoin::{Address, Amount, FeeRate, Psbt, Transaction, Txid};
+/// # use ark_client::wallet::{Balance, OnchainWallet};
 /// # use ark_client::InMemorySwapStorage;
-/// # use ark_core::{BoardingOutput, UtxoCoinSelection, ExplorerUtxo};
+/// # use ark_core::{UtxoCoinSelection, ExplorerUtxo};
+/// # use ark_client::StaticKeyProvider;
 ///
 /// struct MyBlockchain {}
 /// #
@@ -250,48 +374,6 @@ impl Default for OfflineClientConfig {
 /// # }
 /// #
 ///
-/// struct InMemoryDb {}
-/// # impl Persistence for InMemoryDb {
-/// #
-/// #     fn save_boarding_output(
-/// #         &self,
-/// #         sk: SecretKey,
-/// #         boarding_output: BoardingOutput,
-/// #     ) -> Result<(), Error> {
-/// #       unimplemented!()
-/// #     }
-/// #
-/// #     fn load_boarding_outputs(&self) -> Result<Vec<BoardingOutput>, Error> {
-/// #           unimplemented!()
-/// #     }
-/// #
-/// #     fn sk_for_pk(&self, pk: &XOnlyPublicKey) -> Result<SecretKey, Error> {
-/// #         unimplemented!()
-/// #     }
-/// # }
-/// #
-/// #
-/// # impl BoardingWallet for MyWallet
-/// # where
-/// # {
-/// #     fn new_boarding_output(
-/// #         &self,
-/// #         server_pk: XOnlyPublicKey,
-/// #         exit_delay: bitcoin::Sequence,
-/// #         network: Network,
-/// #     ) -> Result<BoardingOutput, Error> {
-/// #         unimplemented!()
-/// #     }
-/// #
-/// #     fn get_boarding_outputs(&self) -> Result<Vec<BoardingOutput>, Error> {
-/// #         unimplemented!()
-/// #     }
-/// #
-/// #     fn sign_for_pk(&self, pk: &XOnlyPublicKey, msg: &Message) -> Result<Signature, Error> {
-/// #         unimplemented!()
-/// #     }
-/// # }
-/// #
 /// // Initialize the client with a static keypair
 /// async fn init_client_with_keypair() -> Result<Client<MyBlockchain, MyWallet, InMemorySwapStorage>, ark_client::Error> {
 ///     // Create a keypair for signing transactions
@@ -360,6 +442,7 @@ pub struct OfflineClient<B, W, S> {
     // TODO: We could introduce a generic interface so that consumers can use either GRPC or REST.
     network_client: ark_grpc::Client,
     key_provider: Arc<dyn KeyProvider>,
+    discoverable_key_provider: Option<Arc<dyn DiscoverableKeyProvider>>,
     blockchain: Arc<B>,
     secp: Secp256k1<All>,
     wallet: Arc<W>,
@@ -368,6 +451,7 @@ pub struct OfflineClient<B, W, S> {
     boltz_referral_id: Option<String>,
     timeout: Duration,
     server_info_ttl: Duration,
+    contract_store: Arc<Mutex<Option<Box<dyn ContractStore>>>>,
     delegator_pk: Option<XOnlyPublicKey>,
     historical_delegator_pks: Vec<XOnlyPublicKey>,
 }
@@ -385,6 +469,90 @@ struct ServerState {
     server_info: server::Info,
     fee_estimator: ark_fees::Estimator,
     server_info_refreshed_at: Instant,
+    contract_manager: Mutex<ContractManager>,
+}
+
+#[derive(Clone, Debug)]
+enum RestoreCandidate {
+    DefaultVtxo(DefaultVtxoContract),
+    DelegateVtxo(DelegateVtxoContract),
+    Boarding(BoardingContract),
+}
+
+#[derive(Clone, Debug)]
+enum RestoreDiscoveryTarget {
+    Offchain(ArkAddress),
+    Boarding(Address),
+}
+
+impl RestoreCandidate {
+    fn discovery_target(
+        &self,
+        secp: &Secp256k1<All>,
+        ctx: &ContractContext,
+    ) -> Result<RestoreDiscoveryTarget, Error> {
+        match self {
+            Self::DefaultVtxo(contract) => Ok(RestoreDiscoveryTarget::Offchain(
+                Vtxo::new_default(
+                    secp,
+                    contract.server,
+                    contract.owner,
+                    contract.exit_delay,
+                    ctx.network(),
+                )?
+                .to_ark_address(),
+            )),
+            Self::DelegateVtxo(contract) => Ok(RestoreDiscoveryTarget::Offchain(
+                Vtxo::new_with_delegator(
+                    secp,
+                    contract.server,
+                    contract.owner,
+                    contract.delegator,
+                    contract.exit_delay,
+                    ctx.network(),
+                )?
+                .to_ark_address(),
+            )),
+            Self::Boarding(contract) => Ok(RestoreDiscoveryTarget::Boarding(
+                contract.boarding_output(ctx)?.address().clone(),
+            )),
+        }
+    }
+
+    fn script_pubkey(
+        &self,
+        secp: &Secp256k1<All>,
+        ctx: &ContractContext,
+    ) -> Result<ScriptBuf, Error> {
+        match self {
+            Self::DefaultVtxo(contract) => Ok(Vtxo::new_default(
+                secp,
+                contract.server,
+                contract.owner,
+                contract.exit_delay,
+                ctx.network(),
+            )?
+            .script_pubkey()),
+            Self::DelegateVtxo(contract) => Ok(Vtxo::new_with_delegator(
+                secp,
+                contract.server,
+                contract.owner,
+                contract.delegator,
+                contract.exit_delay,
+                ctx.network(),
+            )?
+            .script_pubkey()),
+            Self::Boarding(contract) => Ok(contract.boarding_output(ctx)?.script_pubkey()),
+        }
+    }
+
+    fn contract_type(&self) -> ContractType {
+        match self {
+            Self::DefaultVtxo(_) => ContractType::default_vtxo(),
+            Self::DelegateVtxo(_) => ContractType::delegate_vtxo(),
+            Self::Boarding(_) => ContractType::boarding(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -476,13 +644,47 @@ pub trait Blockchain {
 impl<B, W, S> OfflineClient<B, W, S>
 where
     B: Blockchain,
-    W: BoardingWallet + OnchainWallet,
+    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     /// Create a new offline client with a generic key provider.
     pub fn with_key_provider(
         config: OfflineClientConfig,
         key_provider: Arc<dyn KeyProvider>,
+        blockchain: Arc<B>,
+        wallet: Arc<W>,
+        swap_storage: Arc<S>,
+    ) -> Self {
+        Self::with_key_provider_parts(config, key_provider, None, blockchain, wallet, swap_storage)
+    }
+
+    /// Create a new offline client with a discoverable key provider.
+    pub fn with_discoverable_key_provider<P>(
+        config: OfflineClientConfig,
+        key_provider: Arc<P>,
+        blockchain: Arc<B>,
+        wallet: Arc<W>,
+        swap_storage: Arc<S>,
+    ) -> Self
+    where
+        P: DiscoverableKeyProvider + 'static,
+    {
+        let core_key_provider: Arc<dyn KeyProvider> = key_provider.clone();
+        let discoverable_key_provider: Arc<dyn DiscoverableKeyProvider> = key_provider;
+        Self::with_key_provider_parts(
+            config,
+            core_key_provider,
+            Some(discoverable_key_provider),
+            blockchain,
+            wallet,
+            swap_storage,
+        )
+    }
+
+    fn with_key_provider_parts(
+        config: OfflineClientConfig,
+        key_provider: Arc<dyn KeyProvider>,
+        discoverable_key_provider: Option<Arc<dyn DiscoverableKeyProvider>>,
         blockchain: Arc<B>,
         wallet: Arc<W>,
         swap_storage: Arc<S>,
@@ -509,10 +711,10 @@ where
             BoltzReferralId::Disabled => None,
             BoltzReferralId::Custom(referral_id) => Some(referral_id),
         };
-
         Self {
             network_client,
             key_provider,
+            discoverable_key_provider,
             blockchain,
             secp,
             wallet,
@@ -521,6 +723,7 @@ where
             boltz_referral_id,
             timeout: config.timeout,
             server_info_ttl: config.server_info_ttl,
+            contract_store: Arc::new(Mutex::new(None)),
             delegator_pk: config.delegator_pk,
             historical_delegator_pks,
         }
@@ -551,7 +754,20 @@ where
             DerivationPath::from_str(DEFAULT_DERIVATION_PATH).expect("valid derivation path"),
         );
         let key_provider = Arc::new(Bip32KeyProvider::new(xpriv, path));
-        Self::with_key_provider(config, key_provider, blockchain, wallet, swap_storage)
+        Self::with_discoverable_key_provider(config, key_provider, blockchain, wallet, swap_storage)
+    }
+
+    /// Use a custom contract store for the connected client.
+    ///
+    /// If unset, the client uses an in-memory contract store.
+    pub fn with_contract_store(self, store: Box<dyn ContractStore>) -> Self {
+        let mut contract_store = self
+            .contract_store
+            .lock()
+            .expect("contract store lock should not be poisoned");
+        *contract_store = Some(store);
+        drop(contract_store);
+        self
     }
 
     /// Returns the currently configured delegator pubkey, if any.
@@ -562,6 +778,16 @@ where
     /// Returns the Boltz referral ID sent with all swap creation requests, if any.
     pub fn boltz_referral_id(&self) -> Option<&str> {
         self.boltz_referral_id.as_deref()
+    }
+
+    fn contract_manager(&self, network: Network) -> Result<ContractManager, Error> {
+        let store = self
+            .contract_store
+            .lock()
+            .map_err(|_| Error::ad_hoc("contract store lock poisoned"))?
+            .take()
+            .unwrap_or_else(|| Box::new(MemoryContractStore::new()));
+        Ok(ContractManager::new(network, store))
     }
 
     /// Connects to the Ark server and retrieves server information.
@@ -619,10 +845,13 @@ where
         tracing::debug!(ark_server_url = ?self.network_client, "Connected to Ark server");
 
         let fee_estimator = build_fee_estimator(&server_info)?;
+        let mut contract_manager = self.contract_manager(server_info.network)?;
+        contract_manager.register_builtins()?;
         let state = Arc::new(RwLock::new(ServerState {
             server_info: server_info.clone(),
             fee_estimator,
             server_info_refreshed_at: Instant::now(),
+            contract_manager: Mutex::new(contract_manager),
         }));
         let hook_state = state.clone();
         self.network_client
@@ -637,20 +866,89 @@ where
             server_info_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
 
-        // Eagerly persist boarding rows for every signer/delay candidate the wallet should watch.
-        // The migration boarding leg reads the wallet DB only; without this connect-time seed, a
-        // deprecated-signer boarding UTXO could be invisible until the caller happened to call
-        // `get_boarding_addresses()`. Re-persisting is idempotent, so it is safe on every connect.
-        if let Err(error) = client.persist_watch_boarding_outputs(&server_info) {
-            tracing::warn!(?error, "Failed to persist boarding outputs at connect");
-        }
+        client.hydrate_persisted_contract_keys()?;
 
-        if let Err(error) = client.discover_keys(DEFAULT_GAP_LIMIT).await {
-            tracing::warn!(?error, "Failed during key discovery");
-        };
+        // Eagerly persist the bounded baseline contract set. This mirrors the TS SDK split:
+        // connect() registers the always-watched index-0/current-key surface, while full
+        // gap-limit wallet regeneration is explicit via restore_contracts().
+        if let Err(error) = client.persist_baseline_contracts(&server_info) {
+            tracing::warn!(?error, "Failed to persist baseline contracts at connect");
+        }
 
         Ok(client)
     }
+}
+
+fn contract_info_from_stored(
+    contract: StoredContract,
+    server_info: &server::Info,
+    now_unix_secs: i64,
+) -> Result<ContractInfo, Error> {
+    let ctx = ContractContext::new(server_info.network);
+    let (address, address_kind, server_pk) = match &contract.contract_type {
+        contract_type if *contract_type == ContractType::default_vtxo() => {
+            let data: DefaultVtxoContract =
+                serde_json::from_value(contract.data.clone()).map_err(|e| {
+                    Error::ad_hoc(format!("failed to decode default vtxo contract: {e}"))
+                })?;
+            (
+                Some(data.vtxo(&ctx)?.to_ark_address().to_string()),
+                Some(ContractAddressKind::Ark),
+                Some(data.server),
+            )
+        }
+        contract_type if *contract_type == ContractType::delegate_vtxo() => {
+            let data: DelegateVtxoContract = serde_json::from_value(contract.data.clone())
+                .map_err(|e| {
+                    Error::ad_hoc(format!("failed to decode delegate vtxo contract: {e}"))
+                })?;
+            (
+                Some(data.vtxo(&ctx)?.to_ark_address().to_string()),
+                Some(ContractAddressKind::Ark),
+                Some(data.server),
+            )
+        }
+        contract_type if *contract_type == ContractType::boarding() => {
+            let data: BoardingContract = serde_json::from_value(contract.data.clone())
+                .map_err(|e| Error::ad_hoc(format!("failed to decode boarding contract: {e}")))?;
+            (
+                Some(data.boarding_output(&ctx)?.address().to_string()),
+                Some(ContractAddressKind::Bitcoin),
+                Some(data.server),
+            )
+        }
+        contract_type if *contract_type == ContractType::vhtlc() => {
+            let data: VhtlcContract = serde_json::from_value(contract.data.clone())
+                .map_err(|e| Error::ad_hoc(format!("failed to decode vhtlc contract: {e}")))?;
+            let address =
+                ark_core::vhtlc::VhtlcScript::new(data.options.clone(), server_info.network)
+                    .map_err(|e| Error::ad_hoc(format!("failed to build vhtlc address: {e}")))?
+                    .address()
+                    .to_string();
+            (
+                Some(address),
+                Some(ContractAddressKind::Ark),
+                Some(data.options.server),
+            )
+        }
+        _ => {
+            let address = Address::from_script(&contract.script_pubkey, server_info.network)
+                .ok()
+                .map(|address| address.to_string());
+            let address_kind = address.as_ref().map(|_| ContractAddressKind::Bitcoin);
+            (address, address_kind, None)
+        }
+    };
+    let signer_status =
+        server_pk.map(|server_pk| server_info.signer_status_at(server_pk, now_unix_secs));
+
+    Ok(ContractInfo {
+        contract,
+        address,
+        address_kind,
+        server_pk,
+        signer_status,
+    })
 }
 
 fn build_fee_estimator(server_info: &server::Info) -> Result<ark_fees::Estimator, Error> {
@@ -685,7 +983,7 @@ fn update_server_state(
 impl<B, W, S> Client<B, W, S>
 where
     B: Blockchain,
-    W: BoardingWallet + OnchainWallet,
+    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     /// Returns Ark server info, refreshing the cached snapshot when its TTL has expired.
@@ -764,6 +1062,33 @@ where
         self.inner.boltz_referral_id()
     }
 
+    /// List all contracts currently known to this wallet.
+    ///
+    /// This is a wallet-facing view over the contract store: each row includes the stored contract,
+    /// a derived address when the SDK knows the contract type, and signer-rotation status for
+    /// contracts that encode a server signer.
+    pub async fn list_contracts(&self) -> Result<Vec<ContractInfo>, Error> {
+        let server_info = self.server_info().await?;
+        let now = unix_now()?;
+        let contracts = {
+            let state = self
+                .state
+                .read()
+                .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+            let contracts = state
+                .contract_manager
+                .lock()
+                .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?
+                .list()?;
+            contracts
+        };
+
+        contracts
+            .into_iter()
+            .map(|contract| contract_info_from_stored(contract, &server_info, now))
+            .collect()
+    }
+
     /// Get a new offchain receiving address.
     ///
     /// When a delegator is configured (via [`OfflineClientConfig::delegator_pk`]),
@@ -786,11 +1111,7 @@ where
             .public_key()
             .into();
 
-        let vtxo = self.make_vtxo(server_info, server_signer, owner)?;
-
-        let ark_address = vtxo.to_ark_address();
-
-        Ok((ark_address, vtxo))
+        self.persist_offchain_vtxo_contract(server_info, server_signer, owner)
     }
 
     /// Get all known offchain addresses for this wallet.
@@ -804,6 +1125,81 @@ where
         self.get_offchain_addresses_with_server_info(&server_info)
     }
 
+    fn persist_baseline_contracts(&self, server_info: &server::Info) -> Result<(), Error> {
+        self.persist_baseline_offchain_contracts(server_info)?;
+        self.persist_watch_boarding_outputs(server_info)?;
+        Ok(())
+    }
+
+    fn hydrate_persisted_contract_keys(&self) -> Result<(), Error> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+        let contracts = state
+            .contract_manager
+            .lock()
+            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?
+            .list()?;
+
+        let mut indices: Vec<u32> = contracts
+            .into_iter()
+            .filter_map(|contract| contract.key_index)
+            .collect();
+        indices.sort_unstable();
+        indices.dedup();
+
+        let Some(key_provider) = self.inner.discoverable_key_provider.as_ref() else {
+            return Ok(());
+        };
+        for index in indices {
+            key_provider.cache_keypair_at_index(index)?;
+        }
+
+        Ok(())
+    }
+
+    fn persist_baseline_offchain_contracts(
+        &self,
+        server_info: &server::Info,
+    ) -> Result<Vec<(ArkAddress, Vtxo)>, Error> {
+        let owner = self
+            .next_keypair(KeypairIndex::LastUnused)?
+            .x_only_public_key()
+            .0;
+        let candidate_delays = ark_core::candidate_exit_delays(
+            server_info.unilateral_exit_delay,
+            server_info.network,
+        )?;
+
+        let mut results = Vec::new();
+        for server_signer in server_info.all_server_keys() {
+            for exit_delay in &candidate_delays {
+                results.push(self.persist_default_vtxo_contract(
+                    server_info.network,
+                    server_signer,
+                    owner,
+                    *exit_delay,
+                )?);
+
+                let mut seen = HashSet::new();
+                for dpk in &self.inner.historical_delegator_pks {
+                    if !seen.insert(dpk) {
+                        continue;
+                    }
+                    results.push(self.persist_delegate_vtxo_contract(
+                        server_info.network,
+                        server_signer,
+                        owner,
+                        *dpk,
+                        *exit_delay,
+                    )?);
+                }
+            }
+        }
+        Ok(results)
+    }
+
     pub(crate) fn get_offchain_addresses_with_server_info(
         &self,
         server_info: &server::Info,
@@ -814,10 +1210,10 @@ where
         // known server key are discovered and visible in the balance.
         let all_server_keys: Vec<XOnlyPublicKey> = server_info.all_server_keys().collect();
         // Enumerate under every candidate exit delay (the advertised delay plus, on mainnet, the
-        // legacy delay), mirroring `discover_keys`: a VTXO minted before the operator shortened the
-        // delay lives at a legacy-delay address, so building only the current delay would hide it
-        // from `list_vtxos`/balance/migration even though its key was discovered. Off mainnet this
-        // is just the advertised delay (no behaviour change).
+        // legacy delay), mirroring `restore_contracts`: a VTXO minted before the operator shortened
+        // the delay lives at a legacy-delay address, so building only the current delay
+        // would hide it from `list_vtxos`/balance/migration even though its key was
+        // discovered. Off mainnet this is just the advertised delay (no behaviour change).
         let candidate_delays = ark_core::candidate_exit_delays(
             server_info.unilateral_exit_delay,
             server_info.network,
@@ -828,15 +1224,12 @@ where
         for owner_pk in &pks {
             for server_signer in &all_server_keys {
                 for exit_delay in &candidate_delays {
-                    // Default (2-leaf) address.
-                    let default_vtxo = Vtxo::new_default(
-                        self.secp(),
+                    results.push(self.persist_default_vtxo_contract(
+                        server_info.network,
                         *server_signer,
                         *owner_pk,
                         *exit_delay,
-                        server_info.network,
-                    )?;
-                    results.push((default_vtxo.to_ark_address(), default_vtxo));
+                    )?);
 
                     // Delegate addresses for all known delegator keys.
                     let mut seen = HashSet::new();
@@ -844,15 +1237,13 @@ where
                         if !seen.insert(dpk) {
                             continue;
                         }
-                        let delegate_vtxo = Vtxo::new_with_delegator(
-                            self.secp(),
+                        results.push(self.persist_delegate_vtxo_contract(
+                            server_info.network,
                             *server_signer,
                             *owner_pk,
                             *dpk,
                             *exit_delay,
-                            server_info.network,
-                        )?;
-                        results.push((delegate_vtxo.to_ark_address(), delegate_vtxo));
+                        )?);
                     }
                 }
             }
@@ -861,147 +1252,256 @@ where
         Ok(results)
     }
 
-    /// Build a [`Vtxo`] for the given owner key, using a 3-leaf delegate VTXO if a delegator is
-    /// configured, otherwise a standard 2-leaf default VTXO.
-    fn make_vtxo(
+    fn persist_offchain_vtxo_contract(
         &self,
         server_info: &server::Info,
         server_signer: XOnlyPublicKey,
         owner: XOnlyPublicKey,
-    ) -> Result<Vtxo, Error> {
+    ) -> Result<(ArkAddress, Vtxo), Error> {
         match self.inner.delegator_pk {
-            Some(delegator) => Vtxo::new_with_delegator(
-                self.secp(),
+            Some(delegator) => self.persist_delegate_vtxo_contract(
+                server_info.network,
                 server_signer,
                 owner,
                 delegator,
                 server_info.unilateral_exit_delay,
+            ),
+            None => self.persist_default_vtxo_contract(
                 server_info.network,
-            )
-            .map_err(Into::into),
-            None => Vtxo::new_default(
-                self.secp(),
                 server_signer,
                 owner,
                 server_info.unilateral_exit_delay,
-                server_info.network,
-            )
-            .map_err(Into::into),
+            ),
         }
     }
 
-    /// Discover and cache used keys using BIP44-style gap limit
+    fn persist_default_vtxo_contract(
+        &self,
+        network: Network,
+        server: XOnlyPublicKey,
+        owner: XOnlyPublicKey,
+        exit_delay: bitcoin::Sequence,
+    ) -> Result<(ArkAddress, Vtxo), Error> {
+        let key_index = self.derivation_index_for_pk(&owner);
+        let contract = DefaultVtxoContract {
+            server,
+            owner,
+            exit_delay,
+        };
+        let state = self
+            .state
+            .read()
+            .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+        let mut manager = state
+            .contract_manager
+            .lock()
+            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?;
+        manager.insert_or_get(contract.clone(), ContractState::Active, key_index)?;
+        let ctx = ContractContext::new(network);
+        // Derive from the requested default VTXO contract, not from the stored row: the store may
+        // already contain an equivalent boarding row for this script, but the caller still needs
+        // the offchain Arkade address for this default VTXO script.
+        let vtxo = contract.vtxo(&ctx)?;
+        Ok((vtxo.to_ark_address(), vtxo))
+    }
+
+    fn persist_delegate_vtxo_contract(
+        &self,
+        network: Network,
+        server: XOnlyPublicKey,
+        owner: XOnlyPublicKey,
+        delegator: XOnlyPublicKey,
+        exit_delay: bitcoin::Sequence,
+    ) -> Result<(ArkAddress, Vtxo), Error> {
+        let key_index = self.derivation_index_for_pk(&owner);
+        let contract = DelegateVtxoContract {
+            server,
+            owner,
+            delegator,
+            exit_delay,
+        };
+        let state = self
+            .state
+            .read()
+            .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+        let mut manager = state
+            .contract_manager
+            .lock()
+            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?;
+        let stored = manager.insert_or_get(contract, ContractState::Active, key_index)?;
+        let contract = manager
+            .get_typed::<DelegateVtxoContract>(&stored.script_pubkey)?
+            .ok_or_else(|| Error::ad_hoc("missing delegate vtxo contract"))?;
+        let ctx = ContractContext::new(network);
+        let vtxo = contract.vtxo(&ctx)?;
+        Ok((vtxo.to_ark_address(), vtxo))
+    }
+
+    /// Restore persisted contracts using explicit contract discovery.
     ///
-    /// This method derives keys in batches, checks all at once via list_vtxos,
-    /// caches used ones, and stops when a full batch has no used keys.
+    /// This method derives candidate default VTXO, delegate VTXO, and boarding contracts for each
+    /// key index. It queries the Arkade VTXO index for offchain candidates and the configured
+    /// blockchain backend for boarding candidates, persists contracts that have activity, and stops
+    /// when a full batch has no discovered contracts.
     ///
-    /// Returns the number of discovered keys. No-op for StaticKeyProvider.
+    /// No-op for StaticKeyProvider.
     ///
     /// # Arguments
     ///
-    /// * `gap_limit` - Number of consecutive unused addresses before stopping
-    pub async fn discover_keys(&self, gap_limit: u32) -> Result<u32, Error> {
-        if !self.inner.key_provider.supports_discovery() {
-            tracing::debug!("Key provider does not support discovery, skipping");
-            return Ok(0);
+    /// * `gap_limit` - Number of consecutive unused key indexes before stopping
+    pub async fn restore_contracts(&self, gap_limit: u32) -> Result<ContractRestoreReport, Error> {
+        if gap_limit == 0 {
+            return Err(Error::ad_hoc("restore gap limit must be greater than zero"));
         }
 
+        let Some(key_provider) = self.inner.discoverable_key_provider.as_ref() else {
+            tracing::debug!("Key provider does not support discovery, skipping");
+            return Ok(ContractRestoreReport {
+                gap_limit,
+                ..Default::default()
+            });
+        };
+
         let server_info = &self.server_info().await?;
-        // Discover against current + all deprecated signers so that user keys used before a
-        // rotation are still found when recovering from seed.
+        let ctx = ContractContext::new(server_info.network);
         let all_server_keys: Vec<XOnlyPublicKey> = server_info.all_server_keys().collect();
-        // Probe each server key under every candidate exit delay (the advertised delay plus, on
-        // mainnet, the legacy delay), so VTXOs minted before the operator shortened the delay are
-        // still discovered. Off mainnet this is just the advertised delay (no behaviour change).
-        let candidate_delays = ark_core::candidate_exit_delays(
+        let offchain_exit_delays = ark_core::candidate_exit_delays(
             server_info.unilateral_exit_delay,
             server_info.network,
         )?;
+        let boarding_exit_delays =
+            ark_core::candidate_exit_delays(server_info.boarding_exit_delay, server_info.network)?;
 
         let mut start_index = 0u32;
-        let mut discovered_count = 0u32;
+        let mut report = ContractRestoreReport {
+            gap_limit,
+            ..Default::default()
+        };
 
-        tracing::info!(gap_limit, "Starting key discovery");
+        tracing::info!(gap_limit, "Starting contract restore");
 
         loop {
-            // Generate a batch of gap_limit keys
-            let mut batch: Vec<(u32, Keypair, Vec<ArkAddress>)> =
-                Vec::with_capacity(gap_limit as usize);
-
-            for i in 0..gap_limit {
-                let index = start_index
-                    .checked_add(i)
-                    .ok_or_else(|| Error::ad_hoc("Key discovery index overflow"))?;
-
-                let kp = match self.inner.key_provider.derive_at_discovery_index(index)? {
-                    Some(kp) => kp,
-                    None => break,
-                };
-
-                let owner_pk = kp.x_only_public_key().0;
-
-                let mut addresses = Vec::new();
-
-                for server_signer in &all_server_keys {
-                    for exit_delay in &candidate_delays {
-                        // Default (2-leaf) address.
-                        let default_vtxo = Vtxo::new_default(
-                            self.secp(),
-                            *server_signer,
-                            owner_pk,
-                            *exit_delay,
-                            server_info.network,
-                        )?;
-                        addresses.push(default_vtxo.to_ark_address());
-
-                        // Delegate (3-leaf) addresses for each known delegator.
-                        for dpk in &self.inner.historical_delegator_pks {
-                            let delegate_vtxo = Vtxo::new_with_delegator(
-                                self.secp(),
-                                *server_signer,
-                                owner_pk,
-                                *dpk,
-                                *exit_delay,
-                                server_info.network,
-                            )?;
-                            addresses.push(delegate_vtxo.to_ark_address());
-                        }
-                    }
-                }
-
-                batch.push((index, kp, addresses));
-            }
+            let batch = self.restore_candidate_batch(
+                start_index,
+                gap_limit,
+                &all_server_keys,
+                &offchain_exit_delays,
+                &boarding_exit_delays,
+            )?;
 
             if batch.is_empty() {
                 break;
             }
 
-            // Query all addresses in batch at once
-            let addresses = batch.iter().flat_map(|(_, _, addrs)| addrs.iter().copied());
+            report.scanned_from.get_or_insert(start_index);
+            let scanned_to_exclusive = start_index
+                .checked_add(batch.len() as u32)
+                .ok_or_else(|| Error::ad_hoc("Key discovery index overflow"))?;
+            report.scanned_to_exclusive = Some(scanned_to_exclusive);
+            report.scanned_keys += batch.len() as u32;
 
-            let vtxo_list = self.list_vtxos_for_addresses(addresses).await?;
+            let mut offchain_addresses = Vec::new();
+            for (_, _, candidates) in &batch {
+                for candidate in candidates {
+                    if let RestoreDiscoveryTarget::Offchain(address) =
+                        candidate.discovery_target(self.secp(), &ctx)?
+                    {
+                        offchain_addresses.push(address);
+                    }
+                }
+            }
+            let vtxo_list = self
+                .list_vtxos_for_addresses(offchain_addresses.into_iter())
+                .await?;
+            let mut offchain_vtxos_by_script =
+                HashMap::<ScriptBuf, Vec<ContractRestoreVtxo>>::new();
+            for vtxo in vtxo_list.all() {
+                offchain_vtxos_by_script
+                    .entry(vtxo.script.clone())
+                    .or_default()
+                    .push(ContractRestoreVtxo {
+                        outpoint: vtxo.outpoint,
+                        amount: vtxo.amount,
+                        is_spent: vtxo.is_spent,
+                        is_swept: vtxo.is_swept,
+                        is_unrolled: vtxo.is_unrolled,
+                    });
+            }
 
-            // Build set of used scripts from response
-            let used_scripts: HashSet<&ScriptBuf> = vtxo_list.all().map(|v| &v.script).collect();
-
-            // Cache keypairs for used addresses (match by script)
             let mut found_any = false;
-            for (index, kp, addrs) in batch {
-                let used_addr = addrs.iter().find(|addr| {
-                    let script = addr.to_p2tr_script_pubkey();
-                    used_scripts.contains(&script)
-                });
-                if let Some(addr) = used_addr {
-                    tracing::debug!(index, addr = %addr, "Found used address");
-                    self.inner
-                        .key_provider
-                        .cache_discovered_keypair(index, kp)?;
-                    discovered_count += 1;
+            for (index, kp, candidates) in batch {
+                let mut found_for_key = false;
+
+                for candidate in candidates {
+                    let script = candidate.script_pubkey(self.secp(), &ctx)?;
+                    let contract_type = candidate.contract_type();
+                    let target = candidate.discovery_target(self.secp(), &ctx)?;
+                    let discovery = match target {
+                        RestoreDiscoveryTarget::Offchain(_) => offchain_vtxos_by_script
+                            .get(&script)
+                            .filter(|vtxos| !vtxos.is_empty())
+                            .cloned()
+                            .map(|vtxos| ContractRestoreDiscovery::Offchain { vtxos }),
+                        RestoreDiscoveryTarget::Boarding(address) => {
+                            let outpoints = self
+                                .blockchain()
+                                .find_outpoints(&address)
+                                .await?
+                                .into_iter()
+                                .filter(|utxo| !utxo.is_spent)
+                                .map(|utxo| ContractRestoreOutpoint {
+                                    outpoint: utxo.outpoint,
+                                    amount: utxo.amount,
+                                    confirmation_blocktime: utxo.confirmation_blocktime,
+                                    confirmations: utxo.confirmations,
+                                })
+                                .collect::<Vec<_>>();
+                            (!outpoints.is_empty())
+                                .then_some(ContractRestoreDiscovery::Boarding { outpoints })
+                        }
+                    };
+
+                    let Some(discovery) = discovery else {
+                        continue;
+                    };
+
+                    let inserted = self.persist_restore_candidate(candidate, index)?;
+                    let status = if inserted {
+                        report.inserted_contracts += 1;
+                        ContractRestoreEntryStatus::Inserted
+                    } else {
+                        report.known_contracts += 1;
+                        ContractRestoreEntryStatus::Known
+                    };
+                    match &discovery {
+                        ContractRestoreDiscovery::Offchain { .. } => report.offchain_contracts += 1,
+                        ContractRestoreDiscovery::Boarding { .. } => report.boarding_contracts += 1,
+                    }
+                    report.entries.push(ContractRestoreEntry {
+                        key_index: index,
+                        contract_type,
+                        script_pubkey: script,
+                        status,
+                        discovery,
+                    });
+                    found_for_key = true;
+                }
+
+                if found_for_key {
+                    key_provider.cache_discovered_keypair(index, kp)?;
+                    report.discovered_key_indexes.push(index);
+                    report.last_used_key_index = Some(
+                        report
+                            .last_used_key_index
+                            .map_or(index, |last| last.max(index)),
+                    );
+                    report.next_key_index = report
+                        .last_used_key_index
+                        .and_then(|last| last.checked_add(1));
                     found_any = true;
                 }
             }
 
-            // Stop if no used addresses found in this batch (gap limit reached)
             if !found_any {
                 break;
             }
@@ -1011,22 +1511,129 @@ where
                 .ok_or_else(|| Error::ad_hoc("Key discovery index overflow"))?;
         }
 
-        tracing::info!(discovered_count, "Key discovery completed");
+        tracing::info!(?report, "Contract restore completed");
 
-        Ok(discovered_count)
+        Ok(report)
+    }
+
+    fn restore_candidate_batch(
+        &self,
+        start_index: u32,
+        gap_limit: u32,
+        server_keys: &[XOnlyPublicKey],
+        offchain_exit_delays: &[bitcoin::Sequence],
+        boarding_exit_delays: &[bitcoin::Sequence],
+    ) -> Result<Vec<(u32, Keypair, Vec<RestoreCandidate>)>, Error> {
+        let mut batch = Vec::with_capacity(gap_limit as usize);
+
+        for i in 0..gap_limit {
+            let index = start_index
+                .checked_add(i)
+                .ok_or_else(|| Error::ad_hoc("Key discovery index overflow"))?;
+            let Some(key_provider) = self.inner.discoverable_key_provider.as_ref() else {
+                break;
+            };
+            let Some(kp) = key_provider.derive_at_discovery_index(index)? else {
+                break;
+            };
+            let owner = kp.x_only_public_key().0;
+            let mut candidates = Vec::new();
+
+            for server in server_keys {
+                for exit_delay in offchain_exit_delays {
+                    candidates.push(RestoreCandidate::DefaultVtxo(DefaultVtxoContract {
+                        server: *server,
+                        owner,
+                        exit_delay: *exit_delay,
+                    }));
+
+                    let mut seen_delegators = HashSet::new();
+                    for delegator in &self.inner.historical_delegator_pks {
+                        if !seen_delegators.insert(delegator) {
+                            continue;
+                        }
+                        candidates.push(RestoreCandidate::DelegateVtxo(DelegateVtxoContract {
+                            server: *server,
+                            owner,
+                            delegator: *delegator,
+                            exit_delay: *exit_delay,
+                        }));
+                    }
+                }
+
+                for exit_delay in boarding_exit_delays {
+                    candidates.push(RestoreCandidate::Boarding(BoardingContract {
+                        server: *server,
+                        owner,
+                        exit_delay: *exit_delay,
+                    }));
+                }
+            }
+
+            batch.push((index, kp, candidates));
+        }
+
+        Ok(batch)
+    }
+
+    fn persist_restore_candidate(
+        &self,
+        candidate: RestoreCandidate,
+        key_index: u32,
+    ) -> Result<bool, Error> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+        let mut manager = state
+            .contract_manager
+            .lock()
+            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?;
+        let ctx = ContractContext::new(state.server_info.network);
+        let script = candidate.script_pubkey(self.secp(), &ctx)?;
+        let existed = manager.get(&script)?.is_some();
+
+        match candidate {
+            RestoreCandidate::DefaultVtxo(contract) => {
+                manager.insert_or_get(contract, ContractState::Active, Some(key_index))?;
+            }
+            RestoreCandidate::DelegateVtxo(contract) => {
+                manager.insert_or_get(contract, ContractState::Active, Some(key_index))?;
+            }
+            RestoreCandidate::Boarding(contract) => {
+                manager.insert_or_get(contract, ContractState::Active, Some(key_index))?;
+            }
+        }
+
+        Ok(!existed)
     }
 
     // At the moment we are always generating the same address.
     pub async fn get_boarding_address(&self) -> Result<Address, Error> {
         let server_info = &self.server_info().await?;
+        let owner = self
+            .next_keypair(KeypairIndex::LastUnused)?
+            .x_only_public_key()
+            .0;
 
-        let boarding_output = self.inner.wallet.new_boarding_output(
-            server_info.signer_pk.into(),
-            server_info.boarding_exit_delay,
-            server_info.network,
-        )?;
+        let contract = BoardingContract {
+            server: server_info.signer_pk.into(),
+            owner,
+            exit_delay: server_info.boarding_exit_delay,
+        };
+        let key_index = self.derivation_index_for_pk(&owner);
+        let state = self
+            .state
+            .read()
+            .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+        let stored = state
+            .contract_manager
+            .lock()
+            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?
+            .insert_or_get(contract, ContractState::Active, key_index)?;
 
-        Ok(boarding_output.address().clone())
+        Address::from_script(&stored.script_pubkey, server_info.network)
+            .map_err(|e| Error::ad_hoc(format!("invalid boarding contract script: {e}")))
     }
 
     pub fn get_onchain_address(&self) -> Result<Address, Error> {
@@ -1059,34 +1666,44 @@ where
     }
 
     /// Persist (idempotently) a boarding output for each signer the wallet should watch crossed
-    /// with each candidate exit delay, returning the created [`BoardingOutput`]s.
+    /// with each candidate exit delay, returning annotated boarding outputs.
     ///
     /// Covers the current signer plus every deprecated signer, each paired with
     /// [`ark_core::candidate_exit_delays`] (the advertised boarding-exit delay plus, on mainnet,
-    /// the legacy delay). Calling [`BoardingWallet::new_boarding_output`] writes the row to the
-    /// wallet's store; re-persisting the same boarding output is a harmless overwrite (the store
-    /// keys rows by [`BoardingOutput`] identity), so this is safe to call repeatedly — at connect
-    /// time and again from [`Client::get_boarding_addresses`].
+    /// the legacy delay). Re-persisting the same boarding contract is idempotent, so this is safe
+    /// to call repeatedly — at connect time and again from [`Client::get_boarding_addresses`].
     fn persist_watch_boarding_outputs(
         &self,
         server_info: &server::Info,
-    ) -> Result<Vec<BoardingOutput>, Error> {
+    ) -> Result<Vec<AnnotatedBoardingOutput>, Error> {
         let candidate_delays =
             ark_core::candidate_exit_delays(server_info.boarding_exit_delay, server_info.network)?;
+        let owner = self
+            .next_keypair(KeypairIndex::LastUnused)?
+            .x_only_public_key()
+            .0;
+        let key_index = self.derivation_index_for_pk(&owner);
+        let state = self
+            .state
+            .read()
+            .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+        let mut manager = state
+            .contract_manager
+            .lock()
+            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?;
 
-        let mut outputs = Vec::new();
         for server_pk in server_info.all_server_keys() {
             for exit_delay in &candidate_delays {
-                let boarding_output = self.inner.wallet.new_boarding_output(
-                    server_pk,
-                    *exit_delay,
-                    server_info.network,
-                )?;
-                outputs.push(boarding_output);
+                let contract = BoardingContract {
+                    server: server_pk,
+                    owner,
+                    exit_delay: *exit_delay,
+                };
+                manager.insert_or_get(contract, ContractState::Active, key_index)?;
             }
         }
 
-        Ok(outputs)
+        manager.annotated_boarding_outputs_for_exit_delays(&candidate_delays)
     }
 
     pub async fn get_virtual_tx_outpoints(
@@ -1097,7 +1714,7 @@ where
         self.fetch_all_vtxos(request).await
     }
 
-    pub async fn list_vtxos(&self) -> Result<(VtxoList, HashMap<ScriptBuf, Vtxo>), Error> {
+    pub async fn list_vtxos(&self) -> Result<AnnotatedVtxoList, Error> {
         let server_info = self.server_info().await?;
         self.list_vtxos_with_server_info(&server_info).await
     }
@@ -1105,21 +1722,12 @@ where
     pub(crate) async fn list_vtxos_with_server_info(
         &self,
         server_info: &server::Info,
-    ) -> Result<(VtxoList, HashMap<ScriptBuf, Vtxo>), Error> {
-        let ark_addresses = self.get_offchain_addresses_with_server_info(server_info)?;
+    ) -> Result<AnnotatedVtxoList, Error> {
+        let addresses = self.active_offchain_contract_addresses()?;
+        let virtual_tx_outpoints = self.get_virtual_tx_outpoints(addresses.into_iter()).await?;
+        let contract_vtxos = self.annotate_vtxos(virtual_tx_outpoints)?;
 
-        let script_pubkey_to_vtxo_map = ark_addresses
-            .iter()
-            .map(|(a, v)| (a.to_p2tr_script_pubkey(), v.clone()))
-            .collect();
-
-        let addresses = ark_addresses.iter().map(|(a, _)| a).copied();
-
-        let vtxo_list = self
-            .list_vtxos_for_addresses_with_server_info(server_info, addresses)
-            .await?;
-
-        Ok((vtxo_list, script_pubkey_to_vtxo_map))
+        Ok(AnnotatedVtxoList::new(server_info.dust, contract_vtxos))
     }
 
     pub async fn list_vtxos_for_addresses(
@@ -1149,33 +1757,14 @@ where
     pub async fn list_vtxos_for_outpoints(
         &self,
         outpoints: Vec<OutPoint>,
-    ) -> Result<(VtxoList, HashMap<ScriptBuf, Vtxo>), Error> {
-        let ark_addresses = self.get_offchain_addresses().await?;
-
-        let script_pubkey_to_vtxo_map = ark_addresses
-            .iter()
-            .map(|(a, v)| (a.to_p2tr_script_pubkey(), v.clone()))
-            .collect::<HashMap<_, _>>();
-
+    ) -> Result<AnnotatedVtxoList, Error> {
         let request = GetVtxosRequest::new_for_outpoints(&outpoints);
         let virtual_tx_outpoints = self.fetch_all_vtxos(request).await?;
-
-        // Filter out outpoints for which we don't have spend info.
-        let virtual_tx_outpoints = virtual_tx_outpoints
-            .into_iter()
-            .filter(|v| match script_pubkey_to_vtxo_map.get(&v.script) {
-                Some(_) => true,
-                None => {
-                    tracing::debug!(outpoint = %v.outpoint, "Missing spend info for VTXO");
-
-                    false
-                }
-            })
-            .collect();
-
-        let vtxo_list = VtxoList::new(self.server_info().await?.dust, virtual_tx_outpoints);
-
-        Ok((vtxo_list, script_pubkey_to_vtxo_map))
+        let contract_vtxos = self.annotate_vtxos(virtual_tx_outpoints)?;
+        Ok(AnnotatedVtxoList::new(
+            self.server_info().await?.dust,
+            contract_vtxos,
+        ))
     }
 
     pub async fn get_vtxo_chain(
@@ -1196,43 +1785,37 @@ where
     }
 
     pub async fn offchain_balance(&self) -> Result<OffChainBalance, Error> {
-        let (vtxo_list, script_map) = self.list_vtxos().await.context("failed to list VTXOs")?;
+        let vtxo_list = self.list_vtxos().await.context("failed to list VTXOs")?;
         let now = unix_now()?;
         let server_info = self.server_info().await?;
 
         let spendable_outpoints: HashSet<OutPoint> = vtxo_list
-            .spendable_offchain_at(&server_info, now, |script| {
-                script_map.get(script).map(|vtxo| vtxo.server_pk())
-            })
-            .map(|vtxo| vtxo.outpoint)
+            .spendable_offchain_at(&server_info, now)
+            .map(|entry| entry.vtxo().outpoint)
             .collect();
 
         let pre_confirmed = vtxo_list
             .pre_confirmed()
-            .filter(|v| spendable_outpoints.contains(&v.outpoint))
-            .fold(Amount::ZERO, |acc, x| acc + x.amount);
+            .filter(|entry| spendable_outpoints.contains(&entry.vtxo().outpoint))
+            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo().amount);
 
         let confirmed = vtxo_list
             .confirmed()
-            .filter(|v| spendable_outpoints.contains(&v.outpoint))
-            .fold(Amount::ZERO, |acc, x| acc + x.amount);
+            .filter(|entry| spendable_outpoints.contains(&entry.vtxo().outpoint))
+            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo().amount);
 
         let recoverable = vtxo_list
             .recoverable()
-            .fold(Amount::ZERO, |acc, x| acc + x.amount);
+            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo().amount);
 
         let pending_recovery = vtxo_list
-            .pending_recovery_due_to_signer_at(&server_info, now, |script| {
-                script_map.get(script).map(|vtxo| vtxo.server_pk())
-            })
-            .fold(Amount::ZERO, |acc, x| acc + x.amount);
+            .pending_recovery_due_to_signer_at(&server_info, now)
+            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo().amount);
 
         // Aggregate asset balances from currently offchain-spendable VTXOs only.
         let mut asset_balances: HashMap<AssetId, u64> = HashMap::new();
-        for vtxo in vtxo_list.spendable_offchain_at(&server_info, now, |script| {
-            script_map.get(script).map(|vtxo| vtxo.server_pk())
-        }) {
-            for asset in &vtxo.assets {
+        for entry in vtxo_list.spendable_offchain_at(&server_info, now) {
+            for asset in &entry.vtxo().assets {
                 let total = asset_balances
                     .get(&asset.asset_id)
                     .copied()
@@ -1305,10 +1888,16 @@ where
             }
         }
 
-        let (vtxo_list, _) = self.list_vtxos().await?;
+        let vtxo_list = self.list_vtxos().await?;
 
-        let spent_outpoints = vtxo_list.spent().cloned().collect::<Vec<_>>();
-        let unspent_outpoints = vtxo_list.all_unspent().cloned().collect::<Vec<_>>();
+        let spent_outpoints = vtxo_list
+            .spent()
+            .map(|entry| entry.vtxo().clone())
+            .collect::<Vec<_>>();
+        let unspent_outpoints = vtxo_list
+            .all_unspent()
+            .map(|entry| entry.vtxo().clone())
+            .collect::<Vec<_>>();
 
         let incoming_transactions = generate_incoming_vtxo_transaction_history(
             &spent_outpoints,
@@ -1431,8 +2020,76 @@ where
         self.inner.key_provider.get_keypair_for_pk(pk)
     }
 
+    fn sign_for_pk(&self, pk: &XOnlyPublicKey, msg: &Message) -> Result<Signature, Error> {
+        let keypair = self.keypair_by_pk(pk)?;
+        Ok(self.secp().sign_schnorr_no_aux_rand(msg, &keypair))
+    }
+
+    fn boarding_outputs(&self) -> Result<Vec<AnnotatedBoardingOutput>, Error> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+        // Include default VTXO rows only when their CSV delay matches a boarding delay candidate.
+        // This covers the equal-delay case where a default VTXO row is the stored row for a script
+        // that can also be used for boarding, without turning every default VTXO receive script
+        // into a boarding watch.
+        let candidate_delays = ark_core::candidate_exit_delays(
+            state.server_info.boarding_exit_delay,
+            state.server_info.network,
+        )?;
+        let outputs = state
+            .contract_manager
+            .lock()
+            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?
+            .annotated_boarding_outputs_for_exit_delays(&candidate_delays)?;
+        Ok(outputs)
+    }
+
+    fn active_offchain_contract_addresses(&self) -> Result<Vec<ArkAddress>, Error> {
+        self.active_offchain_contracts().map(|contracts| {
+            contracts
+                .into_iter()
+                .map(|contract| contract.address)
+                .collect()
+        })
+    }
+
+    fn active_offchain_contracts(&self) -> Result<Vec<contract::ActiveOffchainContract>, Error> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+        let candidate_delays = ark_core::candidate_exit_delays(
+            state.server_info.unilateral_exit_delay,
+            state.server_info.network,
+        )?;
+        let contracts = state
+            .contract_manager
+            .lock()
+            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?
+            .active_offchain_contracts(&candidate_delays)?;
+        Ok(contracts)
+    }
+
+    fn annotate_vtxos(&self, vtxos: Vec<VirtualTxOutPoint>) -> Result<Vec<AnnotatedVtxo>, Error> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+        let annotated = state
+            .contract_manager
+            .lock()
+            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?
+            .annotate_vtxos(vtxos)?;
+        Ok(annotated)
+    }
+
     fn derivation_index_for_pk(&self, pk: &XOnlyPublicKey) -> Option<u32> {
-        self.inner.key_provider.get_derivation_index_for_pk(pk)
+        self.inner
+            .discoverable_key_provider
+            .as_ref()
+            .and_then(|provider| provider.get_derivation_index_for_pk(pk))
     }
 
     fn secp(&self) -> &Secp256k1<All> {
@@ -1628,31 +2285,6 @@ mod digest_guard_tests {
             let secret_key = SecretKey::from_slice(&[2; 32]).unwrap();
             let keypair = Keypair::from_secret_key(&secp, &secret_key);
             Self { keypair, secp }
-        }
-    }
-
-    impl BoardingWallet for DummyWallet {
-        fn new_boarding_output(
-            &self,
-            server_pubkey: XOnlyPublicKey,
-            exit_delay: bitcoin::Sequence,
-            network: Network,
-        ) -> Result<BoardingOutput, Error> {
-            let owner = self.keypair.x_only_public_key().0;
-            BoardingOutput::new(&self.secp, server_pubkey, owner, exit_delay, network)
-                .map_err(Into::into)
-        }
-
-        fn get_boarding_outputs(&self) -> Result<Vec<BoardingOutput>, Error> {
-            Ok(Vec::new())
-        }
-
-        fn sign_for_pk(
-            &self,
-            _pk: &XOnlyPublicKey,
-            msg: &bitcoin::secp256k1::Message,
-        ) -> Result<bitcoin::secp256k1::schnorr::Signature, Error> {
-            Ok(self.secp.sign_schnorr_no_aux_rand(msg, &self.keypair))
         }
     }
 
@@ -1885,6 +2517,50 @@ mod digest_guard_tests {
     }
 
     #[tokio::test]
+    async fn list_contracts_returns_wallet_contract_views() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let client = connect_test_client(MockArkServer::default()).await;
+        let contracts = client.list_contracts().await.unwrap();
+
+        assert!(!contracts.is_empty());
+        assert!(contracts.iter().all(|entry| entry.address.is_some()));
+        assert!(contracts.iter().all(|entry| entry.signer_status.is_some()));
+    }
+
+    #[tokio::test]
+    async fn boarding_addresses_include_default_row_when_scripts_overlap() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let client = connect_test_client(MockArkServer::default()).await;
+        let addresses = client.get_boarding_addresses().await.unwrap();
+
+        assert_eq!(addresses.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn restore_contracts_rejects_zero_gap_limit() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let client = connect_test_client(MockArkServer::default()).await;
+        let err = client.restore_contracts(0).await.unwrap_err();
+
+        assert!(err.to_string().contains("gap limit"));
+    }
+
+    #[tokio::test]
+    async fn restore_contracts_reports_gap_limit_for_static_provider() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let client = connect_test_client(MockArkServer::default()).await;
+        let report = client.restore_contracts(20).await.unwrap();
+
+        assert_eq!(report.gap_limit, 20);
+        assert_eq!(report.scanned_keys, 0);
+        assert!(report.entries.is_empty());
+    }
+
+    #[tokio::test]
     async fn server_info_zero_ttl_always_refreshes() {
         let _ = rustls::crypto::ring::default_provider().install_default();
 
@@ -1942,6 +2618,8 @@ mod digest_guard_tests {
         inner.connect().await.unwrap();
 
         let initial_info: server::Info = info_response("stale-digest").try_into().unwrap();
+        let mut contract_manager = ContractManager::in_memory(initial_info.network);
+        contract_manager.register_builtins().unwrap();
         let cached_state = Arc::new(RwLock::new(ServerState {
             server_info: initial_info,
             fee_estimator: build_fee_estimator(&info_response("stale-digest").try_into().unwrap())
@@ -1949,6 +2627,7 @@ mod digest_guard_tests {
             server_info_refreshed_at: Instant::now()
                 - DEFAULT_SERVER_INFO_TTL
                 - Duration::from_secs(1),
+            contract_manager: Mutex::new(contract_manager),
         }));
         let hook_state = cached_state.clone();
         inner.set_info_refresh_hook(move |server_info| {

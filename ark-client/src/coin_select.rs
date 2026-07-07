@@ -1,10 +1,10 @@
 use crate::error::ErrorContext;
 use crate::swap_storage::SwapStorage;
-use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use crate::Blockchain;
 use crate::Client;
 use crate::Error;
+use ark_core::contract::SpendPathKind;
 use ark_core::unilateral_exit;
 use ark_core::ExplorerUtxo;
 use bitcoin::Amount;
@@ -35,10 +35,10 @@ pub async fn coin_select_for_onchain<B, W, S>(
 >
 where
     B: Blockchain,
-    W: BoardingWallet + OnchainWallet,
+    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
-    let boarding_outputs = client.inner.wallet.get_boarding_outputs()?;
+    let boarding_outputs = client.boarding_outputs()?;
 
     let now = Timestamp::now();
 
@@ -74,11 +74,18 @@ where
                 ) {
                     tracing::debug!(?outpoint, %amount, ?boarding_output, "Selected boarding output");
 
-                    if selected_boarding_outputs.insert(unilateral_exit::OnChainInput::new(
-                        boarding_output.clone(),
-                        *amount,
-                        *outpoint,
-                    )) {
+                    let script_pubkey = boarding_output.script_pubkey();
+                    let spend_selection = boarding_output.spend_selection(SpendPathKind::Exit)?;
+
+                    if selected_boarding_outputs.insert(
+                        unilateral_exit::OnChainInput::new_with_spend_selection(
+                            boarding_output.exit_delay(),
+                            script_pubkey,
+                            spend_selection,
+                            *amount,
+                            *outpoint,
+                        ),
+                    ) {
                         selected_amount += *amount;
                     }
                 }
@@ -88,7 +95,8 @@ where
 
     let mut selected_vtxo_outputs = HashSet::new();
 
-    for (_, vtxo) in client.get_offchain_addresses().await? {
+    for contract in client.active_offchain_contracts()? {
+        let vtxo = &contract.vtxo;
         if target_amount <= selected_amount {
             return Ok((
                 selected_boarding_outputs.into_iter().collect(),
@@ -116,15 +124,20 @@ where
                 ) {
                     tracing::debug!(?outpoint, %amount, ?vtxo, "Selected VTXO");
 
-                    selected_vtxo_outputs.insert(unilateral_exit::VtxoInput::new(
-                        *outpoint,
-                        vtxo.exit_delay(),
-                        TxOut {
-                            value: *amount,
-                            script_pubkey: vtxo.script_pubkey(),
-                        },
-                        vtxo.exit_spend_info()?,
-                    ));
+                    let script_pubkey = vtxo.script_pubkey();
+                    let spend_selection = contract.spend_selection(SpendPathKind::Exit)?;
+
+                    selected_vtxo_outputs.insert(
+                        unilateral_exit::VtxoInput::new_with_spend_selection(
+                            *outpoint,
+                            vtxo.exit_delay(),
+                            TxOut {
+                                value: *amount,
+                                script_pubkey,
+                            },
+                            spend_selection,
+                        ),
+                    );
                     selected_amount += *amount;
                 }
             }

@@ -11,7 +11,6 @@ use common::init_tracing;
 use common::set_up_client_with_seed;
 use common::set_up_client_with_seed_and_server_info_ttl;
 use common::wait_until_balance;
-use common::InMemoryDb;
 use common::Regtest;
 use rand::thread_rng;
 use rand::Rng;
@@ -374,7 +373,7 @@ pub async fn e2e_signer_rotation_status_due_now() {
     tracing::info!(?row, "DueNow status test passed");
 }
 
-type TestClient = Client<Regtest, Wallet<InMemoryDb>, InMemorySwapStorage>;
+type TestClient = Client<Regtest, Wallet, InMemorySwapStorage>;
 
 async fn wait_for_deprecated_signer(client: &TestClient) -> server::Info {
     let mut last_error = None;
@@ -398,7 +397,7 @@ async fn set_up_ttl_refresh_client(
     regtest: Arc<Regtest>,
     secp: Secp256k1<bitcoin::secp256k1::All>,
     seed: [u8; 32],
-) -> (TestClient, Arc<Wallet<InMemoryDb>>) {
+) -> (TestClient, Arc<Wallet>) {
     set_up_client_with_seed_and_server_info_ttl(
         "alice".to_string(),
         regtest,

@@ -1,6 +1,5 @@
 use crate::batch;
 use crate::batch::BatchOutputType;
-use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use crate::Client;
 use crate::Error;
@@ -16,7 +15,7 @@ use rand::Rng;
 impl<B, W, S> Client<B, W, S>
 where
     B: crate::Blockchain,
-    W: BoardingWallet + OnchainWallet,
+    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     /// Estimates the fee to collaboratively redeem VTXOs to an on-chain Bitcoin address.

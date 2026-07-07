@@ -2,7 +2,6 @@ use crate::error::ErrorContext as _;
 use crate::swap_storage::SwapStorage;
 use crate::utils::sleep;
 use crate::utils::timeout_op;
-use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use crate::Blockchain;
 use crate::Client;
@@ -17,6 +16,7 @@ use ark_core::batch::sign_batch_tree_tx;
 use ark_core::batch::sign_commitment_psbt;
 use ark_core::batch::Delegate;
 use ark_core::batch::NonceKps;
+use ark_core::contract::SpendPathKind;
 use ark_core::intent;
 use ark_core::script::extract_checksig_pubkeys;
 use ark_core::server;
@@ -54,7 +54,7 @@ use std::collections::HashSet;
 impl<B, W, S> Client<B, W, S>
 where
     B: Blockchain,
-    W: BoardingWallet + OnchainWallet,
+    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     /// Settle _all_ prior VTXOs and boarding outputs into the next batch, generating new confirmed
@@ -143,8 +143,11 @@ where
     {
         let server_info = self.server_info().await?;
 
-        let (vtxo_list, _) = self.list_vtxos_with_server_info(&server_info).await?;
-        let vtxo_outpoints: Vec<OutPoint> = vtxo_list.recoverable().map(|v| v.outpoint).collect();
+        let vtxo_list = self.list_vtxos_with_server_info(&server_info).await?;
+        let vtxo_outpoints: Vec<OutPoint> = vtxo_list
+            .recoverable()
+            .map(|entry| entry.vtxo().outpoint)
+            .collect();
 
         let (boarding_inputs, _, _) = self
             .fetch_commitment_transaction_inputs(&server_info, crate::utils::unix_now()?)
@@ -510,7 +513,7 @@ where
     ) -> Result<Vec<intent::Input>, Error> {
         let requested: HashSet<OutPoint> = input_vtxos.into_iter().collect();
 
-        let (vtxo_list, script_pubkey_to_vtxo_map) = self
+        let vtxo_list = self
             .list_vtxos_with_server_info(server_info)
             .await
             .context("failed to get VTXO list")?;
@@ -518,23 +521,22 @@ where
 
         let matching_unspent = vtxo_list
             .all_unspent()
-            .filter(|v| requested.contains(&v.outpoint))
+            .filter(|entry| requested.contains(&entry.vtxo().outpoint))
             .collect::<Vec<_>>();
 
-        let settleable_outpoints = vtxo_list
-            .batch_settleable_at(server_info, now, |script| {
-                script_pubkey_to_vtxo_map
-                    .get(script)
-                    .map(|vtxo| vtxo.server_pk())
-            })
-            .filter(|v| requested.contains(&v.outpoint))
-            .map(|v| v.outpoint)
+        let settleable = vtxo_list
+            .batch_settleable_at(server_info, now)
+            .filter(|entry| requested.contains(&entry.vtxo().outpoint))
+            .collect::<Vec<_>>();
+        let settleable_outpoints = settleable
+            .iter()
+            .map(|entry| entry.vtxo().outpoint)
             .collect::<HashSet<_>>();
 
         let blocked = matching_unspent
             .iter()
-            .filter(|v| !settleable_outpoints.contains(&v.outpoint))
-            .map(|v| v.outpoint.to_string())
+            .filter(|entry| !settleable_outpoints.contains(&entry.vtxo().outpoint))
+            .map(|entry| entry.vtxo().outpoint.to_string())
             .collect::<Vec<_>>();
         if !blocked.is_empty() {
             return Err(Error::ad_hoc(format!(
@@ -543,29 +545,23 @@ where
             )));
         }
 
-        matching_unspent
+        settleable
             .into_iter()
-            .filter(|v| settleable_outpoints.contains(&v.outpoint))
-            .map(|v| {
-                let vtxo = script_pubkey_to_vtxo_map.get(&v.script).ok_or_else(|| {
-                    ark_core::Error::ad_hoc(format!("missing VTXO for script pubkey: {}", v.script))
-                })?;
-                let spend_info = vtxo.forfeit_spend_info()?;
+            .map(|entry| {
+                let spend_selection = entry.spend_selection(SpendPathKind::Forfeit)?;
 
-                Ok(intent::Input::new(
-                    v.outpoint,
-                    vtxo.exit_delay(),
-                    // NOTE: This only works with default VTXOs (single-sig).
-                    None,
+                Ok(intent::Input::new_with_spend_selection(
+                    entry.vtxo().outpoint,
+                    entry.exit_delay()?,
                     TxOut {
-                        value: v.amount,
-                        script_pubkey: vtxo.script_pubkey(),
+                        value: entry.vtxo().amount,
+                        script_pubkey: entry.script_pubkey(),
                     },
-                    vtxo.tapscripts(),
-                    spend_info,
+                    entry.tapscripts(),
+                    spend_selection,
                     false,
-                    v.is_swept,
-                    v.assets.clone(),
+                    entry.vtxo().is_swept,
+                    entry.vtxo().assets.clone(),
                 ))
             })
             .collect::<Result<Vec<_>, Error>>()
@@ -1131,7 +1127,7 @@ where
         let now = u64::try_from(now).map_err(|_| Error::ad_hoc("negative timestamp"))?;
 
         // Get all known boarding outputs.
-        let boarding_outputs = self.inner.wallet.get_boarding_outputs()?;
+        let boarding_outputs = self.boarding_outputs()?;
 
         let mut boarding_inputs: Vec<batch::OnChainInput> = Vec::new();
         let mut total_amount = Amount::ZERO;
@@ -1180,8 +1176,17 @@ where
                         // Mark this outpoint as seen
                         seen_outpoints.insert(*outpoint);
 
-                        boarding_inputs.push(batch::OnChainInput::new(
-                            boarding_output.clone(),
+                        let script_pubkey = boarding_output.script_pubkey();
+                        let tapscripts = boarding_output.tapscripts();
+                        let spend_selection =
+                            boarding_output.spend_selection(SpendPathKind::Forfeit)?;
+
+                        boarding_inputs.push(batch::OnChainInput::new_with_spend_selection(
+                            boarding_output.exit_delay(),
+                            script_pubkey,
+                            tapscripts,
+                            spend_selection,
+                            boarding_output.owner_pk(),
                             *amount,
                             *outpoint,
                         ));
@@ -1191,52 +1196,38 @@ where
             }
         }
 
-        let (vtxo_list, script_pubkey_to_vtxo_map) =
-            self.list_vtxos_with_server_info(server_info).await?;
+        let vtxo_list = self.list_vtxos_with_server_info(server_info).await?;
         // Reuse the caller-supplied timestamp (not a fresh wall-clock) so the VTXO cutoff filter
         // below is evaluated against the same instant as the boarding filter above, and so a
         // test-injected `now` deterministically controls both.
         let settleable_vtxos: Vec<_> = vtxo_list
-            .batch_settleable_at(server_info, now as i64, |script| {
-                script_pubkey_to_vtxo_map
-                    .get(script)
-                    .map(|vtxo| vtxo.server_pk())
-            })
+            .batch_settleable_at(server_info, now as i64)
             .collect();
 
         total_amount += settleable_vtxos
             .iter()
-            .fold(Amount::ZERO, |acc, vtxo| acc + vtxo.amount);
+            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo().amount);
 
         let vtxo_inputs = settleable_vtxos
             .into_iter()
-            .map(|virtual_tx_outpoint| {
-                let vtxo = script_pubkey_to_vtxo_map
-                    .get(&virtual_tx_outpoint.script)
-                    .ok_or_else(|| {
-                        ark_core::Error::ad_hoc(format!(
-                            "missing VTXO for script pubkey: {}",
-                            virtual_tx_outpoint.script
-                        ))
-                    })?;
-                let spend_info = vtxo.forfeit_spend_info()?;
+            .map(|entry| {
+                let spend_selection = entry.spend_selection(SpendPathKind::Forfeit)?;
 
-                Ok(intent::Input::new(
-                    virtual_tx_outpoint.outpoint,
-                    vtxo.exit_delay(),
-                    None,
+                Ok(intent::Input::new_with_spend_selection(
+                    entry.vtxo().outpoint,
+                    entry.exit_delay()?,
                     TxOut {
-                        value: virtual_tx_outpoint.amount,
-                        script_pubkey: vtxo.script_pubkey(),
+                        value: entry.vtxo().amount,
+                        script_pubkey: entry.script_pubkey(),
                     },
-                    vtxo.tapscripts(),
-                    spend_info,
+                    entry.tapscripts(),
+                    spend_selection,
                     false,
-                    virtual_tx_outpoint.is_swept,
-                    virtual_tx_outpoint.assets.clone(),
+                    entry.vtxo().is_swept,
+                    entry.vtxo().assets.clone(),
                 ))
             })
-            .collect::<Result<Vec<_>, ark_core::Error>>()?;
+            .collect::<Result<Vec<_>, Error>>()?;
 
         Ok((boarding_inputs, vtxo_inputs, total_amount))
     }
@@ -1270,14 +1261,14 @@ where
             let boarding_inputs = onchain_inputs.clone().into_iter().map(|o| {
                 intent::Input::new(
                     o.outpoint(),
-                    o.boarding_output().exit_delay(),
+                    o.sequence(),
                     None,
                     TxOut {
                         value: o.amount(),
-                        script_pubkey: o.boarding_output().script_pubkey(),
+                        script_pubkey: o.script_pubkey().clone(),
                     },
-                    o.boarding_output().tapscripts(),
-                    o.boarding_output().forfeit_spend_info(),
+                    o.tapscripts().to_vec(),
+                    o.spend_info().clone(),
                     true,
                     false,
                     Vec::new(),
@@ -1375,7 +1366,7 @@ where
                 let onchain_input = onchain_inputs
                     .iter()
                     .find(|o| {
-                        Some(o.boarding_output().script_pubkey())
+                        Some(o.script_pubkey().clone())
                             == input.witness_utxo.clone().map(|w| w.script_pubkey)
                     })
                     .ok_or_else(|| {
@@ -1384,10 +1375,8 @@ where
                         )
                     })?;
 
-                let owner_pk = onchain_input.boarding_output().owner_pk();
+                let owner_pk = onchain_input.owner_pk();
                 let sig = self
-                    .inner
-                    .wallet
                     .sign_for_pk(&owner_pk, &msg)
                     .map_err(|e| ark_core::Error::ad_hoc(e.to_string()))?;
 
@@ -1895,9 +1884,7 @@ where
                                 schnorr::Signature,
                                 ark_core::Error,
                             > {
-                                self.inner
-                                    .wallet
-                                    .sign_for_pk(pk, msg)
+                                self.sign_for_pk(pk, msg)
                                     .map_err(|e| ark_core::Error::ad_hoc(e.to_string()))
                             };
 

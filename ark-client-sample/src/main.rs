@@ -1,9 +1,6 @@
 #![allow(clippy::print_stdout)]
 #![allow(clippy::large_enum_variant)]
 
-mod common;
-
-use crate::common::InMemoryDb;
 use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
@@ -17,10 +14,14 @@ use ark_client::Error;
 use ark_client::OfflineClient;
 use ark_client::OfflineClientConfig;
 use ark_client::SpendStatus;
+#[cfg(feature = "sqlite")]
+use ark_client::SqliteContractStore;
+#[cfg(feature = "sqlite")]
 use ark_client::SqliteSwapStorage;
 use ark_client::SwapAmount;
 use ark_client::TxStatus;
 use ark_core::asset::ControlAssetConfig;
+use ark_core::contract::SpendPathKind;
 use ark_core::history;
 use ark_core::send::SendReceiver;
 use ark_core::send::VtxoInput;
@@ -32,6 +33,7 @@ use ark_delegator::DelegatorClient;
 use ark_grpc::test_utils as grpc_test_utils;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::bip32::Xpriv;
+use bitcoin::hex::DisplayHex;
 use bitcoin::key::Secp256k1;
 use bitcoin::secp256k1::SecretKey;
 use bitcoin::Address;
@@ -43,17 +45,24 @@ use bitcoin::Transaction;
 use bitcoin::Txid;
 use clap::Parser;
 use clap::Subcommand;
-use esplora_client::OutputStatus;
 use futures::StreamExt;
 use jiff::Timestamp;
 use rand::thread_rng;
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::HashSet;
 use std::fs;
+#[cfg(feature = "sqlite")]
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+
+#[cfg(feature = "sqlite")]
+type SampleSwapStorage = SqliteSwapStorage;
+#[cfg(not(feature = "sqlite"))]
+type SampleSwapStorage = ark_client::InMemorySwapStorage;
 
 #[derive(Parser)]
 #[command(name = "ark-sample")]
@@ -191,8 +200,16 @@ enum Commands {
     RefundSwap { swap_id: String },
     /// Attempt to refund a past swap without the receiver's signature.
     RefundSwapWithoutReceiver { swap_id: String },
+    /// List all known wallet contracts as JSON.
+    ListContracts,
     /// List all VTXOs and boarding outputs sorted by expiry, then amount.
     ListVtxos,
+    /// Restore wallet contracts by scanning derived keys up to the gap limit.
+    RestoreContracts {
+        /// Number of consecutive unused keys before stopping.
+        #[arg(long, default_value = "20")]
+        gap_limit: u32,
+    },
     /// Settle specific VTXOs and/or boarding outputs by outpoint.
     SettleVtxos {
         /// VTXO outpoints to settle (format: txid:vout, comma-separated).
@@ -321,10 +338,23 @@ impl FromStr for AddressesAndAmounts {
 struct Config {
     ark_server_url: String,
     esplora_url: String,
+    #[cfg(feature = "sqlite")]
     swap_storage_path: String,
+    #[cfg(feature = "sqlite")]
+    contract_store: Option<ContractStoreConfig>,
+    #[cfg(feature = "sqlite")]
+    contract_store_path: Option<String>,
     boltz_url: String,
     delegator_pubkey: Option<String>,
     historical_delegator_pubkeys: Option<Vec<String>>,
+}
+
+#[cfg(feature = "sqlite")]
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ContractStoreConfig {
+    Memory,
+    Sqlite,
 }
 
 #[derive(Serialize)]
@@ -351,6 +381,26 @@ struct ListVtxosOutput {
 }
 
 #[derive(Serialize)]
+struct ContractEntry {
+    contract_type: String,
+    state: serde_json::Value,
+    address: Option<String>,
+    address_kind: Option<&'static str>,
+    script: String,
+    parameters: serde_json::Value,
+    created_at: String,
+    created_at_unix_secs: u64,
+    key_index: Option<u32>,
+    server_pk: Option<String>,
+    signer_status: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ListContractsOutput {
+    contracts: Vec<ContractEntry>,
+}
+
+#[derive(Serialize)]
 struct PendingTxEntry {
     ark_txid: String,
     num_inputs: usize,
@@ -366,6 +416,68 @@ struct ListPendingTxsOutput {
 fn format_timestamp(unix_secs: i64) -> Result<String> {
     let ts = Timestamp::from_second(unix_secs)?;
     Ok(ts.to_string())
+}
+
+async fn find_unspent_boarding_outputs(
+    client: &ark_client::Client<EsploraClient, Wallet, SampleSwapStorage>,
+    esplora_client: &EsploraClient,
+) -> Result<Vec<ExplorerUtxo>> {
+    let mut seen = HashSet::new();
+    let mut unspent = Vec::new();
+
+    for address in client
+        .get_boarding_addresses()
+        .await
+        .map_err(|e| anyhow!(e))?
+    {
+        let outpoints = esplora_client
+            .find_outpoints(&address)
+            .await
+            .map_err(|e| anyhow!(e))?;
+
+        for utxo in outpoints.into_iter().filter(|utxo| !utxo.is_spent) {
+            if seen.insert(utxo.outpoint) {
+                unspent.push(utxo);
+            }
+        }
+    }
+
+    Ok(unspent)
+}
+
+#[cfg(feature = "sqlite")]
+fn apply_contract_store_path<B, W, S>(
+    config: &Config,
+    offline_client: OfflineClient<B, W, S>,
+) -> Result<OfflineClient<B, W, S>>
+where
+    B: Blockchain,
+    W: ark_client::wallet::OnchainWallet,
+    S: ark_client::SwapStorage + 'static,
+{
+    match config.contract_store.unwrap_or(ContractStoreConfig::Sqlite) {
+        ContractStoreConfig::Memory => Ok(offline_client),
+        ContractStoreConfig::Sqlite => {
+            let contract_store_path = config
+                .contract_store_path
+                .clone()
+                .unwrap_or_else(|| default_contract_store_path(&config.swap_storage_path));
+
+            Ok(offline_client.with_contract_store(Box::new(
+                SqliteContractStore::new(contract_store_path).map_err(|e| anyhow!(e))?,
+            )))
+        }
+    }
+}
+
+#[cfg(feature = "sqlite")]
+fn default_contract_store_path(swap_storage_path: &str) -> String {
+    Path::new(swap_storage_path)
+        .parent()
+        .map(|parent| parent.join("contracts.sqlite"))
+        .unwrap_or_else(|| Path::new("contracts.sqlite").to_path_buf())
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn parse_delegator_pubkey(pk: &str) -> Result<bitcoin::XOnlyPublicKey> {
@@ -423,11 +535,14 @@ async fn main() -> Result<()> {
     let esplora_client = EsploraClient::new(&config.esplora_url)?;
     let esplora_client = Arc::new(esplora_client);
 
+    #[cfg(feature = "sqlite")]
     let storage = Arc::new(
         SqliteSwapStorage::new(&config.swap_storage_path)
             .await
             .map_err(|e| anyhow!(e))?,
     );
+    #[cfg(not(feature = "sqlite"))]
+    let storage = Arc::new(ark_client::InMemorySwapStorage::new());
 
     let delegator_pk = config
         .delegator_pubkey
@@ -453,35 +568,29 @@ async fn main() -> Result<()> {
             let seed = mnemonic.to_seed("");
             let xpriv = Xpriv::new_master(Network::Regtest, &seed)?;
 
-            let db = InMemoryDb::default();
-            let wallet = Wallet::new_from_xpriv(
-                xpriv,
-                secp,
-                Network::Regtest,
-                config.esplora_url.as_str(),
-                db,
-            )?;
+            let wallet =
+                Wallet::new_from_xpriv(xpriv, Network::Regtest, config.esplora_url.as_str())?;
             let wallet = Arc::new(wallet);
 
             let client_config = OfflineClientConfig {
-                ark_server_url: config.ark_server_url,
-                boltz_url: config.boltz_url,
+                ark_server_url: config.ark_server_url.clone(),
+                boltz_url: config.boltz_url.clone(),
                 delegator_pk,
                 historical_delegator_pks: historical_delegator_pks.clone(),
                 ..Default::default()
             };
 
-            let client = OfflineClient::with_bip32(
+            let offline_client = OfflineClient::with_bip32(
                 client_config,
                 xpriv,
                 None,
                 esplora_client.clone(),
                 wallet,
                 storage,
-            )
-            .connect()
-            .await
-            .map_err(|e| anyhow!(e))?;
+            );
+            #[cfg(feature = "sqlite")]
+            let offline_client = apply_contract_store_path(&config, offline_client)?;
+            let client = offline_client.connect().await.map_err(|e| anyhow!(e))?;
 
             run_command(cli.command, client, esplora_client).await?;
         }
@@ -490,28 +599,27 @@ async fn main() -> Result<()> {
             let sk = SecretKey::from_str(seed.trim())?;
             let kp = sk.keypair(&secp);
 
-            let db = InMemoryDb::default();
-            let wallet = Wallet::new(kp, secp, Network::Regtest, config.esplora_url.as_str(), db)?;
+            let wallet = Wallet::new(kp, Network::Regtest, config.esplora_url.as_str())?;
             let wallet = Arc::new(wallet);
 
             let client_config = OfflineClientConfig {
-                ark_server_url: config.ark_server_url,
-                boltz_url: config.boltz_url,
+                ark_server_url: config.ark_server_url.clone(),
+                boltz_url: config.boltz_url.clone(),
                 delegator_pk,
                 historical_delegator_pks: historical_delegator_pks.clone(),
                 ..Default::default()
             };
 
-            let client = OfflineClient::with_keypair(
+            let offline_client = OfflineClient::with_keypair(
                 client_config,
                 kp,
                 esplora_client.clone(),
                 wallet,
                 storage,
-            )
-            .connect()
-            .await
-            .map_err(|e| anyhow!(e))?;
+            );
+            #[cfg(feature = "sqlite")]
+            let offline_client = apply_contract_store_path(&config, offline_client)?;
+            let client = offline_client.connect().await.map_err(|e| anyhow!(e))?;
 
             run_command(cli.command, client, esplora_client).await?;
         }
@@ -522,31 +630,20 @@ async fn main() -> Result<()> {
 
 async fn run_command(
     command: Commands,
-    client: ark_client::Client<EsploraClient, Wallet<InMemoryDb>, SqliteSwapStorage>,
+    client: ark_client::Client<EsploraClient, Wallet, SampleSwapStorage>,
     esplora_client: Arc<EsploraClient>,
 ) -> Result<()> {
     let client = Arc::new(client);
-    client.discover_keys(20).await.map_err(|e| anyhow!(e))?;
 
     match &command {
         Commands::Balance => {
             let offchain_balance = client.offchain_balance().await.map_err(|e| anyhow!(e))?;
 
-            let boarding = {
-                let boarding_output = client
-                    .get_boarding_address()
-                    .await
-                    .map_err(|e| anyhow!(e))?;
-                let outpoints = esplora_client
-                    .find_outpoints(&boarding_output)
-                    .await
-                    .map_err(|e| anyhow!(e))?;
-
-                let (_, unspent): (Vec<_>, Vec<_>) =
-                    outpoints.into_iter().partition(|u| u.is_spent);
-
-                unspent.iter().map(|u| u.amount).sum::<Amount>()
-            };
+            let boarding = find_unspent_boarding_outputs(&client, &esplora_client)
+                .await?
+                .iter()
+                .map(|utxo| utxo.amount)
+                .sum::<Amount>();
 
             let mut balance_json = serde_json::json!({
                 "offchain_confirmed": offchain_balance.confirmed(),
@@ -590,9 +687,6 @@ async fn run_command(
         }
         Commands::Settle { notes } => {
             let mut rng = thread_rng();
-            // we need to call this because how our wallet works
-            let _ = client.get_boarding_address().await;
-
             let maybe_batch_tx = match notes {
                 Some(notes_str) => {
                     // Parse comma-separated ArkNote strings
@@ -1077,41 +1171,82 @@ async fn run_command(
 
             tracing::info!(?txid, swap_id, "Swap refunded");
         }
+        Commands::RestoreContracts { gap_limit } => {
+            let restored = client
+                .restore_contracts(*gap_limit)
+                .await
+                .map_err(|e| anyhow!(e))?;
+            tracing::info!(?restored, gap_limit, "Restored wallet contracts");
+        }
+        Commands::ListContracts => {
+            let contracts = client.list_contracts().await.map_err(|e| anyhow!(e))?;
+            let mut entries = contracts
+                .into_iter()
+                .map(|entry| {
+                    Ok(ContractEntry {
+                        contract_type: entry.contract.contract_type.to_string(),
+                        state: serde_json::to_value(entry.contract.state)?,
+                        address: entry.address,
+                        address_kind: entry.address_kind.map(|kind| match kind {
+                            ark_client::ContractAddressKind::Ark => "ark",
+                            ark_client::ContractAddressKind::Bitcoin => "bitcoin",
+                        }),
+                        script: entry.contract.script_pubkey.as_bytes().as_hex().to_string(),
+                        parameters: entry.contract.data,
+                        created_at: format_timestamp(entry.contract.created_at as i64)?,
+                        created_at_unix_secs: entry.contract.created_at,
+                        key_index: entry.contract.key_index,
+                        server_pk: entry.server_pk.map(|pk| pk.to_string()),
+                        signer_status: entry.signer_status.map(|status| format!("{status:?}")),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            entries.sort_by(|a, b| {
+                a.contract_type
+                    .cmp(&b.contract_type)
+                    .then_with(|| a.created_at_unix_secs.cmp(&b.created_at_unix_secs))
+                    .then_with(|| a.script.cmp(&b.script))
+            });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&ListContractsOutput { contracts: entries })?
+            );
+        }
         Commands::ListVtxos => {
             // Get VTXOs
-            let (vtxo_list, _) = client.list_vtxos().await.map_err(|e| anyhow!(e))?;
+            let vtxo_list = client.list_vtxos().await.map_err(|e| anyhow!(e))?;
 
             let mut vtxo_entries: Vec<VtxoEntry> = Vec::new();
 
             // Collect pre-confirmed VTXOs
-            for v in vtxo_list.pre_confirmed() {
+            for entry in vtxo_list.pre_confirmed() {
                 vtxo_entries.push(VtxoEntry {
-                    outpoint: v.outpoint.to_string(),
-                    amount_sats: v.amount.to_sat(),
-                    created_at: format_timestamp(v.created_at)?,
-                    expires_at: format_timestamp(v.expires_at)?,
+                    outpoint: entry.vtxo().outpoint.to_string(),
+                    amount_sats: entry.vtxo().amount.to_sat(),
+                    created_at: format_timestamp(entry.vtxo().created_at)?,
+                    expires_at: format_timestamp(entry.vtxo().expires_at)?,
                     status: "pre_confirmed".to_string(),
                 });
             }
 
             // Collect confirmed VTXOs
-            for v in vtxo_list.confirmed() {
+            for entry in vtxo_list.confirmed() {
                 vtxo_entries.push(VtxoEntry {
-                    outpoint: v.outpoint.to_string(),
-                    amount_sats: v.amount.to_sat(),
-                    created_at: format_timestamp(v.created_at)?,
-                    expires_at: format_timestamp(v.expires_at)?,
+                    outpoint: entry.vtxo().outpoint.to_string(),
+                    amount_sats: entry.vtxo().amount.to_sat(),
+                    created_at: format_timestamp(entry.vtxo().created_at)?,
+                    expires_at: format_timestamp(entry.vtxo().expires_at)?,
                     status: "confirmed".to_string(),
                 });
             }
 
             // Collect recoverable VTXOs
-            for v in vtxo_list.recoverable() {
+            for entry in vtxo_list.recoverable() {
                 vtxo_entries.push(VtxoEntry {
-                    outpoint: v.outpoint.to_string(),
-                    amount_sats: v.amount.to_sat(),
-                    created_at: format_timestamp(v.created_at)?,
-                    expires_at: format_timestamp(v.expires_at)?,
+                    outpoint: entry.vtxo().outpoint.to_string(),
+                    amount_sats: entry.vtxo().amount.to_sat(),
+                    created_at: format_timestamp(entry.vtxo().created_at)?,
+                    expires_at: format_timestamp(entry.vtxo().expires_at)?,
                     status: "recoverable".to_string(),
                 });
             }
@@ -1124,32 +1259,23 @@ async fn run_command(
             });
 
             // Get boarding outputs
-            let boarding_output = client
-                .get_boarding_address()
-                .await
-                .map_err(|e| anyhow!(e))?;
-            let outpoints = esplora_client
-                .find_outpoints(&boarding_output)
-                .await
-                .map_err(|e| anyhow!(e))?;
+            let outpoints = find_unspent_boarding_outputs(&client, &esplora_client).await?;
 
             let mut boarding_entries: Vec<BoardingEntry> = Vec::new();
             for o in outpoints {
-                if !o.is_spent {
-                    boarding_entries.push(BoardingEntry {
-                        outpoint: o.outpoint.to_string(),
-                        amount_sats: o.amount.to_sat(),
-                        confirmation_time: o
-                            .confirmation_blocktime
-                            .map(|t| format_timestamp(t as i64))
-                            .transpose()?,
-                        status: if o.confirmation_blocktime.is_some() {
-                            "confirmed".to_string()
-                        } else {
-                            "pending".to_string()
-                        },
-                    });
-                }
+                boarding_entries.push(BoardingEntry {
+                    outpoint: o.outpoint.to_string(),
+                    amount_sats: o.amount.to_sat(),
+                    confirmation_time: o
+                        .confirmation_blocktime
+                        .map(|t| format_timestamp(t as i64))
+                        .transpose()?,
+                    status: if o.confirmation_blocktime.is_some() {
+                        "confirmed".to_string()
+                    } else {
+                        "pending".to_string()
+                    },
+                });
             }
 
             // Sort boarding by confirmation time (earliest first), then amount (largest first)
@@ -1201,9 +1327,6 @@ async fn run_command(
                 println!("{}", serde_json::to_string_pretty(&output)?);
                 return Ok(());
             }
-
-            // We need to call this because of how our wallet works
-            let _ = client.get_boarding_address().await;
 
             let maybe_batch_tx = client
                 .settle_vtxos(&mut rng, &vtxo_outpoints, &boarding_outpoints)
@@ -1297,16 +1420,15 @@ async fn run_command(
         Commands::SubmitOnly { address, amount } => {
             let amount = Amount::from_sat(*amount);
 
-            let (vtxo_list, script_pubkey_to_vtxo_map) =
-                client.list_vtxos().await.map_err(|e| anyhow!(e))?;
+            let vtxo_list = client.list_vtxos().await.map_err(|e| anyhow!(e))?;
 
             let spendable = vtxo_list
                 .spendable_offchain()
-                .map(|vtxo| ark_core::coin_select::VirtualTxOutPoint {
-                    outpoint: vtxo.outpoint,
-                    script_pubkey: vtxo.script.clone(),
-                    expire_at: vtxo.expires_at,
-                    amount: vtxo.amount,
+                .map(|entry| ark_core::coin_select::VirtualTxOutPoint {
+                    outpoint: entry.vtxo().outpoint,
+                    script_pubkey: entry.vtxo().script.clone(),
+                    expire_at: entry.vtxo().expires_at,
+                    amount: entry.vtxo().amount,
                     assets: Vec::new(),
                 })
                 .collect::<Vec<_>>();
@@ -1322,20 +1444,17 @@ async fn run_command(
             let vtxo_inputs: Vec<VtxoInput> = selected
                 .into_iter()
                 .map(|coin| {
-                    let vtxo = script_pubkey_to_vtxo_map
-                        .get(&coin.script_pubkey)
-                        .ok_or_else(|| {
-                            anyhow!("missing VTXO for script pubkey: {}", coin.script_pubkey)
-                        })?;
-                    let (forfeit_script, control_block) = vtxo
-                        .forfeit_spend_info()
-                        .context("failed to get forfeit spend info")?;
-                    Ok(VtxoInput::new(
-                        forfeit_script,
-                        None,
-                        control_block,
-                        vtxo.tapscripts(),
-                        vtxo.script_pubkey(),
+                    let entry = vtxo_list
+                        .all()
+                        .find(|entry| entry.vtxo().outpoint == coin.outpoint)
+                        .ok_or_else(|| anyhow!("missing VTXO for outpoint: {}", coin.outpoint))?;
+                    let spend_selection = entry
+                        .spend_selection(SpendPathKind::Forfeit)
+                        .context("failed to get forfeit spend selection")?;
+                    Ok(VtxoInput::new_with_spend_selection(
+                        spend_selection,
+                        entry.tapscripts(),
+                        entry.script_pubkey(),
                         coin.amount,
                         coin.outpoint,
                         coin.assets,
@@ -1580,7 +1699,25 @@ impl Blockchain for EsploraClient {
             .await
             .map_err(Error::consumer)?;
 
-        let outputs = txs
+        let spent_outpoints: HashSet<OutPoint> = txs
+            .iter()
+            .flat_map(|tx| {
+                tx.vin
+                    .iter()
+                    .filter(|input| {
+                        input
+                            .prevout
+                            .as_ref()
+                            .is_some_and(|prevout| prevout.scriptpubkey == script_pubkey)
+                    })
+                    .map(|input| OutPoint {
+                        txid: input.txid,
+                        vout: input.vout,
+                    })
+            })
+            .collect();
+
+        let utxos = txs
             .into_iter()
             .flat_map(|tx| {
                 let txid = tx.txid;
@@ -1589,6 +1726,10 @@ impl Blockchain for EsploraClient {
                     .enumerate()
                     .filter(|(_, v)| v.scriptpubkey == script_pubkey)
                     .map(|(i, v)| {
+                        let outpoint = OutPoint {
+                            txid,
+                            vout: i as u32,
+                        };
                         let confirmations = match tx.status.block_height {
                             Some(confirmation_block_height) => {
                                 match current_block_height.checked_sub(confirmation_block_height) {
@@ -1600,42 +1741,16 @@ impl Blockchain for EsploraClient {
                         };
 
                         ExplorerUtxo {
-                            outpoint: OutPoint {
-                                txid,
-                                vout: i as u32,
-                            },
+                            outpoint,
                             amount: Amount::from_sat(v.value),
                             confirmation_blocktime: tx.status.block_time,
                             confirmations: confirmations as u64,
-                            // Assume the output is unspent until we dig deeper, further down.
-                            is_spent: false,
+                            is_spent: spent_outpoints.contains(&outpoint),
                         }
                     })
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-
-        let mut utxos = Vec::new();
-        for output in outputs.iter() {
-            let outpoint = output.outpoint;
-            let status = self
-                .esplora_client
-                .get_output_status(&outpoint.txid, outpoint.vout as u64)
-                .await
-                .map_err(Error::consumer)?;
-
-            match status {
-                Some(OutputStatus { spent: false, .. }) | None => {
-                    utxos.push(*output);
-                }
-                Some(OutputStatus { spent: true, .. }) => {
-                    utxos.push(ExplorerUtxo {
-                        is_spent: true,
-                        ..*output
-                    });
-                }
-            }
-        }
 
         Ok(utxos)
     }

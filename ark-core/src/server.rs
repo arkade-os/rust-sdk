@@ -422,6 +422,29 @@ impl VirtualTxOutPoint {
         self.amount < dust || self.is_swept || self.is_expired()
     }
 
+    /// Check if a VTXO should be treated as unspent wallet state.
+    pub fn is_unspent(&self, dust: Amount) -> bool {
+        self.is_recoverable(dust) || (!self.is_unrolled && !self.is_spent && !self.is_swept)
+    }
+
+    /// Check if a VTXO can be spent in an offchain transaction.
+    pub fn is_spendable_offchain(&self, dust: Amount) -> bool {
+        !self.is_recoverable(dust) && !self.is_unrolled && !self.is_spent && !self.is_swept
+    }
+
+    pub fn is_pre_confirmed_spendable(&self, dust: Amount) -> bool {
+        self.is_spendable_offchain(dust) && self.is_preconfirmed
+    }
+
+    pub fn is_confirmed_spendable(&self, dust: Amount) -> bool {
+        self.is_spendable_offchain(dust) && !self.is_preconfirmed
+    }
+
+    /// Check if a VTXO should be treated as spent wallet state.
+    pub fn is_spent_status(&self, dust: Amount) -> bool {
+        !self.is_recoverable(dust) && (self.is_unrolled || self.is_spent || self.is_swept)
+    }
+
     /// Check if a VTXO has expired.
     ///
     /// Expired VTXOs can be settled, but they cannot be sent in an offchain transaction. To settle

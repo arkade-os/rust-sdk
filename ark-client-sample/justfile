@@ -100,6 +100,10 @@ refund-swap-collab actor swap_id:
 refund-swap actor swap_id:
     cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic refund-swap-without-receiver {{ swap_id }}
 
+# List all known wallet contracts for a given actor as JSON
+list-contracts actor:
+    cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic list-contracts
+
 # List all VTXOs and boarding outputs for a given actor
 list-vtxos actor:
     cargo run -p ark-client-sample -- --config ./{{ actor }}/ark.config.toml --mnemonic ./{{ actor }}/ark.mnemonic list-vtxos

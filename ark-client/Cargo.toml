@@ -29,6 +29,7 @@ prost = "0.13.3"
 prost-types = "0.13.3"
 rand = "0.8"
 reqwest = { version = "0.12", features = ["json"] }
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_with = "3.14"
@@ -69,5 +70,5 @@ tonic-prost = "0.14"
 default = ["tls-native-roots"]
 tls-native-roots = ["tonic/tls-native-roots", "ark-grpc/tls-native-roots"]
 tls-webpki-roots = ["tonic/tls-webpki-roots", "ark-grpc/tls-webpki-roots"]
-sqlite = ["sqlx"]
+sqlite = ["sqlx", "rusqlite"]
 test-utils = []

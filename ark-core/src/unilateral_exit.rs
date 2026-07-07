@@ -1,7 +1,7 @@
 use crate::anchor_output;
+use crate::contract::SpendSelection;
 use crate::script::extract_checksig_pubkeys;
 use crate::server;
-use crate::BoardingOutput;
 use crate::Error;
 use crate::ErrorContext;
 use crate::VTXO_CONDITION_KEY;
@@ -41,8 +41,12 @@ use std::collections::HashSet;
 /// spendable by the original owner.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OnChainInput {
-    /// The information needed to spend the UTXO, besides the amount.
-    boarding_output: BoardingOutput,
+    /// The sequence needed by the selected spend path.
+    sequence: Sequence,
+    /// The script pubkey of the UTXO.
+    script_pubkey: ScriptBuf,
+    /// The selected spend path.
+    spend_info: (ScriptBuf, taproot::ControlBlock),
     /// The amount of coins locked in the UTXO.
     amount: Amount,
     /// The location of this UTXO in the blockchain.
@@ -50,18 +54,42 @@ pub struct OnChainInput {
 }
 
 impl OnChainInput {
-    pub fn new(boarding_output: BoardingOutput, amount: Amount, outpoint: OutPoint) -> Self {
+    pub fn new(
+        sequence: Sequence,
+        script_pubkey: ScriptBuf,
+        spend_info: (ScriptBuf, taproot::ControlBlock),
+        amount: Amount,
+        outpoint: OutPoint,
+    ) -> Self {
         Self {
-            boarding_output,
+            sequence,
+            script_pubkey,
+            spend_info,
             amount,
             outpoint,
         }
     }
 
+    pub fn new_with_spend_selection(
+        default_sequence: Sequence,
+        script_pubkey: ScriptBuf,
+        spend_selection: SpendSelection,
+        amount: Amount,
+        outpoint: OutPoint,
+    ) -> Self {
+        Self::new(
+            spend_selection.sequence.unwrap_or(default_sequence),
+            script_pubkey,
+            spend_selection.spend_info(),
+            amount,
+            outpoint,
+        )
+    }
+
     pub fn previous_output(&self) -> TxOut {
         TxOut {
             value: self.amount,
-            script_pubkey: self.boarding_output.script_pubkey(),
+            script_pubkey: self.script_pubkey.clone(),
         }
     }
 }
@@ -88,6 +116,20 @@ impl VtxoInput {
             witness_utxo,
             spend_info,
         }
+    }
+
+    pub fn new_with_spend_selection(
+        outpoint: OutPoint,
+        default_sequence: Sequence,
+        witness_utxo: TxOut,
+        spend_selection: SpendSelection,
+    ) -> Self {
+        Self::new(
+            outpoint,
+            spend_selection.sequence.unwrap_or(default_sequence),
+            witness_utxo,
+            spend_selection.spend_info(),
+        )
     }
 
     pub fn previous_output(&self) -> TxOut {
@@ -153,7 +195,7 @@ where
     let input = {
         let onchain_inputs = onchain_inputs.iter().map(|o| TxIn {
             previous_output: o.outpoint,
-            sequence: o.boarding_output.exit_delay(),
+            sequence: o.sequence,
             ..Default::default()
         });
 
@@ -182,10 +224,10 @@ where
             if onchain_input.outpoint == outpoint {
                 input.witness_utxo = Some(TxOut {
                     value: onchain_input.amount,
-                    script_pubkey: onchain_input.boarding_output.address().script_pubkey(),
+                    script_pubkey: onchain_input.script_pubkey.clone(),
                 });
 
-                let (script, cb) = onchain_input.boarding_output.exit_spend_info();
+                let (script, cb) = onchain_input.spend_info.clone();
                 let leaf_version = cb.leaf_version;
                 input.tap_scripts.insert(cb, (script, leaf_version));
             }

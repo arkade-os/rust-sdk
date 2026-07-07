@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
+use ark_core::contract::ContractType;
 use ark_delegator::DelegatorClient;
 use bitcoin::key::Secp256k1;
 use bitcoin::Amount;
@@ -20,8 +21,8 @@ async fn fulmine_delegator_smoke() {
     let regtest = Arc::new(Regtest::new());
     let secp = Secp256k1::new();
 
-    // Fulmine delegator API (local regtest stack).
-    let delegator = Arc::new(DelegatorClient::new("http://localhost:7004".to_string()));
+    // Fulmine delegator HTTP API (local regtest stack).
+    let delegator = Arc::new(DelegatorClient::new("http://localhost:7002".to_string()));
     let info = delegator.info().await.unwrap();
 
     let delegator_pk: bitcoin::PublicKey = info.pubkey.parse().unwrap();
@@ -56,15 +57,13 @@ async fn fulmine_delegator_smoke() {
 
     tokio::time::sleep(Duration::from_secs(5)).await;
 
-    let (vtxo_list, script_map) = client.list_vtxos().await.unwrap();
+    let vtxo_list = client.list_vtxos().await.unwrap();
 
     tracing::info!(?vtxo_list, "VTXOs after settlement");
 
-    let has_unspent_delegated_vtxo = vtxo_list.all_unspent().any(|v| {
-        script_map
-            .get(&v.script)
-            .is_some_and(|full_vtxo| full_vtxo.delegator_pk() == Some(delegator_pk))
-    });
+    let has_unspent_delegated_vtxo = vtxo_list
+        .all_unspent()
+        .any(|entry| entry.contract().contract_type == ContractType::delegate_vtxo());
 
     assert!(
         has_unspent_delegated_vtxo,

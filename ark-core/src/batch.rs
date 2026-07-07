@@ -1,5 +1,6 @@
 use crate::anchor_output;
 use crate::asset::packet;
+use crate::contract::SpendSelection;
 use crate::conversions::from_musig_xonly;
 use crate::conversions::to_musig_pk;
 use crate::intent;
@@ -8,7 +9,6 @@ use crate::server::NoncePks;
 use crate::server::PartialSigTree;
 use crate::server::TreeTxNoncePks;
 use crate::tree_tx_output_script::TreeTxOutputScript;
-use crate::BoardingOutput;
 use crate::Error;
 use crate::ErrorContext;
 use crate::TxGraph;
@@ -49,8 +49,16 @@ use std::collections::HashMap;
 /// Only UTXOs with a particular script (involving an Ark server) can become VTXOs.
 #[derive(Debug, Clone)]
 pub struct OnChainInput {
-    /// The information needed to spend the UTXO.
-    boarding_output: BoardingOutput,
+    /// The sequence needed by the selected spend path.
+    sequence: bitcoin::Sequence,
+    /// The script pubkey of the UTXO.
+    script_pubkey: bitcoin::ScriptBuf,
+    /// The full tapscript set for the contract.
+    tapscripts: Vec<bitcoin::ScriptBuf>,
+    /// The selected spend path.
+    spend_info: (bitcoin::ScriptBuf, taproot::ControlBlock),
+    /// The owner key that signs the selected spend path.
+    owner_pk: XOnlyPublicKey,
     /// The amount of coins locked in the UTXO.
     amount: Amount,
     /// The location of this UTXO in the blockchain.
@@ -58,16 +66,65 @@ pub struct OnChainInput {
 }
 
 impl OnChainInput {
-    pub fn new(boarding_output: BoardingOutput, amount: Amount, outpoint: OutPoint) -> Self {
+    pub fn new(
+        sequence: bitcoin::Sequence,
+        script_pubkey: bitcoin::ScriptBuf,
+        tapscripts: Vec<bitcoin::ScriptBuf>,
+        spend_info: (bitcoin::ScriptBuf, taproot::ControlBlock),
+        owner_pk: XOnlyPublicKey,
+        amount: Amount,
+        outpoint: OutPoint,
+    ) -> Self {
         Self {
-            boarding_output,
+            sequence,
+            script_pubkey,
+            tapscripts,
+            spend_info,
+            owner_pk,
             amount,
             outpoint,
         }
     }
 
-    pub fn boarding_output(&self) -> &BoardingOutput {
-        &self.boarding_output
+    pub fn new_with_spend_selection(
+        default_sequence: bitcoin::Sequence,
+        script_pubkey: bitcoin::ScriptBuf,
+        tapscripts: Vec<bitcoin::ScriptBuf>,
+        spend_selection: SpendSelection,
+        owner_pk: XOnlyPublicKey,
+        amount: Amount,
+        outpoint: OutPoint,
+    ) -> Self {
+        let (sequence, spend_info) = spend_selection.resolved_spend_info(default_sequence);
+        Self::new(
+            sequence,
+            script_pubkey,
+            tapscripts,
+            spend_info,
+            owner_pk,
+            amount,
+            outpoint,
+        )
+    }
+
+    pub fn sequence(&self) -> bitcoin::Sequence {
+        self.sequence
+    }
+
+    pub fn script_pubkey(&self) -> &bitcoin::ScriptBuf {
+        &self.script_pubkey
+    }
+
+    pub fn tapscripts(&self) -> &[bitcoin::ScriptBuf] {
+        &self.tapscripts
+    }
+
+    pub fn spend_info(&self) -> &(bitcoin::ScriptBuf, taproot::ControlBlock) {
+        &self.spend_info
+    }
+
+    pub fn owner_pk(&self) -> XOnlyPublicKey {
+        self.owner_pk
     }
 
     pub fn amount(&self) -> Amount {
@@ -458,18 +515,13 @@ where
 
     // Sign commitment transaction inputs that belong to us. For every output we are settling, we
     // look through the commitment transaction inputs to find a matching input.
-    for OnChainInput {
-        boarding_output,
-        outpoint: boarding_outpoint,
-        ..
-    } in onchain_inputs.iter()
-    {
-        let (forfeit_script, forfeit_control_block) = boarding_output.forfeit_spend_info();
+    for onchain_input in onchain_inputs.iter() {
+        let (forfeit_script, forfeit_control_block) = onchain_input.spend_info.clone();
 
         for (i, input) in commitment_psbt.inputs.iter_mut().enumerate() {
             let previous_outpoint = commitment_psbt.unsigned_tx.input[i].previous_output;
 
-            if previous_outpoint == *boarding_outpoint {
+            if previous_outpoint == onchain_input.outpoint {
                 // In the case of a boarding output, we are actually using a
                 // script spend path.
 
@@ -494,7 +546,7 @@ where
 
                 let msg =
                     secp256k1::Message::from_digest(tap_sighash.to_raw_hash().to_byte_array());
-                let pk = boarding_output.owner_pk();
+                let pk = onchain_input.owner_pk;
 
                 let sig = sign_for_pk_fn(&pk, &msg)?;
 

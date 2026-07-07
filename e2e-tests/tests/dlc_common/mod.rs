@@ -1486,7 +1486,15 @@ async fn settle(
         .spendable
         .into_iter()
         .map(|(outpoint, amount, boarding_output)| {
-            batch::OnChainInput::new(boarding_output, amount, outpoint)
+            batch::OnChainInput::new(
+                boarding_output.exit_delay(),
+                boarding_output.script_pubkey(),
+                boarding_output.tapscripts(),
+                boarding_output.forfeit_spend_info(),
+                boarding_output.owner_pk(),
+                amount,
+                outpoint,
+            )
         })
         .collect::<Vec<_>>();
 

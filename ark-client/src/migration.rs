@@ -2,7 +2,6 @@ use crate::error::ErrorContext;
 use crate::swap_storage::SwapStorage;
 use crate::utils::timeout_op;
 use crate::utils::unix_now;
-use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use crate::Blockchain;
 use crate::Client;
@@ -323,7 +322,7 @@ pub struct DeprecatedSignerReport {
 impl<B, W, S> Client<B, W, S>
 where
     B: Blockchain,
-    W: BoardingWallet + OnchainWallet,
+    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     /// Sweep VTXOs and boarding outputs minted under a *pre-cutoff* deprecated server signer to
@@ -387,34 +386,49 @@ where
             .fetch_commitment_transaction_inputs(&server_info, now)
             .await?;
 
-        // The VTXO inputs only expose their script pubkey, so resolve each one's signer via the
-        // script -> VTXO map (the same mapping `offchain_balance`/`settle_at` rely on).
-        let (_, script_map) = self.list_vtxos_with_server_info(&server_info).await?;
+        let contract_vtxos = self.list_vtxos_with_server_info(&server_info).await?;
 
         // Build the candidate (outpoint, amount, signer, cutoff) list for the VTXO leg.
         let mut vtxo_candidates: Vec<MigrationVtxoRef> = Vec::new();
         for input in &vtxo_inputs {
-            let Some(vtxo) = script_map.get(input.script_pubkey()) else {
+            let Some(contract_vtxo) = contract_vtxos
+                .all()
+                .find(|entry| entry.vtxo().outpoint == input.outpoint())
+            else {
                 tracing::debug!(
                     outpoint = %input.outpoint(),
-                    "Skipping VTXO with no spend info during migration"
+                    "Skipping VTXO with no contract during migration"
                 );
                 continue;
             };
-            if let Some(cutoff_date) = is_pre_cutoff_deprecated(vtxo.server_pk()) {
+            let signer_pk = contract_vtxo.server_pk()?;
+            if let Some(cutoff_date) = is_pre_cutoff_deprecated(signer_pk) {
                 vtxo_candidates.push(MigrationVtxoRef {
                     outpoint: input.outpoint(),
                     amount: input.amount(),
-                    signer_pk: vtxo.server_pk(),
+                    signer_pk,
                     cutoff_date,
                 });
             }
         }
 
         // Build the candidate list for the boarding leg.
+        let boarding_outputs_by_script = self
+            .boarding_outputs()?
+            .into_iter()
+            .map(|boarding_output| (boarding_output.script_pubkey(), boarding_output))
+            .collect::<HashMap<_, _>>();
         let mut boarding_candidates: Vec<MigrationVtxoRef> = Vec::new();
         for input in &boarding_inputs {
-            let signer_pk = input.boarding_output().server_pk();
+            let Some(boarding_output) = boarding_outputs_by_script.get(input.script_pubkey())
+            else {
+                tracing::debug!(
+                    outpoint = %input.outpoint(),
+                    "Skipping boarding input with no contract during migration"
+                );
+                continue;
+            };
+            let signer_pk = boarding_output.server_pk();
             if let Some(cutoff_date) = is_pre_cutoff_deprecated(signer_pk) {
                 boarding_candidates.push(MigrationVtxoRef {
                     outpoint: input.outpoint(),
@@ -472,9 +486,8 @@ where
     ///
     /// This is observability only — it never moves funds and never calls settle or migrate. It is
     /// the read-only sibling of [`Self::migrate_deprecated_signer_vtxos`]. For each deprecated
-    /// signer it merges the wallet's VTXO holdings (resolved via the script -> VTXO map, like
-    /// [`Self::offchain_balance`]) and its on-chain boarding holdings (grouped by
-    /// [`BoardingOutput::server_pk`]) into one [`DeprecatedSignerReport`].
+    /// signer it merges the wallet's contract-annotated VTXO holdings and its on-chain boarding
+    /// holdings (grouped by their stored contract signer) into one [`DeprecatedSignerReport`].
     ///
     /// Signers under which the wallet holds neither VTXOs nor boarding outputs are omitted. When
     /// the server advertises no deprecated signers, returns an empty vector without touching the
@@ -494,8 +507,7 @@ where
         let now = unix_now()?;
         let dust = server_info.dust;
 
-        // Aggregate VTXO holdings per signer in a single pass over all unspent VTXOs, resolving the
-        // signer via the script -> VTXO map (the same mapping `offchain_balance` relies on).
+        // Aggregate VTXO holdings per signer in a single pass over all unspent VTXOs.
         #[derive(Default)]
         struct VtxoAgg {
             // Spendable (non-recoverable) VTXOs.
@@ -508,25 +520,22 @@ where
             next_sweep_eta: Option<i64>,
         }
 
-        let (vtxo_list, script_map) = self
+        let vtxo_list = self
             .list_vtxos_with_server_info(&server_info)
             .await
             .context("failed to list VTXOs")?;
         let mut vtxo_aggs: HashMap<XOnlyPublicKey, VtxoAgg> = HashMap::new();
-        for v in vtxo_list.all_unspent() {
-            let Some(vtxo) = script_map.get(&v.script) else {
-                continue;
-            };
-            let agg = vtxo_aggs.entry(vtxo.server_pk()).or_default();
-            if v.is_recoverable(dust) {
+        for entry in vtxo_list.all_unspent() {
+            let agg = vtxo_aggs.entry(entry.server_pk()?).or_default();
+            if entry.vtxo().is_recoverable(dust) {
                 agg.recoverable_count += 1;
-                agg.recoverable_value += v.amount;
+                agg.recoverable_value += entry.vtxo().amount;
             } else {
                 agg.spendable_count += 1;
-                agg.spendable_value += v.amount;
+                agg.spendable_value += entry.vtxo().amount;
                 agg.next_sweep_eta = Some(match agg.next_sweep_eta {
-                    Some(eta) => eta.min(v.expires_at),
-                    None => v.expires_at,
+                    Some(eta) => eta.min(entry.vtxo().expires_at),
+                    None => entry.vtxo().expires_at,
                 });
             }
         }
@@ -538,7 +547,7 @@ where
         // unilateral sweep).
         let mut boarding_aggs: HashMap<XOnlyPublicKey, (usize, Amount)> = HashMap::new();
         let mut seen_outpoints = HashSet::new();
-        for boarding_output in self.inner.wallet.get_boarding_outputs()? {
+        for boarding_output in self.boarding_outputs()? {
             let outpoints = timeout_op(
                 self.inner.timeout,
                 self.blockchain().find_outpoints(boarding_output.address()),

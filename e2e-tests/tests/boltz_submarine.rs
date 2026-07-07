@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
+use crate::common::create_lnd_invoice;
 use crate::common::wait_until_balance;
-use ark_client::lightning_invoice::Bolt11Invoice;
 use bitcoin::key::Secp256k1;
 use bitcoin::Amount;
 use common::init_tracing;
@@ -12,20 +12,10 @@ use std::sync::Arc;
 
 mod common;
 
-// TODO: Expand this test to call Lightning APIs directly.
-
-// Modify this constant _before_ running the test.
-const INVOICE: &str = "";
-
 #[tokio::test]
 #[ignore]
 pub async fn submarine_swap() {
-    // This test requires even more setup than regular e2e tests, as well as manual intervention
-    // (for now).
-    //
-    // Follow the steps in
-    // https://github.com/ArkLabsHQ/fulmine/blob/6a4cd0b38a29732d03721b925f220b4f3717f379/docs/swaps.regtest.md
-    // to setup the environment including Boltz.
+    // Requires the Boltz regtest environment. See scripts/boltz-setup.sh.
 
     init_tracing();
     let regtest = Arc::new(Regtest::new());
@@ -33,7 +23,8 @@ pub async fn submarine_swap() {
     let secp = Secp256k1::new();
     let mut rng = thread_rng();
 
-    let invoice: Bolt11Invoice = INVOICE.parse().expect("valid BOLT11 invoice");
+    let invoice_amount = Amount::from_sat(2_000);
+    let invoice = create_lnd_invoice(invoice_amount).await;
 
     let (alice, _) = set_up_client("alice".to_string(), regtest.clone(), secp.clone()).await;
 

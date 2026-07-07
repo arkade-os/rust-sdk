@@ -4,7 +4,6 @@ use crate::error::ErrorContext;
 use crate::swap_storage::SwapStorage;
 use crate::utils::sleep;
 use crate::utils::timeout_op;
-use crate::wallet::BoardingWallet;
 use crate::wallet::OnchainWallet;
 use crate::Blockchain;
 use crate::Client;
@@ -30,7 +29,7 @@ use std::collections::HashSet;
 impl<B, W, S> Client<B, W, S>
 where
     B: Blockchain,
-    W: BoardingWallet + OnchainWallet,
+    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     /// Build the unilateral exit transaction tree for all spendable VTXOs.
@@ -41,7 +40,7 @@ where
     /// commitment transaction output to a spendable VTXO. Every transaction is finalized, but
     /// requires fee bumping through a P2A output.
     pub async fn build_unilateral_exit_trees(&self) -> Result<Vec<Vec<Transaction>>, Error> {
-        let (vtxo_list, _) = self
+        let vtxo_list = self
             .list_vtxos()
             .await
             .context("failed to get spendable VTXOs")?;
@@ -49,7 +48,8 @@ where
         let mut unilateral_exit_trees = Vec::new();
 
         // For each spendable VTXO, generate its unilateral exit tree.
-        for virtual_tx_outpoint in vtxo_list.could_exit_unilaterally() {
+        for contract_vtxo in vtxo_list.could_exit_unilaterally() {
+            let virtual_tx_outpoint = contract_vtxo.vtxo();
             let vtxo_chain_response = timeout_op(
                 self.inner.timeout,
                 self.network_client()
@@ -273,10 +273,6 @@ where
                     if let Ok(keypair) = self.keypair_by_pk(&pk) {
                         let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &keypair);
                         let pk = keypair.x_only_public_key().0;
-                        res.push((sig, pk))
-                    }
-
-                    if let Ok(sig) = self.inner.wallet.sign_for_pk(&pk, &msg) {
                         res.push((sig, pk))
                     }
                 }

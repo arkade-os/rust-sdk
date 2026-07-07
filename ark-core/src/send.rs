@@ -2,6 +2,7 @@ use crate::anchor_output;
 use crate::asset;
 use crate::asset::packet::add_asset_packet_to_psbt;
 use crate::asset::AssetId;
+use crate::contract::SpendSelection;
 use crate::script::tr_script_pubkey;
 use crate::server;
 use crate::ArkAddress;
@@ -91,6 +92,27 @@ impl VtxoInput {
             outpoint,
             assets,
         }
+    }
+
+    pub fn new_with_spend_selection(
+        spend_selection: SpendSelection,
+        tapscripts: Vec<ScriptBuf>,
+        script_pubkey: ScriptBuf,
+        amount: Amount,
+        outpoint: OutPoint,
+        assets: Vec<Asset>,
+    ) -> Self {
+        let (spend_script, control_block) = spend_selection.spend_info();
+        Self::new(
+            spend_script,
+            spend_selection.locktime,
+            control_block,
+            tapscripts,
+            script_pubkey,
+            amount,
+            outpoint,
+            assets,
+        )
     }
 
     pub fn outpoint(&self) -> OutPoint {

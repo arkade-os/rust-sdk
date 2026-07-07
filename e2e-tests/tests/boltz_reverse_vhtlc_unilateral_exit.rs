@@ -1,5 +1,8 @@
 #![allow(clippy::unwrap_used)]
 
+use crate::common::format_command_output;
+use crate::common::start_lnd_payment;
+use crate::common::wait_for_lnd_payment;
 use crate::common::wait_until_balance;
 use ark_client::wallet::OnchainWallet;
 use ark_client::SwapAmount;
@@ -10,12 +13,9 @@ use bitcoin::Amount;
 use common::init_tracing;
 use common::set_up_client;
 use common::Regtest;
-use std::process::Output;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::process::Command;
-use tokio::task::JoinHandle;
 
 mod common;
 
@@ -51,7 +51,7 @@ pub async fn reverse_swap_claim_with_vhtlc_ancestor_can_exit_unilaterally() {
         "Generated Boltz reverse swap invoice"
     );
 
-    let mut payment = start_ln_payment(&reverse_swap.invoice.to_string());
+    let mut payment = start_lnd_payment(&reverse_swap.invoice.to_string());
 
     let claim = tokio::select! {
         res = alice.wait_for_vhtlc(&reverse_swap.swap_id) => res.unwrap(),
@@ -61,7 +61,7 @@ pub async fn reverse_swap_claim_with_vhtlc_ancestor_can_exit_unilaterally() {
                 .expect("failed to wait for lncli payinvoice");
             panic!(
                 "lncli payinvoice exited before the VHTLC was claimed: {}",
-                format_ln_payment_output(&output)
+                format_command_output(&output)
             );
         }
         () = tokio::time::sleep(Duration::from_secs(120)) => {
@@ -69,7 +69,7 @@ pub async fn reverse_swap_claim_with_vhtlc_ancestor_can_exit_unilaterally() {
             panic!("timed out waiting for Boltz to fund and claim the VHTLC");
         }
     };
-    wait_for_ln_payment(payment).await;
+    wait_for_lnd_payment(payment).await;
 
     wait_until_balance!(&alice, confirmed: Amount::ZERO, pre_confirmed: claim.claim_amount);
 
@@ -139,17 +139,27 @@ pub async fn reverse_swap_claim_with_vhtlc_ancestor_can_exit_unilaterally() {
     regtest.set_outpoint_blocktime_offset(max_blocktime_offset as u64);
 
     let send_amount = claim.claim_amount - Amount::from_sat(1_000);
-    let (tx, prevouts) = alice
-        .create_send_on_chain_transaction(
-            bitcoin::Address::<NetworkUnchecked>::from_str(
-                "bcrt1q8df4sx3hz63tq44ve3q6tr4qz0q30usk5sntpt",
-            )
-            .unwrap()
-            .assume_checked(),
-            send_amount,
-        )
-        .await
-        .unwrap();
+    let send_address = bitcoin::Address::<NetworkUnchecked>::from_str(
+        "bcrt1q8df4sx3hz63tq44ve3q6tr4qz0q30usk5sntpt",
+    )
+    .unwrap()
+    .assume_checked();
+    let (tx, prevouts) = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            match alice
+                .create_send_on_chain_transaction(send_address.clone(), send_amount)
+                .await
+            {
+                Ok(result) => return result,
+                Err(err) => {
+                    tracing::debug!(%err, "Waiting for exited VTXO to become spendable on-chain");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for exited VTXO to become spendable on-chain");
 
     assert_eq!(tx.input.len(), prevouts.len());
     assert!(
@@ -178,47 +188,4 @@ pub async fn reverse_swap_claim_with_vhtlc_ancestor_can_exit_unilaterally() {
         )
         .expect("valid input");
     }
-}
-
-fn start_ln_payment(invoice: &str) -> JoinHandle<std::io::Result<Output>> {
-    // Boltz reverse swap invoices are settled only after Alice claims the VHTLC and reveals the
-    // preimage, so we must not wait for `payinvoice` before calling `wait_for_vhtlc`.
-    let invoice = invoice.to_string();
-    tokio::spawn(async move {
-        Command::new("docker")
-            .args([
-                "exec",
-                "lnd",
-                "lncli",
-                "--network=regtest",
-                "payinvoice",
-                "--force",
-                &invoice,
-            ])
-            .output()
-            .await
-    })
-}
-
-async fn wait_for_ln_payment(payment: JoinHandle<std::io::Result<Output>>) {
-    let output = tokio::time::timeout(Duration::from_secs(30), payment)
-        .await
-        .expect("LN payment did not complete after VHTLC claim")
-        .expect("lncli payinvoice task panicked")
-        .expect("failed to wait for lncli payinvoice");
-
-    assert!(
-        output.status.success(),
-        "failed to pay invoice: {}",
-        format_ln_payment_output(&output)
-    );
-}
-
-fn format_ln_payment_output(output: &Output) -> String {
-    format!(
-        "status={} stdout={} stderr={}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    )
 }
