@@ -9,6 +9,7 @@ use ark_core::build_anchor_tx;
 use ark_core::contract::BoardingContract;
 use ark_core::contract::ContractContext;
 use ark_core::contract::ContractState;
+use ark_core::contract::ContractType;
 use ark_core::contract::DefaultVtxoContract;
 use ark_core::contract::DelegateVtxoContract;
 use ark_core::history;
@@ -85,11 +86,12 @@ pub use boltz::SwapStatus;
 pub use boltz::SwapStatusInfo;
 pub use boltz::SwapType;
 pub use boltz::TimeoutBlockHeights;
+pub use contract::AnnotatedBoardingOutput;
+pub use contract::AnnotatedVtxo;
+pub use contract::AnnotatedVtxoList;
 pub use contract::ContractManager;
 pub use contract::ContractRegistry;
 pub use contract::ContractStore;
-pub use contract::ContractVtxo;
-pub use contract::ContractVtxoList;
 pub use contract::MemoryContractStore;
 #[cfg(feature = "sqlite")]
 pub use contract::SqliteContractStore;
@@ -122,10 +124,16 @@ pub const DEFAULT_BOLTZ_REFERRAL_ID: &str = "arkade-rs-SDK";
 /// Summary returned by [`Client::restore_contracts`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ContractRestoreReport {
+    /// Gap limit used for this scan.
+    pub gap_limit: u32,
+    /// First derived key index that was probed, if any.
+    pub scanned_from: Option<u32>,
+    /// One past the last derived key index that was probed, if any.
+    pub scanned_to_exclusive: Option<u32>,
     /// Derived key indexes that were probed.
     pub scanned_keys: u32,
     /// Key indexes where at least one contract had activity.
-    pub discovered_keys: u32,
+    pub discovered_key_indexes: Vec<u32>,
     /// Offchain default/delegate contracts with VTXO activity.
     pub offchain_contracts: u32,
     /// Boarding contracts with on-chain UTXO activity.
@@ -134,12 +142,60 @@ pub struct ContractRestoreReport {
     pub inserted_contracts: u32,
     /// Discovered contracts that were already present in the store.
     pub known_contracts: u32,
+    /// Per-contract discovery details for caller UX.
+    pub entries: Vec<ContractRestoreEntry>,
 }
 
 impl ContractRestoreReport {
-    pub fn discovered_contracts(&self) -> u32 {
-        self.offchain_contracts + self.boarding_contracts
+    pub fn discovered_keys(&self) -> u32 {
+        self.discovered_key_indexes.len() as u32
     }
+
+    pub fn discovered_contracts(&self) -> u32 {
+        self.entries.len() as u32
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContractRestoreEntry {
+    pub key_index: u32,
+    pub contract_type: ContractType,
+    pub script_pubkey: ScriptBuf,
+    pub status: ContractRestoreEntryStatus,
+    pub discovery: ContractRestoreDiscovery,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContractRestoreEntryStatus {
+    Inserted,
+    Known,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ContractRestoreDiscovery {
+    Offchain {
+        vtxos: Vec<ContractRestoreVtxo>,
+    },
+    Boarding {
+        outpoints: Vec<ContractRestoreOutpoint>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContractRestoreVtxo {
+    pub outpoint: OutPoint,
+    pub amount: Amount,
+    pub is_spent: bool,
+    pub is_swept: bool,
+    pub is_unrolled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContractRestoreOutpoint {
+    pub outpoint: OutPoint,
+    pub amount: Amount,
+    pub confirmation_blocktime: Option<u64>,
+    pub confirmations: u64,
 }
 
 /// Default mainnet Arkade server URL.
@@ -457,6 +513,14 @@ impl RestoreCandidate {
             )?
             .script_pubkey()),
             Self::Boarding(contract) => Ok(contract.boarding_output(ctx)?.script_pubkey()),
+        }
+    }
+
+    fn contract_type(&self) -> ContractType {
+        match self {
+            Self::DefaultVtxo(_) => ContractType::default_vtxo(),
+            Self::DelegateVtxo(_) => ContractType::delegate_vtxo(),
+            Self::Boarding(_) => ContractType::boarding(),
         }
     }
 }
@@ -1119,9 +1183,16 @@ where
     ///
     /// * `gap_limit` - Number of consecutive unused key indexes before stopping
     pub async fn restore_contracts(&self, gap_limit: u32) -> Result<ContractRestoreReport, Error> {
+        if gap_limit == 0 {
+            return Err(Error::ad_hoc("restore gap limit must be greater than zero"));
+        }
+
         if !self.inner.key_provider.supports_discovery() {
             tracing::debug!("Key provider does not support discovery, skipping");
-            return Ok(ContractRestoreReport::default());
+            return Ok(ContractRestoreReport {
+                gap_limit,
+                ..Default::default()
+            });
         }
 
         let server_info = &self.server_info().await?;
@@ -1135,7 +1206,10 @@ where
             ark_core::candidate_exit_delays(server_info.boarding_exit_delay, server_info.network)?;
 
         let mut start_index = 0u32;
-        let mut report = ContractRestoreReport::default();
+        let mut report = ContractRestoreReport {
+            gap_limit,
+            ..Default::default()
+        };
 
         tracing::info!(gap_limit, "Starting contract restore");
 
@@ -1152,6 +1226,11 @@ where
                 break;
             }
 
+            report.scanned_from.get_or_insert(start_index);
+            let scanned_to_exclusive = start_index
+                .checked_add(batch.len() as u32)
+                .ok_or_else(|| Error::ad_hoc("Key discovery index overflow"))?;
+            report.scanned_to_exclusive = Some(scanned_to_exclusive);
             report.scanned_keys += batch.len() as u32;
 
             let mut offchain_addresses = Vec::new();
@@ -1167,8 +1246,20 @@ where
             let vtxo_list = self
                 .list_vtxos_for_addresses(offchain_addresses.into_iter())
                 .await?;
-            let used_offchain_scripts: HashSet<ScriptBuf> =
-                vtxo_list.all().map(|vtxo| vtxo.script.clone()).collect();
+            let mut offchain_vtxos_by_script =
+                HashMap::<ScriptBuf, Vec<ContractRestoreVtxo>>::new();
+            for vtxo in vtxo_list.all() {
+                offchain_vtxos_by_script
+                    .entry(vtxo.script.clone())
+                    .or_default()
+                    .push(ContractRestoreVtxo {
+                        outpoint: vtxo.outpoint,
+                        amount: vtxo.amount,
+                        is_spent: vtxo.is_spent,
+                        is_swept: vtxo.is_swept,
+                        is_unrolled: vtxo.is_unrolled,
+                    });
+            }
 
             let mut found_any = false;
             for (index, kp, candidates) in batch {
@@ -1176,36 +1267,56 @@ where
 
                 for candidate in candidates {
                     let script = candidate.script_pubkey(self.secp(), &ctx)?;
+                    let contract_type = candidate.contract_type();
                     let target = candidate.discovery_target(self.secp(), &ctx)?;
-                    let offchain_found = matches!(target, RestoreDiscoveryTarget::Offchain(_))
-                        && used_offchain_scripts.contains(&script);
-                    let boarding_found = match target {
-                        RestoreDiscoveryTarget::Boarding(address) if !offchain_found => self
-                            .blockchain()
-                            .find_outpoints(&address)
-                            .await?
-                            .iter()
-                            .any(|utxo| !utxo.is_spent),
-                        RestoreDiscoveryTarget::Boarding(_)
-                        | RestoreDiscoveryTarget::Offchain(_) => false,
+                    let discovery = match target {
+                        RestoreDiscoveryTarget::Offchain(_) => offchain_vtxos_by_script
+                            .get(&script)
+                            .filter(|vtxos| !vtxos.is_empty())
+                            .cloned()
+                            .map(|vtxos| ContractRestoreDiscovery::Offchain { vtxos }),
+                        RestoreDiscoveryTarget::Boarding(address) => {
+                            let outpoints = self
+                                .blockchain()
+                                .find_outpoints(&address)
+                                .await?
+                                .into_iter()
+                                .filter(|utxo| !utxo.is_spent)
+                                .map(|utxo| ContractRestoreOutpoint {
+                                    outpoint: utxo.outpoint,
+                                    amount: utxo.amount,
+                                    confirmation_blocktime: utxo.confirmation_blocktime,
+                                    confirmations: utxo.confirmations,
+                                })
+                                .collect::<Vec<_>>();
+                            (!outpoints.is_empty())
+                                .then_some(ContractRestoreDiscovery::Boarding { outpoints })
+                        }
                     };
 
-                    if !offchain_found && !boarding_found {
+                    let Some(discovery) = discovery else {
                         continue;
-                    }
+                    };
 
                     let inserted = self.persist_restore_candidate(candidate, index)?;
-                    if inserted {
+                    let status = if inserted {
                         report.inserted_contracts += 1;
+                        ContractRestoreEntryStatus::Inserted
                     } else {
                         report.known_contracts += 1;
+                        ContractRestoreEntryStatus::Known
+                    };
+                    match &discovery {
+                        ContractRestoreDiscovery::Offchain { .. } => report.offchain_contracts += 1,
+                        ContractRestoreDiscovery::Boarding { .. } => report.boarding_contracts += 1,
                     }
-                    if offchain_found {
-                        report.offchain_contracts += 1;
-                    }
-                    if boarding_found {
-                        report.boarding_contracts += 1;
-                    }
+                    report.entries.push(ContractRestoreEntry {
+                        key_index: index,
+                        contract_type,
+                        script_pubkey: script,
+                        status,
+                        discovery,
+                    });
                     found_for_key = true;
                 }
 
@@ -1213,7 +1324,7 @@ where
                     self.inner
                         .key_provider
                         .cache_discovered_keypair(index, kp)?;
-                    report.discovered_keys += 1;
+                    report.discovered_key_indexes.push(index);
                     found_any = true;
                 }
             }
@@ -1388,7 +1499,7 @@ where
     fn persist_watch_boarding_outputs(
         &self,
         server_info: &server::Info,
-    ) -> Result<Vec<contract::ContractBoardingOutput>, Error> {
+    ) -> Result<Vec<AnnotatedBoardingOutput>, Error> {
         let candidate_delays =
             ark_core::candidate_exit_delays(server_info.boarding_exit_delay, server_info.network)?;
         let owner = self
@@ -1427,7 +1538,7 @@ where
         self.fetch_all_vtxos(request).await
     }
 
-    pub async fn list_vtxos(&self) -> Result<ContractVtxoList, Error> {
+    pub async fn list_vtxos(&self) -> Result<AnnotatedVtxoList, Error> {
         let server_info = self.server_info().await?;
         self.list_vtxos_with_server_info(&server_info).await
     }
@@ -1435,12 +1546,12 @@ where
     pub(crate) async fn list_vtxos_with_server_info(
         &self,
         server_info: &server::Info,
-    ) -> Result<ContractVtxoList, Error> {
+    ) -> Result<AnnotatedVtxoList, Error> {
         let addresses = self.active_offchain_contract_addresses()?;
         let virtual_tx_outpoints = self.get_virtual_tx_outpoints(addresses.into_iter()).await?;
         let contract_vtxos = self.annotate_vtxos(virtual_tx_outpoints)?;
 
-        Ok(ContractVtxoList::new(server_info.dust, contract_vtxos))
+        Ok(AnnotatedVtxoList::new(server_info.dust, contract_vtxos))
     }
 
     pub async fn list_vtxos_for_addresses(
@@ -1470,11 +1581,11 @@ where
     pub async fn list_vtxos_for_outpoints(
         &self,
         outpoints: Vec<OutPoint>,
-    ) -> Result<ContractVtxoList, Error> {
+    ) -> Result<AnnotatedVtxoList, Error> {
         let request = GetVtxosRequest::new_for_outpoints(&outpoints);
         let virtual_tx_outpoints = self.fetch_all_vtxos(request).await?;
         let contract_vtxos = self.annotate_vtxos(virtual_tx_outpoints)?;
-        Ok(ContractVtxoList::new(
+        Ok(AnnotatedVtxoList::new(
             self.server_info().await?.dust,
             contract_vtxos,
         ))
@@ -1504,31 +1615,31 @@ where
 
         let spendable_outpoints: HashSet<OutPoint> = vtxo_list
             .spendable_offchain_at(&server_info, now)
-            .map(|entry| entry.vtxo.outpoint)
+            .map(|entry| entry.vtxo().outpoint)
             .collect();
 
         let pre_confirmed = vtxo_list
             .pre_confirmed()
-            .filter(|entry| spendable_outpoints.contains(&entry.vtxo.outpoint))
-            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo.amount);
+            .filter(|entry| spendable_outpoints.contains(&entry.vtxo().outpoint))
+            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo().amount);
 
         let confirmed = vtxo_list
             .confirmed()
-            .filter(|entry| spendable_outpoints.contains(&entry.vtxo.outpoint))
-            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo.amount);
+            .filter(|entry| spendable_outpoints.contains(&entry.vtxo().outpoint))
+            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo().amount);
 
         let recoverable = vtxo_list
             .recoverable()
-            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo.amount);
+            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo().amount);
 
         let pending_recovery = vtxo_list
             .pending_recovery_due_to_signer_at(&server_info, now)
-            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo.amount);
+            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo().amount);
 
         // Aggregate asset balances from currently offchain-spendable VTXOs only.
         let mut asset_balances: HashMap<AssetId, u64> = HashMap::new();
         for entry in vtxo_list.spendable_offchain_at(&server_info, now) {
-            for asset in &entry.vtxo.assets {
+            for asset in &entry.vtxo().assets {
                 let total = asset_balances
                     .get(&asset.asset_id)
                     .copied()
@@ -1605,11 +1716,11 @@ where
 
         let spent_outpoints = vtxo_list
             .spent()
-            .map(|entry| entry.vtxo.clone())
+            .map(|entry| entry.vtxo().clone())
             .collect::<Vec<_>>();
         let unspent_outpoints = vtxo_list
             .all_unspent()
-            .map(|entry| entry.vtxo.clone())
+            .map(|entry| entry.vtxo().clone())
             .collect::<Vec<_>>();
 
         let incoming_transactions = generate_incoming_vtxo_transaction_history(
@@ -1738,7 +1849,7 @@ where
         Ok(self.secp().sign_schnorr_no_aux_rand(msg, &keypair))
     }
 
-    fn boarding_outputs(&self) -> Result<Vec<contract::ContractBoardingOutput>, Error> {
+    fn boarding_outputs(&self) -> Result<Vec<AnnotatedBoardingOutput>, Error> {
         let state = self
             .state
             .read()
@@ -1785,7 +1896,7 @@ where
         Ok(contracts)
     }
 
-    fn annotate_vtxos(&self, vtxos: Vec<VirtualTxOutPoint>) -> Result<Vec<ContractVtxo>, Error> {
+    fn annotate_vtxos(&self, vtxos: Vec<VirtualTxOutPoint>) -> Result<Vec<AnnotatedVtxo>, Error> {
         let state = self
             .state
             .read()
@@ -2234,6 +2345,28 @@ mod digest_guard_tests {
         let addresses = client.get_boarding_addresses().await.unwrap();
 
         assert_eq!(addresses.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn restore_contracts_rejects_zero_gap_limit() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let client = connect_test_client(MockArkServer::default()).await;
+        let err = client.restore_contracts(0).await.unwrap_err();
+
+        assert!(err.to_string().contains("gap limit"));
+    }
+
+    #[tokio::test]
+    async fn restore_contracts_reports_gap_limit_for_static_provider() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let client = connect_test_client(MockArkServer::default()).await;
+        let report = client.restore_contracts(20).await.unwrap();
+
+        assert_eq!(report.gap_limit, 20);
+        assert_eq!(report.scanned_keys, 0);
+        assert!(report.entries.is_empty());
     }
 
     #[tokio::test]

@@ -3,9 +3,9 @@ use crate::send_vtxo::coin_select_vtxo;
 use crate::send_vtxo::select_contract_vtxos;
 use crate::swap_storage::SwapStorage;
 use crate::wallet::OnchainWallet;
+use crate::AnnotatedVtxo;
 use crate::Blockchain;
 use crate::Client;
-use crate::ContractVtxo;
 use crate::Error;
 use ark_core::asset::AssetId;
 use ark_core::asset::ControlAssetConfig;
@@ -277,7 +277,7 @@ where
         Ok(ark_txid)
     }
 
-    async fn spendable_virtual_vtxos(&self) -> Result<Vec<ContractVtxo>, Error> {
+    async fn spendable_virtual_vtxos(&self) -> Result<Vec<AnnotatedVtxo>, Error> {
         let vtxo_list = self.list_vtxos().await.context("failed to list VTXOs")?;
 
         let now = crate::utils::unix_now()?;

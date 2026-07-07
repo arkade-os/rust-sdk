@@ -2,9 +2,9 @@ use crate::error::ErrorContext;
 use crate::swap_storage::SwapStorage;
 use crate::utils::timeout_op;
 use crate::wallet::OnchainWallet;
+use crate::AnnotatedVtxo;
 use crate::Blockchain;
 use crate::Client;
-use crate::ContractVtxo;
 use crate::Error;
 use ark_core::asset::AssetId;
 use ark_core::coin_select::select_vtxos;
@@ -34,26 +34,26 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::time::Duration;
 
-pub(crate) fn coin_select_vtxo(entry: &ContractVtxo) -> VirtualTxOutPoint {
+pub(crate) fn coin_select_vtxo(entry: &AnnotatedVtxo) -> VirtualTxOutPoint {
     VirtualTxOutPoint {
-        outpoint: entry.vtxo.outpoint,
-        script_pubkey: entry.vtxo.script.clone(),
-        expire_at: entry.vtxo.expires_at,
-        amount: entry.vtxo.amount,
-        assets: entry.vtxo.assets.clone(),
+        outpoint: entry.vtxo().outpoint,
+        script_pubkey: entry.vtxo().script.clone(),
+        expire_at: entry.vtxo().expires_at,
+        amount: entry.vtxo().amount,
+        assets: entry.vtxo().assets.clone(),
     }
 }
 
 pub(crate) fn select_contract_vtxos(
-    available: &[ContractVtxo],
+    available: &[AnnotatedVtxo],
     selected: &[VirtualTxOutPoint],
-) -> Vec<ContractVtxo> {
+) -> Vec<AnnotatedVtxo> {
     selected
         .iter()
         .filter_map(|coin| {
             available
                 .iter()
-                .find(|entry| entry.vtxo.outpoint == coin.outpoint)
+                .find(|entry| entry.vtxo().outpoint == coin.outpoint)
                 .cloned()
         })
         .collect()
@@ -383,7 +383,7 @@ where
         let server_info = self.server_info().await?;
         let selected_contracts: Vec<_> = vtxo_list
             .spendable_offchain_at(&server_info, now)
-            .filter(|entry| requested_outpoints.contains(&entry.vtxo.outpoint))
+            .filter(|entry| requested_outpoints.contains(&entry.vtxo().outpoint))
             .cloned()
             .collect();
         let selected: Vec<_> = selected_contracts.iter().map(coin_select_vtxo).collect();
@@ -413,7 +413,7 @@ where
     /// Convert selected [`VirtualTxOutPoint`]s into [`send::VtxoInput`]s.
     pub(crate) fn build_vtxo_inputs(
         &self,
-        selected: Vec<ContractVtxo>,
+        selected: Vec<AnnotatedVtxo>,
     ) -> Result<Vec<VtxoInput>, Error> {
         selected
             .into_iter()
@@ -424,9 +424,9 @@ where
                     spend_selection,
                     entry.tapscripts(),
                     entry.script_pubkey(),
-                    entry.vtxo.amount,
-                    entry.vtxo.outpoint,
-                    entry.vtxo.assets,
+                    entry.vtxo().amount,
+                    entry.vtxo().outpoint,
+                    entry.vtxo().assets.clone(),
                 ))
             })
             .collect()
@@ -726,17 +726,17 @@ where
                     .context("failed to get forfeit spend selection")?;
 
                 vtxo_inputs.push(intent::Input::new_with_spend_selection(
-                    entry.vtxo.outpoint,
+                    entry.vtxo().outpoint,
                     entry.exit_delay()?,
                     TxOut {
-                        value: entry.vtxo.amount,
+                        value: entry.vtxo().amount,
                         script_pubkey: entry.script_pubkey(),
                     },
                     entry.tapscripts(),
                     spend_selection,
                     false,
-                    entry.vtxo.is_swept,
-                    entry.vtxo.assets.clone(),
+                    entry.vtxo().is_swept,
+                    entry.vtxo().assets.clone(),
                 ));
             }
 

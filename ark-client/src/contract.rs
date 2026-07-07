@@ -139,6 +139,10 @@ impl ContractRegistry {
     }
 }
 
+/// Persistence backend for validated [`StoredContract`] rows.
+///
+/// Stores are keyed by script pubkey. Higher-level compatibility for built-in same-script templates
+/// is handled by [`ContractManager`], not by individual store implementations.
 pub trait ContractStore: Send + Sync {
     fn insert(&mut self, contract: StoredContract) -> Result<(), Error>;
     fn get_by_script(&self, script_pubkey: &Script) -> Result<Option<StoredContract>, Error>;
@@ -399,14 +403,42 @@ impl ContractStore for SqliteContractStore {
     }
 }
 
+/// A VTXO returned by wallet surfaces, enriched with its stored contract metadata.
+///
+/// Use [`Self::spend_selection`] to build transaction inputs. The underlying VTXO and contract are
+/// exposed read-only for wallet UX and advanced integrations.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ContractVtxo {
-    pub contract: StoredContract,
-    pub vtxo: VirtualTxOutPoint,
-    pub spend_selections: Vec<SpendSelection>,
+pub struct AnnotatedVtxo {
+    contract: StoredContract,
+    vtxo: VirtualTxOutPoint,
+    spend_selections: Vec<SpendSelection>,
 }
 
-impl ContractVtxo {
+impl AnnotatedVtxo {
+    pub(crate) fn new(
+        contract: StoredContract,
+        vtxo: VirtualTxOutPoint,
+        spend_selections: Vec<SpendSelection>,
+    ) -> Self {
+        Self {
+            contract,
+            vtxo,
+            spend_selections,
+        }
+    }
+
+    pub fn contract(&self) -> &StoredContract {
+        &self.contract
+    }
+
+    pub fn vtxo(&self) -> &VirtualTxOutPoint {
+        &self.vtxo
+    }
+
+    pub fn spend_selections(&self) -> &[SpendSelection] {
+        &self.spend_selections
+    }
+
     pub fn spend_path(&self, kind: ark_core::contract::SpendPathKind) -> Result<SpendPath, Error> {
         self.spend_selection(kind).map(|selection| selection.path)
     }
@@ -457,14 +489,42 @@ struct VtxoContractData {
     exit_delay: Sequence,
 }
 
+/// A boarding output returned by wallet surfaces, enriched with its stored contract metadata.
+///
+/// Use [`Self::spend_selection`] to build transaction inputs. The underlying output and contract
+/// are exposed read-only for wallet UX and advanced integrations.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ContractBoardingOutput {
-    pub contract: StoredContract,
-    pub output: BoardingOutput,
-    pub spend_selections: Vec<SpendSelection>,
+pub struct AnnotatedBoardingOutput {
+    contract: StoredContract,
+    output: BoardingOutput,
+    spend_selections: Vec<SpendSelection>,
 }
 
-impl ContractBoardingOutput {
+impl AnnotatedBoardingOutput {
+    pub(crate) fn new(
+        contract: StoredContract,
+        output: BoardingOutput,
+        spend_selections: Vec<SpendSelection>,
+    ) -> Self {
+        Self {
+            contract,
+            output,
+            spend_selections,
+        }
+    }
+
+    pub fn contract(&self) -> &StoredContract {
+        &self.contract
+    }
+
+    pub fn output(&self) -> &BoardingOutput {
+        &self.output
+    }
+
+    pub fn spend_selections(&self) -> &[SpendSelection] {
+        &self.spend_selections
+    }
+
     pub fn spend_path(&self, kind: ark_core::contract::SpendPathKind) -> Result<SpendPath, Error> {
         self.spend_selection(kind).map(|selection| selection.path)
     }
@@ -539,32 +599,32 @@ impl ActiveOffchainContract {
 }
 
 #[derive(Clone, Debug)]
-pub struct ContractVtxoList {
+pub struct AnnotatedVtxoList {
     dust: Amount,
-    vtxos: Vec<ContractVtxo>,
+    vtxos: Vec<AnnotatedVtxo>,
 }
 
-impl ContractVtxoList {
-    pub fn new(dust: Amount, vtxos: Vec<ContractVtxo>) -> Self {
+impl AnnotatedVtxoList {
+    pub fn new(dust: Amount, vtxos: Vec<AnnotatedVtxo>) -> Self {
         Self { dust, vtxos }
     }
 
-    pub fn into_inner(self) -> Vec<ContractVtxo> {
+    pub fn into_inner(self) -> Vec<AnnotatedVtxo> {
         self.vtxos
     }
 
-    pub fn all(&self) -> impl Iterator<Item = &ContractVtxo> {
+    pub fn all(&self) -> impl Iterator<Item = &AnnotatedVtxo> {
         self.vtxos.iter()
     }
 
-    pub fn all_unspent(&self) -> impl Iterator<Item = &ContractVtxo> {
+    pub fn all_unspent(&self) -> impl Iterator<Item = &AnnotatedVtxo> {
         let dust = self.dust;
         self.vtxos
             .iter()
             .filter(move |entry| entry.vtxo.is_unspent(dust))
     }
 
-    pub fn spendable_offchain(&self) -> impl Iterator<Item = &ContractVtxo> {
+    pub fn spendable_offchain(&self) -> impl Iterator<Item = &AnnotatedVtxo> {
         let dust = self.dust;
         self.vtxos
             .iter()
@@ -575,7 +635,7 @@ impl ContractVtxoList {
         &'a self,
         server_info: &'a server::Info,
         now_unix_secs: i64,
-    ) -> impl Iterator<Item = &'a ContractVtxo> + 'a {
+    ) -> impl Iterator<Item = &'a AnnotatedVtxo> + 'a {
         self.spendable_offchain().filter(move |entry| {
             !entry
                 .server_pk()
@@ -588,7 +648,7 @@ impl ContractVtxoList {
         &'a self,
         server_info: &'a server::Info,
         now_unix_secs: i64,
-    ) -> impl Iterator<Item = &'a ContractVtxo> + 'a {
+    ) -> impl Iterator<Item = &'a AnnotatedVtxo> + 'a {
         self.spendable_offchain().filter(move |entry| {
             entry
                 .server_pk()
@@ -601,7 +661,7 @@ impl ContractVtxoList {
         &'a self,
         server_info: &'a server::Info,
         now_unix_secs: i64,
-    ) -> impl Iterator<Item = &'a ContractVtxo> + 'a {
+    ) -> impl Iterator<Item = &'a AnnotatedVtxo> + 'a {
         self.all_unspent().filter(move |entry| {
             entry.vtxo.is_recoverable(server_info.dust)
                 || !entry
@@ -613,31 +673,31 @@ impl ContractVtxoList {
         })
     }
 
-    pub fn pre_confirmed(&self) -> impl Iterator<Item = &ContractVtxo> {
+    pub fn pre_confirmed(&self) -> impl Iterator<Item = &AnnotatedVtxo> {
         let dust = self.dust;
         self.vtxos
             .iter()
             .filter(move |entry| entry.vtxo.is_pre_confirmed_spendable(dust))
     }
 
-    pub fn confirmed(&self) -> impl Iterator<Item = &ContractVtxo> {
+    pub fn confirmed(&self) -> impl Iterator<Item = &AnnotatedVtxo> {
         let dust = self.dust;
         self.vtxos
             .iter()
             .filter(move |entry| entry.vtxo.is_confirmed_spendable(dust))
     }
 
-    pub fn recoverable(&self) -> impl Iterator<Item = &ContractVtxo> {
+    pub fn recoverable(&self) -> impl Iterator<Item = &AnnotatedVtxo> {
         self.vtxos
             .iter()
             .filter(move |entry| entry.vtxo.is_recoverable(self.dust))
     }
 
-    pub fn could_exit_unilaterally(&self) -> impl Iterator<Item = &ContractVtxo> {
+    pub fn could_exit_unilaterally(&self) -> impl Iterator<Item = &AnnotatedVtxo> {
         self.pre_confirmed().chain(self.confirmed())
     }
 
-    pub fn spent(&self) -> impl Iterator<Item = &ContractVtxo> {
+    pub fn spent(&self) -> impl Iterator<Item = &AnnotatedVtxo> {
         let dust = self.dust;
         self.vtxos
             .iter()
@@ -645,6 +705,13 @@ impl ContractVtxoList {
     }
 }
 
+/// Registry and persistence layer for built-in and custom Ark contracts.
+///
+/// `ContractManager` is a public extension point: consumers can register custom
+/// [`ContractSpec`] implementations while reusing the SDK's validation, persistence, and spend
+/// selection plumbing. The low-level row APIs expose stored contracts keyed by script;
+/// wallet-facing code should prefer semantic annotated outputs such as [`AnnotatedVtxo`] and
+/// [`AnnotatedBoardingOutput`].
 pub struct ContractManager {
     network: Network,
     registry: ContractRegistry,
@@ -660,8 +727,21 @@ impl ContractManager {
         }
     }
 
+    pub fn new_with_builtins(
+        network: Network,
+        store: Box<dyn ContractStore>,
+    ) -> Result<Self, Error> {
+        let mut manager = Self::new(network, store);
+        manager.register_builtins()?;
+        Ok(manager)
+    }
+
     pub fn in_memory(network: Network) -> Self {
         Self::new(network, Box::new(MemoryContractStore::new()))
+    }
+
+    pub fn in_memory_with_builtins(network: Network) -> Result<Self, Error> {
+        Self::new_with_builtins(network, Box::new(MemoryContractStore::new()))
     }
 
     pub fn network(&self) -> Network {
@@ -861,7 +941,7 @@ impl ContractManager {
     pub fn annotate_vtxos(
         &self,
         vtxos: Vec<VirtualTxOutPoint>,
-    ) -> Result<Vec<ContractVtxo>, Error> {
+    ) -> Result<Vec<AnnotatedVtxo>, Error> {
         vtxos
             .into_iter()
             .map(|vtxo| {
@@ -870,11 +950,7 @@ impl ContractManager {
                     .get_by_script(&vtxo.script)?
                     .ok_or_else(|| Error::ad_hoc("unknown contract script"))?;
                 let spend_selections = self.spendable_selections(&contract)?;
-                Ok(ContractVtxo {
-                    contract,
-                    vtxo,
-                    spend_selections,
-                })
+                Ok(AnnotatedVtxo::new(contract, vtxo, spend_selections))
             })
             .collect()
     }
@@ -888,7 +964,7 @@ impl ContractManager {
     pub fn annotated_boarding_outputs_for_exit_delays(
         &self,
         compatible_default_exit_delays: &[Sequence],
-    ) -> Result<Vec<ContractBoardingOutput>, Error> {
+    ) -> Result<Vec<AnnotatedBoardingOutput>, Error> {
         let ctx = ContractContext::new(self.network);
         self.store
             .list()?
@@ -901,16 +977,16 @@ impl ContractManager {
             .map(|(stored, contract)| {
                 let output = contract.boarding_output(&ctx)?;
                 let spend_selections = self.spendable_selections(&stored)?;
-                Ok(ContractBoardingOutput {
-                    contract: stored,
+                Ok(AnnotatedBoardingOutput::new(
+                    stored,
                     output,
                     spend_selections,
-                })
+                ))
             })
             .collect()
     }
 
-    pub fn annotated_boarding_outputs(&self) -> Result<Vec<ContractBoardingOutput>, Error> {
+    pub fn annotated_boarding_outputs(&self) -> Result<Vec<AnnotatedBoardingOutput>, Error> {
         self.annotated_boarding_outputs_for_exit_delays(&[])
     }
 }

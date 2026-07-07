@@ -393,7 +393,7 @@ where
         for input in &vtxo_inputs {
             let Some(contract_vtxo) = contract_vtxos
                 .all()
-                .find(|entry| entry.vtxo.outpoint == input.outpoint())
+                .find(|entry| entry.vtxo().outpoint == input.outpoint())
             else {
                 tracing::debug!(
                     outpoint = %input.outpoint(),
@@ -528,15 +528,15 @@ where
         let mut vtxo_aggs: HashMap<XOnlyPublicKey, VtxoAgg> = HashMap::new();
         for entry in vtxo_list.all_unspent() {
             let agg = vtxo_aggs.entry(entry.server_pk()?).or_default();
-            if entry.vtxo.is_recoverable(dust) {
+            if entry.vtxo().is_recoverable(dust) {
                 agg.recoverable_count += 1;
-                agg.recoverable_value += entry.vtxo.amount;
+                agg.recoverable_value += entry.vtxo().amount;
             } else {
                 agg.spendable_count += 1;
-                agg.spendable_value += entry.vtxo.amount;
+                agg.spendable_value += entry.vtxo().amount;
                 agg.next_sweep_eta = Some(match agg.next_sweep_eta {
-                    Some(eta) => eta.min(entry.vtxo.expires_at),
-                    None => entry.vtxo.expires_at,
+                    Some(eta) => eta.min(entry.vtxo().expires_at),
+                    None => entry.vtxo().expires_at,
                 });
             }
         }

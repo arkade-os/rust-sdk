@@ -50,10 +50,10 @@ pub async fn e2e_continue_pending_tx() {
     let spendable = vtxo_list
         .spendable_offchain()
         .map(|entry| ark_core::coin_select::VirtualTxOutPoint {
-            outpoint: entry.vtxo.outpoint,
-            script_pubkey: entry.vtxo.script.clone(),
-            expire_at: entry.vtxo.expires_at,
-            amount: entry.vtxo.amount,
+            outpoint: entry.vtxo().outpoint,
+            script_pubkey: entry.vtxo().script.clone(),
+            expire_at: entry.vtxo().expires_at,
+            amount: entry.vtxo().amount,
             assets: Vec::new(),
         })
         .collect::<Vec<_>>();
@@ -71,7 +71,7 @@ pub async fn e2e_continue_pending_tx() {
         .map(|coin| {
             let entry = vtxo_list
                 .all()
-                .find(|entry| entry.vtxo.outpoint == coin.outpoint)
+                .find(|entry| entry.vtxo().outpoint == coin.outpoint)
                 .unwrap();
             let spend_selection = entry.spend_selection(SpendPathKind::Forfeit).unwrap();
             VtxoInput::new_with_spend_selection(

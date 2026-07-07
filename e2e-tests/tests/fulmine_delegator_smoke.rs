@@ -63,7 +63,7 @@ async fn fulmine_delegator_smoke() {
 
     let has_unspent_delegated_vtxo = vtxo_list
         .all_unspent()
-        .any(|entry| entry.contract.contract_type == ContractType::delegate_vtxo());
+        .any(|entry| entry.contract().contract_type == ContractType::delegate_vtxo());
 
     assert!(
         has_unspent_delegated_vtxo,

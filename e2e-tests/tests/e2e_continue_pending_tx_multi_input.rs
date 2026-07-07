@@ -88,10 +88,10 @@ pub async fn e2e_continue_pending_tx_multi_input() {
         spendable.len()
     );
     tracing::info!(
-        vtxo_1 = %spendable[0].vtxo.outpoint,
-        vtxo_1_amount = %spendable[0].vtxo.amount,
-        vtxo_2 = %spendable[1].vtxo.outpoint,
-        vtxo_2_amount = %spendable[1].vtxo.amount,
+        vtxo_1 = %spendable[0].vtxo().outpoint,
+        vtxo_1_amount = %spendable[0].vtxo().amount,
+        vtxo_2 = %spendable[1].vtxo().outpoint,
+        vtxo_2_amount = %spendable[1].vtxo().amount,
         "Alice has 2 spendable VTXOs"
     );
 
@@ -103,10 +103,10 @@ pub async fn e2e_continue_pending_tx_multi_input() {
     let spendable_coins = vtxo_list
         .spendable_offchain()
         .map(|entry| ark_core::coin_select::VirtualTxOutPoint {
-            outpoint: entry.vtxo.outpoint,
-            script_pubkey: entry.vtxo.script.clone(),
-            expire_at: entry.vtxo.expires_at,
-            amount: entry.vtxo.amount,
+            outpoint: entry.vtxo().outpoint,
+            script_pubkey: entry.vtxo().script.clone(),
+            expire_at: entry.vtxo().expires_at,
+            amount: entry.vtxo().amount,
             assets: Vec::new(),
         })
         .collect::<Vec<_>>();
@@ -130,7 +130,7 @@ pub async fn e2e_continue_pending_tx_multi_input() {
         .map(|coin| {
             let entry = vtxo_list
                 .all()
-                .find(|entry| entry.vtxo.outpoint == coin.outpoint)
+                .find(|entry| entry.vtxo().outpoint == coin.outpoint)
                 .unwrap();
             let spend_selection = entry.spend_selection(SpendPathKind::Forfeit).unwrap();
             VtxoInput::new_with_spend_selection(

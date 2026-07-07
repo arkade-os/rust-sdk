@@ -8,9 +8,9 @@
 use crate::error::ErrorContext;
 use crate::swap_storage::SwapStorage;
 use crate::wallet::OnchainWallet;
+use crate::AnnotatedVtxo;
 use crate::Blockchain;
 use crate::Client;
-use crate::ContractVtxo;
 use crate::Error;
 use ark_core::intent;
 use ark_core::server::SubscriptionResponse;
@@ -487,14 +487,14 @@ where
     let mut newly_seen = Vec::new();
 
     for entry in vtxo_list.all_unspent() {
-        if entry.contract.contract_type != ark_core::contract::ContractType::delegate_vtxo() {
+        if entry.contract().contract_type != ark_core::contract::ContractType::delegate_vtxo() {
             continue;
         }
 
-        current_outpoints.insert(entry.vtxo.outpoint);
+        current_outpoints.insert(entry.vtxo().outpoint);
 
-        if !seen_unspent_outpoints.contains(&entry.vtxo.outpoint) {
-            newly_seen.push(entry.vtxo.clone());
+        if !seen_unspent_outpoints.contains(&entry.vtxo().outpoint) {
+            newly_seen.push(entry.vtxo().clone());
         }
     }
 
@@ -553,23 +553,23 @@ fn day_timestamp(ts: i64) -> i64 {
 ///
 /// Recoverable VTXOs (expired or sub-dust) are collected separately and merged into the earliest
 /// non-recoverable group.
-fn group_by_expiry_day(vtxos: &[ContractVtxo], dust: Amount) -> Vec<(i64, Vec<&ContractVtxo>)> {
-    let mut groups: BTreeMap<i64, Vec<&ContractVtxo>> = BTreeMap::new();
-    let mut recoverable: Vec<&ContractVtxo> = Vec::new();
+fn group_by_expiry_day(vtxos: &[AnnotatedVtxo], dust: Amount) -> Vec<(i64, Vec<&AnnotatedVtxo>)> {
+    let mut groups: BTreeMap<i64, Vec<&AnnotatedVtxo>> = BTreeMap::new();
+    let mut recoverable: Vec<&AnnotatedVtxo> = Vec::new();
 
     for entry in vtxos {
-        if entry.vtxo.is_spent {
+        if entry.vtxo().is_spent {
             continue;
         }
 
-        if entry.contract.contract_type != ark_core::contract::ContractType::delegate_vtxo() {
+        if entry.contract().contract_type != ark_core::contract::ContractType::delegate_vtxo() {
             continue;
         }
 
-        if entry.vtxo.is_recoverable(dust) {
+        if entry.vtxo().is_recoverable(dust) {
             recoverable.push(entry);
-        } else if entry.vtxo.expires_at > 0 {
-            let day = day_timestamp(entry.vtxo.expires_at);
+        } else if entry.vtxo().expires_at > 0 {
+            let day = day_timestamp(entry.vtxo().expires_at);
             groups.entry(day).or_default().push(entry);
         }
     }
@@ -592,7 +592,7 @@ fn group_by_expiry_day(vtxos: &[ContractVtxo], dust: Amount) -> Vec<(i64, Vec<&C
 ///
 /// If the group only contains recoverable/expired VTXOs (or activation is already in the past),
 /// schedule soon (`now + 60s`).
-fn calculate_valid_at(group_vtxos: &[&ContractVtxo], dust: Amount) -> u64 {
+fn calculate_valid_at(group_vtxos: &[&AnnotatedVtxo], dust: Amount) -> u64 {
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -601,14 +601,14 @@ fn calculate_valid_at(group_vtxos: &[&ContractVtxo], dust: Amount) -> u64 {
     let earliest_activation = group_vtxos
         .iter()
         .filter(|entry| {
-            !entry.vtxo.is_recoverable(dust)
-                && entry.vtxo.created_at > 0
-                && entry.vtxo.expires_at > 0
-                && entry.vtxo.expires_at > entry.vtxo.created_at
+            !entry.vtxo().is_recoverable(dust)
+                && entry.vtxo().created_at > 0
+                && entry.vtxo().expires_at > 0
+                && entry.vtxo().expires_at > entry.vtxo().created_at
         })
         .map(|entry| {
-            let created_at = entry.vtxo.created_at as u64;
-            let lifetime = (entry.vtxo.expires_at - entry.vtxo.created_at) as u64;
+            let created_at = entry.vtxo().created_at as u64;
+            let lifetime = (entry.vtxo().expires_at - entry.vtxo().created_at) as u64;
             created_at + (lifetime * 9 / 10)
         })
         .min();
@@ -644,7 +644,7 @@ async fn delegate_vtxos<B, W, S>(
     let new_outpoints: HashSet<_> = new_vtxos.iter().map(|v| v.outpoint).collect();
     let enriched: Vec<_> = vtxo_list
         .all_unspent()
-        .filter(|entry| new_outpoints.contains(&entry.vtxo.outpoint))
+        .filter(|entry| new_outpoints.contains(&entry.vtxo().outpoint))
         .cloned()
         .collect();
 
@@ -693,7 +693,7 @@ async fn delegate_vtxos<B, W, S>(
             {
                 Ok(selection) => selection,
                 Err(e) => {
-                    tracing::warn!(outpoint = %entry.vtxo.outpoint, "Cannot get delegate spend selection: {e}");
+                    tracing::warn!(outpoint = %entry.vtxo().outpoint, "Cannot get delegate spend selection: {e}");
                     continue;
                 }
             };
@@ -701,26 +701,26 @@ async fn delegate_vtxos<B, W, S>(
             let exit_delay = match entry.exit_delay() {
                 Ok(exit_delay) => exit_delay,
                 Err(e) => {
-                    tracing::warn!(outpoint = %entry.vtxo.outpoint, "Cannot get delegate exit delay: {e}");
+                    tracing::warn!(outpoint = %entry.vtxo().outpoint, "Cannot get delegate exit delay: {e}");
                     continue;
                 }
             };
 
             vtxo_inputs.push(intent::Input::new_with_spend_selection(
-                entry.vtxo.outpoint,
+                entry.vtxo().outpoint,
                 exit_delay,
                 TxOut {
-                    value: entry.vtxo.amount,
+                    value: entry.vtxo().amount,
                     script_pubkey: entry.script_pubkey(),
                 },
                 entry.tapscripts(),
                 spend_selection,
-                entry.vtxo.is_spent,
+                entry.vtxo().is_spent,
                 false,
-                entry.vtxo.assets.clone(),
+                entry.vtxo().assets.clone(),
             ));
 
-            total_amount += entry.vtxo.amount;
+            total_amount += entry.vtxo().amount;
         }
 
         if vtxo_inputs.is_empty() {
@@ -863,15 +863,15 @@ where
     let expiring_outpoints: Vec<OutPoint> = vtxo_list
         .all_unspent()
         .filter(|entry| {
-            if entry.vtxo.expires_at <= 0 || entry.vtxo.created_at <= 0 {
+            if entry.vtxo().expires_at <= 0 || entry.vtxo().created_at <= 0 {
                 return false;
             }
-            let total_lifetime = entry.vtxo.expires_at - entry.vtxo.created_at;
-            let remaining = entry.vtxo.expires_at - now;
+            let total_lifetime = entry.vtxo().expires_at - entry.vtxo().created_at;
+            let remaining = entry.vtxo().expires_at - now;
             remaining > 0
                 && (remaining as f64) < (total_lifetime as f64 * SELF_RENEW_REMAINING_FRACTION)
         })
-        .map(|entry| entry.vtxo.outpoint)
+        .map(|entry| entry.vtxo().outpoint)
         .collect();
 
     if expiring_outpoints.is_empty() {
@@ -945,7 +945,7 @@ mod tests {
         amount_sat: u64,
         expires_at: i64,
         vout: u32,
-    ) -> ContractVtxo {
+    ) -> AnnotatedVtxo {
         use ark_core::contract::ContractState;
         use ark_core::contract::ContractType;
         use ark_core::contract::DelegateVtxoContract;
@@ -976,8 +976,8 @@ mod tests {
             ark_txid: None,
             assets: vec![],
         };
-        ContractVtxo {
-            contract: StoredContract {
+        AnnotatedVtxo::new(
+            StoredContract {
                 contract_type: ContractType::delegate_vtxo(),
                 contract_version: 1,
                 script_pubkey: script,
@@ -987,13 +987,13 @@ mod tests {
                 data: serde_json::to_value(contract).unwrap(),
             },
             vtxo,
-            spend_selections: vec![SpendPath::new(
+            vec![SpendPath::new(
                 SpendPathKind::Delegate,
                 ScriptBuf::new(),
                 dummy_control_block(),
             )
             .select()],
-        }
+        )
     }
 
     fn dummy_control_block() -> bitcoin::taproot::ControlBlock {
@@ -1083,7 +1083,7 @@ mod tests {
         let valid_at = calculate_valid_at(&group, Amount::from_sat(500));
 
         assert!(valid_at > now as u64);
-        assert!(valid_at < later.vtxo.expires_at as u64);
+        assert!(valid_at < later.vtxo().expires_at as u64);
     }
 
     #[test]

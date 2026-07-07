@@ -153,11 +153,11 @@ pub async fn e2e_delegate() {
     for pre in vtxos_pre_settlement {
         assert!(
             vtxos_post_settlement.iter().any(|post| {
-                post.vtxo.outpoint == pre.vtxo.outpoint
-                    && post.vtxo.settled_by == Some(commitment_txid)
+                post.vtxo().outpoint == pre.vtxo().outpoint
+                    && post.vtxo().settled_by == Some(commitment_txid)
             }),
             "expected pre-settlement VTXO {} to be marked spent by delegated settlement {}",
-            pre.vtxo.outpoint,
+            pre.vtxo().outpoint,
             commitment_txid
         );
     }

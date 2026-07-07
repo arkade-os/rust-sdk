@@ -49,7 +49,7 @@ where
 
         // For each spendable VTXO, generate its unilateral exit tree.
         for contract_vtxo in vtxo_list.could_exit_unilaterally() {
-            let virtual_tx_outpoint = &contract_vtxo.vtxo;
+            let virtual_tx_outpoint = contract_vtxo.vtxo();
             let vtxo_chain_response = timeout_op(
                 self.inner.timeout,
                 self.network_client()

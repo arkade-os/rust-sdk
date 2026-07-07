@@ -1150,10 +1150,10 @@ async fn run_command(
             // Collect pre-confirmed VTXOs
             for entry in vtxo_list.pre_confirmed() {
                 vtxo_entries.push(VtxoEntry {
-                    outpoint: entry.vtxo.outpoint.to_string(),
-                    amount_sats: entry.vtxo.amount.to_sat(),
-                    created_at: format_timestamp(entry.vtxo.created_at)?,
-                    expires_at: format_timestamp(entry.vtxo.expires_at)?,
+                    outpoint: entry.vtxo().outpoint.to_string(),
+                    amount_sats: entry.vtxo().amount.to_sat(),
+                    created_at: format_timestamp(entry.vtxo().created_at)?,
+                    expires_at: format_timestamp(entry.vtxo().expires_at)?,
                     status: "pre_confirmed".to_string(),
                 });
             }
@@ -1161,10 +1161,10 @@ async fn run_command(
             // Collect confirmed VTXOs
             for entry in vtxo_list.confirmed() {
                 vtxo_entries.push(VtxoEntry {
-                    outpoint: entry.vtxo.outpoint.to_string(),
-                    amount_sats: entry.vtxo.amount.to_sat(),
-                    created_at: format_timestamp(entry.vtxo.created_at)?,
-                    expires_at: format_timestamp(entry.vtxo.expires_at)?,
+                    outpoint: entry.vtxo().outpoint.to_string(),
+                    amount_sats: entry.vtxo().amount.to_sat(),
+                    created_at: format_timestamp(entry.vtxo().created_at)?,
+                    expires_at: format_timestamp(entry.vtxo().expires_at)?,
                     status: "confirmed".to_string(),
                 });
             }
@@ -1172,10 +1172,10 @@ async fn run_command(
             // Collect recoverable VTXOs
             for entry in vtxo_list.recoverable() {
                 vtxo_entries.push(VtxoEntry {
-                    outpoint: entry.vtxo.outpoint.to_string(),
-                    amount_sats: entry.vtxo.amount.to_sat(),
-                    created_at: format_timestamp(entry.vtxo.created_at)?,
-                    expires_at: format_timestamp(entry.vtxo.expires_at)?,
+                    outpoint: entry.vtxo().outpoint.to_string(),
+                    amount_sats: entry.vtxo().amount.to_sat(),
+                    created_at: format_timestamp(entry.vtxo().created_at)?,
+                    expires_at: format_timestamp(entry.vtxo().expires_at)?,
                     status: "recoverable".to_string(),
                 });
             }
@@ -1366,10 +1366,10 @@ async fn run_command(
             let spendable = vtxo_list
                 .spendable_offchain()
                 .map(|entry| ark_core::coin_select::VirtualTxOutPoint {
-                    outpoint: entry.vtxo.outpoint,
-                    script_pubkey: entry.vtxo.script.clone(),
-                    expire_at: entry.vtxo.expires_at,
-                    amount: entry.vtxo.amount,
+                    outpoint: entry.vtxo().outpoint,
+                    script_pubkey: entry.vtxo().script.clone(),
+                    expire_at: entry.vtxo().expires_at,
+                    amount: entry.vtxo().amount,
                     assets: Vec::new(),
                 })
                 .collect::<Vec<_>>();
@@ -1387,7 +1387,7 @@ async fn run_command(
                 .map(|coin| {
                     let entry = vtxo_list
                         .all()
-                        .find(|entry| entry.vtxo.outpoint == coin.outpoint)
+                        .find(|entry| entry.vtxo().outpoint == coin.outpoint)
                         .ok_or_else(|| anyhow!("missing VTXO for outpoint: {}", coin.outpoint))?;
                     let spend_selection = entry
                         .spend_selection(SpendPathKind::Forfeit)

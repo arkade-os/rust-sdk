@@ -146,7 +146,7 @@ where
         let vtxo_list = self.list_vtxos_with_server_info(&server_info).await?;
         let vtxo_outpoints: Vec<OutPoint> = vtxo_list
             .recoverable()
-            .map(|entry| entry.vtxo.outpoint)
+            .map(|entry| entry.vtxo().outpoint)
             .collect();
 
         let (boarding_inputs, _, _) = self
@@ -521,22 +521,22 @@ where
 
         let matching_unspent = vtxo_list
             .all_unspent()
-            .filter(|entry| requested.contains(&entry.vtxo.outpoint))
+            .filter(|entry| requested.contains(&entry.vtxo().outpoint))
             .collect::<Vec<_>>();
 
         let settleable = vtxo_list
             .batch_settleable_at(server_info, now)
-            .filter(|entry| requested.contains(&entry.vtxo.outpoint))
+            .filter(|entry| requested.contains(&entry.vtxo().outpoint))
             .collect::<Vec<_>>();
         let settleable_outpoints = settleable
             .iter()
-            .map(|entry| entry.vtxo.outpoint)
+            .map(|entry| entry.vtxo().outpoint)
             .collect::<HashSet<_>>();
 
         let blocked = matching_unspent
             .iter()
-            .filter(|entry| !settleable_outpoints.contains(&entry.vtxo.outpoint))
-            .map(|entry| entry.vtxo.outpoint.to_string())
+            .filter(|entry| !settleable_outpoints.contains(&entry.vtxo().outpoint))
+            .map(|entry| entry.vtxo().outpoint.to_string())
             .collect::<Vec<_>>();
         if !blocked.is_empty() {
             return Err(Error::ad_hoc(format!(
@@ -551,17 +551,17 @@ where
                 let spend_selection = entry.spend_selection(SpendPathKind::Forfeit)?;
 
                 Ok(intent::Input::new_with_spend_selection(
-                    entry.vtxo.outpoint,
+                    entry.vtxo().outpoint,
                     entry.exit_delay()?,
                     TxOut {
-                        value: entry.vtxo.amount,
+                        value: entry.vtxo().amount,
                         script_pubkey: entry.script_pubkey(),
                     },
                     entry.tapscripts(),
                     spend_selection,
                     false,
-                    entry.vtxo.is_swept,
-                    entry.vtxo.assets.clone(),
+                    entry.vtxo().is_swept,
+                    entry.vtxo().assets.clone(),
                 ))
             })
             .collect::<Result<Vec<_>, Error>>()
@@ -1206,7 +1206,7 @@ where
 
         total_amount += settleable_vtxos
             .iter()
-            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo.amount);
+            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo().amount);
 
         let vtxo_inputs = settleable_vtxos
             .into_iter()
@@ -1214,17 +1214,17 @@ where
                 let spend_selection = entry.spend_selection(SpendPathKind::Forfeit)?;
 
                 Ok(intent::Input::new_with_spend_selection(
-                    entry.vtxo.outpoint,
+                    entry.vtxo().outpoint,
                     entry.exit_delay()?,
                     TxOut {
-                        value: entry.vtxo.amount,
+                        value: entry.vtxo().amount,
                         script_pubkey: entry.script_pubkey(),
                     },
                     entry.tapscripts(),
                     spend_selection,
                     false,
-                    entry.vtxo.is_swept,
-                    entry.vtxo.assets.clone(),
+                    entry.vtxo().is_swept,
+                    entry.vtxo().assets.clone(),
                 ))
             })
             .collect::<Result<Vec<_>, Error>>()?;
