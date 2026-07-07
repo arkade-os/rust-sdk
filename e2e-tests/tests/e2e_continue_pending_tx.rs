@@ -54,7 +54,7 @@ pub async fn e2e_continue_pending_tx() {
             script_pubkey: entry.vtxo().script.clone(),
             expire_at: entry.vtxo().expires_at,
             amount: entry.vtxo().amount,
-            assets: Vec::new(),
+            assets: entry.vtxo().assets.clone(),
         })
         .collect::<Vec<_>>();
 
