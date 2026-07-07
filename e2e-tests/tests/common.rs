@@ -2,6 +2,7 @@
 
 use ark_bdk_wallet::Wallet;
 use ark_client::error::Error;
+use ark_client::lightning_invoice::Bolt11Invoice;
 use ark_client::Blockchain;
 use ark_client::Client;
 use ark_client::InMemorySwapStorage;
@@ -29,10 +30,12 @@ use rand::Rng;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+use std::process::Output;
 use std::sync::Arc;
 use std::sync::Once;
 use std::sync::RwLock;
 use std::time::Duration;
+use tokio::task::JoinHandle;
 
 pub struct BitcoinRpc {
     url: String,
@@ -261,7 +264,7 @@ impl Regtest {
 
     /// Run a `regtest.mjs` subcommand, asserting it succeeds.
     #[allow(unused)]
-    fn run_regtest(&self, args: &[&str]) -> std::process::Output {
+    fn run_regtest(&self, args: &[&str]) -> Output {
         let script = regtest_mjs_path();
         let output = Command::new("node")
             .arg(&script)
@@ -698,6 +701,85 @@ pub async fn set_up_client_with_seed_and_server_info_ttl(
     .unwrap();
 
     (client, wallet)
+}
+
+#[derive(serde::Deserialize)]
+struct LnAddInvoiceResponse {
+    payment_request: String,
+}
+
+#[allow(unused)]
+pub async fn create_lnd_invoice(amount: Amount) -> Bolt11Invoice {
+    let output = tokio::process::Command::new("docker")
+        .args([
+            "exec",
+            "lnd",
+            "lncli",
+            "--network=regtest",
+            "addinvoice",
+            "--amt",
+            &amount.to_sat().to_string(),
+        ])
+        .output()
+        .await
+        .expect("failed to run lncli addinvoice");
+
+    assert!(
+        output.status.success(),
+        "failed to create LND invoice: {}",
+        format_command_output(&output)
+    );
+
+    let response: LnAddInvoiceResponse = serde_json::from_slice(&output.stdout)
+        .expect("lncli addinvoice should return JSON with payment_request");
+    response
+        .payment_request
+        .parse()
+        .expect("lncli should return a valid BOLT11 invoice")
+}
+
+#[allow(unused)]
+pub fn start_lnd_payment(invoice: &str) -> JoinHandle<std::io::Result<Output>> {
+    let invoice = invoice.to_string();
+    tokio::spawn(async move {
+        tokio::process::Command::new("docker")
+            .args([
+                "exec",
+                "lnd",
+                "lncli",
+                "--network=regtest",
+                "payinvoice",
+                "--force",
+                &invoice,
+            ])
+            .output()
+            .await
+    })
+}
+
+#[allow(unused)]
+pub async fn wait_for_lnd_payment(payment: JoinHandle<std::io::Result<Output>>) {
+    let output = tokio::time::timeout(Duration::from_secs(30), payment)
+        .await
+        .expect("LN payment did not complete")
+        .expect("lncli payinvoice task panicked")
+        .expect("failed to wait for lncli payinvoice");
+
+    assert!(
+        output.status.success(),
+        "failed to pay invoice: {}",
+        format_command_output(&output)
+    );
+}
+
+#[allow(unused)]
+pub fn format_command_output(output: &Output) -> String {
+    format!(
+        "status={} stdout={} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
 }
 
 pub fn init_tracing() {
