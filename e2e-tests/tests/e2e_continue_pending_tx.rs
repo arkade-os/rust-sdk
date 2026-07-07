@@ -73,11 +73,9 @@ pub async fn e2e_continue_pending_tx() {
                 .all()
                 .find(|entry| entry.vtxo.outpoint == coin.outpoint)
                 .unwrap();
-            let (forfeit_script, control_block) = entry.spend_info(SpendPathKind::Forfeit).unwrap();
-            VtxoInput::new(
-                forfeit_script,
-                None,
-                control_block,
+            let spend_selection = entry.spend_selection(SpendPathKind::Forfeit).unwrap();
+            VtxoInput::new_with_spend_selection(
+                spend_selection,
                 entry.tapscripts(),
                 entry.script_pubkey(),
                 coin.amount,

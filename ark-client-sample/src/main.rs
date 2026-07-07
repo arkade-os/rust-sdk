@@ -1389,13 +1389,11 @@ async fn run_command(
                         .all()
                         .find(|entry| entry.vtxo.outpoint == coin.outpoint)
                         .ok_or_else(|| anyhow!("missing VTXO for outpoint: {}", coin.outpoint))?;
-                    let (forfeit_script, control_block) = entry
-                        .spend_info(SpendPathKind::Forfeit)
-                        .context("failed to get forfeit spend info")?;
-                    Ok(VtxoInput::new(
-                        forfeit_script,
-                        None,
-                        control_block,
+                    let spend_selection = entry
+                        .spend_selection(SpendPathKind::Forfeit)
+                        .context("failed to get forfeit spend selection")?;
+                    Ok(VtxoInput::new_with_spend_selection(
+                        spend_selection,
                         entry.tapscripts(),
                         entry.script_pubkey(),
                         coin.amount,

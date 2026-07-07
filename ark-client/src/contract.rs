@@ -422,13 +422,6 @@ impl ContractVtxo {
             .ok_or_else(|| Error::ad_hoc(format!("missing {kind:?} spend path")))
     }
 
-    pub fn spend_info(
-        &self,
-        kind: ark_core::contract::SpendPathKind,
-    ) -> Result<(ScriptBuf, bitcoin::taproot::ControlBlock), Error> {
-        Ok(self.spend_selection(kind)?.spend_info())
-    }
-
     pub fn tapscripts(&self) -> Vec<ScriptBuf> {
         self.spend_selections
             .iter()
@@ -485,13 +478,6 @@ impl ContractBoardingOutput {
             .find(|selection| selection.path.kind == kind)
             .cloned()
             .ok_or_else(|| Error::ad_hoc(format!("missing {kind:?} spend path")))
-    }
-
-    pub fn spend_info(
-        &self,
-        kind: ark_core::contract::SpendPathKind,
-    ) -> Result<(ScriptBuf, bitcoin::taproot::ControlBlock), Error> {
-        Ok(self.spend_selection(kind)?.spend_info())
     }
 
     pub fn tapscripts(&self) -> Vec<ScriptBuf> {
@@ -1214,8 +1200,8 @@ mod tests {
         assert_eq!(annotated[0].server_pk(), server);
         assert_eq!(annotated[0].owner_pk(), owner);
         assert_eq!(annotated[0].spend_selections.len(), 2);
-        assert!(annotated[0].spend_info(SpendPathKind::Forfeit).is_ok());
-        assert!(annotated[0].spend_info(SpendPathKind::Exit).is_ok());
+        assert!(annotated[0].spend_selection(SpendPathKind::Forfeit).is_ok());
+        assert!(annotated[0].spend_selection(SpendPathKind::Exit).is_ok());
     }
 
     #[test]
