@@ -134,6 +134,10 @@ pub struct ContractRestoreReport {
     pub scanned_keys: u32,
     /// Key indexes where at least one contract had activity.
     pub discovered_key_indexes: Vec<u32>,
+    /// Highest discovered key index, if any.
+    pub last_used_key_index: Option<u32>,
+    /// Suggested next receive key index, if any.
+    pub next_key_index: Option<u32>,
     /// Offchain default/delegate contracts with VTXO activity.
     pub offchain_contracts: u32,
     /// Boarding contracts with on-chain UTXO activity.
@@ -1325,6 +1329,14 @@ where
                         .key_provider
                         .cache_discovered_keypair(index, kp)?;
                     report.discovered_key_indexes.push(index);
+                    report.last_used_key_index = Some(
+                        report
+                            .last_used_key_index
+                            .map_or(index, |last| last.max(index)),
+                    );
+                    report.next_key_index = report
+                        .last_used_key_index
+                        .and_then(|last| last.checked_add(1));
                     found_any = true;
                 }
             }

@@ -907,7 +907,7 @@ impl ContractManager {
     /// boarding row, on-chain boarding discovery must still see it as a boarding output. Default
     /// VTXO rows are included only when their CSV delay is one of the caller's boarding delay
     /// candidates. Passing an empty slice means "strict boarding rows only".
-    pub fn annotated_boarding_outputs_for_exit_delays(
+    pub(crate) fn annotated_boarding_outputs_for_exit_delays(
         &self,
         compatible_default_exit_delays: &[Sequence],
     ) -> Result<Vec<AnnotatedBoardingOutput>, Error> {
