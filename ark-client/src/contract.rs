@@ -978,10 +978,13 @@ fn active_offchain_contract_from_stored(
         )?));
     }
 
-    let data = match two_leaf_vtxo_data(&stored) {
-        Ok(data) => data,
-        Err(_) => return Ok(None),
-    };
+    if stored.contract_type != ContractType::default_vtxo()
+        && stored.contract_type != ContractType::boarding()
+    {
+        return Ok(None);
+    }
+
+    let data = two_leaf_vtxo_data(&stored)?;
 
     // A boarding row can also represent an offchain default VTXO row for the same script, but only
     // when its CSV delay is one of the delays used for unilateral-exit VTXOs. Other boarding rows
@@ -1017,7 +1020,10 @@ fn active_offchain_contract(
 }
 
 fn offchain_vtxo_data(stored: &StoredContract) -> Result<VtxoContractData, Error> {
-    two_leaf_vtxo_data(stored).or_else(|_| delegate_vtxo_data(stored))
+    if stored.contract_type == ContractType::delegate_vtxo() {
+        return delegate_vtxo_data(stored);
+    }
+    two_leaf_vtxo_data(stored)
 }
 
 fn delegate_vtxo_data(stored: &StoredContract) -> Result<VtxoContractData, Error> {
@@ -1262,6 +1268,55 @@ mod tests {
         assert_eq!(boarding_outputs[0].contract, stored_default);
         assert_eq!(boarding_outputs[0].server_pk(), server);
         assert_eq!(boarding_outputs[0].owner_pk(), owner);
+    }
+
+    #[test]
+    fn malformed_builtin_contract_fails_vtxo_annotation() {
+        let (server, owner, _) = test_keys();
+        let ctx = ContractContext::new(Network::Regtest);
+        let script_pubkey = DefaultVtxoContract {
+            server,
+            owner,
+            exit_delay: Sequence::from_height(10),
+        }
+        .script_pubkey(&ctx)
+        .unwrap();
+        let mut store = MemoryContractStore::default();
+        let stored = StoredContract {
+            contract_type: ContractType::default_vtxo(),
+            contract_version: DefaultVtxoContract::VERSION,
+            script_pubkey,
+            state: ContractState::Active,
+            created_at: 0,
+            key_index: None,
+            data: serde_json::json!({"bad": "shape"}),
+        };
+        store.insert(stored.clone()).unwrap();
+        let mut manager = ContractManager::new(Network::Regtest, Box::new(store));
+        manager.register_builtins().unwrap();
+        let vtxo = VirtualTxOutPoint {
+            outpoint: OutPoint::null(),
+            created_at: 0,
+            expires_at: 0,
+            amount: Amount::from_sat(42_000),
+            script: stored.script_pubkey,
+            is_preconfirmed: false,
+            is_swept: false,
+            is_unrolled: false,
+            is_spent: false,
+            spent_by: None,
+            commitment_txids: Vec::new(),
+            settled_by: None,
+            ark_txid: None,
+            assets: Vec::new(),
+        };
+
+        let err = manager.annotate_vtxos(vec![vtxo]).unwrap_err();
+
+        assert!(
+            format!("{err:?}").contains("failed to decode contract data"),
+            "{err:?}"
+        );
     }
 
     #[test]
