@@ -1178,13 +1178,14 @@ where
 
                         let script_pubkey = boarding_output.script_pubkey();
                         let tapscripts = boarding_output.tapscripts();
-                        let spend_info = boarding_output.spend_info(SpendPathKind::Forfeit)?;
+                        let spend_selection =
+                            boarding_output.spend_selection(SpendPathKind::Forfeit)?;
 
-                        boarding_inputs.push(batch::OnChainInput::new(
+                        boarding_inputs.push(batch::OnChainInput::new_with_spend_selection(
                             boarding_output.exit_delay(),
                             script_pubkey,
                             tapscripts,
-                            spend_info,
+                            spend_selection,
                             boarding_output.owner_pk(),
                             *amount,
                             *outpoint,
@@ -1210,18 +1211,17 @@ where
         let vtxo_inputs = settleable_vtxos
             .into_iter()
             .map(|entry| {
-                let spend_info = entry.spend_info(SpendPathKind::Forfeit)?;
+                let spend_selection = entry.spend_selection(SpendPathKind::Forfeit)?;
 
-                Ok(intent::Input::new(
+                Ok(intent::Input::new_with_spend_selection(
                     entry.vtxo.outpoint,
                     entry.exit_delay()?,
-                    None,
                     TxOut {
                         value: entry.vtxo.amount,
                         script_pubkey: entry.script_pubkey(),
                     },
                     entry.tapscripts(),
-                    spend_info,
+                    spend_selection,
                     false,
                     entry.vtxo.is_swept,
                     entry.vtxo.assets.clone(),

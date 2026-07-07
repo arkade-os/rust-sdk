@@ -1,4 +1,5 @@
 use crate::anchor_output;
+use crate::contract::SpendSelection;
 use crate::script::extract_checksig_pubkeys;
 use crate::server;
 use crate::Error;
@@ -69,6 +70,22 @@ impl OnChainInput {
         }
     }
 
+    pub fn new_with_spend_selection(
+        default_sequence: Sequence,
+        script_pubkey: ScriptBuf,
+        spend_selection: SpendSelection,
+        amount: Amount,
+        outpoint: OutPoint,
+    ) -> Self {
+        Self::new(
+            spend_selection.sequence.unwrap_or(default_sequence),
+            script_pubkey,
+            spend_selection.spend_info(),
+            amount,
+            outpoint,
+        )
+    }
+
     pub fn previous_output(&self) -> TxOut {
         TxOut {
             value: self.amount,
@@ -99,6 +116,20 @@ impl VtxoInput {
             witness_utxo,
             spend_info,
         }
+    }
+
+    pub fn new_with_spend_selection(
+        outpoint: OutPoint,
+        default_sequence: Sequence,
+        witness_utxo: TxOut,
+        spend_selection: SpendSelection,
+    ) -> Self {
+        Self::new(
+            outpoint,
+            spend_selection.sequence.unwrap_or(default_sequence),
+            witness_utxo,
+            spend_selection.spend_info(),
+        )
     }
 
     pub fn previous_output(&self) -> TxOut {

@@ -75,15 +75,17 @@ where
                     tracing::debug!(?outpoint, %amount, ?boarding_output, "Selected boarding output");
 
                     let script_pubkey = boarding_output.script_pubkey();
-                    let spend_info = boarding_output.spend_info(SpendPathKind::Exit)?;
+                    let spend_selection = boarding_output.spend_selection(SpendPathKind::Exit)?;
 
-                    if selected_boarding_outputs.insert(unilateral_exit::OnChainInput::new(
-                        boarding_output.exit_delay(),
-                        script_pubkey,
-                        spend_info,
-                        *amount,
-                        *outpoint,
-                    )) {
+                    if selected_boarding_outputs.insert(
+                        unilateral_exit::OnChainInput::new_with_spend_selection(
+                            boarding_output.exit_delay(),
+                            script_pubkey,
+                            spend_selection,
+                            *amount,
+                            *outpoint,
+                        ),
+                    ) {
                         selected_amount += *amount;
                     }
                 }
@@ -123,17 +125,19 @@ where
                     tracing::debug!(?outpoint, %amount, ?vtxo, "Selected VTXO");
 
                     let script_pubkey = vtxo.script_pubkey();
-                    let spend_info = contract.spend_info(SpendPathKind::Exit)?;
+                    let spend_selection = contract.spend_selection(SpendPathKind::Exit)?;
 
-                    selected_vtxo_outputs.insert(unilateral_exit::VtxoInput::new(
-                        *outpoint,
-                        vtxo.exit_delay(),
-                        TxOut {
-                            value: *amount,
-                            script_pubkey,
-                        },
-                        spend_info,
-                    ));
+                    selected_vtxo_outputs.insert(
+                        unilateral_exit::VtxoInput::new_with_spend_selection(
+                            *outpoint,
+                            vtxo.exit_delay(),
+                            TxOut {
+                                value: *amount,
+                                script_pubkey,
+                            },
+                            spend_selection,
+                        ),
+                    );
                     selected_amount += *amount;
                 }
             }

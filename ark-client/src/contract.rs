@@ -550,13 +550,6 @@ impl ActiveOffchainContract {
             .cloned()
             .ok_or_else(|| Error::ad_hoc(format!("missing {kind:?} spend path")))
     }
-
-    pub fn spend_info(
-        &self,
-        kind: ark_core::contract::SpendPathKind,
-    ) -> Result<(ScriptBuf, bitcoin::taproot::ControlBlock), Error> {
-        Ok(self.spend_selection(kind)?.spend_info())
-    }
 }
 
 #[derive(Clone, Debug)]

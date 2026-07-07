@@ -1,5 +1,6 @@
 use crate::anchor_output;
 use crate::asset::packet;
+use crate::contract::SpendSelection;
 use crate::conversions::from_musig_xonly;
 use crate::conversions::to_musig_pk;
 use crate::intent;
@@ -83,6 +84,26 @@ impl OnChainInput {
             amount,
             outpoint,
         }
+    }
+
+    pub fn new_with_spend_selection(
+        default_sequence: bitcoin::Sequence,
+        script_pubkey: bitcoin::ScriptBuf,
+        tapscripts: Vec<bitcoin::ScriptBuf>,
+        spend_selection: SpendSelection,
+        owner_pk: XOnlyPublicKey,
+        amount: Amount,
+        outpoint: OutPoint,
+    ) -> Self {
+        Self::new(
+            spend_selection.sequence.unwrap_or(default_sequence),
+            script_pubkey,
+            tapscripts,
+            spend_selection.spend_info(),
+            owner_pk,
+            amount,
+            outpoint,
+        )
     }
 
     pub fn sequence(&self) -> bitcoin::Sequence {

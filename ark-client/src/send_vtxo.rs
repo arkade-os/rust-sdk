@@ -418,12 +418,10 @@ where
         selected
             .into_iter()
             .map(|entry| {
-                let (forfeit_script, control_block) = entry.spend_info(SpendPathKind::Forfeit)?;
+                let spend_selection = entry.spend_selection(SpendPathKind::Forfeit)?;
 
-                Ok(VtxoInput::new(
-                    forfeit_script,
-                    None,
-                    control_block,
+                Ok(VtxoInput::new_with_spend_selection(
+                    spend_selection,
                     entry.tapscripts(),
                     entry.script_pubkey(),
                     entry.vtxo.amount,
@@ -723,20 +721,19 @@ where
         for (batch_idx, batch) in vtxos.chunks(MAX_INPUTS_PER_INTENT).enumerate() {
             let mut vtxo_inputs = Vec::new();
             for entry in batch {
-                let spend_info = entry
-                    .spend_info(SpendPathKind::Forfeit)
-                    .context("failed to get forfeit spend info")?;
+                let spend_selection = entry
+                    .spend_selection(SpendPathKind::Forfeit)
+                    .context("failed to get forfeit spend selection")?;
 
-                vtxo_inputs.push(intent::Input::new(
+                vtxo_inputs.push(intent::Input::new_with_spend_selection(
                     entry.vtxo.outpoint,
                     entry.exit_delay()?,
-                    None,
                     TxOut {
                         value: entry.vtxo.amount,
                         script_pubkey: entry.script_pubkey(),
                     },
                     entry.tapscripts(),
-                    spend_info,
+                    spend_selection,
                     false,
                     entry.vtxo.is_swept,
                     entry.vtxo.assets.clone(),

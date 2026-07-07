@@ -688,10 +688,12 @@ async fn delegate_vtxos<B, W, S>(
         let mut total_amount = Amount::ZERO;
 
         for entry in &group_vtxos {
-            let spend_info = match entry.spend_info(ark_core::contract::SpendPathKind::Delegate) {
-                Ok(info) => info,
+            let spend_selection = match entry
+                .spend_selection(ark_core::contract::SpendPathKind::Delegate)
+            {
+                Ok(selection) => selection,
                 Err(e) => {
-                    tracing::warn!(outpoint = %entry.vtxo.outpoint, "Cannot get delegate spend info: {e}");
+                    tracing::warn!(outpoint = %entry.vtxo.outpoint, "Cannot get delegate spend selection: {e}");
                     continue;
                 }
             };
@@ -704,16 +706,15 @@ async fn delegate_vtxos<B, W, S>(
                 }
             };
 
-            vtxo_inputs.push(intent::Input::new(
+            vtxo_inputs.push(intent::Input::new_with_spend_selection(
                 entry.vtxo.outpoint,
                 exit_delay,
-                None,
                 TxOut {
                     value: entry.vtxo.amount,
                     script_pubkey: entry.script_pubkey(),
                 },
                 entry.tapscripts(),
-                spend_info,
+                spend_selection,
                 entry.vtxo.is_spent,
                 false,
                 entry.vtxo.assets.clone(),
