@@ -33,6 +33,7 @@ use ark_delegator::DelegatorClient;
 use ark_grpc::test_utils as grpc_test_utils;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::bip32::Xpriv;
+use bitcoin::hex::DisplayHex;
 use bitcoin::key::Secp256k1;
 use bitcoin::secp256k1::SecretKey;
 use bitcoin::Address;
@@ -199,6 +200,8 @@ enum Commands {
     RefundSwap { swap_id: String },
     /// Attempt to refund a past swap without the receiver's signature.
     RefundSwapWithoutReceiver { swap_id: String },
+    /// List all known wallet contracts as JSON.
+    ListContracts,
     /// List all VTXOs and boarding outputs sorted by expiry, then amount.
     ListVtxos,
     /// Restore wallet contracts by scanning derived keys up to the gap limit.
@@ -375,6 +378,26 @@ struct BoardingEntry {
 struct ListVtxosOutput {
     vtxos: Vec<VtxoEntry>,
     boarding_outputs: Vec<BoardingEntry>,
+}
+
+#[derive(Serialize)]
+struct ContractEntry {
+    contract_type: String,
+    state: serde_json::Value,
+    address: Option<String>,
+    address_kind: Option<&'static str>,
+    script: String,
+    parameters: serde_json::Value,
+    created_at: String,
+    created_at_unix_secs: u64,
+    key_index: Option<u32>,
+    server_pk: Option<String>,
+    signer_status: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ListContractsOutput {
+    contracts: Vec<ContractEntry>,
 }
 
 #[derive(Serialize)]
@@ -1154,6 +1177,40 @@ async fn run_command(
                 .await
                 .map_err(|e| anyhow!(e))?;
             tracing::info!(?restored, gap_limit, "Restored wallet contracts");
+        }
+        Commands::ListContracts => {
+            let contracts = client.list_contracts().await.map_err(|e| anyhow!(e))?;
+            let mut entries = contracts
+                .into_iter()
+                .map(|entry| {
+                    Ok(ContractEntry {
+                        contract_type: entry.contract.contract_type.to_string(),
+                        state: serde_json::to_value(entry.contract.state)?,
+                        address: entry.address,
+                        address_kind: entry.address_kind.map(|kind| match kind {
+                            ark_client::ContractAddressKind::Ark => "ark",
+                            ark_client::ContractAddressKind::Bitcoin => "bitcoin",
+                        }),
+                        script: entry.contract.script_pubkey.as_bytes().as_hex().to_string(),
+                        parameters: entry.contract.data,
+                        created_at: format_timestamp(entry.contract.created_at as i64)?,
+                        created_at_unix_secs: entry.contract.created_at,
+                        key_index: entry.contract.key_index,
+                        server_pk: entry.server_pk.map(|pk| pk.to_string()),
+                        signer_status: entry.signer_status.map(|status| format!("{status:?}")),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            entries.sort_by(|a, b| {
+                a.contract_type
+                    .cmp(&b.contract_type)
+                    .then_with(|| a.created_at_unix_secs.cmp(&b.created_at_unix_secs))
+                    .then_with(|| a.script.cmp(&b.script))
+            });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&ListContractsOutput { contracts: entries })?
+            );
         }
         Commands::ListVtxos => {
             // Get VTXOs

@@ -12,6 +12,8 @@ use ark_core::contract::ContractState;
 use ark_core::contract::ContractType;
 use ark_core::contract::DefaultVtxoContract;
 use ark_core::contract::DelegateVtxoContract;
+use ark_core::contract::StoredContract;
+use ark_core::contract::VhtlcContract;
 use ark_core::history;
 use ark_core::history::generate_incoming_vtxo_transaction_history;
 use ark_core::history::generate_outgoing_vtxo_transaction_history;
@@ -72,6 +74,7 @@ mod unilateral_exit;
 mod utils;
 
 pub use ark_core::server::DeprecatedSignerStatus;
+pub use ark_core::server::ServerSignerStatus;
 pub use asset::IssueAssetResult;
 pub use boltz::ChainSwapAmount;
 pub use boltz::ChainSwapData;
@@ -200,6 +203,27 @@ pub struct ContractRestoreOutpoint {
     pub amount: Amount,
     pub confirmation_blocktime: Option<u64>,
     pub confirmations: u64,
+}
+
+/// Wallet-facing view of a stored contract.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContractInfo {
+    /// The validated stored contract row.
+    pub contract: StoredContract,
+    /// Address derived from the contract, when the SDK knows how to derive one.
+    pub address: Option<String>,
+    /// Kind of address in [`Self::address`].
+    pub address_kind: Option<ContractAddressKind>,
+    /// Server signer encoded in this contract, when the SDK knows how to decode it.
+    pub server_pk: Option<XOnlyPublicKey>,
+    /// Rotation status of [`Self::server_pk`] against the current server info.
+    pub signer_status: Option<ServerSignerStatus>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContractAddressKind {
+    Ark,
+    Bitcoin,
 }
 
 /// Default mainnet Arkade server URL.
@@ -818,6 +842,78 @@ where
     }
 }
 
+fn contract_info_from_stored(
+    contract: StoredContract,
+    server_info: &server::Info,
+    now_unix_secs: i64,
+) -> Result<ContractInfo, Error> {
+    let ctx = ContractContext::new(server_info.network);
+    let (address, address_kind, server_pk) = match &contract.contract_type {
+        contract_type if *contract_type == ContractType::default_vtxo() => {
+            let data: DefaultVtxoContract =
+                serde_json::from_value(contract.data.clone()).map_err(|e| {
+                    Error::ad_hoc(format!("failed to decode default vtxo contract: {e}"))
+                })?;
+            (
+                Some(data.vtxo(&ctx)?.to_ark_address().to_string()),
+                Some(ContractAddressKind::Ark),
+                Some(data.server),
+            )
+        }
+        contract_type if *contract_type == ContractType::delegate_vtxo() => {
+            let data: DelegateVtxoContract = serde_json::from_value(contract.data.clone())
+                .map_err(|e| {
+                    Error::ad_hoc(format!("failed to decode delegate vtxo contract: {e}"))
+                })?;
+            (
+                Some(data.vtxo(&ctx)?.to_ark_address().to_string()),
+                Some(ContractAddressKind::Ark),
+                Some(data.server),
+            )
+        }
+        contract_type if *contract_type == ContractType::boarding() => {
+            let data: BoardingContract = serde_json::from_value(contract.data.clone())
+                .map_err(|e| Error::ad_hoc(format!("failed to decode boarding contract: {e}")))?;
+            (
+                Some(data.boarding_output(&ctx)?.address().to_string()),
+                Some(ContractAddressKind::Bitcoin),
+                Some(data.server),
+            )
+        }
+        contract_type if *contract_type == ContractType::vhtlc() => {
+            let data: VhtlcContract = serde_json::from_value(contract.data.clone())
+                .map_err(|e| Error::ad_hoc(format!("failed to decode vhtlc contract: {e}")))?;
+            let address =
+                ark_core::vhtlc::VhtlcScript::new(data.options.clone(), server_info.network)
+                    .map_err(|e| Error::ad_hoc(format!("failed to build vhtlc address: {e}")))?
+                    .address()
+                    .to_string();
+            (
+                Some(address),
+                Some(ContractAddressKind::Ark),
+                Some(data.options.server),
+            )
+        }
+        _ => {
+            let address = Address::from_script(&contract.script_pubkey, server_info.network)
+                .ok()
+                .map(|address| address.to_string());
+            let address_kind = address.as_ref().map(|_| ContractAddressKind::Bitcoin);
+            (address, address_kind, None)
+        }
+    };
+    let signer_status =
+        server_pk.map(|server_pk| server_info.signer_status_at(server_pk, now_unix_secs));
+
+    Ok(ContractInfo {
+        contract,
+        address,
+        address_kind,
+        server_pk,
+        signer_status,
+    })
+}
+
 fn build_fee_estimator(server_info: &server::Info) -> Result<ark_fees::Estimator, Error> {
     let fee_estimator_config = server_info
         .fees
@@ -927,6 +1023,33 @@ where
     /// Returns the Boltz referral ID sent with all swap creation requests, if any.
     pub fn boltz_referral_id(&self) -> Option<&str> {
         self.inner.boltz_referral_id()
+    }
+
+    /// List all contracts currently known to this wallet.
+    ///
+    /// This is a wallet-facing view over the contract store: each row includes the stored contract,
+    /// a derived address when the SDK knows the contract type, and signer-rotation status for
+    /// contracts that encode a server signer.
+    pub async fn list_contracts(&self) -> Result<Vec<ContractInfo>, Error> {
+        let server_info = self.server_info().await?;
+        let now = unix_now()?;
+        let contracts = {
+            let state = self
+                .state
+                .read()
+                .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+            let contracts = state
+                .contract_manager
+                .lock()
+                .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?
+                .list()?;
+            contracts
+        };
+
+        contracts
+            .into_iter()
+            .map(|contract| contract_info_from_stored(contract, &server_info, now))
+            .collect()
     }
 
     /// Get a new offchain receiving address.
@@ -2347,6 +2470,18 @@ mod digest_guard_tests {
         let info = client.server_info().await.unwrap();
         assert_eq!(info.digest, "fresh-digest");
         assert_eq!(state.get_info_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn list_contracts_returns_wallet_contract_views() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let client = connect_test_client(MockArkServer::default()).await;
+        let contracts = client.list_contracts().await.unwrap();
+
+        assert!(!contracts.is_empty());
+        assert!(contracts.iter().all(|entry| entry.address.is_some()));
+        assert!(contracts.iter().all(|entry| entry.signer_status.is_some()));
     }
 
     #[tokio::test]
