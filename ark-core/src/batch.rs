@@ -95,11 +95,12 @@ impl OnChainInput {
         amount: Amount,
         outpoint: OutPoint,
     ) -> Self {
+        let (sequence, spend_info) = spend_selection.resolved_spend_info(default_sequence);
         Self::new(
-            spend_selection.sequence.unwrap_or(default_sequence),
+            sequence,
             script_pubkey,
             tapscripts,
-            spend_selection.spend_info(),
+            spend_info,
             owner_pk,
             amount,
             outpoint,

@@ -91,13 +91,14 @@ impl Input {
         is_swept: bool,
         assets: Vec<Asset>,
     ) -> Self {
+        let (sequence, spend_info) = spend_selection.resolved_spend_info(default_sequence);
         Self {
             outpoint,
-            sequence: spend_selection.sequence.unwrap_or(default_sequence),
+            sequence,
             locktime: spend_selection.locktime.unwrap_or(absolute::LockTime::ZERO),
             witness_utxo,
             tapscripts,
-            spend_info: spend_selection.spend_info(),
+            spend_info,
             is_onchain,
             is_swept,
             assets,

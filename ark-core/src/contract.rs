@@ -163,6 +163,17 @@ impl SpendSelection {
         self
     }
 
+    pub fn resolved_sequence(&self, default_sequence: Sequence) -> Sequence {
+        self.sequence.unwrap_or(default_sequence)
+    }
+
+    pub fn resolved_spend_info(
+        &self,
+        default_sequence: Sequence,
+    ) -> (Sequence, (ScriptBuf, ControlBlock)) {
+        (self.resolved_sequence(default_sequence), self.spend_info())
+    }
+
     pub fn spend_info(&self) -> (ScriptBuf, ControlBlock) {
         (self.path.script.clone(), self.path.control_block.clone())
     }
