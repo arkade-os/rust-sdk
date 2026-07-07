@@ -139,17 +139,27 @@ pub async fn reverse_swap_claim_with_vhtlc_ancestor_can_exit_unilaterally() {
     regtest.set_outpoint_blocktime_offset(max_blocktime_offset as u64);
 
     let send_amount = claim.claim_amount - Amount::from_sat(1_000);
-    let (tx, prevouts) = alice
-        .create_send_on_chain_transaction(
-            bitcoin::Address::<NetworkUnchecked>::from_str(
-                "bcrt1q8df4sx3hz63tq44ve3q6tr4qz0q30usk5sntpt",
-            )
-            .unwrap()
-            .assume_checked(),
-            send_amount,
-        )
-        .await
-        .unwrap();
+    let send_address = bitcoin::Address::<NetworkUnchecked>::from_str(
+        "bcrt1q8df4sx3hz63tq44ve3q6tr4qz0q30usk5sntpt",
+    )
+    .unwrap()
+    .assume_checked();
+    let (tx, prevouts) = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            match alice
+                .create_send_on_chain_transaction(send_address.clone(), send_amount)
+                .await
+            {
+                Ok(result) => return result,
+                Err(err) => {
+                    tracing::debug!(%err, "Waiting for exited VTXO to become spendable on-chain");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for exited VTXO to become spendable on-chain");
 
     assert_eq!(tx.input.len(), prevouts.len());
     assert!(
