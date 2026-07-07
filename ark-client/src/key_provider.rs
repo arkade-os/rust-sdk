@@ -122,13 +122,8 @@ pub trait KeyProvider: Send + Sync {
     ///
     /// This is used after loading persisted contracts so HD wallets can sign for stored
     /// contracts immediately after restart, without running a full restore scan.
-    /// Implementations should not advance receive-key discovery state here.
-    fn cache_keypair_at_index(&self, index: u32) -> Result<(), Error> {
-        if let Some(kp) = self.derive_at_discovery_index(index)? {
-            self.cache_discovered_keypair(index, kp)?;
-        }
-        Ok(())
-    }
+    /// Implementations must not advance receive-key discovery state here.
+    fn cache_keypair_at_index(&self, index: u32) -> Result<(), Error>;
 
     fn mark_as_used(&self, _pk: &bitcoin::XOnlyPublicKey) -> Result<(), Error> {
         Ok(())
@@ -176,6 +171,10 @@ impl KeyProvider for StaticKeyProvider {
 
     fn get_cached_pks(&self) -> Result<Vec<bitcoin::XOnlyPublicKey>, Error> {
         Ok(vec![self.kp.public_key().into()])
+    }
+
+    fn cache_keypair_at_index(&self, _index: u32) -> Result<(), Error> {
+        Ok(())
     }
 }
 
