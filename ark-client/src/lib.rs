@@ -100,6 +100,7 @@ pub use contract::MemoryContractStore;
 pub use contract::SqliteContractStore;
 pub use error::Error;
 pub use key_provider::Bip32KeyProvider;
+pub use key_provider::DiscoverableKeyProvider;
 pub use key_provider::KeyProvider;
 pub use key_provider::StaticKeyProvider;
 pub use lightning_invoice;
@@ -441,6 +442,7 @@ pub struct OfflineClient<B, W, S> {
     // TODO: We could introduce a generic interface so that consumers can use either GRPC or REST.
     network_client: ark_grpc::Client,
     key_provider: Arc<dyn KeyProvider>,
+    discoverable_key_provider: Option<Arc<dyn DiscoverableKeyProvider>>,
     blockchain: Arc<B>,
     secp: Secp256k1<All>,
     wallet: Arc<W>,
@@ -653,6 +655,40 @@ where
         wallet: Arc<W>,
         swap_storage: Arc<S>,
     ) -> Self {
+        Self::with_key_provider_parts(config, key_provider, None, blockchain, wallet, swap_storage)
+    }
+
+    /// Create a new offline client with a discoverable key provider.
+    pub fn with_discoverable_key_provider<P>(
+        config: OfflineClientConfig,
+        key_provider: Arc<P>,
+        blockchain: Arc<B>,
+        wallet: Arc<W>,
+        swap_storage: Arc<S>,
+    ) -> Self
+    where
+        P: DiscoverableKeyProvider + 'static,
+    {
+        let core_key_provider: Arc<dyn KeyProvider> = key_provider.clone();
+        let discoverable_key_provider: Arc<dyn DiscoverableKeyProvider> = key_provider;
+        Self::with_key_provider_parts(
+            config,
+            core_key_provider,
+            Some(discoverable_key_provider),
+            blockchain,
+            wallet,
+            swap_storage,
+        )
+    }
+
+    fn with_key_provider_parts(
+        config: OfflineClientConfig,
+        key_provider: Arc<dyn KeyProvider>,
+        discoverable_key_provider: Option<Arc<dyn DiscoverableKeyProvider>>,
+        blockchain: Arc<B>,
+        wallet: Arc<W>,
+        swap_storage: Arc<S>,
+    ) -> Self {
         let secp = Secp256k1::new();
         let network_client = ark_grpc::Client::new(config.ark_server_url);
 
@@ -678,6 +714,7 @@ where
         Self {
             network_client,
             key_provider,
+            discoverable_key_provider,
             blockchain,
             secp,
             wallet,
@@ -717,7 +754,7 @@ where
             DerivationPath::from_str(DEFAULT_DERIVATION_PATH).expect("valid derivation path"),
         );
         let key_provider = Arc::new(Bip32KeyProvider::new(xpriv, path));
-        Self::with_key_provider(config, key_provider, blockchain, wallet, swap_storage)
+        Self::with_discoverable_key_provider(config, key_provider, blockchain, wallet, swap_storage)
     }
 
     /// Use a custom contract store for the connected client.
@@ -1112,8 +1149,11 @@ where
         indices.sort_unstable();
         indices.dedup();
 
+        let Some(key_provider) = self.inner.discoverable_key_provider.as_ref() else {
+            return Ok(());
+        };
         for index in indices {
-            self.inner.key_provider.cache_keypair_at_index(index)?;
+            key_provider.cache_keypair_at_index(index)?;
         }
 
         Ok(())
@@ -1314,13 +1354,13 @@ where
             return Err(Error::ad_hoc("restore gap limit must be greater than zero"));
         }
 
-        if !self.inner.key_provider.supports_discovery() {
+        let Some(key_provider) = self.inner.discoverable_key_provider.as_ref() else {
             tracing::debug!("Key provider does not support discovery, skipping");
             return Ok(ContractRestoreReport {
                 gap_limit,
                 ..Default::default()
             });
-        }
+        };
 
         let server_info = &self.server_info().await?;
         let ctx = ContractContext::new(server_info.network);
@@ -1448,9 +1488,7 @@ where
                 }
 
                 if found_for_key {
-                    self.inner
-                        .key_provider
-                        .cache_discovered_keypair(index, kp)?;
+                    key_provider.cache_discovered_keypair(index, kp)?;
                     report.discovered_key_indexes.push(index);
                     report.last_used_key_index = Some(
                         report
@@ -1492,7 +1530,10 @@ where
             let index = start_index
                 .checked_add(i)
                 .ok_or_else(|| Error::ad_hoc("Key discovery index overflow"))?;
-            let Some(kp) = self.inner.key_provider.derive_at_discovery_index(index)? else {
+            let Some(key_provider) = self.inner.discoverable_key_provider.as_ref() else {
+                break;
+            };
+            let Some(kp) = key_provider.derive_at_discovery_index(index)? else {
                 break;
             };
             let owner = kp.x_only_public_key().0;
@@ -2045,7 +2086,10 @@ where
     }
 
     fn derivation_index_for_pk(&self, pk: &XOnlyPublicKey) -> Option<u32> {
-        self.inner.key_provider.get_derivation_index_for_pk(pk)
+        self.inner
+            .discoverable_key_provider
+            .as_ref()
+            .and_then(|provider| provider.get_derivation_index_for_pk(pk))
     }
 
     fn secp(&self) -> &Secp256k1<All> {

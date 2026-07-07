@@ -554,11 +554,13 @@ where
             signed_checkpoint_txs: res.signed_checkpoint_txs,
         };
 
-        if let Err(err) = self.inner.key_provider.mark_as_used(&used_pk) {
-            tracing::warn!(
-                "Failed updating keypair cache for used change address: {:?}",
-                err
-            );
+        if let Some(key_provider) = self.inner.discoverable_key_provider.as_ref() {
+            if let Err(err) = key_provider.mark_as_used(&used_pk) {
+                tracing::warn!(
+                    "Failed updating keypair cache for used change address: {:?}",
+                    err
+                );
+            }
         }
 
         Ok(pending_tx)
