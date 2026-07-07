@@ -121,7 +121,7 @@ where
         vtxo_outpoints: &[OutPoint],
         receivers: Vec<SendReceiver>,
     ) -> Result<Txid, Error> {
-        // Fetch spend information for the `vtxo_outpoints` chosen by the caller.
+        // Resolve contract-annotated inputs for the `vtxo_outpoints` chosen by the caller.
         let selected = self
             .resolve_selected_send_inputs(vtxo_outpoints)
             .await

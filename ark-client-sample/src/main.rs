@@ -395,6 +395,33 @@ fn format_timestamp(unix_secs: i64) -> Result<String> {
     Ok(ts.to_string())
 }
 
+async fn find_unspent_boarding_outputs(
+    client: &ark_client::Client<EsploraClient, Wallet, SampleSwapStorage>,
+    esplora_client: &EsploraClient,
+) -> Result<Vec<ExplorerUtxo>> {
+    let mut seen = HashSet::new();
+    let mut unspent = Vec::new();
+
+    for address in client
+        .get_boarding_addresses()
+        .await
+        .map_err(|e| anyhow!(e))?
+    {
+        let outpoints = esplora_client
+            .find_outpoints(&address)
+            .await
+            .map_err(|e| anyhow!(e))?;
+
+        for utxo in outpoints.into_iter().filter(|utxo| !utxo.is_spent) {
+            if seen.insert(utxo.outpoint) {
+                unspent.push(utxo);
+            }
+        }
+    }
+
+    Ok(unspent)
+}
+
 #[cfg(feature = "sqlite")]
 fn apply_contract_store_path<B, W, S>(
     config: &Config,
@@ -589,21 +616,11 @@ async fn run_command(
         Commands::Balance => {
             let offchain_balance = client.offchain_balance().await.map_err(|e| anyhow!(e))?;
 
-            let boarding = {
-                let boarding_output = client
-                    .get_boarding_address()
-                    .await
-                    .map_err(|e| anyhow!(e))?;
-                let outpoints = esplora_client
-                    .find_outpoints(&boarding_output)
-                    .await
-                    .map_err(|e| anyhow!(e))?;
-
-                let (_, unspent): (Vec<_>, Vec<_>) =
-                    outpoints.into_iter().partition(|u| u.is_spent);
-
-                unspent.iter().map(|u| u.amount).sum::<Amount>()
-            };
+            let boarding = find_unspent_boarding_outputs(&client, &esplora_client)
+                .await?
+                .iter()
+                .map(|utxo| utxo.amount)
+                .sum::<Amount>();
 
             let mut balance_json = serde_json::json!({
                 "offchain_confirmed": offchain_balance.confirmed(),
@@ -647,9 +664,6 @@ async fn run_command(
         }
         Commands::Settle { notes } => {
             let mut rng = thread_rng();
-            // we need to call this because how our wallet works
-            let _ = client.get_boarding_address().await;
-
             let maybe_batch_tx = match notes {
                 Some(notes_str) => {
                     // Parse comma-separated ArkNote strings
@@ -1188,32 +1202,23 @@ async fn run_command(
             });
 
             // Get boarding outputs
-            let boarding_output = client
-                .get_boarding_address()
-                .await
-                .map_err(|e| anyhow!(e))?;
-            let outpoints = esplora_client
-                .find_outpoints(&boarding_output)
-                .await
-                .map_err(|e| anyhow!(e))?;
+            let outpoints = find_unspent_boarding_outputs(&client, &esplora_client).await?;
 
             let mut boarding_entries: Vec<BoardingEntry> = Vec::new();
             for o in outpoints {
-                if !o.is_spent {
-                    boarding_entries.push(BoardingEntry {
-                        outpoint: o.outpoint.to_string(),
-                        amount_sats: o.amount.to_sat(),
-                        confirmation_time: o
-                            .confirmation_blocktime
-                            .map(|t| format_timestamp(t as i64))
-                            .transpose()?,
-                        status: if o.confirmation_blocktime.is_some() {
-                            "confirmed".to_string()
-                        } else {
-                            "pending".to_string()
-                        },
-                    });
-                }
+                boarding_entries.push(BoardingEntry {
+                    outpoint: o.outpoint.to_string(),
+                    amount_sats: o.amount.to_sat(),
+                    confirmation_time: o
+                        .confirmation_blocktime
+                        .map(|t| format_timestamp(t as i64))
+                        .transpose()?,
+                    status: if o.confirmation_blocktime.is_some() {
+                        "confirmed".to_string()
+                    } else {
+                        "pending".to_string()
+                    },
+                });
             }
 
             // Sort boarding by confirmation time (earliest first), then amount (largest first)
@@ -1265,9 +1270,6 @@ async fn run_command(
                 println!("{}", serde_json::to_string_pretty(&output)?);
                 return Ok(());
             }
-
-            // We need to call this because of how our wallet works
-            let _ = client.get_boarding_address().await;
 
             let maybe_batch_tx = client
                 .settle_vtxos(&mut rng, &vtxo_outpoints, &boarding_outpoints)

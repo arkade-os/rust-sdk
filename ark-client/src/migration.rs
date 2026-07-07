@@ -486,9 +486,8 @@ where
     ///
     /// This is observability only — it never moves funds and never calls settle or migrate. It is
     /// the read-only sibling of [`Self::migrate_deprecated_signer_vtxos`]. For each deprecated
-    /// signer it merges the wallet's VTXO holdings (resolved via the script -> VTXO map, like
-    /// [`Self::offchain_balance`]) and its on-chain boarding holdings (grouped by
-    /// [`BoardingOutput::server_pk`]) into one [`DeprecatedSignerReport`].
+    /// signer it merges the wallet's contract-annotated VTXO holdings and its on-chain boarding
+    /// holdings (grouped by their stored contract signer) into one [`DeprecatedSignerReport`].
     ///
     /// Signers under which the wallet holds neither VTXOs nor boarding outputs are omitted. When
     /// the server advertises no deprecated signers, returns an empty vector without touching the

@@ -6,7 +6,6 @@ use bitcoin::absolute;
 use bitcoin::key::Secp256k1;
 use bitcoin::secp256k1::All;
 use bitcoin::taproot::ControlBlock;
-use bitcoin::Address;
 use bitcoin::Network;
 use bitcoin::ScriptBuf;
 use bitcoin::Sequence;
@@ -79,12 +78,6 @@ pub struct StoredContract {
     /// Static/custom providers may not expose an index, and imported contracts may not have one.
     pub key_index: Option<u32>,
     pub data: serde_json::Value,
-}
-
-#[derive(Clone, Debug)]
-pub struct ContractView {
-    pub contract: StoredContract,
-    pub address: Option<Address>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

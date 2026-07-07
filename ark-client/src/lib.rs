@@ -1490,7 +1490,7 @@ where
     }
 
     /// Persist (idempotently) a boarding output for each signer the wallet should watch crossed
-    /// with each candidate exit delay, returning the created [`BoardingOutput`]s.
+    /// with each candidate exit delay, returning annotated boarding outputs.
     ///
     /// Covers the current signer plus every deprecated signer, each paired with
     /// [`ark_core::candidate_exit_delays`] (the advertised boarding-exit delay plus, on mainnet,

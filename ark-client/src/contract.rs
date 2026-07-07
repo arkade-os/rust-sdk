@@ -4,10 +4,8 @@ use ark_core::contract::ContractContext;
 use ark_core::contract::ContractSpec;
 use ark_core::contract::ContractState;
 use ark_core::contract::ContractType;
-use ark_core::contract::ContractView;
 use ark_core::contract::DefaultVtxoContract;
 use ark_core::contract::DelegateVtxoContract;
-use ark_core::contract::SpendPath;
 use ark_core::contract::SpendSelection;
 use ark_core::contract::StoredContract;
 use ark_core::contract::VhtlcContract;
@@ -35,11 +33,6 @@ use std::time::UNIX_EPOCH;
 trait DynContractHandler: Send + Sync {
     fn contract_type(&self) -> ContractType;
     fn validate(&self, stored: &StoredContract, ctx: &ContractContext) -> Result<(), Error>;
-    fn spendable_paths(
-        &self,
-        stored: &StoredContract,
-        ctx: &ContractContext,
-    ) -> Result<Vec<SpendPath>, Error>;
     fn spendable_selections(
         &self,
         stored: &StoredContract,
@@ -83,17 +76,6 @@ impl<T: ContractSpec> DynContractHandler for ContractHandler<T> {
         }
 
         Ok(())
-    }
-
-    fn spendable_paths(
-        &self,
-        stored: &StoredContract,
-        ctx: &ContractContext,
-    ) -> Result<Vec<SpendPath>, Error> {
-        self.validate(stored, ctx)?;
-        let data: T = serde_json::from_value(stored.data.clone())
-            .map_err(|e| Error::ad_hoc(format!("failed to decode contract data: {e}")))?;
-        data.spendable_paths(ctx).map_err(Into::into)
     }
 
     fn spendable_selections(
@@ -439,10 +421,6 @@ impl AnnotatedVtxo {
         &self.spend_selections
     }
 
-    pub fn spend_path(&self, kind: ark_core::contract::SpendPathKind) -> Result<SpendPath, Error> {
-        self.spend_selection(kind).map(|selection| selection.path)
-    }
-
     pub fn spend_selection(
         &self,
         kind: ark_core::contract::SpendPathKind,
@@ -523,10 +501,6 @@ impl AnnotatedBoardingOutput {
 
     pub fn spend_selections(&self) -> &[SpendSelection] {
         &self.spend_selections
-    }
-
-    pub fn spend_path(&self, kind: ark_core::contract::SpendPathKind) -> Result<SpendPath, Error> {
-        self.spend_selection(kind).map(|selection| selection.path)
     }
 
     pub fn spend_selection(
@@ -869,40 +843,12 @@ impl ContractManager {
             .collect())
     }
 
-    pub fn list_views(&self) -> Result<Vec<ContractView>, Error> {
-        self.store
-            .list()?
-            .into_iter()
-            .map(|contract| {
-                let address = Address::from_script(&contract.script_pubkey, self.network).ok();
-                Ok(ContractView { contract, address })
-            })
-            .collect()
-    }
-
     pub fn update_state(
         &mut self,
         script_pubkey: &Script,
         state: ContractState,
     ) -> Result<(), Error> {
         self.store.update_state(script_pubkey, state)
-    }
-
-    pub fn spendable_paths_for_script(
-        &self,
-        script_pubkey: &Script,
-    ) -> Result<Vec<SpendPath>, Error> {
-        let stored = self
-            .store
-            .get_by_script(script_pubkey)?
-            .ok_or_else(|| Error::ad_hoc("unknown contract script"))?;
-        self.spendable_paths(&stored)
-    }
-
-    pub fn spendable_paths(&self, stored: &StoredContract) -> Result<Vec<SpendPath>, Error> {
-        let ctx = ContractContext::new(self.network);
-        let handler = self.registry.handler_for(&stored.contract_type)?;
-        handler.spendable_paths(stored, &ctx)
     }
 
     pub fn spendable_selections(
@@ -1207,11 +1153,11 @@ mod tests {
             Some(contract)
         );
 
-        let paths = manager
-            .spendable_paths_for_script(&stored.script_pubkey)
-            .unwrap();
-        assert_eq!(paths.len(), 2);
-        assert!(paths.iter().all(|path| !path.script.is_empty()));
+        let selections = manager.spendable_selections(&stored).unwrap();
+        assert_eq!(selections.len(), 2);
+        assert!(selections
+            .iter()
+            .all(|selection| !selection.path.script.is_empty()));
     }
 
     #[test]
