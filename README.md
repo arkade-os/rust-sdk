@@ -27,16 +27,16 @@ Use the convenience crate if you want a single SDK dependency:
 
 ```toml
 [dependencies]
-ark-rs = "0.9.3"
+ark-rs = "0.10.0"
 ```
 
 Or depend on the crates you need directly:
 
 ```toml
 [dependencies]
-ark-core = "0.9.3"
-ark-client = "0.9.3"
-ark-bdk-wallet = "0.9.3"
+ark-core = "0.10.0"
+ark-client = "0.10.0"
+ark-bdk-wallet = "0.10.0"
 ```
 
 Optional `ark-rs` features:
