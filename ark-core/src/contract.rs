@@ -442,4 +442,102 @@ impl ContractSpec for VhtlcContract {
             })
             .collect()
     }
+
+    fn spendable_selections(&self, ctx: &ContractContext) -> Result<Vec<SpendSelection>, Error> {
+        Ok(self
+            .spendable_paths(ctx)?
+            .into_iter()
+            .filter_map(|path| match path.kind {
+                SpendPathKind::VhtlcClaim | SpendPathKind::VhtlcUnilateralClaim => None,
+                SpendPathKind::VhtlcRefundWithoutReceiver => Some(path.select().with_locktime(
+                    absolute::LockTime::from_consensus(self.options.refund_locktime),
+                )),
+                SpendPathKind::VhtlcUnilateralRefund => Some(
+                    path.select()
+                        .with_sequence(self.options.unilateral_refund_delay),
+                ),
+                SpendPathKind::VhtlcUnilateralRefundWithoutReceiver => Some(
+                    path.select()
+                        .with_sequence(self.options.unilateral_refund_without_receiver_delay),
+                ),
+                SpendPathKind::Forfeit
+                | SpendPathKind::Exit
+                | SpendPathKind::Delegate
+                | SpendPathKind::VhtlcRefund
+                | SpendPathKind::Custom(_) => Some(path.select()),
+            })
+            .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin::hashes::ripemd160;
+    use bitcoin::hashes::Hash;
+    use std::str::FromStr;
+
+    fn test_key(hex: &str) -> XOnlyPublicKey {
+        XOnlyPublicKey::from_str(hex).unwrap()
+    }
+
+    fn vhtlc_contract() -> VhtlcContract {
+        VhtlcContract {
+            options: VhtlcOptions {
+                sender: test_key(
+                    "f874c4fd782a63a2b078b424f9f4e5edae622880a29fe572bd71bee45ab55ea0",
+                ),
+                receiver: test_key(
+                    "b02b1a956cd0ed91d1a06b65ae976470ffd4b8c9215f446f266bb74fedd153b6",
+                ),
+                server: test_key(
+                    "e35799157be4b37565bb5afe4d04e6a0fa0a4b6a4f4e48b0d904685d253cdbdb",
+                ),
+                preimage_hash: ripemd160::Hash::hash(b"preimage"),
+                refund_locktime: 500,
+                unilateral_claim_delay: Sequence::from_height(10),
+                unilateral_refund_delay: Sequence::from_height(20),
+                unilateral_refund_without_receiver_delay: Sequence::from_height(30),
+            },
+        }
+    }
+
+    #[test]
+    fn vhtlc_spendable_selections_include_required_constraints() {
+        let ctx = ContractContext::new(Network::Regtest);
+        let selections = vhtlc_contract().spendable_selections(&ctx).unwrap();
+
+        assert!(!selections
+            .iter()
+            .any(|selection| selection.path.kind == SpendPathKind::VhtlcClaim));
+        assert!(!selections
+            .iter()
+            .any(|selection| selection.path.kind == SpendPathKind::VhtlcUnilateralClaim));
+
+        let refund_without_receiver = selections
+            .iter()
+            .find(|selection| selection.path.kind == SpendPathKind::VhtlcRefundWithoutReceiver)
+            .unwrap();
+        assert_eq!(
+            refund_without_receiver.locktime,
+            Some(absolute::LockTime::from_consensus(500))
+        );
+
+        let unilateral_refund = selections
+            .iter()
+            .find(|selection| selection.path.kind == SpendPathKind::VhtlcUnilateralRefund)
+            .unwrap();
+        assert_eq!(unilateral_refund.sequence, Some(Sequence::from_height(20)));
+
+        let unilateral_refund_without_receiver = selections
+            .iter()
+            .find(|selection| {
+                selection.path.kind == SpendPathKind::VhtlcUnilateralRefundWithoutReceiver
+            })
+            .unwrap();
+        assert_eq!(
+            unilateral_refund_without_receiver.sequence,
+            Some(Sequence::from_height(30))
+        );
+    }
 }
