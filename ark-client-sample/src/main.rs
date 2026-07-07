@@ -1139,7 +1139,7 @@ async fn run_command(
                 .restore_contracts(*gap_limit)
                 .await
                 .map_err(|e| anyhow!(e))?;
-            tracing::info!(restored, gap_limit, "Restored wallet contracts");
+            tracing::info!(?restored, gap_limit, "Restored wallet contracts");
         }
         Commands::ListVtxos => {
             // Get VTXOs

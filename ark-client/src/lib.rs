@@ -119,6 +119,29 @@ pub const DEFAULT_GAP_LIMIT: u32 = 20;
 /// provide one. Identifies traffic originating from this SDK.
 pub const DEFAULT_BOLTZ_REFERRAL_ID: &str = "arkade-rs-SDK";
 
+/// Summary returned by [`Client::restore_contracts`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ContractRestoreReport {
+    /// Derived key indexes that were probed.
+    pub scanned_keys: u32,
+    /// Key indexes where at least one contract had activity.
+    pub discovered_keys: u32,
+    /// Offchain default/delegate contracts with VTXO activity.
+    pub offchain_contracts: u32,
+    /// Boarding contracts with on-chain UTXO activity.
+    pub boarding_contracts: u32,
+    /// Contracts that were not already in the store.
+    pub inserted_contracts: u32,
+    /// Discovered contracts that were already present in the store.
+    pub known_contracts: u32,
+}
+
+impl ContractRestoreReport {
+    pub fn discovered_contracts(&self) -> u32 {
+        self.offchain_contracts + self.boarding_contracts
+    }
+}
+
 /// Default mainnet Arkade server URL.
 pub const ARKADE_MAINNET_URL: &str = "https://arkade.computer";
 
@@ -361,6 +384,81 @@ struct ServerState {
     fee_estimator: ark_fees::Estimator,
     server_info_refreshed_at: Instant,
     contract_manager: Mutex<ContractManager>,
+}
+
+#[derive(Clone, Debug)]
+enum RestoreCandidate {
+    DefaultVtxo(DefaultVtxoContract),
+    DelegateVtxo(DelegateVtxoContract),
+    Boarding(BoardingContract),
+}
+
+#[derive(Clone, Debug)]
+enum RestoreDiscoveryTarget {
+    Offchain(ArkAddress),
+    Boarding(Address),
+}
+
+impl RestoreCandidate {
+    fn discovery_target(
+        &self,
+        secp: &Secp256k1<All>,
+        ctx: &ContractContext,
+    ) -> Result<RestoreDiscoveryTarget, Error> {
+        match self {
+            Self::DefaultVtxo(contract) => Ok(RestoreDiscoveryTarget::Offchain(
+                Vtxo::new_default(
+                    secp,
+                    contract.server,
+                    contract.owner,
+                    contract.exit_delay,
+                    ctx.network(),
+                )?
+                .to_ark_address(),
+            )),
+            Self::DelegateVtxo(contract) => Ok(RestoreDiscoveryTarget::Offchain(
+                Vtxo::new_with_delegator(
+                    secp,
+                    contract.server,
+                    contract.owner,
+                    contract.delegator,
+                    contract.exit_delay,
+                    ctx.network(),
+                )?
+                .to_ark_address(),
+            )),
+            Self::Boarding(contract) => Ok(RestoreDiscoveryTarget::Boarding(
+                contract.boarding_output(ctx)?.address().clone(),
+            )),
+        }
+    }
+
+    fn script_pubkey(
+        &self,
+        secp: &Secp256k1<All>,
+        ctx: &ContractContext,
+    ) -> Result<ScriptBuf, Error> {
+        match self {
+            Self::DefaultVtxo(contract) => Ok(Vtxo::new_default(
+                secp,
+                contract.server,
+                contract.owner,
+                contract.exit_delay,
+                ctx.network(),
+            )?
+            .script_pubkey()),
+            Self::DelegateVtxo(contract) => Ok(Vtxo::new_with_delegator(
+                secp,
+                contract.server,
+                contract.owner,
+                contract.delegator,
+                contract.exit_delay,
+                ctx.network(),
+            )?
+            .script_pubkey()),
+            Self::Boarding(contract) => Ok(contract.boarding_output(ctx)?.script_pubkey()),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1008,118 +1106,118 @@ where
         Ok((vtxo.to_ark_address(), vtxo))
     }
 
-    /// Restore persisted contracts using BIP44-style gap-limit key discovery.
+    /// Restore persisted contracts using explicit contract discovery.
     ///
-    /// This method derives keys in batches, checks all at once via list_vtxos,
-    /// caches used ones, persists their contracts, and stops when a full batch has no used keys.
+    /// This method derives candidate default VTXO, delegate VTXO, and boarding contracts for each
+    /// key index. It queries the Arkade VTXO index for offchain candidates and the configured
+    /// blockchain backend for boarding candidates, persists contracts that have activity, and stops
+    /// when a full batch has no discovered contracts.
     ///
-    /// Returns the number of discovered keys. No-op for StaticKeyProvider.
+    /// No-op for StaticKeyProvider.
     ///
     /// # Arguments
     ///
-    /// * `gap_limit` - Number of consecutive unused addresses before stopping
-    pub async fn restore_contracts(&self, gap_limit: u32) -> Result<u32, Error> {
+    /// * `gap_limit` - Number of consecutive unused key indexes before stopping
+    pub async fn restore_contracts(&self, gap_limit: u32) -> Result<ContractRestoreReport, Error> {
         if !self.inner.key_provider.supports_discovery() {
             tracing::debug!("Key provider does not support discovery, skipping");
-            return Ok(0);
+            return Ok(ContractRestoreReport::default());
         }
 
         let server_info = &self.server_info().await?;
-        // Discover against current + all deprecated signers so that user keys used before a
-        // rotation are still found when recovering from seed.
+        let ctx = ContractContext::new(server_info.network);
         let all_server_keys: Vec<XOnlyPublicKey> = server_info.all_server_keys().collect();
-        // Probe each server key under every candidate exit delay (the advertised delay plus, on
-        // mainnet, the legacy delay), so VTXOs minted before the operator shortened the delay are
-        // still discovered. Off mainnet this is just the advertised delay (no behaviour change).
-        let candidate_delays = ark_core::candidate_exit_delays(
+        let offchain_exit_delays = ark_core::candidate_exit_delays(
             server_info.unilateral_exit_delay,
             server_info.network,
         )?;
+        let boarding_exit_delays =
+            ark_core::candidate_exit_delays(server_info.boarding_exit_delay, server_info.network)?;
 
         let mut start_index = 0u32;
-        let mut discovered_count = 0u32;
+        let mut report = ContractRestoreReport::default();
 
         tracing::info!(gap_limit, "Starting contract restore");
 
         loop {
-            // Generate a batch of gap_limit keys
-            let mut batch: Vec<(u32, Keypair, Vec<ArkAddress>)> =
-                Vec::with_capacity(gap_limit as usize);
-
-            for i in 0..gap_limit {
-                let index = start_index
-                    .checked_add(i)
-                    .ok_or_else(|| Error::ad_hoc("Key discovery index overflow"))?;
-
-                let kp = match self.inner.key_provider.derive_at_discovery_index(index)? {
-                    Some(kp) => kp,
-                    None => break,
-                };
-
-                let owner_pk = kp.x_only_public_key().0;
-
-                let mut addresses = Vec::new();
-
-                for server_signer in &all_server_keys {
-                    for exit_delay in &candidate_delays {
-                        // Default (2-leaf) address.
-                        let default_vtxo = Vtxo::new_default(
-                            self.secp(),
-                            *server_signer,
-                            owner_pk,
-                            *exit_delay,
-                            server_info.network,
-                        )?;
-                        addresses.push(default_vtxo.to_ark_address());
-
-                        // Delegate (3-leaf) addresses for each known delegator.
-                        for dpk in &self.inner.historical_delegator_pks {
-                            let delegate_vtxo = Vtxo::new_with_delegator(
-                                self.secp(),
-                                *server_signer,
-                                owner_pk,
-                                *dpk,
-                                *exit_delay,
-                                server_info.network,
-                            )?;
-                            addresses.push(delegate_vtxo.to_ark_address());
-                        }
-                    }
-                }
-
-                batch.push((index, kp, addresses));
-            }
+            let batch = self.restore_candidate_batch(
+                start_index,
+                gap_limit,
+                &all_server_keys,
+                &offchain_exit_delays,
+                &boarding_exit_delays,
+            )?;
 
             if batch.is_empty() {
                 break;
             }
 
-            // Query all addresses in batch at once
-            let addresses = batch.iter().flat_map(|(_, _, addrs)| addrs.iter().copied());
+            report.scanned_keys += batch.len() as u32;
 
-            let vtxo_list = self.list_vtxos_for_addresses(addresses).await?;
+            let mut offchain_addresses = Vec::new();
+            for (_, _, candidates) in &batch {
+                for candidate in candidates {
+                    if let RestoreDiscoveryTarget::Offchain(address) =
+                        candidate.discovery_target(self.secp(), &ctx)?
+                    {
+                        offchain_addresses.push(address);
+                    }
+                }
+            }
+            let vtxo_list = self
+                .list_vtxos_for_addresses(offchain_addresses.into_iter())
+                .await?;
+            let used_offchain_scripts: HashSet<ScriptBuf> =
+                vtxo_list.all().map(|vtxo| vtxo.script.clone()).collect();
 
-            // Build set of used scripts from response
-            let used_scripts: HashSet<&ScriptBuf> = vtxo_list.all().map(|v| &v.script).collect();
-
-            // Cache keypairs for used addresses (match by script)
             let mut found_any = false;
-            for (index, kp, addrs) in batch {
-                let used_addr = addrs.iter().find(|addr| {
-                    let script = addr.to_p2tr_script_pubkey();
-                    used_scripts.contains(&script)
-                });
-                if let Some(addr) = used_addr {
-                    tracing::debug!(index, addr = %addr, "Found used address");
+            for (index, kp, candidates) in batch {
+                let mut found_for_key = false;
+
+                for candidate in candidates {
+                    let script = candidate.script_pubkey(self.secp(), &ctx)?;
+                    let target = candidate.discovery_target(self.secp(), &ctx)?;
+                    let offchain_found = matches!(target, RestoreDiscoveryTarget::Offchain(_))
+                        && used_offchain_scripts.contains(&script);
+                    let boarding_found = match target {
+                        RestoreDiscoveryTarget::Boarding(address) if !offchain_found => self
+                            .blockchain()
+                            .find_outpoints(&address)
+                            .await?
+                            .iter()
+                            .any(|utxo| !utxo.is_spent),
+                        RestoreDiscoveryTarget::Boarding(_)
+                        | RestoreDiscoveryTarget::Offchain(_) => false,
+                    };
+
+                    if !offchain_found && !boarding_found {
+                        continue;
+                    }
+
+                    let inserted = self.persist_restore_candidate(candidate, index)?;
+                    if inserted {
+                        report.inserted_contracts += 1;
+                    } else {
+                        report.known_contracts += 1;
+                    }
+                    if offchain_found {
+                        report.offchain_contracts += 1;
+                    }
+                    if boarding_found {
+                        report.boarding_contracts += 1;
+                    }
+                    found_for_key = true;
+                }
+
+                if found_for_key {
                     self.inner
                         .key_provider
                         .cache_discovered_keypair(index, kp)?;
-                    discovered_count += 1;
+                    report.discovered_keys += 1;
                     found_any = true;
                 }
             }
 
-            // Stop if no used addresses found in this batch (gap limit reached)
             if !found_any {
                 break;
             }
@@ -1129,13 +1227,98 @@ where
                 .ok_or_else(|| Error::ad_hoc("Key discovery index overflow"))?;
         }
 
-        if discovered_count > 0 {
-            self.get_offchain_addresses_with_server_info(server_info)?;
+        tracing::info!(?report, "Contract restore completed");
+
+        Ok(report)
+    }
+
+    fn restore_candidate_batch(
+        &self,
+        start_index: u32,
+        gap_limit: u32,
+        server_keys: &[XOnlyPublicKey],
+        offchain_exit_delays: &[bitcoin::Sequence],
+        boarding_exit_delays: &[bitcoin::Sequence],
+    ) -> Result<Vec<(u32, Keypair, Vec<RestoreCandidate>)>, Error> {
+        let mut batch = Vec::with_capacity(gap_limit as usize);
+
+        for i in 0..gap_limit {
+            let index = start_index
+                .checked_add(i)
+                .ok_or_else(|| Error::ad_hoc("Key discovery index overflow"))?;
+            let Some(kp) = self.inner.key_provider.derive_at_discovery_index(index)? else {
+                break;
+            };
+            let owner = kp.x_only_public_key().0;
+            let mut candidates = Vec::new();
+
+            for server in server_keys {
+                for exit_delay in offchain_exit_delays {
+                    candidates.push(RestoreCandidate::DefaultVtxo(DefaultVtxoContract {
+                        server: *server,
+                        owner,
+                        exit_delay: *exit_delay,
+                    }));
+
+                    let mut seen_delegators = HashSet::new();
+                    for delegator in &self.inner.historical_delegator_pks {
+                        if !seen_delegators.insert(delegator) {
+                            continue;
+                        }
+                        candidates.push(RestoreCandidate::DelegateVtxo(DelegateVtxoContract {
+                            server: *server,
+                            owner,
+                            delegator: *delegator,
+                            exit_delay: *exit_delay,
+                        }));
+                    }
+                }
+
+                for exit_delay in boarding_exit_delays {
+                    candidates.push(RestoreCandidate::Boarding(BoardingContract {
+                        server: *server,
+                        owner,
+                        exit_delay: *exit_delay,
+                    }));
+                }
+            }
+
+            batch.push((index, kp, candidates));
         }
 
-        tracing::info!(discovered_count, "Contract restore completed");
+        Ok(batch)
+    }
 
-        Ok(discovered_count)
+    fn persist_restore_candidate(
+        &self,
+        candidate: RestoreCandidate,
+        key_index: u32,
+    ) -> Result<bool, Error> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+        let mut manager = state
+            .contract_manager
+            .lock()
+            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?;
+        let ctx = ContractContext::new(state.server_info.network);
+        let script = candidate.script_pubkey(self.secp(), &ctx)?;
+        let existed = manager.get(&script)?.is_some();
+
+        match candidate {
+            RestoreCandidate::DefaultVtxo(contract) => {
+                manager.insert_or_get(contract, ContractState::Active, Some(key_index))?;
+            }
+            RestoreCandidate::DelegateVtxo(contract) => {
+                manager.insert_or_get(contract, ContractState::Active, Some(key_index))?;
+            }
+            RestoreCandidate::Boarding(contract) => {
+                manager.insert_or_get(contract, ContractState::Active, Some(key_index))?;
+            }
+        }
+
+        Ok(!existed)
     }
 
     // At the moment we are always generating the same address.
