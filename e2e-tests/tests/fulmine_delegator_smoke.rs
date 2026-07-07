@@ -21,8 +21,8 @@ async fn fulmine_delegator_smoke() {
     let regtest = Arc::new(Regtest::new());
     let secp = Secp256k1::new();
 
-    // Fulmine delegator API (local regtest stack).
-    let delegator = Arc::new(DelegatorClient::new("http://localhost:7004".to_string()));
+    // Fulmine delegator HTTP API (local regtest stack).
+    let delegator = Arc::new(DelegatorClient::new("http://localhost:7002".to_string()));
     let info = delegator.info().await.unwrap();
 
     let delegator_pk: bitcoin::PublicKey = info.pubkey.parse().unwrap();
