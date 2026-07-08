@@ -837,10 +837,39 @@ async fn delegate_group<B, W, S>(
 /// Fraction of VTXO lifetime remaining at which we self-renew as a safety net.
 const SELF_RENEW_REMAINING_FRACTION: f64 = 0.10;
 
-/// Self-renew VTXOs that are close to expiry.
+/// Select VTXOs that should be self-renewed.
 ///
-/// Only settles VTXOs whose remaining lifetime is less than [`SELF_RENEW_REMAINING_FRACTION`] of
-/// their total lifetime, leaving freshly-received VTXOs alone.
+/// Includes all recoverable VTXOs (expired, swept, or sub-dust) plus VTXOs whose remaining lifetime
+/// is less than [`SELF_RENEW_REMAINING_FRACTION`] of their total lifetime.
+fn select_vtxos_for_self_renewal(vtxos: &[AnnotatedVtxo], dust: Amount, now: i64) -> Vec<OutPoint> {
+    let selected: Vec<_> = vtxos
+        .iter()
+        .filter(|entry| {
+            if entry.vtxo().is_recoverable(dust) {
+                return true;
+            }
+
+            if entry.vtxo().expires_at <= 0 || entry.vtxo().created_at <= 0 {
+                return false;
+            }
+            let total_lifetime = entry.vtxo().expires_at - entry.vtxo().created_at;
+            let remaining = entry.vtxo().expires_at - now;
+            remaining > 0
+                && (remaining as f64) < (total_lifetime as f64 * SELF_RENEW_REMAINING_FRACTION)
+        })
+        .collect();
+
+    let total_amount = selected
+        .iter()
+        .fold(Amount::ZERO, |total, entry| total + entry.vtxo().amount);
+    if total_amount < dust {
+        return Vec::new();
+    }
+
+    selected.iter().map(|entry| entry.vtxo().outpoint).collect()
+}
+
+/// Self-renew VTXOs that are close to expiry or already recoverable.
 async fn renew_expiring_vtxos<B, W, S>(client: &Client<B, W, S>)
 where
     B: Blockchain + Send + Sync + 'static,
@@ -855,24 +884,21 @@ where
         }
     };
 
+    let server_info = match client.server_info().await {
+        Ok(server_info) => server_info,
+        Err(e) => {
+            tracing::warn!("Failed to read server info for renewal check: {e}");
+            return;
+        }
+    };
+
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
 
-    let expiring_outpoints: Vec<OutPoint> = vtxo_list
-        .all_unspent()
-        .filter(|entry| {
-            if entry.vtxo().expires_at <= 0 || entry.vtxo().created_at <= 0 {
-                return false;
-            }
-            let total_lifetime = entry.vtxo().expires_at - entry.vtxo().created_at;
-            let remaining = entry.vtxo().expires_at - now;
-            remaining > 0
-                && (remaining as f64) < (total_lifetime as f64 * SELF_RENEW_REMAINING_FRACTION)
-        })
-        .map(|entry| entry.vtxo().outpoint)
-        .collect();
+    let unspent: Vec<_> = vtxo_list.all_unspent().cloned().collect();
+    let expiring_outpoints = select_vtxos_for_self_renewal(&unspent, server_info.dust, now);
 
     if expiring_outpoints.is_empty() {
         return;
@@ -880,7 +906,7 @@ where
 
     tracing::info!(
         count = expiring_outpoints.len(),
-        "Self-renewing expiring VTXOs"
+        "Self-renewing expiring/recoverable VTXOs"
     );
 
     let mut rng = OsRng;
@@ -1084,6 +1110,66 @@ mod tests {
 
         assert!(valid_at > now as u64);
         assert!(valid_at < later.vtxo().expires_at as u64);
+    }
+
+    #[test]
+    fn select_vtxos_for_self_renewal_includes_expired_and_subdust() {
+        let script = ScriptBuf::new();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let expired = mk_contract_vtxo(script.clone(), 10_000, now - 1, 0);
+        let subdust = mk_contract_vtxo(script.clone(), 100, now + 10_000, 1);
+        let fresh = mk_contract_vtxo(script, 10_000, now + 10_000, 2);
+
+        let selected = select_vtxos_for_self_renewal(
+            &[expired.clone(), subdust.clone(), fresh],
+            Amount::from_sat(500),
+            now,
+        );
+
+        assert_eq!(
+            selected,
+            vec![expired.vtxo().outpoint, subdust.vtxo().outpoint]
+        );
+    }
+
+    #[test]
+    fn select_vtxos_for_self_renewal_includes_near_expiry() {
+        let script = ScriptBuf::new();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let near_expiry = mk_contract_vtxo(script, 10_000, now + 50, 0);
+
+        let selected = select_vtxos_for_self_renewal(
+            std::slice::from_ref(&near_expiry),
+            Amount::from_sat(500),
+            now,
+        );
+
+        assert_eq!(selected, vec![near_expiry.vtxo().outpoint]);
+    }
+
+    #[test]
+    fn select_vtxos_for_self_renewal_skips_when_total_is_below_dust() {
+        let script = ScriptBuf::new();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let subdust1 = mk_contract_vtxo(script.clone(), 100, now + 10_000, 0);
+        let subdust2 = mk_contract_vtxo(script, 200, now + 10_000, 1);
+
+        let selected =
+            select_vtxos_for_self_renewal(&[subdust1, subdust2], Amount::from_sat(500), now);
+
+        assert!(selected.is_empty());
     }
 
     #[test]
