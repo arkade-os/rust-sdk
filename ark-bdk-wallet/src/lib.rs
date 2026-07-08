@@ -47,8 +47,8 @@ impl Wallet {
     /// derived from an existing Xpriv. Use this when you already have an Xpriv (e.g. from a
     /// BIP39 mnemonic).
     pub fn new_from_xpriv(xprv: Xpriv, network: Network, esplora_url: &str) -> Result<Self> {
-        let external = bdk_wallet::template::Bip84(xprv, KeychainKind::External);
-        let change = bdk_wallet::template::Bip84(xprv, KeychainKind::Internal);
+        let external = bdk_wallet::template::Bip86(xprv, KeychainKind::External);
+        let change = bdk_wallet::template::Bip86(xprv, KeychainKind::Internal);
         let wallet = BdkWallet::create(external, change)
             .network(network)
             .create_wallet_no_persist()?;
