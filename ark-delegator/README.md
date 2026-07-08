@@ -8,7 +8,7 @@ This crate provides typed request/response helpers for interacting with Arkade d
 
 ```toml
 [dependencies]
-ark-delegator = "0.10.0"
+ark-delegator = "0.10.1"
 ```
 
 ## Documentation

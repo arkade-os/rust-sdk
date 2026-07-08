@@ -8,7 +8,7 @@ This crate implements `ark-client` on-chain wallet traits using [`bdk_wallet`](h
 
 ```toml
 [dependencies]
-ark-bdk-wallet = "0.10.0"
+ark-bdk-wallet = "0.10.1"
 ```
 
 ## Documentation

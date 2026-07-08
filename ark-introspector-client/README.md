@@ -8,7 +8,7 @@ This crate provides typed helpers for querying Arkade introspector APIs used in 
 
 ```toml
 [dependencies]
-ark-introspector-client = "0.10.0"
+ark-introspector-client = "0.10.1"
 ```
 
 ## Documentation

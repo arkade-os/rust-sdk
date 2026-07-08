@@ -1,6 +1,6 @@
 [package]
 name = "ark-grpc"
-version = "0.10.0"
+version = "0.10.1"
 categories = { workspace = true }
 edition = { workspace = true }
 keywords = { workspace = true }
@@ -13,7 +13,7 @@ description = "gRPC client for Ark server communication"
 workspace = true
 
 [dependencies]
-ark-core = { path = "../ark-core", version = "0.10.0" }
+ark-core = { path = "../ark-core", version = "0.10.1" }
 async-stream = { version = "0.3", default-features = false }
 base64 = { version = "0.22", default-features = false }
 bitcoin = { version = "0.32.7", default-features = false }
