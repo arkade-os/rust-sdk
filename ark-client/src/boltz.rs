@@ -2754,6 +2754,9 @@ where
             .map_err(|e| Error::ad_hoc(e.to_string()))
             .context("failed to deserialize swap status response")?;
 
+        self.persist_swap_status(swap_id, status_response.status.clone())
+            .await?;
+
         Ok(SwapStatusInfo {
             swap_id: swap_id.to_string(),
             swap_type,
@@ -2914,6 +2917,10 @@ where
 
                                 // Only yield if status has changed
                                 if last_status.as_ref() != Some(&current_status) {
+                                    if let Err(e) = self.persist_swap_status(&swap_id, current_status.clone()).await {
+                                        yield Err(e);
+                                        break;
+                                    }
                                     last_status = Some(current_status.clone());
                                     yield Ok(current_status);
                                 }
@@ -3379,6 +3386,37 @@ where
             },
             expected_address,
         )
+    }
+
+    async fn persist_swap_status(&self, swap_id: &str, status: SwapStatus) -> Result<(), Error> {
+        if let Some(mut swap) = self.swap_storage().get_submarine(swap_id).await? {
+            swap.status = status.clone();
+            self.swap_storage()
+                .update_submarine(swap_id, swap.clone())
+                .await?;
+            if status.is_terminal() {
+                self.mark_vhtlc_contract_inactive(swap.contract_script_pubkey.as_ref())?;
+            }
+            return Ok(());
+        }
+
+        if let Some(mut swap) = self.swap_storage().get_reverse(swap_id).await? {
+            swap.status = status.clone();
+            self.swap_storage()
+                .update_reverse(swap_id, swap.clone())
+                .await?;
+            if status.is_terminal() {
+                self.mark_vhtlc_contract_inactive(swap.contract_script_pubkey.as_ref())?;
+            }
+            return Ok(());
+        }
+
+        if let Some(mut swap) = self.swap_storage().get_chain(swap_id).await? {
+            swap.status = status;
+            self.swap_storage().update_chain(swap_id, swap).await?;
+        }
+
+        Ok(())
     }
 
     fn insert_vhtlc_contract(
@@ -5148,6 +5186,150 @@ mod tests {
         let decoded: ReverseSwapData =
             serde_json::from_value(serde_json::to_value(&swap).unwrap()).unwrap();
         assert_eq!(decoded.contract_script_pubkey, Some(script_pubkey));
+    }
+
+    #[tokio::test]
+    async fn terminal_submarine_status_marks_vhtlc_contract_inactive() {
+        let server_info = test_server_info();
+        let client = test_client(server_info);
+        let script_pubkey = client
+            .insert_vhtlc_contract(fixture_opts(fixture_server_xonly()), Some(7))
+            .unwrap();
+        let mut swap = fixture_submarine_swap(Some(script_pubkey.clone()));
+        client
+            .swap_storage()
+            .insert_submarine(swap.id.clone(), swap.clone())
+            .await
+            .unwrap();
+
+        client
+            .persist_swap_status(&swap.id, SwapStatus::TransactionClaimed)
+            .await
+            .unwrap();
+
+        swap = client
+            .swap_storage()
+            .get_submarine(&swap.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(swap.status, SwapStatus::TransactionClaimed);
+        let state = client.state.read().unwrap();
+        let stored = state
+            .contract_manager
+            .lock()
+            .unwrap()
+            .get(&script_pubkey)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state, ContractState::Inactive);
+    }
+
+    #[tokio::test]
+    async fn terminal_reverse_status_marks_vhtlc_contract_inactive() {
+        let server_info = test_server_info();
+        let client = test_client(server_info);
+        let script_pubkey = client
+            .insert_vhtlc_contract(fixture_opts(fixture_server_xonly()), Some(8))
+            .unwrap();
+        let mut swap = fixture_reverse_swap(Some(script_pubkey.clone()));
+        client
+            .swap_storage()
+            .insert_reverse(swap.id.clone(), swap.clone())
+            .await
+            .unwrap();
+
+        client
+            .persist_swap_status(&swap.id, SwapStatus::InvoiceExpired)
+            .await
+            .unwrap();
+
+        swap = client
+            .swap_storage()
+            .get_reverse(&swap.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(swap.status, SwapStatus::InvoiceExpired);
+        let state = client.state.read().unwrap();
+        let stored = state
+            .contract_manager
+            .lock()
+            .unwrap()
+            .get(&script_pubkey)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state, ContractState::Inactive);
+    }
+
+    #[tokio::test]
+    async fn non_terminal_swap_status_keeps_vhtlc_contract_active() {
+        let server_info = test_server_info();
+        let client = test_client(server_info);
+        let script_pubkey = client
+            .insert_vhtlc_contract(fixture_opts(fixture_server_xonly()), Some(7))
+            .unwrap();
+        let swap = fixture_submarine_swap(Some(script_pubkey.clone()));
+        client
+            .swap_storage()
+            .insert_submarine(swap.id.clone(), swap.clone())
+            .await
+            .unwrap();
+
+        client
+            .persist_swap_status(&swap.id, SwapStatus::TransactionMempool)
+            .await
+            .unwrap();
+
+        let state = client.state.read().unwrap();
+        let stored = state
+            .contract_manager
+            .lock()
+            .unwrap()
+            .get(&script_pubkey)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state, ContractState::Active);
+    }
+
+    #[test]
+    fn mark_vhtlc_contract_inactive_updates_contract_state() {
+        let server_info = test_server_info();
+        let client = test_client(server_info);
+        let script_pubkey = client
+            .insert_vhtlc_contract(fixture_opts(fixture_server_xonly()), Some(9))
+            .unwrap();
+
+        client
+            .mark_vhtlc_contract_inactive(Some(&script_pubkey))
+            .unwrap();
+
+        let state = client.state.read().unwrap();
+        let stored = state
+            .contract_manager
+            .lock()
+            .unwrap()
+            .get(&script_pubkey)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state, ContractState::Inactive);
+        assert_eq!(stored.key_index, Some(9));
+    }
+
+    #[test]
+    fn mark_vhtlc_contract_inactive_ignores_missing_reference() {
+        let client = test_client(test_server_info());
+
+        client.mark_vhtlc_contract_inactive(None).unwrap();
+
+        let state = client.state.read().unwrap();
+        assert!(state
+            .contract_manager
+            .lock()
+            .unwrap()
+            .list()
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
