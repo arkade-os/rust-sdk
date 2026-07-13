@@ -875,6 +875,16 @@ where
             tracing::warn!(?error, "Failed to persist baseline contracts at connect");
         }
 
+        match client.migrate_boltz_vhtlc_contracts(&server_info).await {
+            Ok(migrated) if migrated > 0 => {
+                tracing::info!(migrated, "Migrated Boltz VHTLC contracts at connect");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(?error, "Failed to migrate Boltz VHTLC contracts at connect");
+            }
+        }
+
         Ok(client)
     }
 }
