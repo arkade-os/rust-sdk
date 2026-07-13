@@ -1815,12 +1815,12 @@ where
         let preimage_hash = sha256::Hash::hash(&preimage);
 
         let claim_keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
-        let claim_public_key = claim_keypair.public_key();
+        let claim_public_key = PublicKey::new(claim_keypair.public_key());
         let claim_key_derivation_index =
             self.derivation_index_for_pk(&claim_keypair.x_only_public_key().0);
 
         let refund_keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
-        let refund_public_key = refund_keypair.public_key();
+        let refund_public_key = PublicKey::new(refund_keypair.public_key());
         let refund_key_derivation_index =
             self.derivation_index_for_pk(&refund_keypair.x_only_public_key().0);
 
@@ -1839,8 +1839,8 @@ where
             to,
             user_lock_amount,
             server_lock_amount,
-            claim_public_key: claim_public_key.into(),
-            refund_public_key: refund_public_key.into(),
+            claim_public_key,
+            refund_public_key,
             preimage_hash,
             referral_id: self.inner.boltz_referral_id.clone(),
         };
@@ -1893,14 +1893,47 @@ where
             .swap_tree
             .or(swap_response.claim_details.swap_tree.clone());
 
+        let chain_vhtlc_fields = chain_vhtlc_fields(
+            &direction,
+            claim_public_key,
+            refund_public_key,
+            swap_response.lockup_details.server_public_key,
+            swap_response.claim_details.server_public_key,
+            &swap_response.lockup_details.lockup_address,
+            &swap_response.claim_details.lockup_address,
+            swap_response.lockup_details.timeouts,
+            swap_response.claim_details.timeouts,
+            claim_key_derivation_index,
+            refund_key_derivation_index,
+        )?;
+
+        let server_info = self.server_info().await?;
+        let vhtlc = self.build_vhtlc_script(
+            &server_info,
+            chain_vhtlc_fields.claim_public_key,
+            chain_vhtlc_fields.refund_public_key,
+            ripemd160::Hash::hash(preimage_hash.as_byte_array()),
+            &chain_vhtlc_fields.timeouts,
+            &chain_vhtlc_fields.address,
+        )?;
+        let contract_script_pubkey = vhtlc.script_pubkey();
+
+        let stored_script_pubkey = self
+            .insert_vhtlc_contract(
+                vhtlc.options().clone(),
+                chain_vhtlc_fields.key_derivation_index,
+            )
+            .context("failed to persist chain VHTLC contract")?;
+        debug_assert_eq!(stored_script_pubkey, contract_script_pubkey);
+
         let data = ChainSwapData {
             id: swap_response.id.clone(),
             status: SwapStatus::Created,
             direction,
             preimage: Some(preimage),
             preimage_hash,
-            claim_public_key: claim_public_key.into(),
-            refund_public_key: refund_public_key.into(),
+            claim_public_key,
+            refund_public_key,
             server_claim_public_key: swap_response.lockup_details.server_public_key,
             server_refund_public_key: swap_response.claim_details.server_public_key,
             user_lockup_address: swap_response.lockup_details.lockup_address,
@@ -1916,6 +1949,7 @@ where
             created_at: created_at.as_secs(),
             claim_key_derivation_index,
             refund_key_derivation_index,
+            contract_script_pubkey: Some(contract_script_pubkey),
         };
 
         self.swap_storage()
@@ -2024,59 +2058,26 @@ where
     ///
     /// Call this after [`Self::wait_for_chain_swap_server_lockup`] returns.
     pub async fn claim_chain_swap(&self, swap_id: &str) -> Result<Txid, Error> {
-        let swap = self
+        let mut swap = self
             .swap_storage()
             .get_chain(swap_id)
             .await
             .context("failed to get chain swap data")?
             .ok_or_else(|| Error::ad_hoc(format!("chain swap data not found: {swap_id}")))?;
 
+        if swap.direction != ChainSwapDirection::BtcToArk {
+            return Err(Error::ad_hoc(
+                "claim_chain_swap only applies to BtcToArk swaps; use claim_chain_swap_btc",
+            ));
+        }
+
         let preimage = swap
             .preimage
             .ok_or_else(|| Error::ad_hoc(format!("preimage not found for chain swap {swap_id}")))?;
 
-        let preimage_hash = ripemd160::Hash::hash(swap.preimage_hash.as_byte_array());
-
-        let timeout_block_heights = swap.server_timeout_block_heights.ok_or_else(|| {
-            Error::ad_hoc(format!(
-                "chain swap {swap_id} has no ARK-side VHTLC timeouts on server lockup \
-                 (this swap's server lockup is on-chain BTC, not an Ark VHTLC)"
-            ))
-        })?;
         let server_info = self.server_info().await?;
 
-        let expected_address = ArkAddress::decode(&swap.server_lockup_address)
-            .map_err(|e| Error::ad_hoc(format!("invalid server lockup address: {e}")))?;
-
-        let vhtlc = self.reconstruct_vhtlc_for_address(
-            &server_info,
-            |server| {
-                Ok(VhtlcOptions {
-                    sender: swap.server_refund_public_key.into(),
-                    receiver: swap.claim_public_key.into(),
-                    server,
-                    preimage_hash,
-                    refund_locktime: timeout_block_heights.refund,
-                    unilateral_claim_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_claim as i64,
-                    )
-                    .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
-                    unilateral_refund_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid unilateral refund timeout: {e}"))
-                    })?,
-                    unilateral_refund_without_receiver_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund_without_receiver as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
-                    })?,
-                })
-            },
-            &expected_address,
-        )?;
+        let vhtlc = self.chain_vhtlc_script(&mut swap, &server_info).await?;
         let vhtlc_address = vhtlc.address();
 
         let vhtlc_outpoint = {
@@ -2207,9 +2208,10 @@ where
         let mut updated_swap = swap.clone();
         updated_swap.status = SwapStatus::TransactionClaimed;
         self.swap_storage()
-            .update_chain(swap_id, updated_swap)
+            .update_chain(swap_id, updated_swap.clone())
             .await
             .context("failed to update chain swap data")?;
+        self.mark_vhtlc_contract_inactive(updated_swap.contract_script_pubkey.as_ref())?;
 
         Ok(ark_txid)
     }
@@ -2387,56 +2389,26 @@ where
     ///
     /// This path does not require a signature from Boltz.
     pub async fn refund_chain_swap(&self, swap_id: &str) -> Result<Txid, Error> {
-        let swap = self
+        let mut swap = self
             .swap_storage()
             .get_chain(swap_id)
             .await
             .context("failed to get chain swap data")?
             .ok_or_else(|| Error::ad_hoc(format!("chain swap data not found: {swap_id}")))?;
 
+        if swap.direction != ChainSwapDirection::ArkToBtc {
+            return Err(Error::ad_hoc(
+                "refund_chain_swap only applies to ArkToBtc swaps; use refund_chain_swap_btc",
+            ));
+        }
+
         let timeout_block_heights = swap.user_timeout_block_heights.ok_or_else(|| {
-            Error::ad_hoc(
-                "chain swap has no ARK-side VHTLC timeouts on user lockup \
-                 (user lockup is on-chain BTC, use refund_chain_swap_btc instead)",
-            )
+            Error::ad_hoc("chain swap is missing ARK-side VHTLC timeouts for user lockup")
         })?;
 
-        let preimage_hash = ripemd160::Hash::hash(swap.preimage_hash.as_byte_array());
         let server_info = self.server_info().await?;
 
-        // User's lockup VHTLC: sender=user(refund), receiver=server(claim)
-        let expected_address = ArkAddress::decode(&swap.user_lockup_address)
-            .map_err(|e| Error::ad_hoc(format!("invalid user lockup address: {e}")))?;
-
-        let vhtlc = self.reconstruct_vhtlc_for_address(
-            &server_info,
-            |server| {
-                Ok(VhtlcOptions {
-                    sender: swap.refund_public_key.into(),
-                    receiver: swap.server_claim_public_key.into(),
-                    server,
-                    preimage_hash,
-                    refund_locktime: timeout_block_heights.refund,
-                    unilateral_claim_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_claim as i64,
-                    )
-                    .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
-                    unilateral_refund_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid unilateral refund timeout: {e}"))
-                    })?,
-                    unilateral_refund_without_receiver_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund_without_receiver as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
-                    })?,
-                })
-            },
-            &expected_address,
-        )?;
+        let vhtlc = self.chain_vhtlc_script(&mut swap, &server_info).await?;
         let vhtlc_address = vhtlc.address();
 
         let vhtlc_outpoint = {
@@ -2547,9 +2519,10 @@ where
         let mut updated_swap = swap.clone();
         updated_swap.status = SwapStatus::TransactionRefunded;
         self.swap_storage()
-            .update_chain(swap_id, updated_swap)
+            .update_chain(swap_id, updated_swap.clone())
             .await
             .context("failed to update chain swap data")?;
+        self.mark_vhtlc_contract_inactive(updated_swap.contract_script_pubkey.as_ref())?;
 
         Ok(ark_txid)
     }
@@ -3428,6 +3401,23 @@ where
             }
         }
 
+        for mut swap in self.swap_storage().list_all_chain().await? {
+            if swap.contract_script_pubkey.is_some() {
+                continue;
+            }
+            match self.chain_vhtlc_script(&mut swap, server_info).await {
+                Ok(_) => {
+                    if swap.status.is_terminal() {
+                        self.mark_vhtlc_contract_inactive(swap.contract_script_pubkey.as_ref())?;
+                    }
+                    migrated += 1;
+                }
+                Err(error) => {
+                    tracing::warn!(swap_id = %swap.id, ?error, "Failed to migrate chain VHTLC contract");
+                }
+            }
+        }
+
         Ok(migrated)
     }
 
@@ -3455,8 +3445,13 @@ where
         }
 
         if let Some(mut swap) = self.swap_storage().get_chain(swap_id).await? {
-            swap.status = status;
-            self.swap_storage().update_chain(swap_id, swap).await?;
+            swap.status = status.clone();
+            self.swap_storage()
+                .update_chain(swap_id, swap.clone())
+                .await?;
+            if status.is_terminal() {
+                self.mark_vhtlc_contract_inactive(swap.contract_script_pubkey.as_ref())?;
+            }
         }
 
         Ok(())
@@ -3549,6 +3544,56 @@ where
             .update_submarine(&swap.id, swap.clone())
             .await
             .context("failed to persist VHTLC contract reference")?;
+
+        Ok(vhtlc)
+    }
+
+    fn build_chain_vhtlc_script(
+        &self,
+        swap: &ChainSwapData,
+        server_info: &Info,
+    ) -> Result<VhtlcScript, Error> {
+        let fields = swap.chain_vhtlc_fields()?;
+        self.build_vhtlc_script(
+            server_info,
+            fields.claim_public_key,
+            fields.refund_public_key,
+            ripemd160::Hash::hash(swap.preimage_hash.as_byte_array()),
+            &fields.timeouts,
+            &fields.address,
+        )
+    }
+
+    async fn chain_vhtlc_script(
+        &self,
+        swap: &mut ChainSwapData,
+        server_info: &Info,
+    ) -> Result<VhtlcScript, Error> {
+        if let Some(script_pubkey) = &swap.contract_script_pubkey {
+            if let Some(contract) = self.get_vhtlc_contract(script_pubkey)? {
+                let expected_address = swap.chain_vhtlc_address()?;
+                let vhtlc = vhtlc_script_from_contract(contract, &expected_address, server_info)?;
+
+                return Ok(vhtlc);
+            }
+
+            tracing::warn!(
+                swap_id = %swap.id,
+                "Chain VHTLC contract reference missing; recreating from swap data"
+            );
+        }
+
+        let vhtlc = self.build_chain_vhtlc_script(swap, server_info)?;
+
+        let script_pubkey = self
+            .insert_vhtlc_contract(vhtlc.options().clone(), swap.chain_vhtlc_key_index())
+            .context("failed to persist chain VHTLC contract")?;
+
+        swap.contract_script_pubkey = Some(script_pubkey);
+        self.swap_storage()
+            .update_chain(&swap.id, swap.clone())
+            .await
+            .context("failed to persist chain VHTLC contract reference")?;
 
         Ok(vhtlc)
     }
@@ -4480,6 +4525,137 @@ pub struct ChainSwapData {
     /// BIP32 derivation index for the refund key.
     #[serde(default)]
     pub refund_key_derivation_index: Option<u32>,
+    /// Script pubkey of the contract-store Ark-side VHTLC row for this swap.
+    #[serde(default)]
+    pub contract_script_pubkey: Option<ScriptBuf>,
+}
+
+/// Direction-specific Ark-side VHTLC inputs for a chain swap.
+///
+/// A Boltz chain swap always has two lockup legs:
+///
+/// - `lockup_details`: the user's lockup leg (`user_lockup_*` in [`ChainSwapData`])
+/// - `claim_details`: Boltz's/server's lockup leg (`server_lockup_*` in [`ChainSwapData`])
+///
+/// Exactly one of those legs is an Ark VHTLC; the other is an on-chain BTC HTLC. The Ark leg is
+/// the only part we persist in the contract manager as a [`VhtlcContract`]. This helper result
+/// keeps the direction table in one place so creation, lazy migration, and spend paths all agree on
+/// which keys, address, timeouts, and wallet derivation index define the Ark-side VHTLC.
+///
+/// Direction table:
+///
+/// | Direction | Ark-side leg | VHTLC receiver/claim key | VHTLC sender/refund key | Wallet key index |
+/// |-----------|--------------|--------------------------|-------------------------|------------------|
+/// | ARK → BTC | user's lockup (`lockup_details`) | Boltz server claim key | wallet refund key | refund key index |
+/// | BTC → ARK | server lockup (`claim_details`) | wallet claim key | Boltz server refund key | claim key index |
+///
+/// The `address` is parsed and retained here because it is part of VHTLC reconstruction: we build
+/// candidate scripts against the current and deprecated Ark server signers, then keep the candidate
+/// whose Ark address matches the one Boltz returned for the Ark-side leg.
+struct ChainVhtlcFields {
+    claim_public_key: PublicKey,
+    refund_public_key: PublicKey,
+    timeouts: TimeoutBlockHeights,
+    address: ArkAddress,
+    key_derivation_index: Option<u32>,
+}
+
+/// Select the Ark-side VHTLC fields from chain-swap data.
+///
+/// This deliberately accepts the raw fields rather than a [`ChainSwapData`] value so callers can
+/// use it before the swap row exists. Creation uses it to compute `contract_script_pubkey` first
+/// and then builds a fully-populated [`ChainSwapData`] in one struct literal. Lazy migration and
+/// spend paths call the same logic through [`ChainSwapData::chain_vhtlc_fields`].
+///
+/// The argument names use wallet/server and user/server lockup terminology to mirror Boltz's
+/// response and [`ChainSwapData`]:
+///
+/// - `wallet_claim_public_key` / `wallet_refund_public_key` are the user's generated swap keys.
+/// - `server_claim_public_key` comes from Boltz `lockup_details.server_public_key` and is used when
+///   Boltz claims the user's ARK lockup in an ARK→BTC swap.
+/// - `server_refund_public_key` comes from Boltz `claim_details.server_public_key` and is used when
+///   Boltz refunds its ARK lockup in a BTC→ARK swap.
+/// - `user_*` fields describe `lockup_details`; `server_*` fields describe `claim_details`.
+#[allow(clippy::too_many_arguments)]
+fn chain_vhtlc_fields(
+    direction: &ChainSwapDirection,
+    wallet_claim_public_key: PublicKey,
+    wallet_refund_public_key: PublicKey,
+    server_claim_public_key: PublicKey,
+    server_refund_public_key: PublicKey,
+    user_lockup_address: &str,
+    server_lockup_address: &str,
+    user_timeout_block_heights: Option<TimeoutBlockHeights>,
+    server_timeout_block_heights: Option<TimeoutBlockHeights>,
+    claim_key_derivation_index: Option<u32>,
+    refund_key_derivation_index: Option<u32>,
+) -> Result<ChainVhtlcFields, Error> {
+    let (claim_public_key, refund_public_key, timeouts, address, key_derivation_index) =
+        match direction {
+            ChainSwapDirection::ArkToBtc => (
+                server_claim_public_key,
+                wallet_refund_public_key,
+                user_timeout_block_heights.ok_or_else(|| {
+                    Error::ad_hoc("chain swap is missing ARK-side VHTLC timeouts for user lockup")
+                })?,
+                user_lockup_address,
+                refund_key_derivation_index,
+            ),
+            ChainSwapDirection::BtcToArk => (
+                wallet_claim_public_key,
+                server_refund_public_key,
+                server_timeout_block_heights.ok_or_else(|| {
+                    Error::ad_hoc("chain swap is missing ARK-side VHTLC timeouts for server lockup")
+                })?,
+                server_lockup_address,
+                claim_key_derivation_index,
+            ),
+        };
+
+    let address = ArkAddress::decode(address)
+        .map_err(|e| Error::ad_hoc(format!("invalid chain VHTLC address: {e}")))?;
+
+    Ok(ChainVhtlcFields {
+        claim_public_key,
+        refund_public_key,
+        timeouts,
+        address,
+        key_derivation_index,
+    })
+}
+
+impl ChainSwapData {
+    fn chain_vhtlc_fields(&self) -> Result<ChainVhtlcFields, Error> {
+        chain_vhtlc_fields(
+            &self.direction,
+            self.claim_public_key,
+            self.refund_public_key,
+            self.server_claim_public_key,
+            self.server_refund_public_key,
+            &self.user_lockup_address,
+            &self.server_lockup_address,
+            self.user_timeout_block_heights,
+            self.server_timeout_block_heights,
+            self.claim_key_derivation_index,
+            self.refund_key_derivation_index,
+        )
+    }
+
+    fn chain_vhtlc_key_index(&self) -> Option<u32> {
+        match self.direction {
+            ChainSwapDirection::ArkToBtc => self.refund_key_derivation_index,
+            ChainSwapDirection::BtcToArk => self.claim_key_derivation_index,
+        }
+    }
+
+    fn chain_vhtlc_address(&self) -> Result<ArkAddress, Error> {
+        let address = match self.direction {
+            ChainSwapDirection::ArkToBtc => &self.user_lockup_address,
+            ChainSwapDirection::BtcToArk => &self.server_lockup_address,
+        };
+        ArkAddress::decode(address)
+            .map_err(|e| Error::ad_hoc(format!("invalid chain VHTLC address: {e}")))
+    }
 }
 
 /// Result of creating a chain swap.
@@ -5095,6 +5271,13 @@ mod tests {
         )
     }
 
+    fn public_key_from_xonly(pk: XOnlyPublicKey) -> PublicKey {
+        PublicKey::new(secp256k1::PublicKey::from_x_only_public_key(
+            pk,
+            secp256k1::Parity::Even,
+        ))
+    }
+
     fn fixture_submarine_swap(contract_script_pubkey: Option<ScriptBuf>) -> SubmarineSwapData {
         let opts = fixture_opts(fixture_server_xonly());
         let vhtlc = VhtlcScript::new(opts.clone(), bitcoin::Network::Testnet).unwrap();
@@ -5102,14 +5285,8 @@ mod tests {
             id: "swap-1".to_string(),
             preimage: None,
             preimage_hash: opts.preimage_hash,
-            claim_public_key: PublicKey::new(secp256k1::PublicKey::from_x_only_public_key(
-                opts.receiver,
-                secp256k1::Parity::Even,
-            )),
-            refund_public_key: PublicKey::new(secp256k1::PublicKey::from_x_only_public_key(
-                opts.sender,
-                secp256k1::Parity::Even,
-            )),
+            claim_public_key: public_key_from_xonly(opts.receiver),
+            refund_public_key: public_key_from_xonly(opts.sender),
             amount: Amount::from_sat(1000),
             timeout_block_heights: TimeoutBlockHeights {
                 refund: opts.refund_locktime,
@@ -5135,14 +5312,8 @@ mod tests {
             id: "reverse-1".to_string(),
             preimage: Some([1; 32]),
             preimage_hash: opts.preimage_hash,
-            claim_public_key: PublicKey::new(secp256k1::PublicKey::from_x_only_public_key(
-                opts.receiver,
-                secp256k1::Parity::Even,
-            )),
-            refund_public_key: PublicKey::new(secp256k1::PublicKey::from_x_only_public_key(
-                opts.sender,
-                secp256k1::Parity::Even,
-            )),
+            claim_public_key: public_key_from_xonly(opts.receiver),
+            refund_public_key: public_key_from_xonly(opts.sender),
             amount: Amount::from_sat(1000),
             timeout_block_heights: TimeoutBlockHeights {
                 refund: opts.refund_locktime,
@@ -5159,6 +5330,60 @@ mod tests {
             bolt11: BOLT11_FIXTURE.to_string(),
             invoice_expiry: 3600,
             claim_address: None,
+            contract_script_pubkey,
+        }
+    }
+
+    fn fixture_chain_swap(
+        direction: ChainSwapDirection,
+        contract_script_pubkey: Option<ScriptBuf>,
+    ) -> ChainSwapData {
+        let mut opts = fixture_opts(fixture_server_xonly());
+        let preimage_hash = sha256::Hash::from_byte_array([2; 32]);
+        opts.preimage_hash = ripemd160::Hash::hash(preimage_hash.as_byte_array());
+        let vhtlc = VhtlcScript::new(opts.clone(), bitcoin::Network::Testnet).unwrap();
+        let timeouts = TimeoutBlockHeights {
+            refund: opts.refund_locktime,
+            unilateral_claim: opts.unilateral_claim_delay.to_consensus_u32(),
+            unilateral_refund: opts.unilateral_refund_delay.to_consensus_u32(),
+            unilateral_refund_without_receiver: opts
+                .unilateral_refund_without_receiver_delay
+                .to_consensus_u32(),
+        };
+        let ark_address = vhtlc.address().to_string();
+        let btc_address =
+            "tb1pxa78pf55g0aaurrd8c76fyax4df9e8y38fzps8sw2vkrecf9k3ss36a78m".to_string();
+        ChainSwapData {
+            id: "chain-1".to_string(),
+            status: SwapStatus::Created,
+            direction: direction.clone(),
+            preimage: Some([1; 32]),
+            preimage_hash,
+            claim_public_key: public_key_from_xonly(opts.receiver),
+            refund_public_key: public_key_from_xonly(opts.sender),
+            server_claim_public_key: public_key_from_xonly(opts.receiver),
+            server_refund_public_key: public_key_from_xonly(opts.sender),
+            user_lockup_address: match direction {
+                ChainSwapDirection::ArkToBtc => ark_address.clone(),
+                ChainSwapDirection::BtcToArk => btc_address.clone(),
+            },
+            server_lockup_address: match direction {
+                ChainSwapDirection::ArkToBtc => btc_address,
+                ChainSwapDirection::BtcToArk => ark_address,
+            },
+            user_lockup_amount: Amount::from_sat(1000),
+            server_lockup_amount: Amount::from_sat(900),
+            user_timeout_block_height: 265,
+            server_timeout_block_height: 265,
+            user_timeout_block_heights: matches!(direction, ChainSwapDirection::ArkToBtc)
+                .then_some(timeouts),
+            server_timeout_block_heights: matches!(direction, ChainSwapDirection::BtcToArk)
+                .then_some(timeouts),
+            bip21: None,
+            swap_tree: None,
+            created_at: 123,
+            claim_key_derivation_index: Some(7),
+            refund_key_derivation_index: Some(8),
             contract_script_pubkey,
         }
     }
@@ -5227,6 +5452,40 @@ mod tests {
         let swap = fixture_reverse_swap(Some(script_pubkey.clone()));
 
         let decoded: ReverseSwapData =
+            serde_json::from_value(serde_json::to_value(&swap).unwrap()).unwrap();
+        assert_eq!(decoded.contract_script_pubkey, Some(script_pubkey));
+    }
+
+    #[test]
+    fn chain_swap_data_deserializes_legacy_missing_contract_reference() {
+        let script_pubkey = VhtlcScript::new(
+            fixture_opts(fixture_server_xonly()),
+            bitcoin::Network::Testnet,
+        )
+        .unwrap()
+        .script_pubkey();
+        let swap = fixture_chain_swap(ChainSwapDirection::ArkToBtc, Some(script_pubkey));
+        let mut json = serde_json::to_value(&swap).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .remove("contract_script_pubkey");
+
+        let decoded: ChainSwapData = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded.id, swap.id);
+        assert_eq!(decoded.contract_script_pubkey, None);
+    }
+
+    #[test]
+    fn chain_swap_data_roundtrips_contract_reference() {
+        let script_pubkey = VhtlcScript::new(
+            fixture_opts(fixture_server_xonly()),
+            bitcoin::Network::Testnet,
+        )
+        .unwrap()
+        .script_pubkey();
+        let swap = fixture_chain_swap(ChainSwapDirection::BtcToArk, Some(script_pubkey.clone()));
+
+        let decoded: ChainSwapData =
             serde_json::from_value(serde_json::to_value(&swap).unwrap()).unwrap();
         assert_eq!(decoded.contract_script_pubkey, Some(script_pubkey));
     }
@@ -5306,6 +5565,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_chain_status_marks_vhtlc_contract_inactive() {
+        let server_info = test_server_info();
+        let client = test_client(server_info);
+        let script_pubkey = client
+            .insert_vhtlc_contract(fixture_opts(fixture_server_xonly()), Some(8))
+            .unwrap();
+        let mut swap =
+            fixture_chain_swap(ChainSwapDirection::ArkToBtc, Some(script_pubkey.clone()));
+        client
+            .swap_storage()
+            .insert_chain(swap.id.clone(), swap.clone())
+            .await
+            .unwrap();
+
+        client
+            .persist_swap_status(&swap.id, SwapStatus::TransactionRefunded)
+            .await
+            .unwrap();
+
+        swap = client
+            .swap_storage()
+            .get_chain(&swap.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(swap.status, SwapStatus::TransactionRefunded);
+        let state = client.state.read().unwrap();
+        let stored = state
+            .contract_manager
+            .lock()
+            .unwrap()
+            .get(&script_pubkey)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state, ContractState::Inactive);
+    }
+
+    #[tokio::test]
     async fn non_terminal_swap_status_keeps_vhtlc_contract_active() {
         let server_info = test_server_info();
         let client = test_client(server_info);
@@ -5346,9 +5643,15 @@ mod tests {
             .insert_submarine(submarine.id.clone(), submarine.clone())
             .await
             .unwrap();
+        let chain = fixture_chain_swap(ChainSwapDirection::ArkToBtc, None);
         client
             .swap_storage()
             .insert_reverse(reverse.id.clone(), reverse.clone())
+            .await
+            .unwrap();
+        client
+            .swap_storage()
+            .insert_chain(chain.id.clone(), chain.clone())
             .await
             .unwrap();
 
@@ -5357,7 +5660,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(migrated, 2);
+        assert_eq!(migrated, 3);
         assert!(client
             .swap_storage()
             .get_submarine(&submarine.id)
@@ -5369,6 +5672,14 @@ mod tests {
         assert!(client
             .swap_storage()
             .get_reverse(&reverse.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .contract_script_pubkey
+            .is_some());
+        assert!(client
+            .swap_storage()
+            .get_chain(&chain.id)
             .await
             .unwrap()
             .unwrap()
@@ -5490,6 +5801,74 @@ mod tests {
             .unwrap();
         assert_eq!(stored_contract.state, ContractState::Active);
         assert_eq!(stored_contract.key_index, swap.key_derivation_index);
+    }
+
+    #[tokio::test]
+    async fn build_chain_vhtlc_script_does_not_require_stored_swap() {
+        let server_info = test_server_info();
+        let client = test_client(server_info.clone());
+        let swap = fixture_chain_swap(ChainSwapDirection::ArkToBtc, None);
+
+        let vhtlc = client
+            .build_chain_vhtlc_script(&swap, &server_info)
+            .unwrap();
+
+        assert_eq!(vhtlc.address(), swap.chain_vhtlc_address().unwrap());
+        assert_eq!(swap.chain_vhtlc_key_index(), Some(8));
+        assert!(client
+            .swap_storage()
+            .get_chain(&swap.id)
+            .await
+            .unwrap()
+            .is_none());
+        let state = client.state.read().unwrap();
+        assert!(state
+            .contract_manager
+            .lock()
+            .unwrap()
+            .list()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn chain_vhtlc_script_lazily_migrates_legacy_swap() {
+        let server_info = test_server_info();
+        let client = test_client(server_info.clone());
+        let mut swap = fixture_chain_swap(ChainSwapDirection::BtcToArk, None);
+        client
+            .swap_storage()
+            .insert_chain(swap.id.clone(), swap.clone())
+            .await
+            .unwrap();
+
+        let vhtlc = client
+            .chain_vhtlc_script(&mut swap, &server_info)
+            .await
+            .unwrap();
+
+        let script_pubkey = swap.contract_script_pubkey.clone().unwrap();
+        assert_eq!(script_pubkey, vhtlc.script_pubkey());
+        let stored_swap = client
+            .swap_storage()
+            .get_chain(&swap.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored_swap.contract_script_pubkey,
+            Some(script_pubkey.clone())
+        );
+        let state = client.state.read().unwrap();
+        let stored_contract = state
+            .contract_manager
+            .lock()
+            .unwrap()
+            .get(&script_pubkey)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored_contract.state, ContractState::Active);
+        assert_eq!(stored_contract.key_index, swap.chain_vhtlc_key_index());
     }
 
     #[tokio::test]
