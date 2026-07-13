@@ -3388,6 +3388,49 @@ where
         )
     }
 
+    pub(crate) async fn migrate_boltz_vhtlc_contracts(
+        &self,
+        server_info: &Info,
+    ) -> Result<u32, Error> {
+        let mut migrated = 0;
+
+        for mut swap in self.swap_storage().list_all_submarine().await? {
+            if swap.contract_script_pubkey.is_some() {
+                continue;
+            }
+            match self.submarine_vhtlc_script(&mut swap, server_info).await {
+                Ok(_) => {
+                    if swap.status.is_terminal() {
+                        self.mark_vhtlc_contract_inactive(swap.contract_script_pubkey.as_ref())?;
+                    }
+                    migrated += 1;
+                }
+                Err(error) => {
+                    tracing::warn!(swap_id = %swap.id, ?error, "Failed to migrate submarine VHTLC contract");
+                }
+            }
+        }
+
+        for mut swap in self.swap_storage().list_all_reverse().await? {
+            if swap.contract_script_pubkey.is_some() {
+                continue;
+            }
+            match self.reverse_vhtlc_script(&mut swap, server_info).await {
+                Ok(_) => {
+                    if swap.status.is_terminal() {
+                        self.mark_vhtlc_contract_inactive(swap.contract_script_pubkey.as_ref())?;
+                    }
+                    migrated += 1;
+                }
+                Err(error) => {
+                    tracing::warn!(swap_id = %swap.id, ?error, "Failed to migrate reverse VHTLC contract");
+                }
+            }
+        }
+
+        Ok(migrated)
+    }
+
     async fn persist_swap_status(&self, swap_id: &str, status: SwapStatus) -> Result<(), Error> {
         if let Some(mut swap) = self.swap_storage().get_submarine(swap_id).await? {
             swap.status = status.clone();
@@ -5290,6 +5333,83 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.state, ContractState::Active);
+    }
+
+    #[tokio::test]
+    async fn eager_migration_persists_missing_vhtlc_contract_refs() {
+        let server_info = test_server_info();
+        let client = test_client(server_info.clone());
+        let submarine = fixture_submarine_swap(None);
+        let reverse = fixture_reverse_swap(None);
+        client
+            .swap_storage()
+            .insert_submarine(submarine.id.clone(), submarine.clone())
+            .await
+            .unwrap();
+        client
+            .swap_storage()
+            .insert_reverse(reverse.id.clone(), reverse.clone())
+            .await
+            .unwrap();
+
+        let migrated = client
+            .migrate_boltz_vhtlc_contracts(&server_info)
+            .await
+            .unwrap();
+
+        assert_eq!(migrated, 2);
+        assert!(client
+            .swap_storage()
+            .get_submarine(&submarine.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .contract_script_pubkey
+            .is_some());
+        assert!(client
+            .swap_storage()
+            .get_reverse(&reverse.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .contract_script_pubkey
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn eager_migration_marks_terminal_swap_contract_inactive() {
+        let server_info = test_server_info();
+        let client = test_client(server_info.clone());
+        let mut swap = fixture_submarine_swap(None);
+        swap.status = SwapStatus::TransactionClaimed;
+        client
+            .swap_storage()
+            .insert_submarine(swap.id.clone(), swap.clone())
+            .await
+            .unwrap();
+
+        let migrated = client
+            .migrate_boltz_vhtlc_contracts(&server_info)
+            .await
+            .unwrap();
+
+        assert_eq!(migrated, 1);
+        let stored_swap = client
+            .swap_storage()
+            .get_submarine(&swap.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let script_pubkey = stored_swap.contract_script_pubkey.unwrap();
+        let state = client.state.read().unwrap();
+        let stored = state
+            .contract_manager
+            .lock()
+            .unwrap()
+            .get(&script_pubkey)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state, ContractState::Inactive);
     }
 
     #[test]
