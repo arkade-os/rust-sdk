@@ -5,6 +5,7 @@ use crate::swap_storage::SwapStorage;
 use crate::utils::sleep;
 use crate::utils::timeout_op;
 use crate::wallet::OnchainWallet;
+use crate::AnchorSpendDeps;
 use crate::Blockchain;
 use crate::Client;
 use ark_core::build_unilateral_exit_tree_txids;
@@ -136,6 +137,7 @@ where
     pub async fn broadcast_next_unilateral_exit_node(
         &self,
         branch: &[Transaction],
+        deps: &AnchorSpendDeps<'_>,
     ) -> Result<Option<Txid>, Error> {
         let blockchain = &self.blockchain();
 
@@ -146,7 +148,7 @@ where
                 let is_not_published = blockchain.find_tx(&parent_txid).await?.is_none();
 
                 if is_not_published {
-                    let child_tx = self.bump_tx(parent_tx).await?;
+                    let child_tx = self.bump_tx(parent_tx, deps).await?;
                     let bump_txid = child_tx.compute_txid();
 
                     tracing::info!(

@@ -41,6 +41,7 @@ use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::Network;
 use bitcoin::OutPoint;
+use bitcoin::Psbt;
 use bitcoin::ScriptBuf;
 use bitcoin::Transaction;
 use bitcoin::Txid;
@@ -553,6 +554,19 @@ impl RestoreCandidate {
             Self::Boarding(_) => ContractType::boarding(),
         }
     }
+}
+
+/// On-chain wallet operations needed to fee-bump a transaction via its P2A (anchor) output.
+///
+/// The caller supplies these from their concrete on-chain wallet.
+#[allow(clippy::type_complexity)]
+pub struct AnchorSpendDeps<'a> {
+    /// Returns a change address for the fee-bump child transaction.
+    pub change_address: Box<dyn Fn() -> Result<Address, Error> + Send + Sync + 'a>,
+    /// Selects on-chain coins to cover `target_amount`.
+    pub select_coins: Box<dyn Fn(Amount) -> Result<UtxoCoinSelection, Error> + Send + Sync + 'a>,
+    /// Signs the child PSBT, returning whether it is finalized.
+    pub sign: Box<dyn Fn(&mut Psbt) -> Result<bool, Error> + Send + Sync + 'a>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2105,17 +2119,21 @@ where
     }
 
     /// Use the P2A output of a transaction to bump its transaction fee with a child transaction.
-    pub async fn bump_tx(&self, parent: &Transaction) -> Result<Transaction, Error> {
+    pub async fn bump_tx(
+        &self,
+        parent: &Transaction,
+        deps: &AnchorSpendDeps<'_>,
+    ) -> Result<Transaction, Error> {
         let fee_rate = timeout_op(self.inner.timeout, self.blockchain().get_fee_rate())
             .await
             .context("Failed to retrieve fee rate")??;
 
-        let change_address = self.inner.wallet.get_onchain_address()?;
+        let change_address = (deps.change_address)()?;
 
         // Create a closure that converts CoinSelectionResult to UtxoCoinSelection
         let select_coins_fn =
             |target_amount: Amount| -> Result<UtxoCoinSelection, ark_core::Error> {
-                self.inner.wallet.select_coins(target_amount).map_err(|e| {
+                (deps.select_coins)(target_amount).map_err(|e| {
                     ark_core::Error::ad_hoc(format!("failed to select coins for anchor TX: {e}"))
                 })
             };
@@ -2125,10 +2143,7 @@ where
             .map_err(|e| Error::ad_hoc(e.to_string()))?;
 
         // Sign the transaction
-        self.inner
-            .wallet
-            .sign(&mut psbt)
-            .context("failed to sign bump TX")?;
+        (deps.sign)(&mut psbt).context("failed to sign bump TX")?;
 
         // Extract the final transaction
         let tx = psbt.extract_tx().map_err(Error::ad_hoc)?;

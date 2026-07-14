@@ -2,6 +2,7 @@
 
 use crate::common::wait_until_balance;
 use ark_client::wallet::OnchainWallet;
+use ark_client::AnchorSpendDeps;
 use ark_core::send::SendReceiver;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::key::Secp256k1;
@@ -92,9 +93,24 @@ pub async fn send_onchain_vtxo_and_boarding_output() {
         }
     });
 
+    let bump_deps = AnchorSpendDeps {
+        change_address: Box::new({
+            let wallet = alice_wallet.clone();
+            move || wallet.get_onchain_address()
+        }),
+        select_coins: Box::new({
+            let wallet = alice_wallet.clone();
+            move |amount| wallet.select_coins(amount)
+        }),
+        sign: Box::new({
+            let wallet = alice_wallet.clone();
+            move |psbt| wallet.sign(psbt)
+        }),
+    };
+
     for (i, unilateral_exit_tree) in unilateral_exit_trees.iter().enumerate() {
         while let Some(txid) = alice
-            .broadcast_next_unilateral_exit_node(unilateral_exit_tree)
+            .broadcast_next_unilateral_exit_node(unilateral_exit_tree, &bump_deps)
             .await
             .expect("to broadcast unilateral exit node")
         {
