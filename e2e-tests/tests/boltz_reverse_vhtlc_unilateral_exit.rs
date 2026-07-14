@@ -33,7 +33,7 @@ pub async fn reverse_swap_claim_with_vhtlc_ancestor_can_exit_unilaterally() {
         set_up_client("alice".to_string(), regtest.clone(), secp.clone()).await;
 
     // The unilateral exit transactions are fee-bumped through Alice's on-chain wallet.
-    let alice_onchain_address = alice.get_onchain_address().unwrap();
+    let alice_onchain_address = alice_wallet.get_onchain_address().unwrap();
     for _ in 0..5 {
         regtest
             .faucet_fund(&alice_onchain_address, Amount::from_sat(100_000))

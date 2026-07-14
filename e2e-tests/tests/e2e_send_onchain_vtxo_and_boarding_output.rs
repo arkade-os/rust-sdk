@@ -45,7 +45,7 @@ pub async fn send_onchain_vtxo_and_boarding_output() {
 
     // We give Alice two extra UTXOs to be able to bump the two transactions she needs to broadcast
     // to commit her VTXO (and the change VTXO too!) to the blockchain.
-    let alice_onchain_address = alice.get_onchain_address().unwrap();
+    let alice_onchain_address = alice_wallet.get_onchain_address().unwrap();
     regtest
         .faucet_fund(&alice_onchain_address, Amount::from_sat(100_000))
         .await;
