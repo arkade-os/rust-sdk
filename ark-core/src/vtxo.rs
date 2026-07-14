@@ -12,12 +12,13 @@ use bitcoin::key::Secp256k1;
 use bitcoin::key::Verification;
 use bitcoin::taproot;
 use bitcoin::taproot::LeafVersion;
-use bitcoin::taproot::TaprootBuilder;
+use bitcoin::taproot::NodeInfo;
 use bitcoin::taproot::TaprootSpendInfo;
 use bitcoin::Address;
 use bitcoin::Network;
 use bitcoin::ScriptBuf;
 use bitcoin::XOnlyPublicKey;
+use std::collections::VecDeque;
 use std::time::Duration;
 
 /// All the information needed to _spend_ a VTXO.
@@ -86,18 +87,8 @@ impl Vtxo {
             .map_err(|e| Error::ad_hoc(format!("invalid unspendable key: {e}")))?;
         let (unspendable_key, _) = unspendable_key.inner.x_only_public_key();
 
-        let leaf_distribution = calculate_leaf_depths(scripts.len());
-
-        let mut builder = TaprootBuilder::new();
-        for (script, depth) in scripts.iter().zip(leaf_distribution.iter()) {
-            builder = builder
-                .add_leaf(*depth as u8, script.clone())
-                .map_err(Error::ad_hoc)?;
-        }
-
-        let spend_info = builder
-            .finalize(secp, unspendable_key)
-            .map_err(|_| Error::ad_hoc("failed to finalize Taproot tree"))?;
+        let node = assemble_taproot_tree(&scripts)?;
+        let spend_info = TaprootSpendInfo::from_node_info(secp, unspendable_key, node);
 
         let exit_delay_kind = ExitDelayKind::from_sequence(exit_delay)?;
 
@@ -291,39 +282,73 @@ impl Vtxo {
     }
 }
 
-fn calculate_leaf_depths(n: usize) -> Vec<usize> {
-    // Handle edge cases
-    if n == 0 {
-        return vec![];
-    }
-    if n == 1 {
-        return vec![0]; // A single node has depth 0
-    }
-    if n == 2 {
-        return vec![1, 1];
-    }
-
-    // Calculate the minimum depth required for n leaves
-    let min_depth = (n as f64).log2().ceil() as usize;
-
-    // Calculate the number of nodes at the deepest level
-    let nodes_at_max_depth = n - (1 << (min_depth - 1)) + 1;
-    let nodes_at_min_depth = (1 << min_depth) - nodes_at_max_depth;
-
-    // Create the result vector with the appropriate depths
-    let mut result = Vec::with_capacity(n);
-
-    // Add the deeper nodes first
-    for _ in 0..nodes_at_max_depth {
-        result.push(min_depth);
+/// Assemble a Taproot tree from `scripts`, in input order, matching btcd's
+/// `txscript.AssembleTaprootScriptTree`.
+///
+/// This is the same construction the Arkade TypeScript SDK's `VtxoScript` uses
+/// (`assembleBtcdTaprootTree`), so VTXOs built here derive byte-identical
+/// addresses and control blocks across SDKs and the Ark server, for any number
+/// of leaves. A previous depth-table approach only matched for one, two, or
+/// three leaves and silently diverged (or failed) for larger trees.
+///
+/// The algorithm has two phases:
+///
+/// 1. Pair leaves left-to-right. A lone trailing leaf (odd leaf count) is merged into the branch
+///    built immediately before it.
+/// 2. Repeatedly merge the two front-most branches (FIFO) until a single root remains.
+///
+/// Branch hashing is BIP341 (lexicographically sorted children), handled by
+/// [`NodeInfo::combine`], so the resulting Merkle root is independent of the
+/// left/right order within each branch.
+fn assemble_taproot_tree(scripts: &[ScriptBuf]) -> Result<NodeInfo, Error> {
+    if scripts.is_empty() {
+        return Err(Error::ad_hoc(
+            "cannot build a Taproot tree from zero scripts",
+        ));
     }
 
-    // Add the less deep nodes
-    for _ in 0..nodes_at_min_depth {
-        result.push(min_depth - 1);
+    let leaf =
+        |script: &ScriptBuf| NodeInfo::new_leaf_with_ver(script.clone(), LeafVersion::TapScript);
+    let combine = |a: NodeInfo, b: NodeInfo| {
+        NodeInfo::combine(a, b)
+            .map_err(|e| Error::ad_hoc(format!("failed to combine Taproot nodes: {e}")))
+    };
+
+    if scripts.len() == 1 {
+        return Ok(leaf(&scripts[0]));
     }
 
-    result
+    // Phase 1: pair leaves left-to-right.
+    let mut branches: Vec<NodeInfo> = Vec::new();
+    let mut i = 0;
+    while i < scripts.len() {
+        if i == scripts.len() - 1 {
+            // Odd trailing leaf: merge it into the last branch built so far.
+            let last = branches
+                .pop()
+                .expect("a branch is always built before a trailing odd leaf");
+            branches.push(combine(last, leaf(&scripts[i]))?);
+        } else {
+            branches.push(combine(leaf(&scripts[i]), leaf(&scripts[i + 1]))?);
+        }
+        i += 2;
+    }
+
+    // Phase 2: FIFO-merge branches until a single root remains.
+    let mut queue: VecDeque<NodeInfo> = branches.into();
+    while queue.len() >= 2 {
+        let left = queue
+            .pop_front()
+            .expect("queue holds at least two branches");
+        let right = queue
+            .pop_front()
+            .expect("queue holds at least two branches");
+        queue.push_back(combine(left, right)?);
+    }
+
+    Ok(queue
+        .pop_front()
+        .expect("exactly one root branch remains after merging"))
 }
 
 #[cfg(test)]
@@ -427,5 +452,176 @@ mod tests {
 
         // Different taproot trees should produce different addresses.
         assert_ne!(default.address(), with_delegator.address());
+    }
+
+    fn xonly(secp: &Secp256k1<bitcoin::secp256k1::All>, byte: u8) -> XOnlyPublicKey {
+        bitcoin::key::Keypair::from_seckey_slice(secp, &[byte; 32])
+            .expect("non-zero repeated byte is a valid secret key")
+            .x_only_public_key()
+            .0
+    }
+
+    /// `n` distinct leaf scripts (single-key CSV) for tree-shape tests.
+    fn leaf_scripts(secp: &Secp256k1<bitcoin::secp256k1::All>, n: usize) -> Vec<ScriptBuf> {
+        let seq = bitcoin::Sequence::from_seconds_ceil(512)
+            .expect("512 seconds is a valid relative timelock");
+        (0..n)
+            .map(|i| csv_sig_script(seq, xonly(secp, (i as u8) + 1)))
+            .collect()
+    }
+
+    /// `new_with_custom_scripts` must reproduce btcd's `AssembleTaprootScriptTree`
+    /// (and therefore the TS SDK's `VtxoScript`). We cross-check against an
+    /// independent `TaprootBuilder` reconstruction using the known btcd leaf
+    /// depths, in input order, for the counts the Ark flow actually uses.
+    #[test]
+    fn custom_scripts_tree_matches_btcd_assembly() {
+        use bitcoin::taproot::TaprootBuilder;
+
+        let secp = Secp256k1::new();
+        let (server, owner, _) = test_keys();
+        let exit = bitcoin::Sequence::from_seconds_ceil(512)
+            .expect("512 seconds is a valid relative timelock");
+
+        // btcd depth tables (input order) for 2..=5 leaves.
+        let cases: &[(usize, &[u8])] = &[
+            (2, &[1, 1]),
+            (3, &[2, 2, 1]),
+            (4, &[2, 2, 2, 2]),
+            (5, &[2, 2, 3, 3, 2]),
+        ];
+
+        let unspendable: PublicKey = UNSPENDABLE_KEY
+            .parse()
+            .expect("hardcoded unspendable key is valid");
+        let (unspendable, _) = unspendable.inner.x_only_public_key();
+
+        for (n, depths) in cases {
+            let scripts = leaf_scripts(&secp, *n);
+
+            let vtxo = Vtxo::new_with_custom_scripts(
+                &secp,
+                server,
+                owner,
+                scripts.clone(),
+                exit,
+                Network::Bitcoin,
+            )
+            .expect("custom scripts build a valid VTXO");
+
+            let mut builder = TaprootBuilder::new();
+            for (script, depth) in scripts.iter().zip(depths.iter()) {
+                builder = builder
+                    .add_leaf(*depth, script.clone())
+                    .expect("valid leaf depth for reference tree");
+            }
+            let reference = builder
+                .finalize(&secp, unspendable)
+                .expect("reference taproot tree finalizes");
+            let reference = ArkAddress::new(Network::Bitcoin, server, reference.output_key());
+
+            assert_eq!(
+                vtxo.to_ark_address().encode(),
+                reference.encode(),
+                "tree mismatch for {n} leaves"
+            );
+        }
+    }
+
+    /// Every leaf must remain spendable (resolve a control block) for any leaf
+    /// count, including the non-power-of-two counts the old depth table either
+    /// mis-built (5) or failed on entirely (4, 6).
+    #[test]
+    fn custom_scripts_tree_preserves_all_leaves() {
+        let secp = Secp256k1::new();
+        let (server, owner, _) = test_keys();
+        let exit = bitcoin::Sequence::from_seconds_ceil(512)
+            .expect("512 seconds is a valid relative timelock");
+
+        for n in 1..=16usize {
+            let scripts = leaf_scripts(&secp, n);
+            let vtxo = Vtxo::new_with_custom_scripts(
+                &secp,
+                server,
+                owner,
+                scripts.clone(),
+                exit,
+                Network::Bitcoin,
+            )
+            .expect("custom scripts build a valid VTXO");
+
+            assert_eq!(vtxo.tapscripts().len(), n, "leaf count changed for n={n}");
+            for script in &scripts {
+                assert!(
+                    vtxo.get_spend_info(script.clone()).is_ok(),
+                    "no control block for a leaf with n={n}"
+                );
+            }
+        }
+    }
+
+    /// Known-answer test pinning the 5-leaf escrow address to the value produced
+    /// by the Arkade TS SDK / `arkade.computer` operator. Guards cross-SDK
+    /// address compatibility against future tree-construction regressions.
+    #[test]
+    fn escrow_five_leaf_address_matches_ts_sdk() {
+        use bitcoin::absolute::LockTime;
+        use bitcoin::opcodes::all::OP_CHECKSIG;
+        use bitcoin::opcodes::all::OP_CHECKSIGVERIFY;
+        use bitcoin::opcodes::all::OP_CLTV;
+        use bitcoin::opcodes::all::OP_CSV;
+        use bitcoin::opcodes::all::OP_DROP;
+        use bitcoin::script::Builder;
+
+        let secp = Secp256k1::new();
+        let (server, arbiter, alice, bob) = (
+            xonly(&secp, 1),
+            xonly(&secp, 2),
+            xonly(&secp, 3),
+            xonly(&secp, 4),
+        );
+        let expiry = LockTime::from_consensus(1_750_000_000);
+        let exit = bitcoin::Sequence::from_seconds_ceil(512)
+            .expect("512 seconds is a valid relative timelock");
+
+        let cltv = |a: XOnlyPublicKey, b: XOnlyPublicKey| {
+            Builder::new()
+                .push_int(expiry.to_consensus_u32() as i64)
+                .push_opcode(OP_CLTV)
+                .push_opcode(OP_DROP)
+                .push_x_only_key(&a)
+                .push_opcode(OP_CHECKSIGVERIFY)
+                .push_x_only_key(&b)
+                .push_opcode(OP_CHECKSIG)
+                .into_script()
+        };
+        let csv = |a: XOnlyPublicKey, b: XOnlyPublicKey| {
+            Builder::new()
+                .push_int(exit.to_consensus_u32() as i64)
+                .push_opcode(OP_CSV)
+                .push_opcode(OP_DROP)
+                .push_x_only_key(&a)
+                .push_opcode(OP_CHECKSIGVERIFY)
+                .push_x_only_key(&b)
+                .push_opcode(OP_CHECKSIG)
+                .into_script()
+        };
+
+        let scripts = vec![
+            multisig_3_of_3_script(server, arbiter, alice),
+            multisig_3_of_3_script(server, arbiter, bob),
+            cltv(server, arbiter),
+            multisig_3_of_3_script(server, alice, bob),
+            csv(alice, bob),
+        ];
+
+        let vtxo =
+            Vtxo::new_with_custom_scripts(&secp, server, alice, scripts, exit, Network::Bitcoin)
+                .expect("escrow scripts build a valid VTXO");
+
+        assert_eq!(
+            vtxo.to_ark_address().encode(),
+            "ark1qqdcf32k0vfxgsyet5ldt246q4jaw8scx3sysx0lnstlt6w4m5rclv2zhfqtr8zgxsw3erprwh0z7vg6uyg75n229y8kn0d4yjew75z35ddvjs",
+        );
     }
 }
