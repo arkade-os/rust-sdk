@@ -35,6 +35,7 @@ use bitcoin::XOnlyPublicKey;
 use serde::Deserialize;
 use serde::Serialize;
 
+/// A UTXO input that proves coin ownership inside an intent proof.
 #[derive(Clone, Debug)]
 pub struct Input {
     // The TXID of this outpoint is a hash of the TXID of the actual outpoint.
@@ -56,6 +57,7 @@ pub struct Input {
 }
 
 impl Input {
+    /// Construct a new `Input` from the given outpoint, spend metadata, and coin value.
     pub fn new(
         outpoint: OutPoint,
         sequence: Sequence,
@@ -178,6 +180,7 @@ pub enum Output {
     AssetPacket(TxOut),
 }
 
+/// A fully-signed BIP-322-style intent proof paired with its intent message.
 #[derive(Debug, Clone)]
 pub struct Intent {
     pub proof: Psbt,
@@ -185,10 +188,12 @@ pub struct Intent {
 }
 
 impl Intent {
+    /// Create an `Intent` from a finalized proof PSBT and an `IntentMessage`.
     pub fn new(proof: Psbt, message: IntentMessage) -> Self {
         Self { proof, message }
     }
 
+    /// Serialize the proof PSBT as a standard Base64 string.
     pub fn serialize_proof(&self) -> String {
         let base64 = base64::engine::GeneralPurpose::new(
             &base64::alphabet::STANDARD,
@@ -200,11 +205,16 @@ impl Intent {
         base64.encode(&bytes)
     }
 
+    /// Serialize the intent message as a JSON string.
     pub fn serialize_message(&self) -> Result<String, Error> {
         self.message.encode()
     }
 }
 
+/// Build and sign a BIP-322-style intent proof for the given inputs, outputs, and message.
+///
+/// `sign_for_vtxo_fn` and `sign_for_onchain_fn` are caller-supplied signing callbacks used for
+/// off-chain VTXOs and on-chain UTXOs respectively.
 pub fn make_intent<SV, SO>(
     sign_for_vtxo_fn: SV,
     sign_for_onchain_fn: SO,
@@ -428,6 +438,14 @@ pub(crate) fn build_proof_psbt(
             psbt.inputs[i + 1].witness_script = Some(input.spend_info.0.clone());
         }
 
+        // BIP-322: PSBT_GLOBAL_GENERIC_SIGNED_MESSAGE (0x09) — lets a co-signer
+        // recompute the to_spend commitment from PSBT-internal data alone and
+        // distinguish a genuine ownership proof from a fund-moving spend.
+        psbt.unknown.insert(
+            psbt::raw::Key { type_value: 0x09, key: vec![] },
+            message.as_bytes().to_vec(),
+        );
+
         psbt
     };
 
@@ -450,6 +468,7 @@ fn message_hash(message: &[u8]) -> sha256::Hash {
     sha256::Hash::hash(&v)
 }
 
+/// The JSON payload embedded in an intent proof, discriminated by the `type` field.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
 pub enum IntentMessage {
@@ -476,6 +495,7 @@ pub enum IntentMessage {
 }
 
 impl IntentMessage {
+    /// Serialize this message to a JSON string.
     pub fn encode(&self) -> Result<String, Error> {
         serde_json::to_string(self)
             .map_err(Error::ad_hoc)
@@ -648,7 +668,45 @@ pub(crate) mod taptree {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bitcoin::key::Secp256k1;
+    use bitcoin::opcodes::all::OP_TRUE;
+    use bitcoin::taproot::{LeafVersion, TaprootBuilder};
     use std::str::FromStr;
+
+    // Returns a minimal valid Input built from an OP_TRUE leaf under a known key.
+    fn dummy_input() -> Input {
+        let secp = Secp256k1::new();
+        // x-coordinate of the secp256k1 generator G — a well-known valid x-only key.
+        let internal_key = XOnlyPublicKey::from_slice(&[
+            0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac,
+            0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b, 0x07,
+            0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9,
+            0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98,
+        ])
+        .unwrap();
+        let leaf = ScriptBuf::builder().push_opcode(OP_TRUE).into_script();
+        let spend_info = TaprootBuilder::new()
+            .add_leaf_with_ver(0, leaf.clone(), LeafVersion::TapScript)
+            .unwrap()
+            .finalize(&secp, internal_key)
+            .unwrap();
+        let control_block = spend_info
+            .control_block(&(leaf.clone(), LeafVersion::TapScript))
+            .unwrap();
+        let script_pubkey =
+            ScriptBuf::new_p2tr(&secp, internal_key, spend_info.merkle_root());
+        Input::new(
+            OutPoint { txid: Txid::all_zeros(), vout: 0 },
+            Sequence::ZERO,
+            None,
+            TxOut { value: Amount::from_sat(10_000), script_pubkey },
+            vec![leaf.clone()],
+            (leaf, control_block),
+            false,
+            false,
+            vec![],
+        )
+    }
 
     #[test]
     fn intent_message_register_serialization() {
@@ -706,6 +764,35 @@ mod tests {
         assert_eq!(
             encoded,
             r#"{"type":"get-pending-tx","expire_at":1762862054}"#
+        );
+    }
+
+    #[test]
+    fn build_proof_psbt_sets_0x09_global_signed_message() {
+        let msg = IntentMessage::Delete { expire_at: 1762862054 };
+        let (psbt, _) = build_proof_psbt(&msg, &[dummy_input()], &[]).unwrap();
+
+        let key = psbt::raw::Key { type_value: 0x09, key: vec![] };
+        assert_eq!(
+            psbt.unknown.get(&key).map(|v| v.as_slice()),
+            Some(msg.encode().unwrap().as_bytes()),
+            "PSBT global 0x09 must equal the encoded message",
+        );
+    }
+
+    #[test]
+    fn build_proof_psbt_0x09_survives_psbt_roundtrip() {
+        let msg = IntentMessage::Delete { expire_at: 1762862054 };
+        let (psbt, _) = build_proof_psbt(&msg, &[dummy_input()], &[]).unwrap();
+
+        let bytes = psbt.serialize();
+        let recovered = Psbt::deserialize(&bytes).unwrap();
+
+        let key = psbt::raw::Key { type_value: 0x09, key: vec![] };
+        assert_eq!(
+            recovered.unknown.get(&key).map(|v| v.as_slice()),
+            Some(msg.encode().unwrap().as_bytes()),
+            "0x09 field must survive PSBT serialize/deserialize round-trip",
         );
     }
 }
