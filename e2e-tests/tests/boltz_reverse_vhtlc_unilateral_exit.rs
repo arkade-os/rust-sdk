@@ -4,7 +4,6 @@ use crate::common::format_command_output;
 use crate::common::start_lnd_payment;
 use crate::common::wait_for_lnd_payment;
 use crate::common::wait_until_balance;
-use ark_client::wallet::OnchainWallet;
 use ark_client::AnchorSpendDeps;
 use ark_client::SwapAmount;
 use bitcoin::address::NetworkUnchecked;

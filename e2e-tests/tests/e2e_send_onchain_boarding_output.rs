@@ -1,6 +1,5 @@
 #![allow(clippy::unwrap_used)]
 
-use ark_client::wallet::OnchainWallet;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::key::Secp256k1;
 use bitcoin::relative;

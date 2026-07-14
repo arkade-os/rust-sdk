@@ -1,7 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
 use crate::common::wait_until_balance;
-use ark_client::wallet::OnchainWallet;
 use ark_client::AnchorSpendDeps;
 use ark_core::send::SendReceiver;
 use bitcoin::address::NetworkUnchecked;

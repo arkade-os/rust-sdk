@@ -61,7 +61,6 @@ pub mod error;
 pub mod key_provider;
 pub mod swap_storage;
 pub mod vtxo_watcher;
-pub mod wallet;
 
 mod asset;
 mod batch;
