@@ -7,7 +7,6 @@
 
 use crate::error::ErrorContext;
 use crate::swap_storage::SwapStorage;
-use crate::wallet::OnchainWallet;
 use crate::AnnotatedVtxo;
 use crate::Blockchain;
 use crate::Client;
@@ -96,10 +95,9 @@ enum WatcherWork {
     RenewTick,
 }
 
-impl<B, W, S> Client<B, W, S>
+impl<B, S> Client<B, S>
 where
     B: Blockchain + Send + Sync + 'static,
-    W: OnchainWallet + Send + Sync + 'static,
     S: SwapStorage + 'static,
 {
     /// Start a background task that watches for new VTXOs and:
@@ -133,14 +131,13 @@ where
 }
 
 /// Outer loop that reconnects on stream errors with exponential backoff.
-async fn run_watcher_loop<B, W, S>(
-    client: Arc<Client<B, W, S>>,
+async fn run_watcher_loop<B, S>(
+    client: Arc<Client<B, S>>,
     delegator: Arc<DelegatorClient>,
     config: VtxoWatcherConfig,
     mut stop_rx: watch::Receiver<bool>,
 ) where
     B: Blockchain + Send + Sync + 'static,
-    W: OnchainWallet + Send + Sync + 'static,
     S: SwapStorage + 'static,
 {
     let mut backoff = INITIAL_BACKOFF;
@@ -361,10 +358,9 @@ async fn run_watcher_loop<B, W, S>(
 ///
 /// When [`Client::refresh_server_info`] updates the cached `deprecated_signers`, this arm picks up
 /// the freshly advertised deprecated signers on its next pass and migrates.
-async fn run_migration_arm<B, W, S>(client: &Client<B, W, S>, stop_rx: &mut watch::Receiver<bool>)
+async fn run_migration_arm<B, S>(client: &Client<B, S>, stop_rx: &mut watch::Receiver<bool>)
 where
     B: Blockchain + Send + Sync + 'static,
-    W: OnchainWallet + Send + Sync + 'static,
     S: SwapStorage + 'static,
 {
     // Consecutive-failure count drives the exponential cooldown; `0` means healthy (use the base
@@ -435,14 +431,13 @@ async fn wait_or_stop(stop_rx: &mut watch::Receiver<bool>, duration: Duration) -
 }
 
 /// Add newly persisted active contract scripts to an existing subscription.
-async fn refresh_subscription_scripts<B, W, S>(
-    client: &Client<B, W, S>,
+async fn refresh_subscription_scripts<B, S>(
+    client: &Client<B, S>,
     subscription_id: &str,
     subscribed_addrs: &mut HashSet<ArkAddress>,
 ) -> Result<(), Error>
 where
     B: Blockchain + Send + Sync + 'static,
-    W: OnchainWallet + Send + Sync + 'static,
     S: SwapStorage + 'static,
 {
     let addrs = client.active_offchain_contract_addresses()?;
@@ -472,13 +467,12 @@ where
 /// Enumerate newly seen unspent delegate-eligible VTXOs from wallet state.
 ///
 /// This is a failsafe path to catch outputs that may have been missed by subscription timing.
-async fn collect_new_delegation_candidates<B, W, S>(
-    client: &Client<B, W, S>,
+async fn collect_new_delegation_candidates<B, S>(
+    client: &Client<B, S>,
     seen_unspent_outpoints: &mut HashSet<OutPoint>,
 ) -> Result<Vec<VirtualTxOutPoint>, Error>
 where
     B: Blockchain + Send + Sync + 'static,
-    W: OnchainWallet + Send + Sync + 'static,
     S: SwapStorage + 'static,
 {
     let vtxo_list = client.list_vtxos().await?;
@@ -622,13 +616,12 @@ fn calculate_valid_at(group_vtxos: &[&AnnotatedVtxo], dust: Amount) -> u64 {
 /// Submit newly received VTXOs to the delegator service for future auto-renewal.
 ///
 /// Only the affected outpoints are delegated; spend metadata is resolved through contracts.
-async fn delegate_vtxos<B, W, S>(
-    client: &Arc<Client<B, W, S>>,
+async fn delegate_vtxos<B, S>(
+    client: &Arc<Client<B, S>>,
     delegator: &DelegatorClient,
     new_vtxos: &[VirtualTxOutPoint],
 ) where
     B: Blockchain + Send + Sync + 'static,
-    W: OnchainWallet + Send + Sync + 'static,
     S: SwapStorage + 'static,
 {
     let vtxo_list = match client.list_vtxos().await {
@@ -781,8 +774,8 @@ async fn delegate_vtxos<B, W, S>(
 }
 
 /// Prepare, sign, and submit a single delegation group.
-async fn delegate_group<B, W, S>(
-    client: &Client<B, W, S>,
+async fn delegate_group<B, S>(
+    client: &Client<B, S>,
     delegator: &DelegatorClient,
     vtxo_inputs: Vec<intent::Input>,
     outputs: Vec<intent::Output>,
@@ -792,7 +785,6 @@ async fn delegate_group<B, W, S>(
     valid_at: u64,
 ) where
     B: Blockchain + Send + Sync + 'static,
-    W: OnchainWallet + Send + Sync + 'static,
     S: SwapStorage + 'static,
 {
     let input_count = vtxo_inputs.len();
@@ -870,10 +862,9 @@ fn select_vtxos_for_self_renewal(vtxos: &[AnnotatedVtxo], dust: Amount, now: i64
 }
 
 /// Self-renew VTXOs that are close to expiry or already recoverable.
-async fn renew_expiring_vtxos<B, W, S>(client: &Client<B, W, S>)
+async fn renew_expiring_vtxos<B, S>(client: &Client<B, S>)
 where
     B: Blockchain + Send + Sync + 'static,
-    W: OnchainWallet + Send + Sync + 'static,
     S: SwapStorage + 'static,
 {
     let vtxo_list = match client.list_vtxos().await {

@@ -3,7 +3,6 @@ use crate::key_provider::KeypairIndex;
 use crate::utils::sleep;
 use crate::utils::timeout_op;
 use crate::utils::unix_now;
-use crate::wallet::OnchainWallet;
 use ark_core::asset::AssetId;
 use ark_core::build_anchor_tx;
 use ark_core::contract::BoardingContract;
@@ -41,6 +40,7 @@ use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::Network;
 use bitcoin::OutPoint;
+use bitcoin::Psbt;
 use bitcoin::ScriptBuf;
 use bitcoin::Transaction;
 use bitcoin::Txid;
@@ -61,7 +61,6 @@ pub mod error;
 pub mod key_provider;
 pub mod swap_storage;
 pub mod vtxo_watcher;
-pub mod wallet;
 
 mod asset;
 mod batch;
@@ -299,10 +298,9 @@ impl Default for OfflineClientConfig {
 /// # use bitcoin::key::Keypair;
 /// # use bitcoin::secp256k1::SecretKey;
 /// # use std::sync::Arc;
-/// # use bitcoin::{Address, Amount, FeeRate, Psbt, Transaction, Txid};
-/// # use ark_client::wallet::{Balance, OnchainWallet};
+/// # use bitcoin::{Address, Transaction, Txid};
 /// # use ark_client::InMemorySwapStorage;
-/// # use ark_core::{UtxoCoinSelection, ExplorerUtxo};
+/// # use ark_core::ExplorerUtxo;
 /// # use ark_client::StaticKeyProvider;
 ///
 /// struct MyBlockchain {}
@@ -345,45 +343,15 @@ impl Default for OfflineClientConfig {
 /// #     }
 /// # }
 ///
-/// struct MyWallet {}
-/// # impl OnchainWallet for MyWallet where {
-/// #
-/// #     fn get_onchain_address(&self) -> Result<Address, Error> {
-/// #         unimplemented!("You can implement this function using your preferred client library such as bdk")
-/// #     }
-/// #
-/// #     async fn sync(&self) -> Result<(), Error> {
-/// #         unimplemented!()
-/// #     }
-/// #
-/// #     fn balance(&self) -> Result<Balance, Error> {
-/// #         unimplemented!()
-/// #     }
-/// #
-/// #     fn prepare_send_to_address(&self, address: Address, amount: Amount, fee_rate: FeeRate) -> Result<Psbt, Error> {
-/// #         unimplemented!()
-/// #     }
-/// #
-/// #     fn sign(&self, psbt: &mut Psbt) -> Result<bool, Error> {
-/// #         unimplemented!()
-/// #     }
-/// #
-/// #     fn select_coins(&self, target_amount: Amount) -> Result<ark_core::UtxoCoinSelection, Error> {
-/// #         unimplemented!()
-/// #     }
-/// # }
-/// #
-///
 /// // Initialize the client with a static keypair
-/// async fn init_client_with_keypair() -> Result<Client<MyBlockchain, MyWallet, InMemorySwapStorage>, ark_client::Error> {
+/// async fn init_client_with_keypair() -> Result<Client<MyBlockchain, InMemorySwapStorage>, ark_client::Error> {
 ///     // Create a keypair for signing transactions
 ///     let secp = bitcoin::key::Secp256k1::new();
 ///     let secret_key = SecretKey::from_str("your_private_key_here").unwrap();
 ///     let keypair = Keypair::from_secret_key(&secp, &secret_key);
 ///
-///     // Initialize blockchain and wallet implementations
+///     // Initialize blockchain implementation
 ///     let blockchain = Arc::new(MyBlockchain::new("https://esplora.example.com"));
-///     let wallet = Arc::new(MyWallet {});
 ///
 ///     let config = OfflineClientConfig {
 ///         ark_server_url: "https://ark-server.example.com".to_string(),
@@ -395,7 +363,6 @@ impl Default for OfflineClientConfig {
 ///         config,
 ///         keypair,
 ///         blockchain,
-///         wallet,
 ///         Arc::new(InMemorySwapStorage::default()),
 ///     );
 ///
@@ -407,14 +374,13 @@ impl Default for OfflineClientConfig {
 ///
 /// // Initialize the client with a BIP32 HD wallet
 /// # use bitcoin::bip32::{Xpriv, DerivationPath};
-/// async fn init_client_with_bip32() -> Result<Client<MyBlockchain, MyWallet, InMemorySwapStorage>, ark_client::Error> {
+/// async fn init_client_with_bip32() -> Result<Client<MyBlockchain, InMemorySwapStorage>, ark_client::Error> {
 ///     // Create a BIP32 master key and derivation path
 ///     let master_key = Xpriv::from_str("xprv...").unwrap();
 ///     let derivation_path = DerivationPath::from_str("m/84'/0'/0'/0/0").unwrap();
 ///
-///     // Initialize blockchain and wallet implementations
+///     // Initialize blockchain implementation
 ///     let blockchain = Arc::new(MyBlockchain::new("https://esplora.example.com"));
-///     let wallet = Arc::new(MyWallet {});
 ///
 ///     let config = OfflineClientConfig {
 ///         ark_server_url: "https://ark-server.example.com".to_string(),
@@ -427,7 +393,6 @@ impl Default for OfflineClientConfig {
 ///         master_key,
 ///         Some(derivation_path),
 ///         blockchain,
-///         wallet,
 ///         Arc::new(InMemorySwapStorage::default()),
 ///     );
 ///
@@ -438,14 +403,13 @@ impl Default for OfflineClientConfig {
 /// }
 /// ```
 #[derive(Clone)]
-pub struct OfflineClient<B, W, S> {
+pub struct OfflineClient<B, S> {
     // TODO: We could introduce a generic interface so that consumers can use either GRPC or REST.
     network_client: ark_grpc::Client,
     key_provider: Arc<dyn KeyProvider>,
     discoverable_key_provider: Option<Arc<dyn DiscoverableKeyProvider>>,
     blockchain: Arc<B>,
     secp: Secp256k1<All>,
-    wallet: Arc<W>,
     swap_storage: Arc<S>,
     boltz_url: String,
     boltz_referral_id: Option<String>,
@@ -459,8 +423,8 @@ pub struct OfflineClient<B, W, S> {
 /// A client to interact with Ark server
 ///
 /// See [`OfflineClient`] docs for details.
-pub struct Client<B, W, S> {
-    inner: OfflineClient<B, W, S>,
+pub struct Client<B, S> {
+    inner: OfflineClient<B, S>,
     state: Arc<RwLock<ServerState>>,
     server_info_refresh_lock: Arc<tokio::sync::Mutex<()>>,
 }
@@ -555,6 +519,19 @@ impl RestoreCandidate {
     }
 }
 
+/// On-chain wallet operations needed to fee-bump a transaction via its P2A (anchor) output.
+///
+/// The caller supplies these from their concrete on-chain wallet.
+#[allow(clippy::type_complexity)]
+pub struct AnchorSpendDeps<'a> {
+    /// Returns a change address for the fee-bump child transaction.
+    pub change_address: Box<dyn Fn() -> Result<Address, Error> + Send + Sync + 'a>,
+    /// Selects on-chain coins to cover `target_amount`.
+    pub select_coins: Box<dyn Fn(Amount) -> Result<UtxoCoinSelection, Error> + Send + Sync + 'a>,
+    /// Signs the child PSBT, returning whether it is finalized.
+    pub sign: Box<dyn Fn(&mut Psbt) -> Result<bool, Error> + Send + Sync + 'a>,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct TxStatus {
     pub confirmed_at: Option<i64>,
@@ -641,10 +618,9 @@ pub trait Blockchain {
     ) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
-impl<B, W, S> OfflineClient<B, W, S>
+impl<B, S> OfflineClient<B, S>
 where
     B: Blockchain,
-    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     /// Create a new offline client with a generic key provider.
@@ -652,10 +628,9 @@ where
         config: OfflineClientConfig,
         key_provider: Arc<dyn KeyProvider>,
         blockchain: Arc<B>,
-        wallet: Arc<W>,
         swap_storage: Arc<S>,
     ) -> Self {
-        Self::with_key_provider_parts(config, key_provider, None, blockchain, wallet, swap_storage)
+        Self::with_key_provider_parts(config, key_provider, None, blockchain, swap_storage)
     }
 
     /// Create a new offline client with a discoverable key provider.
@@ -663,7 +638,6 @@ where
         config: OfflineClientConfig,
         key_provider: Arc<P>,
         blockchain: Arc<B>,
-        wallet: Arc<W>,
         swap_storage: Arc<S>,
     ) -> Self
     where
@@ -676,7 +650,6 @@ where
             core_key_provider,
             Some(discoverable_key_provider),
             blockchain,
-            wallet,
             swap_storage,
         )
     }
@@ -686,7 +659,6 @@ where
         key_provider: Arc<dyn KeyProvider>,
         discoverable_key_provider: Option<Arc<dyn DiscoverableKeyProvider>>,
         blockchain: Arc<B>,
-        wallet: Arc<W>,
         swap_storage: Arc<S>,
     ) -> Self {
         let secp = Secp256k1::new();
@@ -717,7 +689,6 @@ where
             discoverable_key_provider,
             blockchain,
             secp,
-            wallet,
             swap_storage,
             boltz_url: config.boltz_url.trim_end_matches('/').to_string(),
             boltz_referral_id,
@@ -734,11 +705,10 @@ where
         config: OfflineClientConfig,
         kp: Keypair,
         blockchain: Arc<B>,
-        wallet: Arc<W>,
         swap_storage: Arc<S>,
     ) -> Self {
         let key_provider = Arc::new(StaticKeyProvider::new(kp));
-        Self::with_key_provider(config, key_provider, blockchain, wallet, swap_storage)
+        Self::with_key_provider(config, key_provider, blockchain, swap_storage)
     }
 
     /// Create a new offline client with an [`Xpriv`].
@@ -747,14 +717,13 @@ where
         xpriv: Xpriv,
         path: Option<DerivationPath>,
         blockchain: Arc<B>,
-        wallet: Arc<W>,
         swap_storage: Arc<S>,
     ) -> Self {
         let path = path.unwrap_or(
             DerivationPath::from_str(DEFAULT_DERIVATION_PATH).expect("valid derivation path"),
         );
         let key_provider = Arc::new(Bip32KeyProvider::new(xpriv, path));
-        Self::with_discoverable_key_provider(config, key_provider, blockchain, wallet, swap_storage)
+        Self::with_discoverable_key_provider(config, key_provider, blockchain, swap_storage)
     }
 
     /// Use a custom contract store for the connected client.
@@ -795,7 +764,7 @@ where
     /// # Errors
     ///
     /// Returns an error if the connection fails or times out.
-    pub async fn connect(mut self) -> Result<Client<B, W, S>, Error> {
+    pub async fn connect(mut self) -> Result<Client<B, S>, Error> {
         timeout_op(self.timeout, self.network_client.connect())
             .await
             .context("Failed to connect to Ark server")??;
@@ -810,10 +779,7 @@ where
     /// # Errors
     ///
     /// Returns an error if the connection fails or times out.
-    pub async fn connect_with_retries(
-        mut self,
-        max_retries: usize,
-    ) -> Result<Client<B, W, S>, Error> {
+    pub async fn connect_with_retries(mut self, max_retries: usize) -> Result<Client<B, S>, Error> {
         let mut n_retries = 0;
         while n_retries < max_retries {
             let res = timeout_op(self.timeout, self.network_client.connect())
@@ -837,7 +803,7 @@ where
         self.finish_connect().await
     }
 
-    async fn finish_connect(mut self) -> Result<Client<B, W, S>, Error> {
+    async fn finish_connect(mut self) -> Result<Client<B, S>, Error> {
         let server_info = timeout_op(self.timeout, self.network_client.get_info())
             .await
             .context("Failed to get Ark server info")??;
@@ -980,10 +946,9 @@ fn update_server_state(
     Ok(())
 }
 
-impl<B, W, S> Client<B, W, S>
+impl<B, S> Client<B, S>
 where
     B: Blockchain,
-    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     /// Returns Ark server info, refreshing the cached snapshot when its TTL has expired.
@@ -1636,10 +1601,6 @@ where
             .map_err(|e| Error::ad_hoc(format!("invalid boarding contract script: {e}")))
     }
 
-    pub fn get_onchain_address(&self) -> Result<Address, Error> {
-        self.inner.wallet.get_onchain_address()
-    }
-
     pub async fn get_boarding_addresses(&self) -> Result<Vec<Address>, Error> {
         let server_info = &self.server_info().await?;
 
@@ -2105,17 +2066,21 @@ where
     }
 
     /// Use the P2A output of a transaction to bump its transaction fee with a child transaction.
-    pub async fn bump_tx(&self, parent: &Transaction) -> Result<Transaction, Error> {
+    pub async fn bump_tx(
+        &self,
+        parent: &Transaction,
+        deps: &AnchorSpendDeps<'_>,
+    ) -> Result<Transaction, Error> {
         let fee_rate = timeout_op(self.inner.timeout, self.blockchain().get_fee_rate())
             .await
             .context("Failed to retrieve fee rate")??;
 
-        let change_address = self.inner.wallet.get_onchain_address()?;
+        let change_address = (deps.change_address)()?;
 
         // Create a closure that converts CoinSelectionResult to UtxoCoinSelection
         let select_coins_fn =
             |target_amount: Amount| -> Result<UtxoCoinSelection, ark_core::Error> {
-                self.inner.wallet.select_coins(target_amount).map_err(|e| {
+                (deps.select_coins)(target_amount).map_err(|e| {
                     ark_core::Error::ad_hoc(format!("failed to select coins for anchor TX: {e}"))
                 })
             };
@@ -2125,10 +2090,7 @@ where
             .map_err(|e| Error::ad_hoc(e.to_string()))?;
 
         // Sign the transaction
-        self.inner
-            .wallet
-            .sign(&mut psbt)
-            .context("failed to sign bump TX")?;
+        (deps.sign)(&mut psbt).context("failed to sign bump TX")?;
 
         // Extract the final transaction
         let tx = psbt.extract_tx().map_err(Error::ad_hoc)?;
@@ -2213,9 +2175,7 @@ mod digest_guard_tests {
     use bitcoin::key::Secp256k1;
     use bitcoin::secp256k1::SecretKey;
     use bitcoin::Address;
-    use bitcoin::FeeRate;
     use bitcoin::Network;
-    use bitcoin::Psbt;
     use std::convert::Infallible;
     use std::future::Future;
     use std::pin::Pin;
@@ -2271,61 +2231,6 @@ mod digest_guard_tests {
 
         async fn broadcast_package(&self, _txs: &[&Transaction]) -> Result<(), Error> {
             Ok(())
-        }
-    }
-
-    struct DummyWallet {
-        keypair: Keypair,
-        secp: Secp256k1<All>,
-    }
-
-    impl DummyWallet {
-        fn new() -> Self {
-            let secp = Secp256k1::new();
-            let secret_key = SecretKey::from_slice(&[2; 32]).unwrap();
-            let keypair = Keypair::from_secret_key(&secp, &secret_key);
-            Self { keypair, secp }
-        }
-    }
-
-    impl OnchainWallet for DummyWallet {
-        fn get_onchain_address(&self) -> Result<Address, Error> {
-            Ok(Address::p2tr(
-                &self.secp,
-                self.keypair.x_only_public_key().0,
-                None,
-                Network::Regtest,
-            ))
-        }
-
-        async fn sync(&self) -> Result<(), Error> {
-            Ok(())
-        }
-
-        fn balance(&self) -> Result<wallet::Balance, Error> {
-            Ok(wallet::Balance {
-                immature: Amount::ZERO,
-                trusted_pending: Amount::ZERO,
-                untrusted_pending: Amount::ZERO,
-                confirmed: Amount::ZERO,
-            })
-        }
-
-        fn prepare_send_to_address(
-            &self,
-            _address: Address,
-            _amount: Amount,
-            _fee_rate: FeeRate,
-        ) -> Result<Psbt, Error> {
-            Err(Error::wallet("not implemented"))
-        }
-
-        fn sign(&self, _psbt: &mut Psbt) -> Result<bool, Error> {
-            Ok(true)
-        }
-
-        fn select_coins(&self, _target_amount: Amount) -> Result<UtxoCoinSelection, Error> {
-            Err(Error::wallet("not implemented"))
         }
     }
 
@@ -2437,7 +2342,7 @@ mod digest_guard_tests {
 
     async fn connect_test_client(
         mock: MockArkServer,
-    ) -> Client<DummyBlockchain, DummyWallet, InMemorySwapStorage> {
+    ) -> Client<DummyBlockchain, InMemorySwapStorage> {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
@@ -2453,7 +2358,7 @@ mod digest_guard_tests {
 
         let secp = Secp256k1::new();
         let keypair = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[3; 32]).unwrap());
-        OfflineClient::<DummyBlockchain, DummyWallet, InMemorySwapStorage>::with_keypair(
+        OfflineClient::<DummyBlockchain, InMemorySwapStorage>::with_keypair(
             OfflineClientConfig {
                 ark_server_url: format!("http://{addr}"),
                 boltz_url: "http://127.0.0.1:1".to_string(),
@@ -2461,7 +2366,6 @@ mod digest_guard_tests {
             },
             keypair,
             Arc::new(DummyBlockchain),
-            Arc::new(DummyWallet::new()),
             Arc::new(InMemorySwapStorage::default()),
         )
         .connect()

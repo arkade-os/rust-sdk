@@ -4,7 +4,7 @@ use crate::error::ErrorContext;
 use crate::swap_storage::SwapStorage;
 use crate::utils::sleep;
 use crate::utils::timeout_op;
-use crate::wallet::OnchainWallet;
+use crate::AnchorSpendDeps;
 use crate::Blockchain;
 use crate::Client;
 use ark_core::build_unilateral_exit_tree_txids;
@@ -26,10 +26,9 @@ use std::collections::HashSet;
 
 // TODO: We should not _need_ to connect to the Ark server to perform unilateral exit. Currently we
 // do talk to the Ark server for simplicity.
-impl<B, W, S> Client<B, W, S>
+impl<B, S> Client<B, S>
 where
     B: Blockchain,
-    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     /// Build the unilateral exit transaction tree for all spendable VTXOs.
@@ -136,6 +135,7 @@ where
     pub async fn broadcast_next_unilateral_exit_node(
         &self,
         branch: &[Transaction],
+        deps: &AnchorSpendDeps<'_>,
     ) -> Result<Option<Txid>, Error> {
         let blockchain = &self.blockchain();
 
@@ -146,7 +146,7 @@ where
                 let is_not_published = blockchain.find_tx(&parent_txid).await?.is_none();
 
                 if is_not_published {
-                    let child_tx = self.bump_tx(parent_tx).await?;
+                    let child_tx = self.bump_tx(parent_tx, deps).await?;
                     let bump_txid = child_tx.compute_txid();
 
                     tracing::info!(
@@ -208,9 +208,10 @@ where
         &self,
         to_address: Address,
         to_amount: Amount,
+        change_address: Address,
     ) -> Result<Txid, Error> {
         let (tx, _) = self
-            .create_send_on_chain_transaction_inner(to_address, to_amount)
+            .create_send_on_chain_transaction_inner(to_address, to_amount, change_address)
             .await?;
 
         let txid = tx.compute_txid();
@@ -234,8 +235,9 @@ where
         &self,
         to_address: Address,
         to_amount: Amount,
+        change_address: Address,
     ) -> Result<(Transaction, Vec<TxOut>), Error> {
-        self.create_send_on_chain_transaction_inner(to_address, to_amount)
+        self.create_send_on_chain_transaction_inner(to_address, to_amount, change_address)
             .await
     }
 
@@ -243,6 +245,7 @@ where
         &self,
         to_address: Address,
         to_amount: Amount,
+        change_address: Address,
     ) -> Result<(Transaction, Vec<TxOut>), Error> {
         let dust = self.server_info().await?.dust;
         if to_amount < dust {
@@ -256,8 +259,6 @@ where
         let fee = Amount::from_sat(1_000);
 
         let (onchain_inputs, vtxo_inputs) = coin_select_for_onchain(self, to_amount + fee).await?;
-
-        let change_address = self.inner.wallet.get_onchain_address()?;
 
         let sign = move |input: &mut psbt::Input, msg: bitcoin::secp256k1::Message| match &input
             .witness_script

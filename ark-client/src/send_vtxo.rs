@@ -1,7 +1,6 @@
 use crate::error::ErrorContext;
 use crate::swap_storage::SwapStorage;
 use crate::utils::timeout_op;
-use crate::wallet::OnchainWallet;
 use crate::AnnotatedVtxo;
 use crate::Blockchain;
 use crate::Client;
@@ -59,10 +58,9 @@ pub(crate) fn select_contract_vtxos(
         .collect()
 }
 
-impl<B, W, S> Client<B, W, S>
+impl<B, S> Client<B, S>
 where
     B: Blockchain,
-    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     // Send public APIs
