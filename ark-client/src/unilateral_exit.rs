@@ -210,9 +210,10 @@ where
         &self,
         to_address: Address,
         to_amount: Amount,
+        change_address: Address,
     ) -> Result<Txid, Error> {
         let (tx, _) = self
-            .create_send_on_chain_transaction_inner(to_address, to_amount)
+            .create_send_on_chain_transaction_inner(to_address, to_amount, change_address)
             .await?;
 
         let txid = tx.compute_txid();
@@ -236,8 +237,9 @@ where
         &self,
         to_address: Address,
         to_amount: Amount,
+        change_address: Address,
     ) -> Result<(Transaction, Vec<TxOut>), Error> {
-        self.create_send_on_chain_transaction_inner(to_address, to_amount)
+        self.create_send_on_chain_transaction_inner(to_address, to_amount, change_address)
             .await
     }
 
@@ -245,6 +247,7 @@ where
         &self,
         to_address: Address,
         to_amount: Amount,
+        change_address: Address,
     ) -> Result<(Transaction, Vec<TxOut>), Error> {
         let dust = self.server_info().await?.dust;
         if to_amount < dust {
@@ -258,8 +261,6 @@ where
         let fee = Amount::from_sat(1_000);
 
         let (onchain_inputs, vtxo_inputs) = coin_select_for_onchain(self, to_amount + fee).await?;
-
-        let change_address = self.inner.wallet.get_onchain_address()?;
 
         let sign = move |input: &mut psbt::Input, msg: bitcoin::secp256k1::Message| match &input
             .witness_script

@@ -163,7 +163,11 @@ pub async fn reverse_swap_claim_with_vhtlc_ancestor_can_exit_unilaterally() {
     let (tx, prevouts) = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             match alice
-                .create_send_on_chain_transaction(send_address.clone(), send_amount)
+                .create_send_on_chain_transaction(
+                    send_address.clone(),
+                    send_amount,
+                    alice_wallet.get_onchain_address().unwrap(),
+                )
                 .await
             {
                 Ok(result) => return result,

@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
+use ark_client::wallet::OnchainWallet;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::key::Secp256k1;
 use bitcoin::relative;
@@ -21,7 +22,8 @@ pub async fn send_onchain_boarding_output() {
 
     let secp = Secp256k1::new();
 
-    let (alice, _) = set_up_client("alice".to_string(), regtest.clone(), secp.clone()).await;
+    let (alice, alice_wallet) =
+        set_up_client("alice".to_string(), regtest.clone(), secp.clone()).await;
 
     // To be able to spend a boarding output it needs to have been confirmed for at least
     // `boarding_exit_delay`.
@@ -55,6 +57,7 @@ pub async fn send_onchain_boarding_output() {
             .unwrap()
             .assume_checked(),
             Amount::from_btc(0.7).unwrap(),
+            alice_wallet.get_onchain_address().unwrap(),
         )
         .await
         .unwrap();

@@ -181,6 +181,7 @@ pub async fn send_onchain_vtxo_and_boarding_output() {
             .unwrap()
             .assume_checked(),
             Amount::from_btc(1.4).unwrap(),
+            alice_wallet.get_onchain_address().unwrap(),
         )
         .await
         .unwrap();
