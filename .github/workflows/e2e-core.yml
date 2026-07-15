@@ -1,9 +1,10 @@
 name: Core E2E Tests
 
-# The regtest stack (Bitcoin Core + Fulcrum + mempool/esplora + arkd + emulator)
-# is provided by the `regtest` git submodule (arkade-regtest) and driven by its
-# zero-dependency Node CLI (`regtest.mjs`). arkd runs from a container image
-# (ARKD_IMAGE in .env.regtest); the orchestrator self-funds it on `start`.
+# The regtest stack (Bitcoin Core + Fulcrum + mempool/esplora + arkd + emulator,
+# and Boltz for the e2e_boltz_* tests) is provided by the `regtest` git submodule
+# (arkade-regtest) and driven by its zero-dependency Node CLI (`regtest.mjs`).
+# arkd runs from a container image (ARKD_IMAGE in .env.regtest); the orchestrator
+# self-funds it on `start`.
 
 on:
   workflow_call:
@@ -80,10 +81,19 @@ jobs:
       - name: Make binaries executable
         run: chmod +x target/debug/deps/e2e_*
 
-      # Brings up base + ark (arkd) + emulator. The orchestrator waits for the
+      # Brings up base + ark (arkd) + emulator for every e2e test. Boltz is only
+      # enabled for the e2e_boltz_* binaries. The orchestrator waits for the
       # stack to be ready and self-funds arkd before returning.
       - name: Start regtest stack
-        run: node regtest/regtest.mjs start --env .env.regtest --profile emulator
+        run: |
+          test_name=$(basename "${{ matrix.test-binary }}")
+          profiles=(--profile emulator)
+          if [[ "$test_name" == e2e_boltz* ]]; then
+            profiles+=(--profile boltz)
+          fi
+
+          echo "Starting regtest for $test_name with profiles: ${profiles[*]}"
+          node regtest/regtest.mjs start --env .env.regtest "${profiles[@]}"
 
       - name: Run Test Binary
         env:
@@ -101,7 +111,7 @@ jobs:
           node regtest/regtest.mjs rpc getblockcount 2>&1 || echo "(getblockcount failed)"
           echo "=== auto-miner ticks ==="
           docker logs bitcoin-miner 2>&1 | tail -40 || echo "(bitcoin-miner not found)"
-          for c in bitcoin fulcrum mempool_web nbxplorer arkd arkd-wallet emulator; do
+          for c in bitcoin fulcrum mempool_web nbxplorer arkd arkd-wallet emulator lnd boltz-lnd boltz boltz-fulmine nginx-boltz lnurl-server; do
             echo "=== docker logs $c ==="
             docker logs "$c" 2>&1 || echo "(container $c not found)"
             echo "=== end $c ==="
