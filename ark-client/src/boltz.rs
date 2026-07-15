@@ -136,7 +136,7 @@ pub struct ClaimVhtlcResult {
 pub enum PendingVhtlcSpendType {
     /// Claim via `claim_script`: preimage + receiver + server.
     ///
-    /// Used in reverse submarine swaps (receiving Lightning → Ark).
+    /// Used in reverse submarine swaps (receiving Lightning → Arkade).
     Claim { swap_id: String, preimage: [u8; 32] },
     /// Collaborative refund via `refund_script`: sender + receiver (Boltz) + server.
     ///
@@ -294,7 +294,7 @@ where
     }
 
     /// Pay a BOLT11 invoice by performing a submarine swap via Boltz. This allows to make Lightning
-    /// payments with an Ark wallet.
+    /// payments with an Arkade wallet.
     ///
     /// # Arguments
     ///
@@ -302,7 +302,7 @@ where
     ///
     /// # Returns
     ///
-    /// - A [`SubmarineSwapResult`], including an identifier for the swap and the TXID of the Ark
+    /// - A [`SubmarineSwapResult`], including an identifier for the swap and the TXID of the Arkade
     ///   transaction that funds the VHTLC.
     pub async fn pay_ln_invoice(
         &self,
@@ -1043,7 +1043,7 @@ where
     }
 
     /// Generate a BOLT11 invoice to perform a reverse submarine swap via Boltz. This allows to
-    /// receive Lightning payments into an Ark wallet.
+    /// receive Lightning payments into an Arkade wallet.
     ///
     /// # Arguments
     ///
@@ -1070,7 +1070,7 @@ where
     /// Generate a BOLT11 invoice to receive Lightning into another user's Arkade address.
     ///
     /// The local client still creates and claims the Boltz reverse-swap VHTLC, but the resulting
-    /// Ark output is sent to `recipient_address` instead of a fresh local address.
+    /// Arkade output is sent to `recipient_address` instead of a fresh local address.
     ///
     /// # Arguments
     ///
@@ -1507,7 +1507,7 @@ where
 
         sign_ark_transaction(sign_fn, &mut ark_tx, 0)
             .map_err(Error::from)
-            .context("failed to sign Ark TX")?;
+            .context("failed to sign Arkade TX")?;
 
         let ark_txid = ark_tx.unsigned_tx.compute_txid();
 
@@ -1625,7 +1625,7 @@ where
             }
         }
 
-        tracing::debug!("Ark transaction for swap found");
+        tracing::debug!("Arkade transaction for swap found");
 
         let timeout_block_heights = swap.timeout_block_heights;
         let server_info = self.server_info().await?;
@@ -1757,7 +1757,7 @@ where
 
         sign_ark_transaction(sign_fn, &mut ark_tx, 0)
             .map_err(Error::from)
-            .context("failed to sign Ark TX")?;
+            .context("failed to sign Arkade TX")?;
 
         let ark_txid = ark_tx.unsigned_tx.compute_txid();
 
@@ -1800,11 +1800,11 @@ where
 
     // Chain swap.
 
-    /// Create a chain swap via Boltz for swapping between ARK and on-chain BTC.
+    /// Create a chain swap via Boltz for swapping between Arkade and on-chain BTC.
     ///
     /// Returns a [`ChainSwapResult`] containing the swap ID and the address the user must
     /// fund to initiate the swap. For [`ChainSwapDirection::ArkToBtc`], the user should send
-    /// Ark VTXOs to the `user_lockup_address` using [`Client::send_vtxo`]. For
+    /// Arkade VTXOs to the `user_lockup_address` using [`Client::send_vtxo`]. For
     /// [`ChainSwapDirection::BtcToArk`], the user should send BTC to the `user_lockup_address`.
     ///
     /// After funding, use [`Self::wait_for_chain_swap_server_lockup`] to wait for Boltz to
@@ -1884,7 +1884,7 @@ where
 
         // lockup_details = user's side (where user locks funds)
         // claim_details  = server's side (where user claims funds)
-        // The ARK side carries `timeouts` (full VHTLC timelocks).
+        // The Arkade side carries `timeouts` (full VHTLC timelocks).
         // The BTC side carries `swap_tree` and optionally `bip21`.
         let bip21 = swap_response
             .lockup_details
@@ -2054,10 +2054,10 @@ where
         Err(Error::ad_hoc("Chain swap status stream ended unexpectedly"))
     }
 
-    /// Claim the Ark VHTLC from a chain swap after Boltz has locked funds.
+    /// Claim the Arkade VHTLC from a chain swap after Boltz has locked funds.
     ///
-    /// This claims the server's Ark VHTLC lockup using the stored preimage. It is intended
-    /// for [`ChainSwapDirection::BtcToArk`] swaps where the server locks an Ark VHTLC.
+    /// This claims the server's Arkade VHTLC lockup using the stored preimage. It is intended
+    /// for [`ChainSwapDirection::BtcToArk`] swaps where the server locks an Arkade VHTLC.
     ///
     /// Call this after [`Self::wait_for_chain_swap_server_lockup`] returns.
     pub async fn claim_chain_swap(&self, swap_id: &str) -> Result<Txid, Error> {
@@ -2175,7 +2175,7 @@ where
 
         sign_ark_transaction(sign_fn, &mut ark_tx, 0)
             .map_err(Error::from)
-            .context("failed to sign Ark TX")?;
+            .context("failed to sign Arkade TX")?;
 
         let ark_txid = ark_tx.unsigned_tx.compute_txid();
 
@@ -2385,9 +2385,9 @@ where
         Ok(txid)
     }
 
-    /// Refund the Ark VHTLC from a chain swap after the timelock has expired.
+    /// Refund the Arkade VHTLC from a chain swap after the timelock has expired.
     ///
-    /// This is for [`ChainSwapDirection::ArkToBtc`] swaps where the user locked an Ark VHTLC
+    /// This is for [`ChainSwapDirection::ArkToBtc`] swaps where the user locked an Arkade VHTLC
     /// and needs to reclaim it (e.g. if Boltz never locked BTC or the swap expired).
     ///
     /// This path does not require a signature from Boltz.
@@ -2406,7 +2406,7 @@ where
         }
 
         let timeout_block_heights = swap.user_timeout_block_heights.ok_or_else(|| {
-            Error::ad_hoc("chain swap is missing ARK-side VHTLC timeouts for user lockup")
+            Error::ad_hoc("chain swap is missing Arkade-side VHTLC timeouts for user lockup")
         })?;
 
         let server_info = self.server_info().await?;
@@ -2517,7 +2517,7 @@ where
         .map_err(Error::ark_server)
         .context("failed to finalize offchain transaction")?;
 
-        tracing::info!(swap_id, txid = %ark_txid, "Refunded chain swap Ark VHTLC");
+        tracing::info!(swap_id, txid = %ark_txid, "Refunded chain swap Arkade VHTLC");
 
         let mut updated_swap = swap.clone();
         updated_swap.status = SwapStatus::TransactionRefunded;
@@ -2533,7 +2533,7 @@ where
     /// Refund on-chain BTC from a chain swap after the timelock has expired.
     ///
     /// This is for [`ChainSwapDirection::BtcToArk`] swaps where the user locked on-chain BTC
-    /// and needs to reclaim it (e.g. if Boltz never locked the Ark VHTLC or the swap expired).
+    /// and needs to reclaim it (e.g. if Boltz never locked the Arkade VHTLC or the swap expired).
     pub async fn refund_chain_swap_btc(
         &self,
         swap_id: &str,
@@ -2743,7 +2743,7 @@ where
             .build()
             .map_err(|e| Error::ad_hoc(e.to_string()))?;
 
-        // Fetch submarine swap fees (ARK -> BTC)
+        // Fetch submarine swap fees (Arkade -> BTC)
         let submarine_url = format!("{}/v2/swap/submarine", &self.inner.boltz_url);
         let submarine_response = client
             .get(&submarine_url)
@@ -2774,7 +2774,7 @@ where
             miner_fees: submarine_pair_fees.miner_fees,
         };
 
-        // Fetch reverse swap fees (BTC -> ARK)
+        // Fetch reverse swap fees (BTC -> Arkade)
         let reverse_url = format!("{}/v2/swap/reverse", self.inner.boltz_url);
         let reverse_response = client
             .get(&reverse_url)
@@ -4387,7 +4387,7 @@ struct RefundSwapResponse {
     error: Option<String>,
 }
 
-/// Fee information for submarine swaps (Ark -> Lightning).
+/// Fee information for submarine swaps (Arkade -> Lightning).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmarineSwapFees {
@@ -4406,7 +4406,7 @@ pub struct ReverseMinerFees {
     pub claim: u64,
 }
 
-/// Fee information for reverse swaps (Lightning -> Ark).
+/// Fee information for reverse swaps (Lightning -> Arkade).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReverseSwapFees {
@@ -4419,9 +4419,9 @@ pub struct ReverseSwapFees {
 /// Combined fee information for both swap types.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BoltzFees {
-    /// Fees for submarine swaps (Ark -> Lightning).
+    /// Fees for submarine swaps (Arkade -> Lightning).
     pub submarine: SubmarineSwapFees,
-    /// Fees for reverse swaps (Lightning -> Ark).
+    /// Fees for reverse swaps (Lightning -> Arkade).
     pub reverse: ReverseSwapFees,
 }
 
@@ -4505,13 +4505,13 @@ struct ReversePairsResponse {
 /// Direction of a chain swap.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ChainSwapDirection {
-    /// User locks Ark VHTLC, claims on-chain BTC.
+    /// User locks Arkade VHTLC, claims on-chain BTC.
     ArkToBtc,
-    /// User sends on-chain BTC, claims Ark VHTLC.
+    /// User sends on-chain BTC, claims Arkade VHTLC.
     BtcToArk,
 }
 
-/// Data for a pending chain swap (ARK ↔ BTC).
+/// Data for a pending chain swap (Arkade ↔ BTC).
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainSwapData {
@@ -4545,10 +4545,10 @@ pub struct ChainSwapData {
     pub user_timeout_block_height: u32,
     /// Timeout block height for Boltz's lockup.
     pub server_timeout_block_height: u32,
-    /// Full VHTLC timelocks for user's lockup (present when user locks on ARK side).
+    /// Full VHTLC timelocks for user's lockup (present when user locks on Arkade side).
     #[serde(default)]
     pub user_timeout_block_heights: Option<TimeoutBlockHeights>,
-    /// Full VHTLC timelocks for Boltz's lockup (present when server locks on ARK side).
+    /// Full VHTLC timelocks for Boltz's lockup (present when server locks on Arkade side).
     #[serde(default)]
     pub server_timeout_block_heights: Option<TimeoutBlockHeights>,
     /// BIP21 payment URI for funding (present for on-chain BTC lockup).
@@ -4565,33 +4565,33 @@ pub struct ChainSwapData {
     /// BIP32 derivation index for the refund key.
     #[serde(default)]
     pub refund_key_derivation_index: Option<u32>,
-    /// Script pubkey of the contract-store Ark-side VHTLC row for this swap.
+    /// Script pubkey of the contract-store Arkade-side VHTLC row for this swap.
     #[serde(default)]
     pub contract_script_pubkey: Option<ScriptBuf>,
 }
 
-/// Direction-specific Ark-side VHTLC inputs for a chain swap.
+/// Direction-specific Arkade-side VHTLC inputs for a chain swap.
 ///
 /// A Boltz chain swap always has two lockup legs:
 ///
 /// - `lockup_details`: the user's lockup leg (`user_lockup_*` in [`ChainSwapData`])
 /// - `claim_details`: Boltz's/server's lockup leg (`server_lockup_*` in [`ChainSwapData`])
 ///
-/// Exactly one of those legs is an Ark VHTLC; the other is an on-chain BTC HTLC. The Ark leg is
-/// the only part we persist in the contract manager as a [`VhtlcContract`]. This helper result
+/// Exactly one of those legs is an Arkade VHTLC; the other is an on-chain BTC HTLC. The Arkade leg
+/// is the only part we persist in the contract manager as a [`VhtlcContract`]. This helper result
 /// keeps the direction table in one place so creation, lazy migration, and spend paths all agree on
-/// which keys, address, timeouts, and wallet derivation index define the Ark-side VHTLC.
+/// which keys, address, timeouts, and wallet derivation index define the Arkade-side VHTLC.
 ///
 /// Direction table:
 ///
-/// | Direction | Ark-side leg | VHTLC receiver/claim key | VHTLC sender/refund key | Wallet key index |
+/// | Direction | Arkade-side leg | VHTLC receiver/claim key | VHTLC sender/refund key | Wallet key index |
 /// |-----------|--------------|--------------------------|-------------------------|------------------|
-/// | ARK → BTC | user's lockup (`lockup_details`) | Boltz server claim key | wallet refund key | refund key index |
-/// | BTC → ARK | server lockup (`claim_details`) | wallet claim key | Boltz server refund key | claim key index |
+/// | Arkade → BTC | user's lockup (`lockup_details`) | Boltz server claim key | wallet refund key | refund key index |
+/// | BTC → Arkade | server lockup (`claim_details`) | wallet claim key | Boltz server refund key | claim key index |
 ///
 /// The `address` is parsed and retained here because it is part of VHTLC reconstruction: we build
-/// candidate scripts against the current and deprecated Ark server signers, then keep the candidate
-/// whose Ark address matches the one Boltz returned for the Ark-side leg.
+/// candidate scripts against the current and deprecated Arkade server signers, then keep the
+/// candidate whose Arkade address matches the one Boltz returned for the Arkade-side leg.
 struct ChainVhtlcFields {
     claim_public_key: PublicKey,
     refund_public_key: PublicKey,
@@ -4600,7 +4600,7 @@ struct ChainVhtlcFields {
     key_derivation_index: Option<u32>,
 }
 
-/// Select the Ark-side VHTLC fields from chain-swap data.
+/// Select the Arkade-side VHTLC fields from chain-swap data.
 ///
 /// This deliberately accepts the raw fields rather than a [`ChainSwapData`] value so callers can
 /// use it before the swap row exists. Creation uses it to compute `contract_script_pubkey` first
@@ -4612,9 +4612,9 @@ struct ChainVhtlcFields {
 ///
 /// - `wallet_claim_public_key` / `wallet_refund_public_key` are the user's generated swap keys.
 /// - `server_claim_public_key` comes from Boltz `lockup_details.server_public_key` and is used when
-///   Boltz claims the user's ARK lockup in an ARK→BTC swap.
+///   Boltz claims the user's Arkade lockup in an Arkade→BTC swap.
 /// - `server_refund_public_key` comes from Boltz `claim_details.server_public_key` and is used when
-///   Boltz refunds its ARK lockup in a BTC→ARK swap.
+///   Boltz refunds its Arkade lockup in a BTC→Arkade swap.
 /// - `user_*` fields describe `lockup_details`; `server_*` fields describe `claim_details`.
 #[allow(clippy::too_many_arguments)]
 fn chain_vhtlc_fields(
@@ -4636,7 +4636,9 @@ fn chain_vhtlc_fields(
                 server_claim_public_key,
                 wallet_refund_public_key,
                 user_timeout_block_heights.ok_or_else(|| {
-                    Error::ad_hoc("chain swap is missing ARK-side VHTLC timeouts for user lockup")
+                    Error::ad_hoc(
+                        "chain swap is missing Arkade-side VHTLC timeouts for user lockup",
+                    )
                 })?,
                 user_lockup_address,
                 refund_key_derivation_index,
@@ -4645,7 +4647,9 @@ fn chain_vhtlc_fields(
                 wallet_claim_public_key,
                 server_refund_public_key,
                 server_timeout_block_heights.ok_or_else(|| {
-                    Error::ad_hoc("chain swap is missing ARK-side VHTLC timeouts for server lockup")
+                    Error::ad_hoc(
+                        "chain swap is missing Arkade-side VHTLC timeouts for server lockup",
+                    )
                 })?,
                 server_lockup_address,
                 claim_key_derivation_index,
@@ -5295,7 +5299,7 @@ mod tests {
         )
     }
 
-    // Expected Ark address from the fixture (vhtlc.json CSV > 16 case, testnet).
+    // Expected Arkade address from the fixture (vhtlc.json CSV > 16 case, testnet).
     const FIXTURE_ADDRESS: &str = "tark1qz4d2t2czchfaml2l3ad3gwde2qxpd0srhc7wkpnvtg99cnxyz8c3pnvvhnhumhwhqthmlxmdryakwx99s6508y8dunj9sty2p5mr7unh5re63";
 
     const BOLT11_FIXTURE: &str = "lnbcrt10u1p5d55pjpp56ms94rkev7tdrwqyus5a63lny2mqzq9vh2rq3u4ym3v4lxv6xl4qdql2djkuepqw3hjqs2jfvsxzerywfjhxuccqz95xqztfsp57x0nwf7nzsndjdrvsre570ehg0szw34l284hswdz6zpqvktq9mrs9qxpqysgqllgxhxeny0tvtnxuqgn4s0t2qamc6yqc4t3pe6p2x5lgs8v8r3vxzxp3a3ax9j7d2ta5cduddln8n9se7q0jgg7s0h8t2vhljlu3wkcps9k8xs";
