@@ -78,7 +78,7 @@ fn validate_invoice_description(description: Option<&str>) -> Result<(), Error> 
 }
 
 /// The type of a Boltz swap.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub enum SwapType {
     Submarine,
     Reverse,
@@ -420,7 +420,8 @@ where
     pub async fn wait_for_invoice_paid(&self, swap_id: &str) -> Result<[u8; 32], Error> {
         use futures::StreamExt;
 
-        let stream = self.subscribe_to_swap_updates(swap_id.to_string());
+        let stream =
+            self.subscribe_to_swap_updates_for_type(swap_id.to_string(), SwapType::Submarine);
         tokio::pin!(stream);
 
         while let Some(status_result) = stream.next().await {
@@ -1320,7 +1321,8 @@ where
     pub async fn wait_for_vhtlc_funding(&self, swap_id: &str) -> Result<(), Error> {
         use futures::StreamExt;
 
-        let stream = self.subscribe_to_swap_updates(swap_id.to_string());
+        let stream =
+            self.subscribe_to_swap_updates_for_type(swap_id.to_string(), SwapType::Reverse);
         tokio::pin!(stream);
 
         while let Some(status_result) = stream.next().await {
@@ -1581,7 +1583,8 @@ where
             ))
         })?;
 
-        let stream = self.subscribe_to_swap_updates(swap_id.to_string());
+        let stream =
+            self.subscribe_to_swap_updates_for_type(swap_id.to_string(), SwapType::Reverse);
         tokio::pin!(stream);
 
         while let Some(status_result) = stream.next().await {
@@ -1986,7 +1989,7 @@ where
     ) -> Result<Option<String>, Error> {
         use futures::StreamExt;
 
-        let stream = self.subscribe_to_swap_updates(swap_id.to_string());
+        let stream = self.subscribe_to_swap_updates_for_type(swap_id.to_string(), SwapType::Chain);
         tokio::pin!(stream);
 
         while let Some(status_result) = stream.next().await {
@@ -2691,15 +2694,7 @@ where
     /// for the live status.
     pub async fn get_swap_status(&self, swap_id: &str) -> Result<SwapStatusInfo, Error> {
         // Determine swap type from local storage.
-        let swap_type = if self.swap_storage().get_submarine(swap_id).await?.is_some() {
-            SwapType::Submarine
-        } else if self.swap_storage().get_reverse(swap_id).await?.is_some() {
-            SwapType::Reverse
-        } else if self.swap_storage().get_chain(swap_id).await?.is_some() {
-            SwapType::Chain
-        } else {
-            SwapType::Unknown
-        };
+        let swap_type = self.swap_type_for_id(swap_id).await?;
 
         // Query the Boltz API for live status.
         let url = format!("{}/v2/swap/{swap_id}", self.inner.boltz_url);
@@ -2727,7 +2722,7 @@ where
             .map_err(|e| Error::ad_hoc(e.to_string()))
             .context("failed to deserialize swap status response")?;
 
-        self.persist_swap_status(swap_id, status_response.status.clone())
+        self.persist_swap_status_for_type(swap_type, swap_id, status_response.status.clone())
             .await?;
 
         Ok(SwapStatusInfo {
@@ -2867,6 +2862,30 @@ where
         swap_id: String,
     ) -> impl futures::Stream<Item = Result<SwapStatus, Error>> + '_ {
         async_stream::stream! {
+            use futures::StreamExt;
+
+            let swap_type = match self.swap_type_for_id(&swap_id).await {
+                Ok(swap_type) => swap_type,
+                Err(error) => {
+                    yield Err(error);
+                    return;
+                }
+            };
+            let stream = self.subscribe_to_swap_updates_for_type(swap_id, swap_type);
+            tokio::pin!(stream);
+
+            while let Some(status) = stream.next().await {
+                yield status;
+            }
+        }
+    }
+
+    fn subscribe_to_swap_updates_for_type(
+        &self,
+        swap_id: String,
+        swap_type: SwapType,
+    ) -> impl futures::Stream<Item = Result<SwapStatus, Error>> + '_ {
+        async_stream::stream! {
             let mut last_status: Option<SwapStatus> = None;
             let url = format!("{}/v2/swap/{swap_id}", self.inner.boltz_url);
 
@@ -2890,7 +2909,7 @@ where
 
                                 // Only yield if status has changed
                                 if last_status.as_ref() != Some(&current_status) {
-                                    if let Err(e) = self.persist_swap_status(&swap_id, current_status.clone()).await {
+                                    if let Err(e) = self.persist_swap_status_for_type(swap_type, &swap_id, current_status.clone()).await {
                                         yield Err(e);
                                         break;
                                     }
@@ -3421,37 +3440,58 @@ where
         Ok(migrated)
     }
 
-    async fn persist_swap_status(&self, swap_id: &str, status: SwapStatus) -> Result<(), Error> {
-        if let Some(mut swap) = self.swap_storage().get_submarine(swap_id).await? {
-            swap.status = status.clone();
-            self.swap_storage()
-                .update_submarine(swap_id, swap.clone())
-                .await?;
-            if status.is_terminal() {
-                self.mark_vhtlc_contract_inactive(swap.contract_script_pubkey.as_ref())?;
-            }
-            return Ok(());
+    async fn swap_type_for_id(&self, swap_id: &str) -> Result<SwapType, Error> {
+        if self.swap_storage().get_submarine(swap_id).await?.is_some() {
+            Ok(SwapType::Submarine)
+        } else if self.swap_storage().get_reverse(swap_id).await?.is_some() {
+            Ok(SwapType::Reverse)
+        } else if self.swap_storage().get_chain(swap_id).await?.is_some() {
+            Ok(SwapType::Chain)
+        } else {
+            Ok(SwapType::Unknown)
         }
+    }
 
-        if let Some(mut swap) = self.swap_storage().get_reverse(swap_id).await? {
-            swap.status = status.clone();
-            self.swap_storage()
-                .update_reverse(swap_id, swap.clone())
-                .await?;
-            if status.is_terminal() {
-                self.mark_vhtlc_contract_inactive(swap.contract_script_pubkey.as_ref())?;
-            }
-            return Ok(());
-        }
+    async fn persist_swap_status_for_type(
+        &self,
+        swap_type: SwapType,
+        swap_id: &str,
+        status: SwapStatus,
+    ) -> Result<(), Error> {
+        let terminal = status.is_terminal();
 
-        if let Some(mut swap) = self.swap_storage().get_chain(swap_id).await? {
-            swap.status = status.clone();
-            self.swap_storage()
-                .update_chain(swap_id, swap.clone())
-                .await?;
-            if status.is_terminal() {
-                self.mark_vhtlc_contract_inactive(swap.contract_script_pubkey.as_ref())?;
+        match swap_type {
+            SwapType::Submarine => {
+                if let Some(mut swap) = self.swap_storage().get_submarine(swap_id).await? {
+                    swap.status = status;
+                    let contract_script_pubkey = swap.contract_script_pubkey.clone();
+                    self.swap_storage().update_submarine(swap_id, swap).await?;
+                    if terminal {
+                        self.mark_vhtlc_contract_inactive(contract_script_pubkey.as_ref())?;
+                    }
+                }
             }
+            SwapType::Reverse => {
+                if let Some(mut swap) = self.swap_storage().get_reverse(swap_id).await? {
+                    swap.status = status;
+                    let contract_script_pubkey = swap.contract_script_pubkey.clone();
+                    self.swap_storage().update_reverse(swap_id, swap).await?;
+                    if terminal {
+                        self.mark_vhtlc_contract_inactive(contract_script_pubkey.as_ref())?;
+                    }
+                }
+            }
+            SwapType::Chain => {
+                if let Some(mut swap) = self.swap_storage().get_chain(swap_id).await? {
+                    swap.status = status;
+                    let contract_script_pubkey = swap.contract_script_pubkey.clone();
+                    self.swap_storage().update_chain(swap_id, swap).await?;
+                    if terminal {
+                        self.mark_vhtlc_contract_inactive(contract_script_pubkey.as_ref())?;
+                    }
+                }
+            }
+            SwapType::Unknown => {}
         }
 
         Ok(())
@@ -5505,7 +5545,11 @@ mod tests {
             .unwrap();
 
         client
-            .persist_swap_status(&swap.id, SwapStatus::TransactionClaimed)
+            .persist_swap_status_for_type(
+                SwapType::Submarine,
+                &swap.id,
+                SwapStatus::TransactionClaimed,
+            )
             .await
             .unwrap();
 
@@ -5542,7 +5586,7 @@ mod tests {
             .unwrap();
 
         client
-            .persist_swap_status(&swap.id, SwapStatus::InvoiceExpired)
+            .persist_swap_status_for_type(SwapType::Reverse, &swap.id, SwapStatus::InvoiceExpired)
             .await
             .unwrap();
 
@@ -5580,7 +5624,11 @@ mod tests {
             .unwrap();
 
         client
-            .persist_swap_status(&swap.id, SwapStatus::TransactionRefunded)
+            .persist_swap_status_for_type(
+                SwapType::Chain,
+                &swap.id,
+                SwapStatus::TransactionRefunded,
+            )
             .await
             .unwrap();
 
@@ -5617,7 +5665,11 @@ mod tests {
             .unwrap();
 
         client
-            .persist_swap_status(&swap.id, SwapStatus::TransactionMempool)
+            .persist_swap_status_for_type(
+                SwapType::Submarine,
+                &swap.id,
+                SwapStatus::TransactionMempool,
+            )
             .await
             .unwrap();
 
