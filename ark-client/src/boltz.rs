@@ -2744,7 +2744,7 @@ where
             .map_err(|e| Error::ad_hoc(e.to_string()))?;
 
         // Fetch submarine swap fees (Arkade -> BTC)
-        let submarine_url = format!("{}/v2/swap/submarine", &self.inner.boltz_url);
+        let submarine_url = format!("{}/v2/swap/submarine", self.inner.boltz_url);
         let submarine_response = client
             .get(&submarine_url)
             .send()
