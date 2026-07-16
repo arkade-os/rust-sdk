@@ -4326,12 +4326,31 @@ where
     let mut infos = Vec::new();
 
     for mut swap in submarine_swaps {
-        if client.vhtlc_contract_is_inactive(swap.contract_script_pubkey.as_ref())? {
-            continue;
+        match client.vhtlc_contract_is_inactive(swap.contract_script_pubkey.as_ref()) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    swap_id = %swap.id,
+                    ?error,
+                    "Skipping submarine swap after VHTLC contract state check failed"
+                );
+                continue;
+            }
         }
-        let vhtlc = client
-            .submarine_vhtlc_script(&mut swap, &server_info)
-            .await?;
+
+        let vhtlc = match client.submarine_vhtlc_script(&mut swap, &server_info).await {
+            Ok(vhtlc) => vhtlc,
+            Err(error) => {
+                tracing::warn!(
+                    swap_id = %swap.id,
+                    ?error,
+                    "Skipping submarine swap after VHTLC reconstruction failed"
+                );
+                continue;
+            }
+        };
+
         infos.push(VhtlcLifecycleInfo {
             swap_id: swap.id.clone(),
             swap_type: SwapType::Submarine,
@@ -4341,10 +4360,31 @@ where
     }
 
     for mut swap in reverse_swaps {
-        if client.vhtlc_contract_is_inactive(swap.contract_script_pubkey.as_ref())? {
-            continue;
+        match client.vhtlc_contract_is_inactive(swap.contract_script_pubkey.as_ref()) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    swap_id = %swap.id,
+                    ?error,
+                    "Skipping reverse swap after VHTLC contract state check failed"
+                );
+                continue;
+            }
         }
-        let vhtlc = client.reverse_vhtlc_script(&mut swap, &server_info).await?;
+
+        let vhtlc = match client.reverse_vhtlc_script(&mut swap, &server_info).await {
+            Ok(vhtlc) => vhtlc,
+            Err(error) => {
+                tracing::warn!(
+                    swap_id = %swap.id,
+                    ?error,
+                    "Skipping reverse swap after VHTLC reconstruction failed"
+                );
+                continue;
+            }
+        };
+
         infos.push(VhtlcLifecycleInfo {
             swap_id: swap.id.clone(),
             swap_type: SwapType::Reverse,
@@ -4354,9 +4394,19 @@ where
     }
 
     for mut swap in chain_swaps {
-        if client.vhtlc_contract_is_inactive(swap.contract_script_pubkey.as_ref())? {
-            continue;
+        match client.vhtlc_contract_is_inactive(swap.contract_script_pubkey.as_ref()) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    swap_id = %swap.id,
+                    ?error,
+                    "Skipping chain swap after VHTLC contract state check failed"
+                );
+                continue;
+            }
         }
+
         let address = match swap.chain_vhtlc_address() {
             Ok(address) => address,
             Err(error) => {
@@ -4368,7 +4418,19 @@ where
                 continue;
             }
         };
-        let vhtlc = client.chain_vhtlc_script(&mut swap, &server_info).await?;
+
+        let vhtlc = match client.chain_vhtlc_script(&mut swap, &server_info).await {
+            Ok(vhtlc) => vhtlc,
+            Err(error) => {
+                tracing::warn!(
+                    swap_id = %swap.id,
+                    ?error,
+                    "Skipping chain swap after VHTLC reconstruction failed"
+                );
+                continue;
+            }
+        };
+
         infos.push(VhtlcLifecycleInfo {
             swap_id: swap.id.clone(),
             swap_type: SwapType::Chain,
