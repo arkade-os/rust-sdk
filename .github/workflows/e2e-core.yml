@@ -85,8 +85,10 @@ jobs:
       # enabled for the e2e_boltz_* binaries. The orchestrator waits for the
       # stack to be ready and self-funds arkd before returning.
       - name: Start regtest stack
+        env:
+          TEST_BINARY: ${{ matrix.test-binary }}
         run: |
-          test_name=$(basename "${{ matrix.test-binary }}")
+          test_name=$(basename "$TEST_BINARY")
           profiles=(--profile emulator)
           if [[ "$test_name" == e2e_boltz* ]]; then
             profiles+=(--profile boltz)
@@ -99,10 +101,11 @@ jobs:
         env:
           INTROSPECTOR_URL: http://127.0.0.1:7073
           REGTEST_DIR: ${{ github.workspace }}/regtest
+          TEST_BINARY: ${{ matrix.test-binary }}
         run: |
-          test_name=$(basename ${{ matrix.test-binary }})
+          test_name=$(basename "$TEST_BINARY")
           echo "Running test: $test_name"
-          ${{ matrix.test-binary }} --ignored --test-threads=1 --nocapture
+          "$TEST_BINARY" --ignored --test-threads=1 --nocapture
 
       - name: Print container logs on failure
         if: failure()
