@@ -182,6 +182,21 @@ pub struct PendingVhtlcSpendTx {
     pub pending_tx: PendingTx,
 }
 
+/// Configuration for the background Boltz VHTLC watcher.
+#[derive(Clone, Copy, Debug)]
+pub struct BoltzVhtlcWatcherConfig {
+    /// How often to refresh the VHTLC subscription and retry status-driven refund actions.
+    pub refresh_interval: Duration,
+}
+
+impl Default for BoltzVhtlcWatcherConfig {
+    fn default() -> Self {
+        Self {
+            refresh_interval: VHTLC_WATCHER_REFRESH_INTERVAL,
+        }
+    }
+}
+
 /// Handle to stop the background Boltz VHTLC watcher.
 pub struct BoltzVhtlcWatcherHandle {
     stop_tx: tokio::sync::watch::Sender<bool>,
@@ -3021,10 +3036,22 @@ where
         B: Send + Sync + 'static,
         W: Send + Sync + 'static,
     {
+        self.start_boltz_vhtlc_watcher_with_config(BoltzVhtlcWatcherConfig::default())
+    }
+
+    /// Start a background watcher for active Boltz VHTLC contracts with custom configuration.
+    pub fn start_boltz_vhtlc_watcher_with_config(
+        self: &Arc<Self>,
+        config: BoltzVhtlcWatcherConfig,
+    ) -> BoltzVhtlcWatcherHandle
+    where
+        B: Send + Sync + 'static,
+        W: Send + Sync + 'static,
+    {
         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
         let client = Arc::clone(self);
         tokio::spawn(async move {
-            run_boltz_vhtlc_watcher_loop(client, stop_rx).await;
+            run_boltz_vhtlc_watcher_loop(client, stop_rx, config).await;
             tracing::debug!("Boltz VHTLC watcher stopped");
         });
         BoltzVhtlcWatcherHandle { stop_tx }
@@ -4268,17 +4295,27 @@ where
 async fn run_boltz_vhtlc_watcher_loop<B, W, S>(
     client: Arc<Client<B, W, S>>,
     mut stop_rx: tokio::sync::watch::Receiver<bool>,
+    config: BoltzVhtlcWatcherConfig,
 ) where
     B: Blockchain + Send + Sync + 'static,
     W: OnchainWallet + Send + Sync + 'static,
     S: SwapStorage + 'static,
 {
+    let refresh_interval = if config.refresh_interval.is_zero() {
+        VHTLC_WATCHER_REFRESH_INTERVAL
+    } else {
+        config.refresh_interval
+    };
     let mut backoff = VHTLC_WATCHER_INITIAL_BACKOFF;
     let mut action_log = BoltzVhtlcActionLog::default();
 
     loop {
         if *stop_rx.borrow() {
             return;
+        }
+
+        if let Err(error) = drive_refundable_vhtlc_swaps(client.as_ref(), &mut action_log).await {
+            tracing::warn!(?error, "Failed to drive refundable VHTLC swaps");
         }
 
         let addresses = match active_vhtlc_addresses(client.as_ref()).await {
@@ -4294,7 +4331,7 @@ async fn run_boltz_vhtlc_watcher_loop<B, W, S>(
         };
 
         if addresses.is_empty() {
-            if wait_for_vhtlc_watcher_retry(&mut stop_rx, VHTLC_WATCHER_REFRESH_INTERVAL).await {
+            if wait_for_vhtlc_watcher_retry(&mut stop_rx, refresh_interval).await {
                 return;
             }
             backoff = VHTLC_WATCHER_INITIAL_BACKOFF;
@@ -4331,7 +4368,7 @@ async fn run_boltz_vhtlc_watcher_loop<B, W, S>(
         );
         backoff = VHTLC_WATCHER_INITIAL_BACKOFF;
         let mut subscribed_addrs: HashSet<ArkAddress> = addresses.into_iter().collect();
-        let mut refresh_interval = tokio::time::interval(VHTLC_WATCHER_REFRESH_INTERVAL);
+        let mut refresh_interval = tokio::time::interval(refresh_interval);
 
         loop {
             use futures::StreamExt;
