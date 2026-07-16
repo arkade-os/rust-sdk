@@ -76,6 +76,7 @@ mod utils;
 pub use ark_core::server::DeprecatedSignerStatus;
 pub use ark_core::server::ServerSignerStatus;
 pub use asset::IssueAssetResult;
+pub use boltz::BoltzVhtlcWatcherHandle;
 pub use boltz::ChainSwapAmount;
 pub use boltz::ChainSwapData;
 pub use boltz::ChainSwapDirection;

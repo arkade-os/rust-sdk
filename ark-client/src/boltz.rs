@@ -23,6 +23,8 @@ use ark_core::send::VtxoInput;
 use ark_core::server::parse_sequence_number;
 use ark_core::server::Info;
 use ark_core::server::PendingTx;
+use ark_core::server::SubscriptionEvent;
+use ark_core::server::SubscriptionResponse;
 use ark_core::vhtlc::VhtlcOptions;
 use ark_core::vhtlc::VhtlcScript;
 use ark_core::ArkAddress;
@@ -55,6 +57,8 @@ use serde::Serialize;
 use serde_with::serde_as;
 use serde_with::DisplayFromStr;
 use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -63,6 +67,9 @@ use std::time::UNIX_EPOCH;
 /// BOLT11 tagged fields use a 10-bit length in 5-bit groups, capping the payload at
 /// `floor(1023 * 5 / 8) = 639` UTF-8 bytes.
 const MAX_BOLT11_DESCRIPTION_BYTES: usize = 639;
+const VHTLC_WATCHER_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+const VHTLC_WATCHER_MAX_BACKOFF: Duration = Duration::from_secs(30);
+const VHTLC_WATCHER_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 
 fn validate_invoice_description(description: Option<&str>) -> Result<(), Error> {
     if let Some(d) = description {
@@ -171,6 +178,24 @@ impl PendingVhtlcSpendType {
 pub struct PendingVhtlcSpendTx {
     pub spend_type: PendingVhtlcSpendType,
     pub pending_tx: PendingTx,
+}
+
+/// Handle to stop the background Boltz VHTLC watcher.
+pub struct BoltzVhtlcWatcherHandle {
+    stop_tx: tokio::sync::watch::Sender<bool>,
+}
+
+impl BoltzVhtlcWatcherHandle {
+    /// Stop the background watcher.
+    pub fn stop(self) {
+        let _ = self.stop_tx.send(true);
+    }
+}
+
+impl Drop for BoltzVhtlcWatcherHandle {
+    fn drop(&mut self) {
+        let _ = self.stop_tx.send(true);
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -493,7 +518,7 @@ where
                                     }
                                 }
 
-                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                tokio::time::sleep(Duration::from_secs(1)).await;
                             }
                         }
                         SwapStatus::InvoiceExpired => {
@@ -2924,6 +2949,25 @@ where
         }
     }
 
+    /// Start a background watcher for active Boltz VHTLC contracts.
+    ///
+    /// The watcher subscribes directly to active VHTLC scripts and reconciles contract state from
+    /// VTXO events. This keeps VHTLC lifecycle handling event-driven instead of tying contract
+    /// deactivation to Boltz status polling.
+    pub fn start_boltz_vhtlc_watcher(self: &Arc<Self>) -> BoltzVhtlcWatcherHandle
+    where
+        B: Send + Sync + 'static,
+        W: Send + Sync + 'static,
+    {
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let client = Arc::clone(self);
+        tokio::spawn(async move {
+            run_boltz_vhtlc_watcher_loop(client, stop_rx).await;
+            tracing::debug!("Boltz VHTLC watcher stopped");
+        });
+        BoltzVhtlcWatcherHandle { stop_tx }
+    }
+
     fn subscribe_to_swap_updates_for_type(
         &self,
         swap_id: String,
@@ -2988,7 +3032,7 @@ where
                 }
 
                 // Poll every second
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
         }
     }
@@ -3525,53 +3569,62 @@ where
         match swap_type {
             SwapType::Submarine => {
                 if let Some(mut swap) = self.swap_storage().get_submarine(swap_id).await? {
+                    let should_reconcile = swap.status != status && status.is_terminal();
                     let vhtlc_address = swap.vhtlc_address;
                     let contract_script_pubkey = swap.contract_script_pubkey.clone();
                     swap.status = status;
                     self.swap_storage().update_submarine(swap_id, swap).await?;
-                    self.best_effort_reconcile_vhtlc_contract_state_from_vtxos(
-                        swap_id,
-                        vhtlc_address,
-                        contract_script_pubkey,
-                    )
-                    .await;
+                    if should_reconcile {
+                        self.best_effort_reconcile_vhtlc_contract_state_from_vtxos(
+                            swap_id,
+                            vhtlc_address,
+                            contract_script_pubkey,
+                        )
+                        .await;
+                    }
                 }
             }
             SwapType::Reverse => {
                 if let Some(mut swap) = self.swap_storage().get_reverse(swap_id).await? {
+                    let should_reconcile = swap.status != status && status.is_terminal();
                     let vhtlc_address = swap.vhtlc_address;
                     let contract_script_pubkey = swap.contract_script_pubkey.clone();
                     swap.status = status;
                     self.swap_storage().update_reverse(swap_id, swap).await?;
-                    self.best_effort_reconcile_vhtlc_contract_state_from_vtxos(
-                        swap_id,
-                        vhtlc_address,
-                        contract_script_pubkey,
-                    )
-                    .await;
+                    if should_reconcile {
+                        self.best_effort_reconcile_vhtlc_contract_state_from_vtxos(
+                            swap_id,
+                            vhtlc_address,
+                            contract_script_pubkey,
+                        )
+                        .await;
+                    }
                 }
             }
             SwapType::Chain => {
                 if let Some(mut swap) = self.swap_storage().get_chain(swap_id).await? {
+                    let should_reconcile = swap.status != status && status.is_terminal();
                     let vhtlc_address = swap.chain_vhtlc_address();
                     let contract_script_pubkey = swap.contract_script_pubkey.clone();
                     swap.status = status;
                     self.swap_storage().update_chain(swap_id, swap).await?;
-                    match vhtlc_address {
-                        Ok(vhtlc_address) => {
-                            self.best_effort_reconcile_vhtlc_contract_state_from_vtxos(
-                                swap_id,
-                                vhtlc_address,
-                                contract_script_pubkey,
-                            )
-                            .await;
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                swap_id,
-                                ?error,
-                                "Failed to resolve chain VHTLC address during contract-state reconciliation"
-                            );
+                    if should_reconcile {
+                        match vhtlc_address {
+                            Ok(vhtlc_address) => {
+                                self.best_effort_reconcile_vhtlc_contract_state_from_vtxos(
+                                    swap_id,
+                                    vhtlc_address,
+                                    contract_script_pubkey,
+                                )
+                                .await;
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    swap_id,
+                                    ?error,
+                                    "Failed to resolve chain VHTLC address during contract-state reconciliation"
+                                );
+                            }
                         }
                     }
                 }
@@ -4147,6 +4200,212 @@ where
             .ok_or_else(|| Error::ad_hoc("checkpoint PSBT has no inputs"))?
             .witness_script = Some(witness_script);
         Ok(())
+    }
+}
+
+async fn run_boltz_vhtlc_watcher_loop<B, W, S>(
+    client: Arc<Client<B, W, S>>,
+    mut stop_rx: tokio::sync::watch::Receiver<bool>,
+) where
+    B: Blockchain + Send + Sync + 'static,
+    W: OnchainWallet + Send + Sync + 'static,
+    S: SwapStorage + 'static,
+{
+    let mut backoff = VHTLC_WATCHER_INITIAL_BACKOFF;
+
+    loop {
+        if *stop_rx.borrow() {
+            return;
+        }
+
+        let addresses = match active_vhtlc_addresses(client.as_ref()).await {
+            Ok(addresses) => addresses,
+            Err(error) => {
+                tracing::warn!(?error, "Failed to collect active VHTLC addresses");
+                if wait_for_vhtlc_watcher_retry(&mut stop_rx, backoff).await {
+                    return;
+                }
+                backoff = (backoff * 2).min(VHTLC_WATCHER_MAX_BACKOFF);
+                continue;
+            }
+        };
+
+        if addresses.is_empty() {
+            if wait_for_vhtlc_watcher_retry(&mut stop_rx, VHTLC_WATCHER_REFRESH_INTERVAL).await {
+                return;
+            }
+            backoff = VHTLC_WATCHER_INITIAL_BACKOFF;
+            continue;
+        }
+
+        let subscription_id = match client.subscribe_to_scripts(addresses.clone(), None).await {
+            Ok(subscription_id) => subscription_id,
+            Err(error) => {
+                tracing::warn!(?error, "Failed to subscribe to VHTLC scripts");
+                if wait_for_vhtlc_watcher_retry(&mut stop_rx, backoff).await {
+                    return;
+                }
+                backoff = (backoff * 2).min(VHTLC_WATCHER_MAX_BACKOFF);
+                continue;
+            }
+        };
+
+        let mut stream = match client.get_subscription(subscription_id.clone()).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                tracing::warn!(?error, "Failed to open VHTLC subscription stream");
+                if wait_for_vhtlc_watcher_retry(&mut stop_rx, backoff).await {
+                    return;
+                }
+                backoff = (backoff * 2).min(VHTLC_WATCHER_MAX_BACKOFF);
+                continue;
+            }
+        };
+
+        tracing::info!(
+            watched_scripts = addresses.len(),
+            "Boltz VHTLC watcher connected"
+        );
+        backoff = VHTLC_WATCHER_INITIAL_BACKOFF;
+        let mut subscribed_addrs: std::collections::HashSet<ArkAddress> =
+            addresses.into_iter().collect();
+        let mut refresh_interval = tokio::time::interval(VHTLC_WATCHER_REFRESH_INTERVAL);
+
+        loop {
+            use futures::StreamExt;
+
+            tokio::select! {
+                _ = stop_rx.changed() => return,
+                _ = refresh_interval.tick() => {
+                    if let Err(error) = refresh_boltz_vhtlc_subscription(
+                        client.as_ref(),
+                        &subscription_id,
+                        &mut subscribed_addrs,
+                    ).await {
+                        tracing::warn!(?error, "Failed to refresh VHTLC watcher subscription");
+                    }
+                }
+                event = stream.next() => {
+                    match event {
+                        Some(Ok(SubscriptionResponse::Heartbeat)) => {}
+                        Some(Ok(SubscriptionResponse::Event(event))) => {
+                            if let Err(error) = handle_boltz_vhtlc_subscription_event(client.as_ref(), &event).await {
+                                tracing::warn!(?error, "Failed to handle VHTLC subscription event");
+                            }
+                        }
+                        Some(Err(error)) => {
+                            tracing::warn!(?error, "VHTLC subscription stream error");
+                            break;
+                        }
+                        None => {
+                            tracing::debug!("VHTLC subscription stream ended");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if wait_for_vhtlc_watcher_retry(&mut stop_rx, backoff).await {
+            return;
+        }
+        backoff = (backoff * 2).min(VHTLC_WATCHER_MAX_BACKOFF);
+    }
+}
+
+async fn active_vhtlc_addresses<B, W, S>(client: &Client<B, W, S>) -> Result<Vec<ArkAddress>, Error>
+where
+    B: Blockchain,
+    W: OnchainWallet,
+    S: SwapStorage + 'static,
+{
+    let infos = client.collect_active_vhtlc_infos().await?;
+    Ok(infos.into_iter().map(|info| info.address).collect())
+}
+
+async fn refresh_boltz_vhtlc_subscription<B, W, S>(
+    client: &Client<B, W, S>,
+    subscription_id: &str,
+    subscribed_addrs: &mut std::collections::HashSet<ArkAddress>,
+) -> Result<(), Error>
+where
+    B: Blockchain,
+    W: OnchainWallet,
+    S: SwapStorage + 'static,
+{
+    let new_addrs: Vec<_> = active_vhtlc_addresses(client)
+        .await?
+        .into_iter()
+        .filter(|address| !subscribed_addrs.contains(address))
+        .collect();
+
+    if new_addrs.is_empty() {
+        return Ok(());
+    }
+
+    client
+        .subscribe_to_scripts(new_addrs.clone(), Some(subscription_id.to_string()))
+        .await?;
+
+    let added = new_addrs.len();
+    subscribed_addrs.extend(new_addrs);
+    tracing::info!(added, "Updated VHTLC watcher subscription");
+    Ok(())
+}
+
+async fn handle_boltz_vhtlc_subscription_event<B, W, S>(
+    client: &Client<B, W, S>,
+    event: &SubscriptionEvent,
+) -> Result<(), Error>
+where
+    B: Blockchain,
+    W: OnchainWallet,
+    S: SwapStorage + 'static,
+{
+    if event.new_vtxos.is_empty() && event.spent_vtxos.is_empty() {
+        return Ok(());
+    }
+
+    tracing::debug!(
+        txid = %event.txid,
+        new_vtxos = event.new_vtxos.len(),
+        spent_vtxos = event.spent_vtxos.len(),
+        "Received VHTLC subscription event"
+    );
+
+    if event.spent_vtxos.is_empty() {
+        return Ok(());
+    }
+
+    let infos = client.collect_active_vhtlc_infos().await?;
+    let info_by_script: std::collections::HashMap<_, _> = infos
+        .into_iter()
+        .map(|info| (info.script_pubkey.clone(), info))
+        .collect();
+
+    for spent_vtxo in &event.spent_vtxos {
+        let Some(info) = info_by_script.get(&spent_vtxo.script) else {
+            continue;
+        };
+        client
+            .reconcile_vhtlc_contract_state_from_vtxos(
+                &info.swap_id,
+                info.address,
+                Some(info.script_pubkey.clone()),
+            )
+            .await?;
+    }
+
+    Ok(())
+}
+
+async fn wait_for_vhtlc_watcher_retry(
+    stop_rx: &mut tokio::sync::watch::Receiver<bool>,
+    duration: Duration,
+) -> bool {
+    tokio::select! {
+        _ = stop_rx.changed() => true,
+        _ = tokio::time::sleep(duration) => false,
     }
 }
 
