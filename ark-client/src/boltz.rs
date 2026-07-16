@@ -3443,62 +3443,65 @@ where
     ) -> Result<(), Error> {
         match swap_type {
             SwapType::Submarine => {
-                if let Some(mut swap) = self.swap_storage().get_submarine(swap_id).await? {
+                if let Some(swap) = self.swap_storage().get_submarine(swap_id).await? {
                     let should_reconcile = swap.status != status && status.is_terminal();
-                    let vhtlc_address = swap.vhtlc_address;
-                    let contract_script_pubkey = swap.contract_script_pubkey.clone();
-                    swap.status = status;
-                    self.swap_storage().update_submarine(swap_id, swap).await?;
+                    self.swap_storage()
+                        .update_status_submarine(swap_id, status)
+                        .await?;
                     if should_reconcile {
-                        self.best_effort_reconcile_vhtlc_contract_state_from_vtxos(
-                            swap_id,
-                            vhtlc_address,
-                            contract_script_pubkey,
-                        )
-                        .await;
+                        if let Some(swap) = self.swap_storage().get_submarine(swap_id).await? {
+                            self.best_effort_reconcile_vhtlc_contract_state_from_vtxos(
+                                swap_id,
+                                swap.vhtlc_address,
+                                swap.contract_script_pubkey,
+                            )
+                            .await;
+                        }
                     }
                 }
             }
             SwapType::Reverse => {
-                if let Some(mut swap) = self.swap_storage().get_reverse(swap_id).await? {
+                if let Some(swap) = self.swap_storage().get_reverse(swap_id).await? {
                     let should_reconcile = swap.status != status && status.is_terminal();
-                    let vhtlc_address = swap.vhtlc_address;
-                    let contract_script_pubkey = swap.contract_script_pubkey.clone();
-                    swap.status = status;
-                    self.swap_storage().update_reverse(swap_id, swap).await?;
+                    self.swap_storage()
+                        .update_status_reverse(swap_id, status)
+                        .await?;
                     if should_reconcile {
-                        self.best_effort_reconcile_vhtlc_contract_state_from_vtxos(
-                            swap_id,
-                            vhtlc_address,
-                            contract_script_pubkey,
-                        )
-                        .await;
+                        if let Some(swap) = self.swap_storage().get_reverse(swap_id).await? {
+                            self.best_effort_reconcile_vhtlc_contract_state_from_vtxos(
+                                swap_id,
+                                swap.vhtlc_address,
+                                swap.contract_script_pubkey,
+                            )
+                            .await;
+                        }
                     }
                 }
             }
             SwapType::Chain => {
-                if let Some(mut swap) = self.swap_storage().get_chain(swap_id).await? {
+                if let Some(swap) = self.swap_storage().get_chain(swap_id).await? {
                     let should_reconcile = swap.status != status && status.is_terminal();
-                    let vhtlc_address = swap.chain_vhtlc_address();
-                    let contract_script_pubkey = swap.contract_script_pubkey.clone();
-                    swap.status = status;
-                    self.swap_storage().update_chain(swap_id, swap).await?;
+                    self.swap_storage()
+                        .update_status_chain(swap_id, status)
+                        .await?;
                     if should_reconcile {
-                        match vhtlc_address {
-                            Ok(vhtlc_address) => {
-                                self.best_effort_reconcile_vhtlc_contract_state_from_vtxos(
-                                    swap_id,
-                                    vhtlc_address,
-                                    contract_script_pubkey,
-                                )
-                                .await;
-                            }
-                            Err(error) => {
-                                tracing::warn!(
-                                    swap_id,
-                                    ?error,
-                                    "Failed to resolve chain VHTLC address during contract-state reconciliation"
-                                );
+                        if let Some(swap) = self.swap_storage().get_chain(swap_id).await? {
+                            match swap.chain_vhtlc_address() {
+                                Ok(vhtlc_address) => {
+                                    self.best_effort_reconcile_vhtlc_contract_state_from_vtxos(
+                                        swap_id,
+                                        vhtlc_address,
+                                        swap.contract_script_pubkey,
+                                    )
+                                    .await;
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        swap_id,
+                                        ?error,
+                                        "Failed to resolve chain VHTLC address during contract-state reconciliation"
+                                    );
+                                }
                             }
                         }
                     }
@@ -4686,11 +4689,15 @@ where
     W: OnchainWallet,
     S: SwapStorage + 'static,
 {
-    if let Some(mut swap) = client.swap_storage().get_submarine(swap_id).await? {
-        swap.status = status;
+    if client
+        .swap_storage()
+        .get_submarine(swap_id)
+        .await?
+        .is_some()
+    {
         client
             .swap_storage()
-            .update_submarine(swap_id, swap)
+            .update_status_submarine(swap_id, status)
             .await?;
     }
     Ok(())
@@ -4706,9 +4713,11 @@ where
     W: OnchainWallet,
     S: SwapStorage + 'static,
 {
-    if let Some(mut swap) = client.swap_storage().get_reverse(swap_id).await? {
-        swap.status = status;
-        client.swap_storage().update_reverse(swap_id, swap).await?;
+    if client.swap_storage().get_reverse(swap_id).await?.is_some() {
+        client
+            .swap_storage()
+            .update_status_reverse(swap_id, status)
+            .await?;
     }
     Ok(())
 }
