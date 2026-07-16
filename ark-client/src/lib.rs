@@ -866,15 +866,6 @@ where
             server_info_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
 
-        client.hydrate_persisted_contract_keys()?;
-
-        // Eagerly persist the bounded baseline contract set. This mirrors the TS SDK split:
-        // connect() registers the always-watched index-0/current-key surface, while full
-        // gap-limit wallet regeneration is explicit via restore_contracts().
-        if let Err(error) = client.persist_baseline_contracts(&server_info) {
-            tracing::warn!(?error, "Failed to persist baseline contracts at connect");
-        }
-
         match client.migrate_boltz_vhtlc_contracts(&server_info).await {
             Ok(migrated) if migrated > 0 => {
                 tracing::info!(migrated, "Migrated Boltz VHTLC contracts at connect");
@@ -883,6 +874,15 @@ where
             Err(error) => {
                 tracing::warn!(?error, "Failed to migrate Boltz VHTLC contracts at connect");
             }
+        }
+
+        client.hydrate_persisted_contract_keys()?;
+
+        // Eagerly persist the bounded baseline contract set. This mirrors the TS SDK split:
+        // connect() registers the always-watched index-0/current-key surface, while full
+        // gap-limit wallet regeneration is explicit via restore_contracts().
+        if let Err(error) = client.persist_baseline_contracts(&server_info) {
+            tracing::warn!(?error, "Failed to persist baseline contracts at connect");
         }
 
         Ok(client)
