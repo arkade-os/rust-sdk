@@ -173,6 +173,50 @@ pub struct PendingVhtlcSpendTx {
     pub pending_tx: PendingTx,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VhtlcContractLiveness {
+    /// No VTXO exists yet. Keep watching: the VHTLC may still be funded later.
+    Unfunded,
+    /// A spend was submitted but not finalized. Keep active for pending-tx recovery.
+    PendingSpend,
+    /// VTXO exists and can still be spent cooperatively/offchain.
+    Funded,
+    /// VTXO exists and is recoverable/settleable.
+    Recoverable,
+    /// VTXO existed and no longer has any actionable offchain/recovery state.
+    Spent,
+}
+
+impl VhtlcContractLiveness {
+    fn should_deactivate_contract(self) -> bool {
+        matches!(self, Self::Spent)
+    }
+}
+
+fn classify_vhtlc_contract_liveness(
+    dust: Amount,
+    has_pending_spend: bool,
+    vtxos: Vec<ark_core::server::VirtualTxOutPoint>,
+) -> VhtlcContractLiveness {
+    if has_pending_spend {
+        return VhtlcContractLiveness::PendingSpend;
+    }
+
+    if vtxos.is_empty() {
+        return VhtlcContractLiveness::Unfunded;
+    }
+
+    let vtxos = VtxoList::new(dust, vtxos);
+    if vtxos.spendable_offchain().next().is_some() {
+        return VhtlcContractLiveness::Funded;
+    }
+    if vtxos.recoverable().next().is_some() {
+        return VhtlcContractLiveness::Recoverable;
+    }
+
+    VhtlcContractLiveness::Spent
+}
+
 impl<B, W, S> Client<B, W, S>
 where
     B: Blockchain,
@@ -2953,8 +2997,8 @@ where
 
     /// List pending (submitted but not finalized) VHTLC spend transactions.
     ///
-    /// This checks all non-terminal swaps in storage, queries the server for pending VTXOs
-    /// on their VHTLC addresses, and determines the spend type from the PSBT data.
+    /// This checks swaps whose VHTLC contract is still active, queries the server for pending
+    /// VTXOs on their VHTLC addresses, and determines the spend type from the PSBT data.
     pub async fn list_pending_vhtlc_spend_txs(&self) -> Result<Vec<PendingVhtlcSpendTx>, Error> {
         let vhtlc_infos = self.collect_active_vhtlc_infos().await?;
 
@@ -3392,9 +3436,12 @@ where
             }
             match self.submarine_vhtlc_script(&mut swap, server_info).await {
                 Ok(_) => {
-                    if swap.status.is_terminal() {
-                        self.mark_vhtlc_contract_inactive(swap.contract_script_pubkey.as_ref())?;
-                    }
+                    self.best_effort_reconcile_vhtlc_contract_state_from_vtxos(
+                        &swap.id,
+                        swap.vhtlc_address,
+                        swap.contract_script_pubkey.clone(),
+                    )
+                    .await;
                     migrated += 1;
                 }
                 Err(error) => {
@@ -3409,9 +3456,12 @@ where
             }
             match self.reverse_vhtlc_script(&mut swap, server_info).await {
                 Ok(_) => {
-                    if swap.status.is_terminal() {
-                        self.mark_vhtlc_contract_inactive(swap.contract_script_pubkey.as_ref())?;
-                    }
+                    self.best_effort_reconcile_vhtlc_contract_state_from_vtxos(
+                        &swap.id,
+                        swap.vhtlc_address,
+                        swap.contract_script_pubkey.clone(),
+                    )
+                    .await;
                     migrated += 1;
                 }
                 Err(error) => {
@@ -3426,8 +3476,22 @@ where
             }
             match self.chain_vhtlc_script(&mut swap, server_info).await {
                 Ok(_) => {
-                    if swap.status.is_terminal() {
-                        self.mark_vhtlc_contract_inactive(swap.contract_script_pubkey.as_ref())?;
+                    match swap.chain_vhtlc_address() {
+                        Ok(vhtlc_address) => {
+                            self.best_effort_reconcile_vhtlc_contract_state_from_vtxos(
+                                &swap.id,
+                                vhtlc_address,
+                                swap.contract_script_pubkey.clone(),
+                            )
+                            .await;
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                swap_id = %swap.id,
+                                ?error,
+                                "Failed to resolve chain VHTLC address during contract-state reconciliation"
+                            );
+                        }
                     }
                     migrated += 1;
                 }
@@ -3458,36 +3522,57 @@ where
         swap_id: &str,
         status: SwapStatus,
     ) -> Result<(), Error> {
-        let terminal = status.is_terminal();
-
         match swap_type {
             SwapType::Submarine => {
                 if let Some(mut swap) = self.swap_storage().get_submarine(swap_id).await? {
-                    swap.status = status;
+                    let vhtlc_address = swap.vhtlc_address;
                     let contract_script_pubkey = swap.contract_script_pubkey.clone();
+                    swap.status = status;
                     self.swap_storage().update_submarine(swap_id, swap).await?;
-                    if terminal {
-                        self.mark_vhtlc_contract_inactive(contract_script_pubkey.as_ref())?;
-                    }
+                    self.best_effort_reconcile_vhtlc_contract_state_from_vtxos(
+                        swap_id,
+                        vhtlc_address,
+                        contract_script_pubkey,
+                    )
+                    .await;
                 }
             }
             SwapType::Reverse => {
                 if let Some(mut swap) = self.swap_storage().get_reverse(swap_id).await? {
-                    swap.status = status;
+                    let vhtlc_address = swap.vhtlc_address;
                     let contract_script_pubkey = swap.contract_script_pubkey.clone();
+                    swap.status = status;
                     self.swap_storage().update_reverse(swap_id, swap).await?;
-                    if terminal {
-                        self.mark_vhtlc_contract_inactive(contract_script_pubkey.as_ref())?;
-                    }
+                    self.best_effort_reconcile_vhtlc_contract_state_from_vtxos(
+                        swap_id,
+                        vhtlc_address,
+                        contract_script_pubkey,
+                    )
+                    .await;
                 }
             }
             SwapType::Chain => {
                 if let Some(mut swap) = self.swap_storage().get_chain(swap_id).await? {
-                    swap.status = status;
+                    let vhtlc_address = swap.chain_vhtlc_address();
                     let contract_script_pubkey = swap.contract_script_pubkey.clone();
+                    swap.status = status;
                     self.swap_storage().update_chain(swap_id, swap).await?;
-                    if terminal {
-                        self.mark_vhtlc_contract_inactive(contract_script_pubkey.as_ref())?;
+                    match vhtlc_address {
+                        Ok(vhtlc_address) => {
+                            self.best_effort_reconcile_vhtlc_contract_state_from_vtxos(
+                                swap_id,
+                                vhtlc_address,
+                                contract_script_pubkey,
+                            )
+                            .await;
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                swap_id,
+                                ?error,
+                                "Failed to resolve chain VHTLC address during contract-state reconciliation"
+                            );
+                        }
                     }
                 }
             }
@@ -3516,6 +3601,84 @@ where
         Ok(stored.script_pubkey)
     }
 
+    async fn observe_vhtlc_contract_liveness(
+        &self,
+        server_info: &Info,
+        address: ArkAddress,
+    ) -> Result<VhtlcContractLiveness, Error> {
+        let pending_request =
+            ark_core::server::GetVtxosRequest::new_for_addresses(std::iter::once(address))
+                .pending_only()
+                .map_err(Error::from)?;
+        let pending_vtxos = self
+            .fetch_all_vtxos(pending_request)
+            .await
+            .context("failed to fetch pending VHTLC VTXOs")?;
+
+        let vtxos = self
+            .get_virtual_tx_outpoints(std::iter::once(address))
+            .await
+            .context("failed to fetch VHTLC VTXOs")?;
+
+        Ok(classify_vhtlc_contract_liveness(
+            server_info.dust,
+            !pending_vtxos.is_empty(),
+            vtxos,
+        ))
+    }
+
+    async fn reconcile_vhtlc_contract_state_from_vtxos(
+        &self,
+        swap_id: &str,
+        address: ArkAddress,
+        script_pubkey: Option<ScriptBuf>,
+    ) -> Result<(), Error> {
+        let Some(script_pubkey) = script_pubkey else {
+            return Ok(());
+        };
+
+        let server_info = self.server_info().await?;
+        let liveness = self
+            .observe_vhtlc_contract_liveness(&server_info, address)
+            .await?;
+
+        tracing::debug!(
+            swap_id,
+            %address,
+            ?liveness,
+            "Observed VHTLC contract liveness"
+        );
+
+        if liveness.should_deactivate_contract() {
+            self.mark_vhtlc_contract_inactive(Some(&script_pubkey))?;
+            tracing::info!(
+                swap_id,
+                %address,
+                "Marked spent VHTLC contract inactive"
+            );
+        }
+
+        Ok(())
+    }
+
+    async fn best_effort_reconcile_vhtlc_contract_state_from_vtxos(
+        &self,
+        swap_id: &str,
+        address: ArkAddress,
+        script_pubkey: Option<ScriptBuf>,
+    ) {
+        if let Err(error) = self
+            .reconcile_vhtlc_contract_state_from_vtxos(swap_id, address, script_pubkey)
+            .await
+        {
+            tracing::warn!(
+                swap_id,
+                ?error,
+                "Failed to reconcile VHTLC contract state from VTXO status"
+            );
+        }
+    }
+
     fn mark_vhtlc_contract_inactive(&self, script_pubkey: Option<&ScriptBuf>) -> Result<(), Error> {
         let Some(script_pubkey) = script_pubkey else {
             return Ok(());
@@ -3530,6 +3693,23 @@ where
             .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?
             .update_state(script_pubkey, ContractState::Inactive);
         result
+    }
+
+    fn vhtlc_contract_is_inactive(&self, script_pubkey: Option<&ScriptBuf>) -> Result<bool, Error> {
+        let Some(script_pubkey) = script_pubkey else {
+            return Ok(false);
+        };
+        let state = self
+            .state
+            .read()
+            .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+        let inactive = state
+            .contract_manager
+            .lock()
+            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?
+            .get(script_pubkey)?
+            .is_some_and(|contract| contract.state == ContractState::Inactive);
+        Ok(inactive)
     }
 
     fn get_vhtlc_contract(
@@ -3674,7 +3854,6 @@ where
         Ok(vhtlc)
     }
 
-    /// Collect info about all active (non-terminal) VHTLCs from swap storage.
     /// Ensure a swap key is loaded into the key provider's cache so
     /// `keypair_by_pk` can find it during intent signing.
     ///
@@ -3743,7 +3922,7 @@ where
         let mut infos = Vec::new();
 
         for mut swap in submarine_swaps {
-            if swap.status.is_terminal() {
+            if self.vhtlc_contract_is_inactive(swap.contract_script_pubkey.as_ref())? {
                 continue;
             }
 
@@ -3780,7 +3959,7 @@ where
         }
 
         for mut swap in reverse_swaps {
-            if swap.status.is_terminal() {
+            if self.vhtlc_contract_is_inactive(swap.contract_script_pubkey.as_ref())? {
                 continue;
             }
 
@@ -4270,7 +4449,11 @@ pub enum SwapStatus {
 }
 
 impl SwapStatus {
-    /// Whether this status represents a terminal state (swap is done, no further action needed).
+    /// Whether this status represents a Boltz-terminal lifecycle state.
+    ///
+    /// Do not use this to decide whether an Arkade-side VHTLC contract is inactive: a terminal
+    /// Boltz status can still leave a user-claimable/refundable VHTLC. Use observed VTXO liveness
+    /// for contract deactivation instead.
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
@@ -4826,6 +5009,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::RwLock;
+    use std::time::Duration;
     use std::time::Instant;
 
     #[derive(Clone)]
@@ -4971,6 +5155,7 @@ mod tests {
                 OfflineClientConfig {
                     ark_server_url: "http://127.0.0.1:1".to_string(),
                     boltz_url: "http://127.0.0.1:1".to_string(),
+                    timeout: Duration::from_millis(50),
                     ..Default::default()
                 },
                 keypair,
@@ -4990,6 +5175,69 @@ mod tests {
             })),
             server_info_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    fn fixture_vtxo(amount: Amount, is_spent: bool) -> ark_core::server::VirtualTxOutPoint {
+        ark_core::server::VirtualTxOutPoint {
+            outpoint: bitcoin::OutPoint {
+                txid: Txid::from_byte_array([1; 32]),
+                vout: 0,
+            },
+            created_at: 0,
+            expires_at: i64::MAX,
+            amount,
+            script: ScriptBuf::new(),
+            is_preconfirmed: false,
+            is_swept: false,
+            is_unrolled: false,
+            is_spent,
+            spent_by: None,
+            commitment_txids: Vec::new(),
+            settled_by: None,
+            ark_txid: None,
+            assets: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn classify_vhtlc_liveness_deactivates_only_spent_vtxos() {
+        let dust = Amount::from_sat(1000);
+
+        assert_eq!(
+            classify_vhtlc_contract_liveness(dust, true, Vec::new()),
+            VhtlcContractLiveness::PendingSpend
+        );
+        assert_eq!(
+            classify_vhtlc_contract_liveness(dust, false, Vec::new()),
+            VhtlcContractLiveness::Unfunded
+        );
+        assert_eq!(
+            classify_vhtlc_contract_liveness(
+                dust,
+                false,
+                vec![fixture_vtxo(Amount::from_sat(1000), false)]
+            ),
+            VhtlcContractLiveness::Funded
+        );
+        assert_eq!(
+            classify_vhtlc_contract_liveness(
+                dust,
+                false,
+                vec![fixture_vtxo(Amount::from_sat(1), false)]
+            ),
+            VhtlcContractLiveness::Recoverable
+        );
+        assert_eq!(
+            classify_vhtlc_contract_liveness(
+                dust,
+                false,
+                vec![fixture_vtxo(Amount::from_sat(1000), true)]
+            ),
+            VhtlcContractLiveness::Spent
+        );
+
+        assert!(VhtlcContractLiveness::Spent.should_deactivate_contract());
+        assert!(!VhtlcContractLiveness::Recoverable.should_deactivate_contract());
     }
 
     #[test]
@@ -5535,7 +5783,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_submarine_status_marks_vhtlc_contract_inactive() {
+    async fn terminal_submarine_status_keeps_vhtlc_contract_active_without_spent_vtxo() {
         let server_info = test_server_info();
         let client = test_client(server_info);
         let script_pubkey = client
@@ -5572,11 +5820,11 @@ mod tests {
             .get(&script_pubkey)
             .unwrap()
             .unwrap();
-        assert_eq!(stored.state, ContractState::Inactive);
+        assert_eq!(stored.state, ContractState::Active);
     }
 
     #[tokio::test]
-    async fn terminal_reverse_status_marks_vhtlc_contract_inactive() {
+    async fn terminal_reverse_status_keeps_vhtlc_contract_active_without_spent_vtxo() {
         let server_info = test_server_info();
         let client = test_client(server_info);
         let script_pubkey = client
@@ -5609,11 +5857,11 @@ mod tests {
             .get(&script_pubkey)
             .unwrap()
             .unwrap();
-        assert_eq!(stored.state, ContractState::Inactive);
+        assert_eq!(stored.state, ContractState::Active);
     }
 
     #[tokio::test]
-    async fn terminal_chain_status_marks_vhtlc_contract_inactive() {
+    async fn terminal_chain_status_keeps_vhtlc_contract_active_without_spent_vtxo() {
         let server_info = test_server_info();
         let client = test_client(server_info);
         let script_pubkey = client
@@ -5651,7 +5899,7 @@ mod tests {
             .get(&script_pubkey)
             .unwrap()
             .unwrap();
-        assert_eq!(stored.state, ContractState::Inactive);
+        assert_eq!(stored.state, ContractState::Active);
     }
 
     #[tokio::test]
@@ -5744,7 +5992,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn eager_migration_marks_terminal_swap_contract_inactive() {
+    async fn eager_migration_keeps_contract_active_without_spent_vtxo() {
         let server_info = test_server_info();
         let client = test_client(server_info.clone());
         let mut swap = fixture_submarine_swap(None);
@@ -5776,7 +6024,7 @@ mod tests {
             .get(&script_pubkey)
             .unwrap()
             .unwrap();
-        assert_eq!(stored.state, ContractState::Inactive);
+        assert_eq!(stored.state, ContractState::Active);
     }
 
     #[test]
