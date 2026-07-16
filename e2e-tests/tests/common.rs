@@ -710,16 +710,31 @@ struct LnAddInvoiceResponse {
 
 #[allow(unused)]
 pub async fn create_lnd_invoice(amount: Amount) -> Bolt11Invoice {
+    create_lnd_invoice_with_expiry(amount, None).await
+}
+
+#[allow(unused)]
+pub async fn create_lnd_invoice_with_expiry(
+    amount: Amount,
+    expiry_secs: Option<u64>,
+) -> Bolt11Invoice {
+    let amount = amount.to_sat().to_string();
+    let expiry = expiry_secs.map(|expiry| expiry.to_string());
+    let mut args = vec![
+        "exec",
+        "lnd",
+        "lncli",
+        "--network=regtest",
+        "addinvoice",
+        "--amt",
+        &amount,
+    ];
+    if let Some(expiry) = expiry.as_ref() {
+        args.extend(["--expiry", expiry]);
+    }
+
     let output = tokio::process::Command::new("docker")
-        .args([
-            "exec",
-            "lnd",
-            "lncli",
-            "--network=regtest",
-            "addinvoice",
-            "--amt",
-            &amount.to_sat().to_string(),
-        ])
+        .args(args)
         .output()
         .await
         .expect("failed to run lncli addinvoice");
