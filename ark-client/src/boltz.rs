@@ -2876,12 +2876,16 @@ where
                             Ok(current_status) => {
                                 let current_status = current_status.status;
 
-                                // Only yield if status has changed
-                                if last_status.as_ref() != Some(&current_status) {
+                                let status_changed = last_status.as_ref() != Some(&current_status);
+                                if status_changed || current_status.is_terminal() {
                                     if let Err(e) = self.persist_swap_status_for_type(swap_type, &swap_id, current_status.clone()).await {
                                         yield Err(e);
                                         break;
                                     }
+                                }
+
+                                // Only yield if status has changed.
+                                if status_changed {
                                     last_status = Some(current_status.clone());
                                     yield Ok(current_status);
                                 }
@@ -3449,8 +3453,8 @@ where
     ) -> Result<(), Error> {
         match swap_type {
             SwapType::Submarine => {
-                if let Some(swap) = self.swap_storage().get_submarine(swap_id).await? {
-                    let should_reconcile = swap.status != status && status.is_terminal();
+                if self.swap_storage().get_submarine(swap_id).await?.is_some() {
+                    let should_reconcile = status.is_terminal();
                     self.swap_storage()
                         .update_status_submarine(swap_id, status)
                         .await?;
@@ -3467,8 +3471,8 @@ where
                 }
             }
             SwapType::Reverse => {
-                if let Some(swap) = self.swap_storage().get_reverse(swap_id).await? {
-                    let should_reconcile = swap.status != status && status.is_terminal();
+                if self.swap_storage().get_reverse(swap_id).await?.is_some() {
+                    let should_reconcile = status.is_terminal();
                     self.swap_storage()
                         .update_status_reverse(swap_id, status)
                         .await?;
@@ -3485,8 +3489,8 @@ where
                 }
             }
             SwapType::Chain => {
-                if let Some(swap) = self.swap_storage().get_chain(swap_id).await? {
-                    let should_reconcile = swap.status != status && status.is_terminal();
+                if self.swap_storage().get_chain(swap_id).await?.is_some() {
+                    let should_reconcile = status.is_terminal();
                     self.swap_storage()
                         .update_status_chain(swap_id, status)
                         .await?;
@@ -3604,6 +3608,18 @@ where
         address: ArkAddress,
         script_pubkey: Option<ScriptBuf>,
     ) {
+        match self.vhtlc_contract_is_inactive(script_pubkey.as_ref()) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    swap_id,
+                    ?error,
+                    "Failed to check VHTLC contract state before reconciliation"
+                );
+            }
+        }
+
         if let Err(error) = self
             .reconcile_vhtlc_contract_state_from_vtxos(swap_id, address, script_pubkey)
             .await
