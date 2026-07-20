@@ -76,6 +76,8 @@ mod utils;
 pub use ark_core::server::DeprecatedSignerStatus;
 pub use ark_core::server::ServerSignerStatus;
 pub use asset::IssueAssetResult;
+pub use boltz::BoltzVhtlcWatcherConfig;
+pub use boltz::BoltzVhtlcWatcherHandle;
 pub use boltz::ChainSwapAmount;
 pub use boltz::ChainSwapData;
 pub use boltz::ChainSwapDirection;
@@ -866,6 +868,16 @@ where
             server_info_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
 
+        match client.migrate_boltz_vhtlc_contracts(&server_info).await {
+            Ok(migrated) if migrated > 0 => {
+                tracing::info!(migrated, "Migrated Boltz VHTLC contracts at connect");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(?error, "Failed to migrate Boltz VHTLC contracts at connect");
+            }
+        }
+
         client.hydrate_persisted_contract_keys()?;
 
         // Eagerly persist the bounded baseline contract set. This mirrors the TS SDK split:
@@ -1132,29 +1144,28 @@ where
     }
 
     fn hydrate_persisted_contract_keys(&self) -> Result<(), Error> {
-        let state = self
-            .state
-            .read()
-            .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
-        let contracts = state
-            .contract_manager
-            .lock()
-            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?
-            .list()?;
+        if let Some(key_provider) = self.inner.discoverable_key_provider.as_ref() {
+            let state = self
+                .state
+                .read()
+                .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+            let contracts = state
+                .contract_manager
+                .lock()
+                .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?
+                .list()?;
 
-        let mut indices: Vec<u32> = contracts
-            .into_iter()
-            .filter_map(|contract| contract.key_index)
-            .collect();
-        indices.sort_unstable();
-        indices.dedup();
+            let mut indices: Vec<u32> = contracts
+                .into_iter()
+                .filter_map(|contract| contract.key_index)
+                .collect();
+            indices.sort_unstable();
+            indices.dedup();
 
-        let Some(key_provider) = self.inner.discoverable_key_provider.as_ref() else {
-            return Ok(());
+            for index in indices {
+                key_provider.cache_keypair_at_index(index)?;
+            }
         };
-        for index in indices {
-            key_provider.cache_keypair_at_index(index)?;
-        }
 
         Ok(())
     }

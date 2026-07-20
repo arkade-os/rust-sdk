@@ -22,7 +22,7 @@ mod common;
 #[tokio::test]
 #[ignore]
 pub async fn reverse_swap_claim_with_vhtlc_ancestor_can_exit_unilaterally() {
-    // Requires the Boltz regtest environment. See scripts/boltz-setup.sh.
+    // Requires the arkade-regtest Boltz profile.
     init_tracing();
 
     let regtest = Arc::new(Regtest::new());

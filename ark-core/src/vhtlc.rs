@@ -376,6 +376,10 @@ impl VhtlcScript {
         &self.taproot_spend_info
     }
 
+    pub fn options(&self) -> &VhtlcOptions {
+        &self.options
+    }
+
     pub fn script_pubkey(&self) -> ScriptBuf {
         ScriptBuf::builder()
             .push_opcode(OP_PUSHNUM_1)
