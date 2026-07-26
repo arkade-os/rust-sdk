@@ -4,15 +4,19 @@ set dotenv-load := true
 # is provided by the `regtest` git submodule (arkade-regtest) and driven by its
 # zero-dependency Node CLI (`regtest.mjs`). `.env.regtest` holds this repo's arkd
 # image + config overrides (exit delays, zeroed intent fees).
+
 regtest_dir := "regtest"
 regtest_env := ".env.regtest"
+
 # Profiles the e2e suite needs: `emulator` transitively pulls in `base` + `ark`
 # (arkd) plus the arkade-script emulator used by the introspector tests. boltz /
 # delegate / solver are not exercised by the `e2e_*` suite.
+
 regtest_profiles := "emulator"
 
 mod ark-rest
 mod nix
+mod ark-frost-sample
 
 ## ------------------------
 ## Code quality functions
