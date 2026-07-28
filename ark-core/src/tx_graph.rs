@@ -148,7 +148,7 @@ impl TxGraph {
         fn _as_map<'a>(graph: &'a TxGraph, map: &mut HashMap<Txid, &'a Psbt>) {
             map.insert(graph.root.unsigned_tx.compute_txid(), &graph.root);
 
-            for (_, child) in graph.children.iter() {
+            for child in graph.children.values() {
                 _as_map(child, map);
             }
         }
