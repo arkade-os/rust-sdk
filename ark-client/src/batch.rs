@@ -33,7 +33,6 @@ use bitcoin::hashes::sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::hex::DisplayHex;
 use bitcoin::key::Keypair;
-use bitcoin::key::Secp256k1;
 use bitcoin::psbt;
 use bitcoin::secp256k1;
 use bitcoin::secp256k1::schnorr;
@@ -640,9 +639,10 @@ where
                         let mut res = vec![];
                         let pks = extract_checksig_pubkeys(script);
                         for pk in pks {
-                            if let Ok(keypair) = self.keypair_by_pk(&pk) {
-                                let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &keypair);
-                                let pk = keypair.x_only_public_key().0;
+                            if self.can_sign_for_pk(&pk) {
+                                let sig = self
+                                    .sign_for_pk(&pk, &msg)
+                                    .map_err(|e| ark_core::Error::ad_hoc(e.to_string()))?;
                                 res.push((sig, pk));
                             }
                         }
@@ -1335,8 +1335,6 @@ where
 
         let cosigner_pk = cosigner_keypair.public_key();
 
-        let secp = Secp256k1::new();
-
         let sign_for_vtxo_fn =
             |input: &mut psbt::Input,
              msg: secp256k1::Message|
@@ -1349,9 +1347,11 @@ where
                         let pks = extract_checksig_pubkeys(script);
                         let mut res = vec![];
                         for pk in pks {
-                            if let Ok(keypair) = self.keypair_by_pk(&pk) {
-                                let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
-                                res.push((sig, keypair.public_key().into()))
+                            if self.can_sign_for_pk(&pk) {
+                                let sig = self
+                                    .sign_for_pk(&pk, &msg)
+                                    .map_err(|e| ark_core::Error::ad_hoc(e.to_string()))?;
+                                res.push((sig, pk))
                             }
                         }
                         Ok(res)
@@ -1473,8 +1473,6 @@ where
             .iter()
             .map(|k| k.public_key())
             .collect::<Vec<_>>();
-
-        let secp = Secp256k1::new();
 
         let mut step = Step::Start;
 
@@ -1852,11 +1850,11 @@ where
                                         let pks = extract_checksig_pubkeys(script);
                                         let mut res = vec![];
                                         for pk in pks {
-                                            if let Ok(keypair) =
-                                            self.keypair_by_pk(&pk) {
-                                                let sig =
-                                                    secp.sign_schnorr_no_aux_rand(&msg, &keypair);
-                                                res.push((sig, keypair.public_key().into()))
+                                            if self.can_sign_for_pk(&pk) {
+                                                let sig = self.sign_for_pk(&pk, &msg).map_err(
+                                                    |e| ark_core::Error::ad_hoc(e.to_string()),
+                                                )?;
+                                                res.push((sig, pk))
                                             }
                                         }
                                         Ok(res)

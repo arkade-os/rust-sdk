@@ -1868,15 +1868,15 @@ where
         let preimage: [u8; 32] = rand::random();
         let preimage_hash = sha256::Hash::hash(&preimage);
 
-        let claim_keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
-        let claim_public_key = claim_keypair.public_key();
+        let claim_public_key =
+            self.next_signing_public_key(crate::key_provider::KeypairIndex::New)?;
         let claim_key_derivation_index =
-            self.derivation_index_for_pk(&claim_keypair.x_only_public_key().0);
+            self.derivation_index_for_pk(&claim_public_key.x_only_public_key().0);
 
-        let refund_keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
-        let refund_public_key = refund_keypair.public_key();
+        let refund_public_key =
+            self.next_signing_public_key(crate::key_provider::KeypairIndex::New)?;
         let refund_key_derivation_index =
-            self.derivation_index_for_pk(&refund_keypair.x_only_public_key().0);
+            self.derivation_index_for_pk(&refund_public_key.x_only_public_key().0);
 
         let (from, to) = match &direction {
             ChainSwapDirection::ArkToBtc => (Asset::Ark, Asset::Btc),
@@ -2401,8 +2401,8 @@ where
             .map_err(|e| Error::ad_hoc(format!("failed to compute sighash: {e}")))?;
 
         let msg = secp256k1::Message::from_digest(sighash.to_byte_array());
-        let claim_kp = self.keypair_by_pk(&swap.claim_public_key.inner.x_only_public_key().0)?;
-        let signature = secp.sign_schnorr_no_aux_rand(&msg, &claim_kp);
+        let signature =
+            self.sign_for_pk(&swap.claim_public_key.inner.x_only_public_key().0, &msg)?;
 
         // Build witness: <signature> <preimage> <claim_script> <control_block>
         let mut witness = bitcoin::Witness::new();
@@ -2735,8 +2735,8 @@ where
             .map_err(|e| Error::ad_hoc(format!("failed to compute sighash: {e}")))?;
 
         let msg = secp256k1::Message::from_digest(sighash.to_byte_array());
-        let refund_kp = self.keypair_by_pk(&swap.refund_public_key.inner.x_only_public_key().0)?;
-        let signature = secp.sign_schnorr_no_aux_rand(&msg, &refund_kp);
+        let signature =
+            self.sign_for_pk(&swap.refund_public_key.inner.x_only_public_key().0, &msg)?;
 
         // Witness for refund: <signature> <refund_script> <control_block>
         let mut witness = bitcoin::Witness::new();

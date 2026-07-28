@@ -743,10 +743,7 @@ where
     ///
     /// Use this to keep secret key material outside the client: all Schnorr signing goes through
     /// the signer. This supports threshold signature schemes (e.g. FROST), hardware wallets and
-    /// remote signers.
-    ///
-    /// See [`Signer`] for the limitations of a client whose signer exposes no raw keypairs (no
-    /// settlement, no boarding, no chain swaps).
+    /// remote signers. All flows work with such a client; see [`Signer`] for details.
     pub fn with_signer(
         config: OfflineClientConfig,
         signer: Arc<dyn Signer>,
@@ -2027,31 +2024,6 @@ where
         }
 
         Ok(all_vtxos)
-    }
-
-    /// The next raw keypair to use for receiving.
-    ///
-    /// Fails if the signer does not expose raw keypairs. Only flows which need the secret key
-    /// itself (musig2) should call this; everything else should sign via [`Self::sign_for_pk`].
-    fn next_keypair(&self, keypair_index: KeypairIndex) -> Result<Keypair, Error> {
-        self.inner
-            .signer
-            .next_keypair(keypair_index)?
-            .ok_or_else(|| {
-                Error::ad_hoc("this flow needs a raw keypair, but the signer exposes none")
-            })
-    }
-
-    /// The raw keypair for `pk`.
-    ///
-    /// Fails if the signer does not expose raw keypairs. Only flows which need the secret key
-    /// itself (musig2) should call this; everything else should sign via [`Self::sign_for_pk`].
-    fn keypair_by_pk(&self, pk: &XOnlyPublicKey) -> Result<Keypair, Error> {
-        self.inner.signer.keypair_for_pk(pk)?.ok_or_else(|| {
-            Error::ad_hoc(format!(
-                "this flow needs the raw keypair for {pk}, but the signer exposes none"
-            ))
-        })
     }
 
     /// The next x-only public key to use for receiving.
