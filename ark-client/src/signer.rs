@@ -1,0 +1,97 @@
+use crate::error::Error;
+use crate::key_provider::KeyProvider;
+use crate::key_provider::KeypairIndex;
+use bitcoin::key::Keypair;
+use bitcoin::secp256k1;
+use bitcoin::secp256k1::schnorr;
+use bitcoin::secp256k1::Secp256k1;
+use bitcoin::secp256k1::SignOnly;
+use bitcoin::XOnlyPublicKey;
+use std::sync::LazyLock;
+
+static SECP: LazyLock<Secp256k1<SignOnly>> = LazyLock::new(Secp256k1::signing_only);
+
+/// The signing backend of a client.
+///
+/// Every [`KeyProvider`] is automatically a [`Signer`] through a blanket implementation, so local
+/// key management keeps working unchanged. Implement this trait directly to keep secret key
+/// material outside this library: threshold signature schemes (e.g. FROST), hardware wallets or
+/// remote signing services. Only [`Signer::signing_pks`] and [`Signer::sign_schnorr`] are
+/// required.
+///
+/// # Raw keypair access
+///
+/// Some flows need the raw secret key and cannot work with plain Schnorr signing:
+///
+/// - Settlement and boarding (the batch protocol signs the VTXO tree with musig2, which needs the
+///   secret key for nonce generation).
+/// - Boltz chain swaps (the on-chain lockup uses a musig2 aggregate key with Boltz).
+///
+/// These flows are only available when the signer exposes raw keypairs via
+/// [`Signer::keypair_for_pk`] and [`Signer::next_keypair`]. The default implementations expose
+/// none, which is the correct behavior for external signers. All plain Schnorr script-path
+/// signing works regardless, covering offchain sends and Boltz Lightning swaps (VHTLC claim and
+/// refund).
+pub trait Signer: Send + Sync {
+    /// The x-only public keys this signer can produce Schnorr signatures for.
+    fn signing_pks(&self) -> Result<Vec<XOnlyPublicKey>, Error>;
+
+    /// Produce a BIP340 signature over `msg` for the given public key.
+    fn sign_schnorr(
+        &self,
+        pk: &XOnlyPublicKey,
+        msg: &secp256k1::Message,
+    ) -> Result<schnorr::Signature, Error>;
+
+    /// The next x-only public key to use for receiving.
+    ///
+    /// Defaults to the first key of [`Signer::signing_pks`], which is right for single-key
+    /// signers.
+    fn next_signing_pk(&self, _keypair_index: KeypairIndex) -> Result<XOnlyPublicKey, Error> {
+        self.signing_pks()?
+            .first()
+            .copied()
+            .ok_or_else(|| Error::ad_hoc("signer has no public keys"))
+    }
+
+    /// The raw keypair for `pk`, if this signer can expose it.
+    ///
+    /// Returns `Ok(None)` if this signer holds no raw key material (the default).
+    fn keypair_for_pk(&self, _pk: &XOnlyPublicKey) -> Result<Option<Keypair>, Error> {
+        Ok(None)
+    }
+
+    /// The next raw keypair to use for receiving, if this signer can expose one.
+    ///
+    /// Returns `Ok(None)` if this signer holds no raw key material (the default).
+    fn next_keypair(&self, _keypair_index: KeypairIndex) -> Result<Option<Keypair>, Error> {
+        Ok(None)
+    }
+}
+
+impl<T: KeyProvider + ?Sized> Signer for T {
+    fn signing_pks(&self) -> Result<Vec<XOnlyPublicKey>, Error> {
+        self.get_cached_pks()
+    }
+
+    fn sign_schnorr(
+        &self,
+        pk: &XOnlyPublicKey,
+        msg: &secp256k1::Message,
+    ) -> Result<schnorr::Signature, Error> {
+        let kp = self.get_keypair_for_pk(pk)?;
+        Ok(SECP.sign_schnorr_no_aux_rand(msg, &kp))
+    }
+
+    fn next_signing_pk(&self, keypair_index: KeypairIndex) -> Result<XOnlyPublicKey, Error> {
+        Ok(self.get_next_keypair(keypair_index)?.x_only_public_key().0)
+    }
+
+    fn keypair_for_pk(&self, pk: &XOnlyPublicKey) -> Result<Option<Keypair>, Error> {
+        self.get_keypair_for_pk(pk).map(Some)
+    }
+
+    fn next_keypair(&self, keypair_index: KeypairIndex) -> Result<Option<Keypair>, Error> {
+        self.get_next_keypair(keypair_index).map(Some)
+    }
+}

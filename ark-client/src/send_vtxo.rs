@@ -21,7 +21,6 @@ use ark_core::send::SendReceiver;
 use ark_core::send::VtxoInput;
 use ark_core::server;
 use ark_core::server::PendingTx;
-use bitcoin::key::Secp256k1;
 use bitcoin::psbt;
 use bitcoin::secp256k1;
 use bitcoin::secp256k1::schnorr;
@@ -246,12 +245,13 @@ where
                 .as_ref()
                 .ok_or_else(|| ark_core::Error::ad_hoc("Missing witness script for psbt::Input"))?;
             let pks = extract_checksig_pubkeys(script);
-            let secp = Secp256k1::new();
             let mut sigs = vec![];
             for pk in pks {
-                if let Ok(keypair) = self.keypair_by_pk(&pk) {
-                    let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
-                    sigs.push((sig, keypair.x_only_public_key().0));
+                if self.can_sign_for_pk(&pk) {
+                    let sig = self
+                        .sign_for_pk(&pk, &msg)
+                        .map_err(|e| ark_core::Error::ad_hoc(e.to_string()))?;
+                    sigs.push((sig, pk));
                 }
             }
             Ok(sigs)
@@ -715,7 +715,6 @@ where
             return Ok(vec![]);
         }
 
-        let secp = Secp256k1::new();
         let mut all_pending_txs = Vec::new();
         let mut seen_ark_txids = HashSet::new();
 
@@ -769,9 +768,11 @@ where
                         let pks = extract_checksig_pubkeys(script);
                         let mut res = vec![];
                         for pk in &pks {
-                            if let Ok(keypair) = self.keypair_by_pk(pk) {
-                                let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
-                                res.push((sig, keypair.x_only_public_key().0));
+                            if self.can_sign_for_pk(pk) {
+                                let sig = self
+                                    .sign_for_pk(pk, &msg)
+                                    .map_err(|e| ark_core::Error::ad_hoc(e.to_string()))?;
+                                res.push((sig, *pk));
                             }
                         }
                         Ok(res)

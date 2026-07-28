@@ -198,10 +198,10 @@ where
         &self,
         invoice: Bolt11Invoice,
     ) -> Result<SubmarineSwapData, Error> {
-        let refund_keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
-        let refund_public_key = refund_keypair.public_key();
+        let refund_public_key =
+            self.next_signing_public_key(crate::key_provider::KeypairIndex::New)?;
         let key_derivation_index =
-            self.derivation_index_for_pk(&refund_keypair.x_only_public_key().0);
+            self.derivation_index_for_pk(&refund_public_key.x_only_public_key().0);
 
         let preimage_hash = invoice.payment_hash();
         let preimage_hash = ripemd160::Hash::hash(preimage_hash.as_byte_array());
@@ -291,10 +291,10 @@ where
         &self,
         invoice: Bolt11Invoice,
     ) -> Result<SubmarineSwapResult, Error> {
-        let refund_keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
-        let refund_public_key = refund_keypair.public_key();
+        let refund_public_key =
+            self.next_signing_public_key(crate::key_provider::KeypairIndex::New)?;
         let key_derivation_index =
-            self.derivation_index_for_pk(&refund_keypair.x_only_public_key().0);
+            self.derivation_index_for_pk(&refund_public_key.x_only_public_key().0);
 
         let preimage_hash = invoice.payment_hash();
         let preimage_hash = ripemd160::Hash::hash(preimage_hash.as_byte_array());
@@ -638,15 +638,15 @@ where
             &server_info,
         )?;
 
-        let kp = self.keypair_by_pk(&refunder_pk)?;
         let sign_fn =
             |_: &mut psbt::Input,
              msg: secp256k1::Message|
              -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
-                let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &kp);
-                let pk = kp.x_only_public_key().0;
+                let sig = self
+                    .sign_for_pk(&refunder_pk, &msg)
+                    .map_err(|e| ark_core::Error::ad_hoc(e.to_string()))?;
 
-                Ok(vec![(sig, pk)])
+                Ok(vec![(sig, refunder_pk)])
             };
 
         sign_ark_transaction(sign_fn, &mut ark_tx, 0)?;
@@ -664,15 +664,15 @@ where
             .ok_or_else(|| Error::ad_hoc("no checkpoint PSBTs found"))?
             .clone();
 
-        let kp = self.keypair_by_pk(&refunder_pk)?;
         let sign_fn =
             |_: &mut psbt::Input,
              msg: secp256k1::Message|
              -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
-                let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &kp);
-                let pk = kp.x_only_public_key().0;
+                let sig = self
+                    .sign_for_pk(&refunder_pk, &msg)
+                    .map_err(|e| ark_core::Error::ad_hoc(e.to_string()))?;
 
-                Ok(vec![(sig, pk)])
+                Ok(vec![(sig, refunder_pk)])
             };
 
         sign_checkpoint_transaction(sign_fn, &mut checkpoint_psbt)?;
@@ -918,15 +918,15 @@ where
         )?;
 
         // Sign the ark transaction with the sender's (user's) key.
-        let kp = self.keypair_by_pk(&refunder_pk)?;
         let sign_fn =
             |_: &mut psbt::Input,
              msg: secp256k1::Message|
              -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
-                let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &kp);
-                let pk = kp.x_only_public_key().0;
+                let sig = self
+                    .sign_for_pk(&refunder_pk, &msg)
+                    .map_err(|e| ark_core::Error::ad_hoc(e.to_string()))?;
 
-                Ok(vec![(sig, pk)])
+                Ok(vec![(sig, refunder_pk)])
             };
 
         sign_ark_transaction(sign_fn, &mut ark_tx, 0)?;
@@ -1011,15 +1011,15 @@ where
             .ok_or_else(|| Error::ad_hoc("no signed checkpoint PSBTs returned"))?
             .clone();
 
-        let kp = self.keypair_by_pk(&refunder_pk)?;
         let sign_fn =
             |_: &mut psbt::Input,
              msg: secp256k1::Message|
              -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
-                let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &kp);
-                let pk = kp.x_only_public_key().0;
+                let sig = self
+                    .sign_for_pk(&refunder_pk, &msg)
+                    .map_err(|e| ark_core::Error::ad_hoc(e.to_string()))?;
 
-                Ok(vec![(sig, pk)])
+                Ok(vec![(sig, refunder_pk)])
             };
 
         server_signed_checkpoint
@@ -1243,10 +1243,10 @@ where
 
         let preimage_hash = ripemd160::Hash::hash(preimage_hash_sha256.as_byte_array());
 
-        let claim_keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
-        let claim_public_key = claim_keypair.public_key();
+        let claim_public_key =
+            self.next_signing_public_key(crate::key_provider::KeypairIndex::New)?;
         let key_derivation_index =
-            self.derivation_index_for_pk(&claim_keypair.x_only_public_key().0);
+            self.derivation_index_for_pk(&claim_public_key.x_only_public_key().0);
 
         let (invoice_amount, onchain_amount) = match amount {
             SwapAmount::Invoice(amount) => (Some(amount), None),
@@ -1526,7 +1526,6 @@ where
         .map_err(Error::from)
         .context("failed to build offchain TXs")?;
 
-        let kp = self.keypair_by_pk(&claimer_pk)?;
         let sign_fn =
             |input: &mut psbt::Input,
              msg: secp256k1::Message|
@@ -1553,10 +1552,11 @@ where
                     );
                 }
 
-                let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &kp);
-                let pk = kp.x_only_public_key().0;
+                let sig = self
+                    .sign_for_pk(&claimer_pk, &msg)
+                    .map_err(|e| ark_core::Error::ad_hoc(e.to_string()))?;
 
-                Ok(vec![(sig, pk)])
+                Ok(vec![(sig, claimer_pk)])
             };
 
         sign_ark_transaction(sign_fn, &mut ark_tx, 0)
@@ -1773,7 +1773,6 @@ where
         .map_err(Error::from)
         .context("failed to build offchain TXs")?;
 
-        let kp = self.keypair_by_pk(&claimer_pk)?;
         let sign_fn =
             |input: &mut psbt::Input,
              msg: secp256k1::Message|
@@ -1800,10 +1799,11 @@ where
                     );
                 }
 
-                let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &kp);
-                let pk = kp.x_only_public_key().0;
+                let sig = self
+                    .sign_for_pk(&claimer_pk, &msg)
+                    .map_err(|e| ark_core::Error::ad_hoc(e.to_string()))?;
 
-                Ok(vec![(sig, pk)])
+                Ok(vec![(sig, claimer_pk)])
             };
 
         sign_ark_transaction(sign_fn, &mut ark_tx, 0)
@@ -2191,7 +2191,6 @@ where
         .map_err(Error::from)
         .context("failed to build offchain TXs")?;
 
-        let kp = self.keypair_by_pk(&claimer_pk)?;
         let sign_fn =
             |input: &mut psbt::Input,
              msg: secp256k1::Message|
@@ -2217,10 +2216,11 @@ where
                     );
                 }
 
-                let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &kp);
-                let pk = kp.x_only_public_key().0;
+                let sig = self
+                    .sign_for_pk(&claimer_pk, &msg)
+                    .map_err(|e| ark_core::Error::ad_hoc(e.to_string()))?;
 
-                Ok(vec![(sig, pk)])
+                Ok(vec![(sig, claimer_pk)])
             };
 
         sign_ark_transaction(sign_fn, &mut ark_tx, 0)
@@ -2550,14 +2550,14 @@ where
             &server_info,
         )?;
 
-        let kp = self.keypair_by_pk(&refunder_pk)?;
         let sign_fn =
             |_: &mut psbt::Input,
              msg: secp256k1::Message|
              -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
-                let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &kp);
-                let pk = kp.x_only_public_key().0;
-                Ok(vec![(sig, pk)])
+                let sig = self
+                    .sign_for_pk(&refunder_pk, &msg)
+                    .map_err(|e| ark_core::Error::ad_hoc(e.to_string()))?;
+                Ok(vec![(sig, refunder_pk)])
             };
 
         sign_ark_transaction(sign_fn, &mut ark_tx, 0)?;
@@ -2575,14 +2575,14 @@ where
             .ok_or_else(|| Error::ad_hoc("no checkpoint PSBTs found"))?
             .clone();
 
-        let kp = self.keypair_by_pk(&refunder_pk)?;
         let sign_fn =
             |_: &mut psbt::Input,
              msg: secp256k1::Message|
              -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
-                let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &kp);
-                let pk = kp.x_only_public_key().0;
-                Ok(vec![(sig, pk)])
+                let sig = self
+                    .sign_for_pk(&refunder_pk, &msg)
+                    .map_err(|e| ark_core::Error::ad_hoc(e.to_string()))?;
+                Ok(vec![(sig, refunder_pk)])
             };
 
         sign_checkpoint_transaction(sign_fn, &mut checkpoint_psbt)?;
@@ -3042,7 +3042,6 @@ where
             .map(|info| (info.script_pubkey.clone(), info))
             .collect();
 
-        let secp = Secp256k1::new();
         let mut results = Vec::new();
         let mut seen_ark_txids = std::collections::HashSet::new();
 
@@ -3108,9 +3107,11 @@ where
                         let pks = extract_checksig_pubkeys(script);
                         let mut res = vec![];
                         for pk in &pks {
-                            if let Ok(keypair) = self.keypair_by_pk(pk) {
-                                let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
-                                res.push((sig, keypair.x_only_public_key().0));
+                            if self.can_sign_for_pk(pk) {
+                                let sig = self
+                                    .sign_for_pk(pk, &msg)
+                                    .map_err(|e| ark_core::Error::ad_hoc(e.to_string()))?;
+                                res.push((sig, *pk));
                             }
                         }
                         Ok(res)
@@ -3447,8 +3448,8 @@ where
         key_derivation_index: Option<u32>,
         swap_id: &str,
     ) -> bool {
-        // Already in cache — nothing to do.
-        if self.keypair_by_pk(pk).is_ok() {
+        // Already available — nothing to do.
+        if self.can_sign_for_pk(pk) {
             return true;
         }
 
@@ -3685,9 +3686,11 @@ where
                 let pks = extract_checksig_pubkeys(script);
                 let mut res = vec![];
                 for pk in pks {
-                    if let Ok(keypair) = self.keypair_by_pk(&pk) {
-                        let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &keypair);
-                        res.push((sig, keypair.x_only_public_key().0));
+                    if self.can_sign_for_pk(&pk) {
+                        let sig = self
+                            .sign_for_pk(&pk, &msg)
+                            .map_err(|e| ark_core::Error::ad_hoc(e.to_string()))?;
+                        res.push((sig, pk));
                     }
                 }
                 Ok(res)
