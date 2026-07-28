@@ -1,0 +1,28 @@
+[package]
+name = "ark-frost-sample"
+version = "0.10.1"
+edition = { workspace = true }
+publish = false
+repository = { workspace = true }
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = "1"
+ark-bdk-wallet = { path = "../ark-bdk-wallet" }
+ark-client = { path = "../ark-client", features = ["default", "sqlite"] }
+ark-core = { path = "../ark-core" }
+base64 = "0.22"
+bitcoin = { version = "0.32.7" }
+clap = { version = "4", features = ["derive"] }
+esplora-client = { version = "0.10", features = ["async-https"] }
+frost-secp256k1-tr = "2.2"
+rand = "0.8"
+rustls = { version = "0.23", features = ["ring"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+toml = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi", "env-filter"] }

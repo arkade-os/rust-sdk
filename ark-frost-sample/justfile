@@ -1,0 +1,34 @@
+# FROST multisig sample commands
+#
+# Run all three `keygen` recipes at the same time in separate terminals.
+
+default:
+    @just --list
+
+# Run the interactive 2-of-3 DKG for an actor (run for alice, bob AND clair concurrently)
+keygen actor:
+    cargo run -p ark-frost-sample -- --actor {{ actor }} keygen
+
+# Show the FROST group public key
+group-info actor:
+    cargo run -p ark-frost-sample -- --actor {{ actor }} group-info
+
+# Show the Ark address of the multisig wallet
+offchain-address actor:
+    cargo run -p ark-frost-sample -- --actor {{ actor }} offchain-address
+
+# Show the multisig wallet balance
+balance actor:
+    cargo run -p ark-frost-sample -- --actor {{ actor }} balance
+
+# Receive sats over Lightning (prints a BOLT11 invoice, then coordinates the claim)
+invoice actor amount:
+    cargo run -p ark-frost-sample -- --actor {{ actor }} invoice {{ amount }}
+
+# Pay a BOLT11 invoice over Lightning
+pay actor invoice:
+    cargo run -p ark-frost-sample -- --actor {{ actor }} pay {{ invoice }}
+
+# Respond to a signing request blob from another actor
+sign actor blob:
+    cargo run -p ark-frost-sample -- --actor {{ actor }} sign {{ blob }}

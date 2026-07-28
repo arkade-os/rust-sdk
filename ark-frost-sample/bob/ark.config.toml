@@ -1,0 +1,4 @@
+ark_server_url = "http://localhost:7070"
+esplora_url = "http://localhost:3000/api"
+boltz_url = "http://localhost:9001"
+# network = "regtest"

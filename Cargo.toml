@@ -11,6 +11,7 @@ members = [
   "ark-introspector-client",
   "e2e-tests",
   "ark-client-sample",
+  "ark-frost-sample",
   "ark-rs",
 ]
 
