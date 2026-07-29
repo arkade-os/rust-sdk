@@ -1,7 +1,7 @@
 /*
  * Ark API
  *
- * Combined Ark Service, Indexer, Admin, Signer Manager, and Wallet API
+ * Combined Ark Service, Indexer, Signer Manager, and Wallet API
  *
  * The version of the OpenAPI document: 1.0.0
  *
@@ -14,8 +14,16 @@ use serde::Serialize;
 
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GetVirtualTxsRequest {
+    /// Intent that directly proves ownership of the transaction inputs. If passed, the txids field
+    /// is ignored.
+    #[serde(rename = "intent", skip_serializing_if = "Option::is_none")]
+    pub intent: Option<models::IndexerIntent>,
     #[serde(rename = "page", skip_serializing_if = "Option::is_none")]
     pub page: Option<models::IndexerPageRequest>,
+    /// Valid auth_token can also be used if the ownership has already been proved. A valid token
+    /// obtained from GetVtxoChain rpc can be recycled for this request.
+    #[serde(rename = "token", skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
     #[serde(rename = "txids", skip_serializing_if = "Option::is_none")]
     pub txids: Option<Vec<String>>,
 }
@@ -23,7 +31,9 @@ pub struct GetVirtualTxsRequest {
 impl GetVirtualTxsRequest {
     pub fn new() -> GetVirtualTxsRequest {
         GetVirtualTxsRequest {
+            intent: None,
             page: None,
+            token: None,
             txids: None,
         }
     }

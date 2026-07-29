@@ -347,6 +347,7 @@ impl Client {
                     pending_only,
                     before,
                     after,
+                    None,
                     page_period_size,
                     page_period_index,
                 )
@@ -794,9 +795,17 @@ impl Client {
         let configuration = self.configuration()?;
         let response = self
             .guarded(async {
-                indexer_service_get_virtual_txs(&configuration, txids, size, index)
-                    .await
-                    .map_err(Error::request)
+                indexer_service_get_virtual_txs(
+                    &configuration,
+                    txids,
+                    None,
+                    size,
+                    index,
+                    None,
+                    None,
+                )
+                .await
+                .map_err(Error::request)
             })
             .await?;
 

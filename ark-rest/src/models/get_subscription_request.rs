@@ -1,7 +1,7 @@
 /*
  * Ark API
  *
- * Combined Ark Service, Indexer, Admin, Signer Manager, and Wallet API
+ * Combined Ark Service, Indexer, Signer Manager, and Wallet API
  *
  * The version of the OpenAPI document: 1.0.0
  *
@@ -14,6 +14,11 @@ use serde::Serialize;
 
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GetSubscriptionRequest {
+    /// Optional: filter to apply on stream creation. Only used when subscription_id is empty;
+    /// ignored otherwise. See UpdateSubscriptionRequest for filter semantics.
+    #[serde(rename = "filter", skip_serializing_if = "Option::is_none")]
+    pub filter: Option<models::SubscriptionFilter>,
+    /// If empty, server creates a new subscription automatically.
     #[serde(rename = "subscriptionId", skip_serializing_if = "Option::is_none")]
     pub subscription_id: Option<String>,
 }
@@ -21,6 +26,7 @@ pub struct GetSubscriptionRequest {
 impl GetSubscriptionRequest {
     pub fn new() -> GetSubscriptionRequest {
         GetSubscriptionRequest {
+            filter: None,
             subscription_id: None,
         }
     }

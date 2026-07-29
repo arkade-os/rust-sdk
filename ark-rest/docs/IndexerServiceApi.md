@@ -10,6 +10,7 @@ All URIs are relative to _http://localhost_
 | [**indexer_service_get_connectors**](IndexerServiceApi.md#indexer_service_get_connectors)                             | **GET** /v1/indexer/commitmentTx/{txid}/connectors                                |             |
 | [**indexer_service_get_forfeit_txs**](IndexerServiceApi.md#indexer_service_get_forfeit_txs)                           | **GET** /v1/indexer/commitmentTx/{txid}/forfeitTxs                                |             |
 | [**indexer_service_get_subscription**](IndexerServiceApi.md#indexer_service_get_subscription)                         | **GET** /v1/indexer/script/subscription/{subscription_id}                         |             |
+| [**indexer_service_get_subscription2**](IndexerServiceApi.md#indexer_service_get_subscription2)                       | **GET** /v1/indexer/subscription                                                  |             |
 | [**indexer_service_get_virtual_txs**](IndexerServiceApi.md#indexer_service_get_virtual_txs)                           | **GET** /v1/indexer/virtualTx/{txids}                                             |             |
 | [**indexer_service_get_vtxo_chain**](IndexerServiceApi.md#indexer_service_get_vtxo_chain)                             | **GET** /v1/indexer/vtxo/{outpoint.txid}/{outpoint.vout}/chain                    |             |
 | [**indexer_service_get_vtxo_tree**](IndexerServiceApi.md#indexer_service_get_vtxo_tree)                               | **GET** /v1/indexer/batch/{batch_outpoint.txid}/{batch_outpoint.vout}/tree        |             |
@@ -17,6 +18,7 @@ All URIs are relative to _http://localhost_
 | [**indexer_service_get_vtxos**](IndexerServiceApi.md#indexer_service_get_vtxos)                                       | **GET** /v1/indexer/vtxos                                                         |             |
 | [**indexer_service_subscribe_for_scripts**](IndexerServiceApi.md#indexer_service_subscribe_for_scripts)               | **POST** /v1/indexer/script/subscribe                                             |             |
 | [**indexer_service_unsubscribe_for_scripts**](IndexerServiceApi.md#indexer_service_unsubscribe_for_scripts)           | **POST** /v1/indexer/script/unsubscribe                                           |             |
+| [**indexer_service_update_subscription**](IndexerServiceApi.md#indexer_service_update_subscription)                   | **POST** /v1/indexer/subscription/update                                          |             |
 
 ## indexer_service_get_asset
 
@@ -160,15 +162,48 @@ No authorization required
 
 ## indexer_service_get_subscription
 
-> models::GetSubscriptionResponse indexer_service_get_subscription(subscription_id)
+> models::GetSubscriptionResponse indexer_service_get_subscription(subscription_id, filter_period_expressions, filter_period_scripts_period_add, filter_period_scripts_period_remove)
 
 GetSubscription is a server-side streaming RPC which allows clients to receive real-time notifications on transactions related to the subscribed vtxo scripts. The subscription can be created or updated by using the SubscribeForScripts and UnsubscribeForScripts RPCs.
 
 ### Parameters
 
-| Name                | Type       | Description | Required   | Notes |
-| ------------------- | ---------- | ----------- | ---------- | ----- |
-| **subscription_id** | **String** |             | [required] |       |
+| Name                                    | Type                                 | Description                                                                                    | Required   | Notes |
+| --------------------------------------- | ------------------------------------ | ---------------------------------------------------------------------------------------------- | ---------- | ----- |
+| **subscription_id**                     | **String**                           | If empty, server creates a new subscription automatically.                                     | [required] |       |
+| **filter_period_expressions**           | Option<[**Vec<String>**](String.md)> | CEL expressions evaluated against each indexed tx envelope. The indexer combines them with OR. |            |       |
+| **filter_period_scripts_period_add**    | Option<[**Vec<String>**](String.md)> |                                                                                                |            |       |
+| **filter_period_scripts_period_remove** | Option<[**Vec<String>**](String.md)> |                                                                                                |            |       |
+
+### Return type
+
+[**models::GetSubscriptionResponse**](GetSubscriptionResponse.md)
+
+### Authorization
+
+No authorization required
+
+### HTTP request headers
+
+- **Content-Type**: Not defined
+- **Accept**: text/event-stream, application/json
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+## indexer_service_get_subscription2
+
+> models::GetSubscriptionResponse indexer_service_get_subscription2(subscription_id, filter_period_expressions, filter_period_scripts_period_add, filter_period_scripts_period_remove)
+
+GetSubscription is a server-side streaming RPC which allows clients to receive real-time notifications on transactions related to the subscribed vtxo scripts. The subscription can be created or updated by using the SubscribeForScripts and UnsubscribeForScripts RPCs.
+
+### Parameters
+
+| Name                                    | Type                                 | Description                                                                                    | Required | Notes |
+| --------------------------------------- | ------------------------------------ | ---------------------------------------------------------------------------------------------- | -------- | ----- |
+| **subscription_id**                     | Option<**String**>                   | If empty, server creates a new subscription automatically.                                     |          |       |
+| **filter_period_expressions**           | Option<[**Vec<String>**](String.md)> | CEL expressions evaluated against each indexed tx envelope. The indexer combines them with OR. |          |       |
+| **filter_period_scripts_period_add**    | Option<[**Vec<String>**](String.md)> |                                                                                                |          |       |
+| **filter_period_scripts_period_remove** | Option<[**Vec<String>**](String.md)> |                                                                                                |          |       |
 
 ### Return type
 
@@ -187,17 +222,20 @@ No authorization required
 
 ## indexer_service_get_virtual_txs
 
-> models::GetVirtualTxsResponse indexer_service_get_virtual_txs(txids, page_period_size, page_period_index)
+> models::GetVirtualTxsResponse indexer_service_get_virtual_txs(txids, token, page_period_size, page_period_index, intent_period_proof, intent_period_message)
 
 GetVirtualTxs returns the virtual transactions in hex format for the specified txids. The response may be paginated if the results span multiple pages.
 
 ### Parameters
 
-| Name                  | Type                         | Description | Required   | Notes |
-| --------------------- | ---------------------------- | ----------- | ---------- | ----- |
-| **txids**             | [**Vec<String>**](String.md) |             | [required] |       |
-| **page_period_size**  | Option<**i32**>              |             |            |       |
-| **page_period_index** | Option<**i32**>              |             |            |       |
+| Name                      | Type                         | Description                                                                                                                                                | Required   | Notes |
+| ------------------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- | ----- |
+| **txids**                 | [**Vec<String>**](String.md) |                                                                                                                                                            | [required] |       |
+| **token**                 | Option<**String**>           | Valid auth_token can also be used if the ownership has already been proved. A valid token obtained from GetVtxoChain rpc can be recycled for this request. |            |       |
+| **page_period_size**      | Option<**i32**>              |                                                                                                                                                            |            |       |
+| **page_period_index**     | Option<**i32**>              |                                                                                                                                                            |            |       |
+| **intent_period_proof**   | Option<**String**>           |                                                                                                                                                            |            |       |
+| **intent_period_message** | Option<**String**>           |                                                                                                                                                            |            |       |
 
 ### Return type
 
@@ -216,18 +254,22 @@ No authorization required
 
 ## indexer_service_get_vtxo_chain
 
-> models::GetVtxoChainResponse indexer_service_get_vtxo_chain(outpoint_period_txid, outpoint_period_vout, page_period_size, page_period_index)
+> models::GetVtxoChainResponse indexer_service_get_vtxo_chain(outpoint_period_txid, outpoint_period_vout, token, page_token, page_period_size, page_period_index, intent_period_proof, intent_period_message)
 
 GetVtxoChain returns the the chain of ark txs that starts from spending any vtxo leaf and ends with the creation of the provided vtxo outpoint. The response may be paginated if the results span multiple pages.
 
 ### Parameters
 
-| Name                     | Type            | Description | Required   | Notes |
-| ------------------------ | --------------- | ----------- | ---------- | ----- |
-| **outpoint_period_txid** | **String**      |             | [required] |       |
-| **outpoint_period_vout** | **i32**         |             | [required] |       |
-| **page_period_size**     | Option<**i32**> |             |            |       |
-| **page_period_index**    | Option<**i32**> |             |            |       |
+| Name                      | Type               | Description                                                                                                                                                 | Required   | Notes |
+| ------------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- | ----- |
+| **outpoint_period_txid**  | **String**         |                                                                                                                                                             | [required] |       |
+| **outpoint_period_vout**  | **i32**            |                                                                                                                                                             | [required] |       |
+| **token**                 | Option<**String**> | Valid auth_token can also be used if the ownership has already been proved. A valid token obtained from GetVirtualTxs rpc can be recycled for this request. |            |       |
+| **page_token**            | Option<**String**> | Opaque cursor returned as next_page_token by a previous call. When set, the response resumes from where that page ended.                                    |            |       |
+| **page_period_size**      | Option<**i32**>    |                                                                                                                                                             |            |       |
+| **page_period_index**     | Option<**i32**>    |                                                                                                                                                             |            |       |
+| **intent_period_proof**   | Option<**String**> |                                                                                                                                                             |            |       |
+| **intent_period_message** | Option<**String**> |                                                                                                                                                             |            |       |
 
 ### Return type
 
@@ -306,24 +348,25 @@ No authorization required
 
 ## indexer_service_get_vtxos
 
-> models::GetVtxosResponse indexer_service_get_vtxos(scripts, outpoints, spendable_only, spent_only, recoverable_only, pending_only, after, before, page_period_size, page_period_index)
+> models::GetVtxosResponse indexer_service_get_vtxos(scripts, outpoints, spendable_only, spent_only, recoverable_only, pending_only, after, before, renewable_only, page_period_size, page_period_index)
 
 GetVtxos returns the list of vtxos based on the provided filter. Vtxos can be retrieved either by addresses or by outpoints, and optionally filtered by spendable or spent only. The response may be paginated if the results span multiple pages.
 
 ### Parameters
 
-| Name                  | Type                                 | Description                                                                                                                                                     | Required | Notes |
-| --------------------- | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ----- |
-| **scripts**           | Option<[**Vec<String>**](String.md)> | Either specify a list of vtxo scripts.                                                                                                                          |          |       |
-| **outpoints**         | Option<[**Vec<String>**](String.md)> | Or specify a list of vtxo outpoints. The 2 filters are mutually exclusive.                                                                                      |          |       |
-| **spendable_only**    | Option<**bool**>                     | Retrieve only spendable vtxos                                                                                                                                   |          |       |
-| **spent_only**        | Option<**bool**>                     | Retrieve only spent vtxos.                                                                                                                                      |          |       |
-| **recoverable_only**  | Option<**bool**>                     | Retrieve only recoverable vtxos (notes, subdust or swept vtxos). The 3 filters are mutually exclusive,                                                          |          |       |
-| **pending_only**      | Option<**bool**>                     | Include only spent vtxos that are not finalized.                                                                                                                |          |       |
-| **after**             | Option<**i64**>                      | Include only vtxos with last update after the given unix time in milliseconds. A value of 0 means no lower bound.                                               |          |       |
-| **before**            | Option<**i64**>                      | Include only vtxos with last update before the given unix time in milliseconds, greater value than the after when specified. A value of 0 means no upper bound. |          |       |
-| **page_period_size**  | Option<**i32**>                      |                                                                                                                                                                 |          |       |
-| **page_period_index** | Option<**i32**>                      |                                                                                                                                                                 |          |       |
+| Name                  | Type                                 | Description                                                                                                                                                                                                                                        | Required | Notes |
+| --------------------- | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ----- |
+| **scripts**           | Option<[**Vec<String>**](String.md)> | Either specify a list of vtxo scripts.                                                                                                                                                                                                             |          |       |
+| **outpoints**         | Option<[**Vec<String>**](String.md)> | Or specify a list of vtxo outpoints. The 2 filters are mutually exclusive.                                                                                                                                                                         |          |       |
+| **spendable_only**    | Option<**bool**>                     | The spendable_only, spent_only, recoverable_only, pending_only and renewable_only filters are mutually exclusive, and are applied only when the scripts filter is used. They are ignored when querying by outpoints. Retrieve only spendable vtxos |          |       |
+| **spent_only**        | Option<**bool**>                     | Retrieve only spent vtxos.                                                                                                                                                                                                                         |          |       |
+| **recoverable_only**  | Option<**bool**>                     | Retrieve only recoverable vtxos (notes, subdust or swept vtxos).                                                                                                                                                                                   |          |       |
+| **pending_only**      | Option<**bool**>                     | Include only spent vtxos that are not finalized.                                                                                                                                                                                                   |          |       |
+| **after**             | Option<**i64**>                      | Include only vtxos with last update after the given unix time in milliseconds. A value of 0 means no lower bound.                                                                                                                                  |          |       |
+| **before**            | Option<**i64**>                      | Include only vtxos with last update before the given unix time in milliseconds, greater value than the after when specified. A value of 0 means no upper bound.                                                                                    |          |       |
+| **renewable_only**    | Option<**bool**>                     | Retrieve the union of the spendable and recoverable vtxos.                                                                                                                                                                                         |          |       |
+| **page_period_size**  | Option<**i32**>                      |                                                                                                                                                                                                                                                    |          |       |
+| **page_period_index** | Option<**i32**>                      |                                                                                                                                                                                                                                                    |          |       |
 
 ### Return type
 
@@ -378,6 +421,33 @@ UnsubscribeForScripts allows to remove scripts from an existing subscription.
 | Name                                | Type                                                                | Description | Required   | Notes |
 | ----------------------------------- | ------------------------------------------------------------------- | ----------- | ---------- | ----- |
 | **unsubscribe_for_scripts_request** | [**UnsubscribeForScriptsRequest**](UnsubscribeForScriptsRequest.md) |             | [required] |       |
+
+### Return type
+
+[**serde_json::Value**](serde_json::Value.md)
+
+### Authorization
+
+No authorization required
+
+### HTTP request headers
+
+- **Content-Type**: application/json
+- **Accept**: application/json
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+## indexer_service_update_subscription
+
+> serde_json::Value indexer_service_update_subscription(update_subscription_request)
+
+UpdateSubscription updates an existing subscription created via GetSubscription. See UpdateSubscriptionRequest for the full set of supported filter combinations and their semantics.
+
+### Parameters
+
+| Name                            | Type                                                          | Description | Required   | Notes |
+| ------------------------------- | ------------------------------------------------------------- | ----------- | ---------- | ----- |
+| **update_subscription_request** | [**UpdateSubscriptionRequest**](UpdateSubscriptionRequest.md) |             | [required] |       |
 
 ### Return type
 

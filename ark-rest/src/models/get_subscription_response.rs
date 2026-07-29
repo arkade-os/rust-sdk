@@ -1,7 +1,7 @@
 /*
  * Ark API
  *
- * Combined Ark Service, Indexer, Admin, Signer Manager, and Wallet API
+ * Combined Ark Service, Indexer, Signer Manager, and Wallet API
  *
  * The version of the OpenAPI document: 1.0.0
  *
@@ -18,6 +18,11 @@ pub struct GetSubscriptionResponse {
     pub event: Option<models::IndexerSubscriptionEvent>,
     #[serde(rename = "heartbeat", skip_serializing_if = "Option::is_none")]
     pub heartbeat: Option<serde_json::Value>,
+    #[serde(
+        rename = "subscriptionStarted",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub subscription_started: Option<models::SubscriptionStartedEvent>,
 }
 
 impl GetSubscriptionResponse {
@@ -25,6 +30,7 @@ impl GetSubscriptionResponse {
         GetSubscriptionResponse {
             event: None,
             heartbeat: None,
+            subscription_started: None,
         }
     }
 }
