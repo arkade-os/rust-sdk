@@ -659,6 +659,8 @@ impl Client {
                         page: size_and_index.map(|(size, index)| {
                             generated::ark::v1::IndexerPageRequest { size, index }
                         }),
+                        page_token: String::new(),
+                        auth: None,
                     })
                     .await
             })
@@ -682,6 +684,7 @@ impl Client {
                         page: size_and_index.map(|(size, index)| {
                             generated::ark::v1::IndexerPageRequest { size, index }
                         }),
+                        auth: None,
                     })
                     .await
             })
@@ -764,7 +767,10 @@ impl Client {
             .indexer()?
             .request(move |mut client| async move {
                 client
-                    .get_subscription(GetSubscriptionRequest { subscription_id })
+                    .get_subscription(GetSubscriptionRequest {
+                        subscription_id,
+                        filter: None,
+                    })
                     .await
             })
             .await?;
@@ -1354,6 +1360,11 @@ impl TryFrom<generated::ark::v1::GetSubscriptionResponse> for SubscriptionRespon
         let value = match value.data {
             Some(get_subscription_response::Data::Heartbeat(_)) => return Ok(Self::Heartbeat),
             Some(get_subscription_response::Data::Event(event)) => event,
+            Some(get_subscription_response::Data::SubscriptionStarted(event)) => {
+                return Ok(Self::SubscriptionStarted {
+                    subscription_id: event.subscription_id,
+                })
+            }
             None => return Err(Error::conversion("empty subscription response")),
         };
 
@@ -1456,6 +1467,7 @@ impl From<GetVtxosRequest> for generated::ark::v1::GetVtxosRequest {
                 spendable_only,
                 spent_only,
                 recoverable_only,
+                renewable_only: false,
                 page,
                 pending_only,
                 after: value.after().unwrap_or(0) as i64,
@@ -1467,6 +1479,7 @@ impl From<GetVtxosRequest> for generated::ark::v1::GetVtxosRequest {
                 spendable_only,
                 spent_only,
                 recoverable_only,
+                renewable_only: false,
                 page,
                 pending_only,
                 after: value.after().unwrap_or(0) as i64,

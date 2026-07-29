@@ -28,7 +28,7 @@ use std::str::FromStr;
 ///
 /// Update this when the SDK intentionally targets a newer arkd compatibility
 /// baseline.
-pub const TARGET_ARKD_VERSION: &str = "0.9.9";
+pub const TARGET_ARKD_VERSION: &str = "0.9.15";
 
 /// Version of this SDK, as `rust-sdk/<crate version>`.
 ///
@@ -789,6 +789,7 @@ pub struct CommitmentTransaction {
 pub enum SubscriptionResponse {
     Event(Box<SubscriptionEvent>),
     Heartbeat,
+    SubscriptionStarted { subscription_id: String },
 }
 
 #[derive(Clone, Debug)]

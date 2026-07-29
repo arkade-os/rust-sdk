@@ -821,6 +821,9 @@ async fn run_command(
                         tracing::info!("---");
                     }
                     Ok(SubscriptionResponse::Heartbeat) => {}
+                    Ok(SubscriptionResponse::SubscriptionStarted { subscription_id }) => {
+                        tracing::info!("Subscription started: {subscription_id}");
+                    }
                     Err(e) => {
                         tracing::error!("Error receiving subscription response: {e}");
                         break;

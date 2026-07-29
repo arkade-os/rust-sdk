@@ -304,6 +304,9 @@ async fn run_watcher_loop<B, W, S>(
                 event = stream.next() => {
                     match event {
                         Some(Ok(SubscriptionResponse::Heartbeat)) => {}
+                        Some(Ok(SubscriptionResponse::SubscriptionStarted { subscription_id })) => {
+                            tracing::debug!(subscription_id, "Subscription started");
+                        }
                         Some(Ok(SubscriptionResponse::Event(event))) => {
                             if !event.new_vtxos.is_empty() {
                                 tracing::debug!(
