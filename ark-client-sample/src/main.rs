@@ -783,7 +783,7 @@ async fn run_command(
 
             // Now get the subscription stream
             let mut subscription_stream = client
-                .get_subscription(subscription_id)
+                .get_subscription(subscription_id, None)
                 .await
                 .map_err(|e| anyhow!(e))?;
 

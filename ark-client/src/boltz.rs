@@ -494,7 +494,7 @@ where
         let claim_txs = timeout_op(
             self.inner.timeout,
             self.network_client()
-                .get_virtual_txs(vec![claim_txid.to_string()], None),
+                .get_virtual_txs(vec![claim_txid.to_string()], None, None),
         )
         .await?
         .map_err(|e| Error::ad_hoc(e.to_string()))

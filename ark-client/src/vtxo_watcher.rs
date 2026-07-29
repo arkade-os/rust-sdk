@@ -170,7 +170,7 @@ async fn run_watcher_loop<B, W, S>(
             }
         };
 
-        let mut stream = match client.get_subscription(subscription_id.clone()).await {
+        let mut stream = match client.get_subscription(subscription_id.clone(), None).await {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("Failed to get subscription stream: {e}, retrying in {backoff:?}");
@@ -1004,6 +1004,7 @@ mod tests {
             settled_by: None,
             ark_txid: None,
             assets: vec![],
+            depth: 0,
         };
         AnnotatedVtxo::new(
             StoredContract {

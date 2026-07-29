@@ -458,6 +458,7 @@ impl TryFrom<IndexerVtxo> for ark_core::server::VirtualTxOutPoint {
             settled_by,
             ark_txid,
             assets,
+            depth: value.depth.unwrap_or_default() as u32,
         })
     }
 }

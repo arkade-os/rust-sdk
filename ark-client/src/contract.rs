@@ -1195,6 +1195,7 @@ mod tests {
             settled_by: None,
             ark_txid: None,
             assets: Vec::new(),
+            depth: 0,
         };
 
         let annotated = manager.annotate_vtxos(vec![vtxo.clone()]).unwrap();
@@ -1309,6 +1310,7 @@ mod tests {
             settled_by: None,
             ark_txid: None,
             assets: Vec::new(),
+            depth: 0,
         };
 
         let err = manager.annotate_vtxos(vec![vtxo]).unwrap_err();
@@ -1352,6 +1354,7 @@ mod tests {
             settled_by: None,
             ark_txid: None,
             assets: Vec::new(),
+            depth: 0,
         };
 
         let annotated = manager.annotate_vtxos(vec![vtxo]).unwrap();

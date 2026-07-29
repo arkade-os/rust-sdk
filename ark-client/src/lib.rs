@@ -21,6 +21,7 @@ use ark_core::history::sort_transactions_by_created_at;
 use ark_core::history::OutgoingTransaction;
 use ark_core::server;
 use ark_core::server::GetVtxosRequest;
+use ark_core::server::SubscriptionFilter;
 use ark_core::server::SubscriptionResponse;
 use ark_core::server::VirtualTxOutPoint;
 use ark_core::ArkAddress;
@@ -1776,7 +1777,7 @@ where
         let vtxo_chain = timeout_op(
             self.inner.timeout,
             self.network_client()
-                .get_vtxo_chain(Some(out_point), Some((size, index))),
+                .get_vtxo_chain(Some(out_point), Some((size, index)), None, None),
         )
         .await
         .context("Failed to fetch VTXO chain")??;
@@ -2190,6 +2191,7 @@ where
     /// # Arguments
     ///
     /// * `subscription_id` - The subscription ID to get the stream for
+    /// * `filter` - Optional [`SubscriptionFilter`] applied when the stream is opened
     ///
     /// # Returns
     ///
@@ -2197,10 +2199,26 @@ where
     pub async fn get_subscription(
         &self,
         subscription_id: String,
+        filter: Option<SubscriptionFilter>,
     ) -> Result<impl Stream<Item = Result<SubscriptionResponse, ark_grpc::Error>> + Unpin, Error>
     {
         self.network_client()
-            .get_subscription(subscription_id)
+            .get_subscription(subscription_id, filter)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Update the filter of an existing subscription
+    ///
+    /// The filter's expressions are always overwritten as a whole (an empty list clears them),
+    /// whereas the scripts are added to and removed from the subscription's existing script set.
+    pub async fn update_subscription(
+        &self,
+        subscription_id: String,
+        filter: SubscriptionFilter,
+    ) -> Result<(), Error> {
+        self.network_client()
+            .update_subscription(subscription_id, filter)
             .await
             .map_err(Into::into)
     }
