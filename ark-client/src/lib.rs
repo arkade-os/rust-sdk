@@ -2119,7 +2119,11 @@ where
 
         let mut all_vtxos = Vec::new();
         let mut cursor = 0;
-        const PAGE_SIZE: i32 = 100;
+        // The server honors the requested page size (its per-endpoint "max" is only the default
+        // for requests that don't set one), and every page request re-runs the full vtxo query
+        // server-side before paginating in memory — so fewer, larger pages are strictly cheaper
+        // on both ends. 2000 vtxos fit comfortably within tonic's 4 MiB response limit.
+        const PAGE_SIZE: i32 = 2000;
 
         loop {
             let paged_request = request.clone().with_page(PAGE_SIZE, cursor);
