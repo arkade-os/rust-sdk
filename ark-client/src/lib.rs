@@ -590,6 +590,62 @@ pub struct OffChainBalance {
 }
 
 impl OffChainBalance {
+    /// Compute the offchain balance from an already-fetched VTXO list, e.g. one returned by
+    /// [`Client::list_vtxos`].
+    ///
+    /// Use this when you need both the balance and the VTXO list, so a single VTXO sync serves
+    /// both instead of fetching the list twice.
+    pub fn from_vtxo_list(
+        vtxo_list: &AnnotatedVtxoList,
+        server_info: &server::Info,
+        now: i64,
+    ) -> Result<Self, Error> {
+        let spendable_outpoints: HashSet<OutPoint> = vtxo_list
+            .spendable_offchain_at(server_info, now)
+            .map(|entry| entry.vtxo().outpoint)
+            .collect();
+
+        let pre_confirmed = vtxo_list
+            .pre_confirmed()
+            .filter(|entry| spendable_outpoints.contains(&entry.vtxo().outpoint))
+            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo().amount);
+
+        let confirmed = vtxo_list
+            .confirmed()
+            .filter(|entry| spendable_outpoints.contains(&entry.vtxo().outpoint))
+            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo().amount);
+
+        let recoverable = vtxo_list
+            .recoverable()
+            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo().amount);
+
+        let pending_recovery = vtxo_list
+            .pending_recovery_due_to_signer_at(server_info, now)
+            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo().amount);
+
+        // Aggregate asset balances from currently offchain-spendable VTXOs only.
+        let mut asset_balances: HashMap<AssetId, u64> = HashMap::new();
+        for entry in vtxo_list.spendable_offchain_at(server_info, now) {
+            for asset in &entry.vtxo().assets {
+                let total = asset_balances
+                    .get(&asset.asset_id)
+                    .copied()
+                    .unwrap_or(0)
+                    .checked_add(asset.amount)
+                    .ok_or_else(|| Error::ad_hoc("asset balance overflow"))?;
+                asset_balances.insert(asset.asset_id, total);
+            }
+        }
+
+        Ok(OffChainBalance {
+            pre_confirmed,
+            confirmed,
+            recoverable,
+            pending_recovery,
+            asset_balances,
+        })
+    }
+
     pub fn pre_confirmed(&self) -> Amount {
         self.pre_confirmed
     }
@@ -1868,54 +1924,27 @@ where
     }
 
     pub async fn offchain_balance(&self) -> Result<OffChainBalance, Error> {
-        let vtxo_list = self.list_vtxos().await.context("failed to list VTXOs")?;
-        let now = unix_now()?;
+        let (_, balance) = self.offchain_balance_with_vtxos().await?;
+        Ok(balance)
+    }
+
+    /// Get the offchain balance together with the VTXO list it was computed from.
+    ///
+    /// Prefer this over calling [`Client::offchain_balance`] and [`Client::list_vtxos`]
+    /// back-to-back: a single VTXO sync serves both.
+    pub async fn offchain_balance_with_vtxos(
+        &self,
+    ) -> Result<(AnnotatedVtxoList, OffChainBalance), Error> {
         let server_info = self.server_info().await?;
+        let vtxo_list = self
+            .list_vtxos_with_server_info(&server_info)
+            .await
+            .context("failed to list VTXOs")?;
+        let now = unix_now()?;
 
-        let spendable_outpoints: HashSet<OutPoint> = vtxo_list
-            .spendable_offchain_at(&server_info, now)
-            .map(|entry| entry.vtxo().outpoint)
-            .collect();
+        let balance = OffChainBalance::from_vtxo_list(&vtxo_list, &server_info, now)?;
 
-        let pre_confirmed = vtxo_list
-            .pre_confirmed()
-            .filter(|entry| spendable_outpoints.contains(&entry.vtxo().outpoint))
-            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo().amount);
-
-        let confirmed = vtxo_list
-            .confirmed()
-            .filter(|entry| spendable_outpoints.contains(&entry.vtxo().outpoint))
-            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo().amount);
-
-        let recoverable = vtxo_list
-            .recoverable()
-            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo().amount);
-
-        let pending_recovery = vtxo_list
-            .pending_recovery_due_to_signer_at(&server_info, now)
-            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo().amount);
-
-        // Aggregate asset balances from currently offchain-spendable VTXOs only.
-        let mut asset_balances: HashMap<AssetId, u64> = HashMap::new();
-        for entry in vtxo_list.spendable_offchain_at(&server_info, now) {
-            for asset in &entry.vtxo().assets {
-                let total = asset_balances
-                    .get(&asset.asset_id)
-                    .copied()
-                    .unwrap_or(0)
-                    .checked_add(asset.amount)
-                    .ok_or_else(|| Error::ad_hoc("asset balance overflow"))?;
-                asset_balances.insert(asset.asset_id, total);
-            }
-        }
-
-        Ok(OffChainBalance {
-            pre_confirmed,
-            confirmed,
-            recoverable,
-            pending_recovery,
-            asset_balances,
-        })
+        Ok((vtxo_list, balance))
     }
 
     /// Get information about an asset by its ID.
