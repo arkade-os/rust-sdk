@@ -129,6 +129,14 @@ service IndexerService {
       }
     };
   };
+
+  // UpdateSubscription adds or removes scripts on a subscription created via GetSubscription.
+  rpc UpdateSubscription(UpdateSubscriptionRequest) returns (UpdateSubscriptionResponse) {
+    option (meshapi.gateway.http) = {
+      post: "/v1/indexer/subscription/update"
+      body: "*"
+    };
+  };
 }
 
 message GetCommitmentTxRequest {
@@ -354,14 +362,44 @@ message UnsubscribeForScriptsResponse {}
 
 
 message GetSubscriptionRequest {
+  // If empty, the server creates a new subscription automatically.
   string subscription_id = 1;
+  // Optional filter applied on stream creation. Only used when subscription_id is empty;
+  // ignored otherwise.
+  SubscriptionFilter filter = 2;
 }
+
+message SubscriptionFilter {
+  // CEL expressions evaluated against each indexed tx envelope, combined with OR.
+  repeated string expressions = 1;
+  // Script add/remove operations. Will be migrated to a CEL formula in a future protocol
+  // version and removed.
+  ScriptFilter scripts = 2;
+}
+
+message ScriptFilter {
+  repeated string add = 1;
+  repeated string remove = 2;
+}
+
+message UpdateSubscriptionRequest {
+  string subscription_id = 1;
+  SubscriptionFilter filter = 2;
+}
+
+message UpdateSubscriptionResponse {}
 
 message GetSubscriptionResponse {
   oneof data {
     IndexerHeartbeat heartbeat = 1;
     IndexerSubscriptionEvent event = 2;
+    // First frame of a server-created subscription, carrying the assigned id.
+    SubscriptionStartedEvent subscription_started = 3;
   }
+}
+
+message SubscriptionStartedEvent {
+  string subscription_id = 1;
 }
 
 message IndexerTxData {

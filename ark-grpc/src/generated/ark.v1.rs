@@ -1778,12 +1778,40 @@ pub struct UnsubscribeForScriptsRequest {
 pub struct UnsubscribeForScriptsResponse {}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetSubscriptionRequest {
+    /// If empty, the server creates a new subscription automatically.
     #[prost(string, tag = "1")]
     pub subscription_id: ::prost::alloc::string::String,
+    /// Optional filter applied on stream creation. Only used when subscription_id is empty.
+    /// ignored otherwise.
+    #[prost(message, optional, tag = "2")]
+    pub filter: ::core::option::Option<SubscriptionFilter>,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SubscriptionFilter {
+    #[prost(string, repeated, tag = "1")]
+    pub expressions: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(message, optional, tag = "2")]
+    pub scripts: ::core::option::Option<ScriptFilter>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScriptFilter {
+    #[prost(string, repeated, tag = "1")]
+    pub add: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "2")]
+    pub remove: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UpdateSubscriptionRequest {
+    #[prost(string, tag = "1")]
+    pub subscription_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "2")]
+    pub filter: ::core::option::Option<SubscriptionFilter>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UpdateSubscriptionResponse {}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetSubscriptionResponse {
-    #[prost(oneof = "get_subscription_response::Data", tags = "1, 2")]
+    #[prost(oneof = "get_subscription_response::Data", tags = "1, 2, 3")]
     pub data: ::core::option::Option<get_subscription_response::Data>,
 }
 /// Nested message and enum types in `GetSubscriptionResponse`.
@@ -1794,7 +1822,14 @@ pub mod get_subscription_response {
         Heartbeat(super::IndexerHeartbeat),
         #[prost(message, tag = "2")]
         Event(super::IndexerSubscriptionEvent),
+        #[prost(message, tag = "3")]
+        SubscriptionStarted(super::SubscriptionStartedEvent),
     }
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SubscriptionStartedEvent {
+    #[prost(string, tag = "1")]
+    pub subscription_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct IndexerTxData {
@@ -2229,6 +2264,26 @@ pub mod indexer_service_client {
             req.extensions_mut()
                 .insert(GrpcMethod::new("ark.v1.IndexerService", "GetSubscription"));
             self.inner.server_streaming(req, path, codec).await
+        }
+        /// UpdateSubscription adds or removes scripts on a subscription created via
+        /// GetSubscription.
+        pub async fn update_subscription(
+            &mut self,
+            request: impl tonic::IntoRequest<super::UpdateSubscriptionRequest>,
+        ) -> std::result::Result<tonic::Response<super::UpdateSubscriptionResponse>, tonic::Status>
+        {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path =
+                http::uri::PathAndQuery::from_static("/ark.v1.IndexerService/UpdateSubscription");
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new(
+                "ark.v1.IndexerService",
+                "UpdateSubscription",
+            ));
+            self.inner.unary(req, path, codec).await
         }
     }
 }

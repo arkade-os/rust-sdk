@@ -764,7 +764,10 @@ impl Client {
             .indexer()?
             .request(move |mut client| async move {
                 client
-                    .get_subscription(GetSubscriptionRequest { subscription_id })
+                    .get_subscription(GetSubscriptionRequest {
+                        subscription_id,
+                        filter: None,
+                    })
                     .await
             })
             .await?;
@@ -1354,6 +1357,11 @@ impl TryFrom<generated::ark::v1::GetSubscriptionResponse> for SubscriptionRespon
         let value = match value.data {
             Some(get_subscription_response::Data::Heartbeat(_)) => return Ok(Self::Heartbeat),
             Some(get_subscription_response::Data::Event(event)) => event,
+            Some(get_subscription_response::Data::SubscriptionStarted(_)) => {
+                return Err(Error::conversion(
+                    "unexpected subscription_started event in subscription stream",
+                ));
+            }
             None => return Err(Error::conversion("empty subscription response")),
         };
 
