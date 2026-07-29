@@ -1819,27 +1819,46 @@ where
         // don't refetch what they just returned.
         let refresh_outpoints = cache.unspent_outpoints_for(&scripts).await?;
 
-        if !unknown_scripts.is_empty() {
+        let delta_after = (cache.last_sync_ms().await? - vtxo_cache::SYNC_MARGIN_MS).max(1) as u64;
+
+        // The three fetches are independent, so they run concurrently.
+        let unknown_fut = async {
+            if unknown_scripts.is_empty() {
+                return Ok(Vec::new());
+            }
+
             let request = GetVtxosRequest::new_for_scripts(unknown_scripts.clone());
-            let vtxos = self.fetch_all_vtxos(request).await?;
-            cache.upsert(vtxos).await?;
-        }
+            self.fetch_all_vtxos(request).await
+        };
 
         // The delta must cover _all_ synced scripts, not just the requested ones, because the
         // watermark below is global: anything the delta skips now would be skipped forever.
-        if !synced_scripts.is_empty() {
-            let after = (cache.last_sync_ms().await? - vtxo_cache::SYNC_MARGIN_MS).max(1) as u64;
-            let request = GetVtxosRequest::new_for_scripts(synced_scripts.into_iter().collect())
-                .with_after(after);
-            let vtxos = self.fetch_all_vtxos(request).await?;
-            cache.upsert(vtxos).await?;
-        }
+        let delta_fut = async {
+            if synced_scripts.is_empty() {
+                return Ok(Vec::new());
+            }
 
-        if !refresh_outpoints.is_empty() {
+            let request =
+                GetVtxosRequest::new_for_scripts(synced_scripts.iter().cloned().collect())
+                    .with_after(delta_after);
+            self.fetch_all_vtxos(request).await
+        };
+
+        let refresh_fut = async {
+            if refresh_outpoints.is_empty() {
+                return Ok(Vec::new());
+            }
+
             let request = GetVtxosRequest::new_for_outpoints(&refresh_outpoints);
-            let vtxos = self.fetch_all_vtxos(request).await?;
-            cache.upsert(vtxos).await?;
-        }
+            self.fetch_all_vtxos(request).await
+        };
+
+        let (unknown_vtxos, delta_vtxos, refresh_vtxos) =
+            futures::try_join!(unknown_fut, delta_fut, refresh_fut)?;
+
+        cache.upsert(unknown_vtxos).await?;
+        cache.upsert(delta_vtxos).await?;
+        cache.upsert(refresh_vtxos).await?;
 
         cache.mark_synced(unknown_scripts).await?;
         cache.set_last_sync_ms(now_ms).await?;
