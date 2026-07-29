@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Script to merge multiple OpenAPI 3.0 files into a single specification.
-This merges admin.openapi.json, indexer.openapi.json, service.openapi.json,
+This merges indexer.openapi.json, service.openapi.json,
 signer_manager.openapi.json, types.openapi.json, and wallet.openapi.json
 """
 
@@ -35,7 +35,6 @@ def merge_openapi_files():
         'swagger/types.openapi.json',        # Base types first
         'swagger/service.openapi.json',      # Main service API
         'swagger/indexer.openapi.json',      # Indexer API
-        'swagger/admin.openapi.json',        # Admin API
         'swagger/signer_manager.openapi.json', # Signer manager API
         'swagger/wallet.openapi.json',       # Wallet API
     ]
@@ -55,7 +54,7 @@ def merge_openapi_files():
                 merged['info'] = {
                     'title': 'Ark API',
                     'version': '1.0.0',
-                    'description': 'Combined Ark Service, Indexer, Admin, Signer Manager, and Wallet API'
+                    'description': 'Combined Ark Service, Indexer, Signer Manager, and Wallet API'
                 }
             else:
                 # Merge subsequent files

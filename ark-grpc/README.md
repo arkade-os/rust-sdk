@@ -13,6 +13,10 @@ ark-grpc = "0.10.1"
 
 TLS root options are available through the `tls-native-roots` and `tls-webpki-roots` features.
 
+## Updating the generated client
+
+See [docs/update-server-api.md](../docs/update-server-api.md) for how to regenerate the client against a new arkd release.
+
 ## Documentation
 
 API documentation is available on [docs.rs/ark-grpc](https://docs.rs/ark-grpc).

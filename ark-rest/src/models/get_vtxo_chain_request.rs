@@ -1,7 +1,7 @@
 /*
  * Ark API
  *
- * Combined Ark Service, Indexer, Admin, Signer Manager, and Wallet API
+ * Combined Ark Service, Indexer, Signer Manager, and Wallet API
  *
  * The version of the OpenAPI document: 1.0.0
  *
@@ -14,17 +14,32 @@ use serde::Serialize;
 
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GetVtxoChainRequest {
+    /// Intent that directly proves ownership of the vtxo. If passed, the outpoint field is
+    /// ignored.
+    #[serde(rename = "intent", skip_serializing_if = "Option::is_none")]
+    pub intent: Option<models::IndexerIntent>,
     #[serde(rename = "outpoint", skip_serializing_if = "Option::is_none")]
     pub outpoint: Option<models::IndexerOutpoint>,
     #[serde(rename = "page", skip_serializing_if = "Option::is_none")]
     pub page: Option<models::IndexerPageRequest>,
+    /// Opaque cursor returned as next_page_token by a previous call. When set, the response
+    /// resumes from where that page ended.
+    #[serde(rename = "pageToken", skip_serializing_if = "Option::is_none")]
+    pub page_token: Option<String>,
+    /// Valid auth_token can also be used if the ownership has already been proved. A valid token
+    /// obtained from GetVirtualTxs rpc can be recycled for this request.
+    #[serde(rename = "token", skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
 }
 
 impl GetVtxoChainRequest {
     pub fn new() -> GetVtxoChainRequest {
         GetVtxoChainRequest {
+            intent: None,
             outpoint: None,
             page: None,
+            page_token: None,
+            token: None,
         }
     }
 }

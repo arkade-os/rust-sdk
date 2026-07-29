@@ -168,6 +168,8 @@ pub struct Vtxo {
     pub ark_txid: ::prost::alloc::string::String,
     #[prost(message, repeated, tag = "14")]
     pub assets: ::prost::alloc::vec::Vec<Asset>,
+    #[prost(uint32, tag = "15")]
+    pub depth: u32,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Asset {
@@ -1544,6 +1546,9 @@ pub struct GetVtxosRequest {
     /// Or specify a list of vtxo outpoints. The 2 filters are mutually exclusive.
     #[prost(string, repeated, tag = "2")]
     pub outpoints: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// The spendable_only, spent_only, recoverable_only, pending_only and
+    /// renewable_only filters are mutually exclusive, and are applied only when
+    /// the scripts filter is used. They are ignored when querying by outpoints.
     /// Retrieve only spendable vtxos
     #[prost(bool, tag = "3")]
     pub spendable_only: bool,
@@ -1551,7 +1556,6 @@ pub struct GetVtxosRequest {
     #[prost(bool, tag = "4")]
     pub spent_only: bool,
     /// Retrieve only recoverable vtxos (notes, subdust or swept vtxos).
-    /// The 3 filters are mutually exclusive,
     #[prost(bool, tag = "5")]
     pub recoverable_only: bool,
     #[prost(message, optional, tag = "6")]
@@ -1567,6 +1571,9 @@ pub struct GetVtxosRequest {
     /// greater value than the after when specified. A value of 0 means no upper bound.
     #[prost(int64, tag = "9")]
     pub before: i64,
+    /// Retrieve the union of the spendable and recoverable vtxos.
+    #[prost(bool, tag = "10")]
+    pub renewable_only: bool,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetVtxosResponse {
@@ -1581,6 +1588,28 @@ pub struct GetVtxoChainRequest {
     pub outpoint: ::core::option::Option<IndexerOutpoint>,
     #[prost(message, optional, tag = "2")]
     pub page: ::core::option::Option<IndexerPageRequest>,
+    /// Opaque cursor returned as next_page_token by a previous call. When set, the
+    /// response resumes from where that page ended.
+    #[prost(string, tag = "5")]
+    pub page_token: ::prost::alloc::string::String,
+    /// Either auth_token or intent can be provided to prove ownership.
+    #[prost(oneof = "get_vtxo_chain_request::Auth", tags = "3, 4")]
+    pub auth: ::core::option::Option<get_vtxo_chain_request::Auth>,
+}
+/// Nested message and enum types in `GetVtxoChainRequest`.
+pub mod get_vtxo_chain_request {
+    /// Either auth_token or intent can be provided to prove ownership.
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Auth {
+        /// Intent that directly proves ownership of the vtxo. If passed, the outpoint field is
+        /// ignored.
+        #[prost(message, tag = "3")]
+        Intent(super::IndexerIntent),
+        /// Valid auth_token can also be used if the ownership has already been proved.
+        /// A valid token obtained from GetVirtualTxs rpc can be recycled for this request.
+        #[prost(string, tag = "4")]
+        Token(::prost::alloc::string::String),
+    }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetVtxoChainResponse {
@@ -1588,6 +1617,13 @@ pub struct GetVtxoChainResponse {
     pub chain: ::prost::alloc::vec::Vec<IndexerChain>,
     #[prost(message, optional, tag = "2")]
     pub page: ::core::option::Option<IndexerPageResponse>,
+    /// Auth token can be used for other rpcs related to this vtxo/tx that require proof of
+    /// ownership.
+    #[prost(string, tag = "3")]
+    pub auth_token: ::prost::alloc::string::String,
+    /// Opaque cursor for fetching the next page. Empty when there are no more pages.
+    #[prost(string, tag = "4")]
+    pub next_page_token: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetVirtualTxsRequest {
@@ -1595,6 +1631,24 @@ pub struct GetVirtualTxsRequest {
     pub txids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(message, optional, tag = "2")]
     pub page: ::core::option::Option<IndexerPageRequest>,
+    /// Either auth_token or intent can be provided to prove ownership.
+    #[prost(oneof = "get_virtual_txs_request::Auth", tags = "3, 4")]
+    pub auth: ::core::option::Option<get_virtual_txs_request::Auth>,
+}
+/// Nested message and enum types in `GetVirtualTxsRequest`.
+pub mod get_virtual_txs_request {
+    /// Either auth_token or intent can be provided to prove ownership.
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Auth {
+        /// Intent that directly proves ownership of the transaction inputs.
+        /// If passed, the txids field is ignored.
+        #[prost(message, tag = "3")]
+        Intent(super::IndexerIntent),
+        /// Valid auth_token can also be used if the ownership has already been proved.
+        /// A valid token obtained from GetVtxoChain rpc can be recycled for this request.
+        #[prost(string, tag = "4")]
+        Token(::prost::alloc::string::String),
+    }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetVirtualTxsResponse {
@@ -1602,6 +1656,10 @@ pub struct GetVirtualTxsResponse {
     pub txs: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(message, optional, tag = "2")]
     pub page: ::core::option::Option<IndexerPageResponse>,
+    /// Auth token can be used for other rpcs related to this vtxo/tx that require proof of
+    /// ownership.
+    #[prost(string, tag = "3")]
+    pub auth_token: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetAssetRequest {
@@ -1692,6 +1750,8 @@ pub struct IndexerVtxo {
     pub ark_txid: ::prost::alloc::string::String,
     #[prost(message, repeated, tag = "14")]
     pub assets: ::prost::alloc::vec::Vec<IndexerAsset>,
+    #[prost(uint32, tag = "15")]
+    pub depth: u32,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct IndexerAsset {
@@ -1737,6 +1797,13 @@ pub mod indexer_tx_history_record {
         VirtualTxid(::prost::alloc::string::String),
     }
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct IndexerIntent {
+    #[prost(string, tag = "1")]
+    pub proof: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub message: ::prost::alloc::string::String,
+}
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct IndexerPageRequest {
     #[prost(int32, tag = "1")]
@@ -1778,12 +1845,18 @@ pub struct UnsubscribeForScriptsRequest {
 pub struct UnsubscribeForScriptsResponse {}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetSubscriptionRequest {
+    /// If empty, server creates a new subscription automatically.
     #[prost(string, tag = "1")]
     pub subscription_id: ::prost::alloc::string::String,
+    /// Optional: filter to apply on stream creation. Only used when
+    /// subscription_id is empty; ignored otherwise. See
+    /// UpdateSubscriptionRequest for filter semantics.
+    #[prost(message, optional, tag = "2")]
+    pub filter: ::core::option::Option<SubscriptionFilter>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetSubscriptionResponse {
-    #[prost(oneof = "get_subscription_response::Data", tags = "1, 2")]
+    #[prost(oneof = "get_subscription_response::Data", tags = "1, 2, 3")]
     pub data: ::core::option::Option<get_subscription_response::Data>,
 }
 /// Nested message and enum types in `GetSubscriptionResponse`.
@@ -1794,8 +1867,97 @@ pub mod get_subscription_response {
         Heartbeat(super::IndexerHeartbeat),
         #[prost(message, tag = "2")]
         Event(super::IndexerSubscriptionEvent),
+        #[prost(message, tag = "3")]
+        SubscriptionStarted(super::SubscriptionStartedEvent),
     }
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SubscriptionStartedEvent {
+    #[prost(string, tag = "1")]
+    pub subscription_id: ::prost::alloc::string::String,
+}
+/// SubscriptionFilter is the payload carried by GetSubscription's initial
+/// filter and by UpdateSubscription. See UpdateSubscriptionRequest for the
+/// per-call semantics of each field.
+///
+/// At runtime, a tx event is dispatched to a subscription when any of its
+/// expressions evaluates to true on the event's tx, OR when the event
+/// carries a vtxo whose script is in the subscription's script set.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SubscriptionFilter {
+    /// CEL expressions evaluated against each indexed tx envelope. The
+    /// indexer combines them with OR.
+    #[prost(string, repeated, tag = "1")]
+    pub expressions: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Script add/remove operations. Will be migrated to a CEL formula in a
+    /// future protocol version and removed.
+    #[prost(message, optional, tag = "2")]
+    pub scripts: ::core::option::Option<ScriptFilter>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScriptFilter {
+    #[prost(string, repeated, tag = "1")]
+    pub add: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "2")]
+    pub remove: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+/// UpdateSubscriptionRequest mutates an existing subscription. Both filter
+/// fields are optional and may be set together. The subscription_id must
+/// be non-empty and the filter must be present; otherwise InvalidArgument
+/// is returned.
+///
+/// Expressions (filter.expressions):
+///
+/// * Always overwritten as a whole. The field's contents replace any previously-set expressions
+///   even when the list is empty (which clears them entirely).
+/// * Duplicate expressions are deduplicated, since the underlying set is keyed by expression
+///   string.
+/// * Bounded by a server-side per-subscription cap; exceeding it returns InvalidArgument.
+///
+/// Scripts (filter.scripts):
+///
+/// * When the scripts field is unset, scripts are left untouched.
+/// * When set with both `add` and `remove` empty, the call clears all scripts (mirrors
+///   UnsubscribeForScripts with an empty scripts list).
+/// * When set with `add` non-empty, those scripts are added.
+/// * When set with `remove` non-empty, those scripts are removed.
+/// * `add` and `remove` may be combined in a single call. When the two lists overlap, remove takes
+///   precedence, since add is applied first and remove second.
+/// * Both operations are idempotent: adding an already-subscribed script is a no-op, and removing
+///   an unsubscribed script is a no-op.
+///
+/// Atomicity:
+///
+/// * All inputs (CEL expressions, scripts to add, scripts to remove) are validated before any state
+///   is mutated. If any single input fails validation, no mutations are applied and even valid
+///   entries in the same request are discarded. An InvalidArgument response therefore guarantees
+///   the subscription is unchanged.
+/// * A successful response guarantees all requested mutations were applied.
+///
+/// Errors:
+///
+/// * NotFound: subscription_id does not match a live subscription.
+/// * InvalidArgument: any CEL compile error, any script parse error, or the expressions cap
+///   exceeded.
+///
+/// GetSubscription initial filter:
+///
+/// * The same SubscriptionFilter shape is accepted by GetSubscriptionRequest.filter on stream
+///   creation, with the same semantics as above and two exceptions.
+/// * `scripts.remove` is ignored on creation, since a freshly-created subscription has no scripts
+///   to remove.
+/// * When `scripts` is set with both `add` and `remove` empty on creation, the clear-all behavior
+///   does not fire either, since there is nothing to clear. An empty SubscriptionFilter is
+///   therefore a no-op on creation.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UpdateSubscriptionRequest {
+    #[prost(string, tag = "1")]
+    pub subscription_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "2")]
+    pub filter: ::core::option::Option<SubscriptionFilter>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UpdateSubscriptionResponse {}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct IndexerTxData {
     #[prost(string, tag = "1")]
@@ -2230,6 +2392,27 @@ pub mod indexer_service_client {
                 .insert(GrpcMethod::new("ark.v1.IndexerService", "GetSubscription"));
             self.inner.server_streaming(req, path, codec).await
         }
+        /// UpdateSubscription updates an existing subscription created via
+        /// GetSubscription. See UpdateSubscriptionRequest for the full set of
+        /// supported filter combinations and their semantics.
+        pub async fn update_subscription(
+            &mut self,
+            request: impl tonic::IntoRequest<super::UpdateSubscriptionRequest>,
+        ) -> std::result::Result<tonic::Response<super::UpdateSubscriptionResponse>, tonic::Status>
+        {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path =
+                http::uri::PathAndQuery::from_static("/ark.v1.IndexerService/UpdateSubscription");
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new(
+                "ark.v1.IndexerService",
+                "UpdateSubscription",
+            ));
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2284,6 +2467,23 @@ pub struct GetRoundsRequest {
 pub struct GetRoundsResponse {
     #[prost(string, repeated, tag = "1")]
     pub rounds: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetExpiredRoundsRequest {}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetExpiredRoundsResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub rounds: ::prost::alloc::vec::Vec<ExpiredRound>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExpiredRound {
+    #[prost(string, tag = "1")]
+    pub round_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub commitment_txid: ::prost::alloc::string::String,
+    /// Unix timestamp at which the round's batch outputs expired.
+    #[prost(int64, tag = "3")]
+    pub expired_at: i64,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateNoteRequest {
@@ -2445,10 +2645,10 @@ pub struct ScheduledSweep {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ScheduledSessionConfig {
-    #[prost(int64, tag = "1")]
-    pub start_time: i64,
-    #[prost(int64, tag = "2")]
-    pub end_time: i64,
+    #[prost(string, tag = "1")]
+    pub start_time: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub end_time: ::prost::alloc::string::String,
     #[prost(int64, tag = "3")]
     pub period: i64,
     #[prost(int64, tag = "4")]
@@ -2559,6 +2759,23 @@ pub struct GetRecoverableLiquidityResponse {
     #[prost(uint64, tag = "1")]
     pub amount: u64,
 }
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetCollectedFeesRequest {
+    /// Unix timestamp (UTC, exclusive). Only include rounds starting after this time. 0 means no
+    /// lower bound.
+    #[prost(int64, tag = "1")]
+    pub after: i64,
+    /// Unix timestamp (UTC, exclusive). Only include rounds starting before this time. 0 means no
+    /// upper bound.
+    #[prost(int64, tag = "2")]
+    pub before: i64,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetCollectedFeesResponse {
+    /// Total collected fees in satoshis.
+    #[prost(uint64, tag = "1")]
+    pub collected_fees: u64,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SweepRequest {
     #[prost(bool, tag = "1")]
@@ -2572,6 +2789,151 @@ pub struct SweepResponse {
     pub txid: ::prost::alloc::string::String,
     #[prost(string, tag = "2")]
     pub hex: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Settings {
+    #[prost(int64, optional, tag = "1")]
+    pub session_duration: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "2")]
+    pub unrolled_vtxo_min_expiry_margin: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "3")]
+    pub ban_threshold: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "4")]
+    pub ban_duration: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "5")]
+    pub unilateral_exit_delay: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "6")]
+    pub public_unilateral_exit_delay: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "7")]
+    pub checkpoint_exit_delay: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "8")]
+    pub boarding_exit_delay: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "9")]
+    pub vtxo_tree_expiry: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "10")]
+    pub round_min_participants_count: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "11")]
+    pub round_max_participants_count: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "12")]
+    pub vtxo_min_amount: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "13")]
+    pub vtxo_max_amount: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "14")]
+    pub utxo_min_amount: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "15")]
+    pub utxo_max_amount: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "16")]
+    pub settlement_min_expiry_gap: ::core::option::Option<i64>,
+    #[prost(string, optional, tag = "17")]
+    pub vtxo_no_csv_validation_cutoff_date: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(int64, optional, tag = "18")]
+    pub max_tx_weight: ::core::option::Option<i64>,
+    #[prost(int64, optional, tag = "19")]
+    pub max_op_return_outputs: ::core::option::Option<i64>,
+    #[prost(float, optional, tag = "20")]
+    pub asset_tx_max_weight_ratio: ::core::option::Option<f32>,
+    #[prost(string, optional, tag = "21")]
+    pub note_uri_prefix: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "22")]
+    pub build_version_header: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(bool, optional, tag = "23")]
+    pub build_version_header_required: ::core::option::Option<bool>,
+    #[prost(string, optional, tag = "24")]
+    pub updated_at: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(bool, optional, tag = "25")]
+    pub digest_header_required: ::core::option::Option<bool>,
+    #[prost(string, optional, tag = "26")]
+    pub batch_trigger: ::core::option::Option<::prost::alloc::string::String>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetSettingsRequest {}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetSettingsResponse {
+    #[prost(message, optional, tag = "1")]
+    pub settings: ::core::option::Option<Settings>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct UpdateSettingsRequest {
+    #[prost(message, optional, tag = "1")]
+    pub settings: ::core::option::Option<Settings>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UpdateSettingsResponse {
+    #[prost(string, repeated, tag = "1")]
+    pub change_log: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetMainAccountUtxosRequest {}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetMainAccountUtxosResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub utxos: ::prost::alloc::vec::Vec<WalletUtxo>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WalletUtxo {
+    #[prost(string, tag = "1")]
+    pub txid: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub vout: u32,
+    #[prost(uint64, tag = "3")]
+    pub value: u64,
+    #[prost(string, tag = "4")]
+    pub script: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub address: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "6")]
+    pub confirmations: u32,
+    #[prost(bool, tag = "7")]
+    pub locked: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListTokensRequest {
+    /// base64 auth token
+    #[prost(string, tag = "1")]
+    pub token: ::prost::alloc::string::String,
+    /// hex-encoded hash of outpoints
+    #[prost(string, tag = "2")]
+    pub hash: ::prost::alloc::string::String,
+    /// txid:vout format
+    #[prost(string, tag = "3")]
+    pub outpoint: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub txid: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListTokensResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub tokens: ::prost::alloc::vec::Vec<TokenInfo>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TokenInfo {
+    #[prost(string, tag = "1")]
+    pub hash: ::prost::alloc::string::String,
+    /// txid:vout format
+    #[prost(string, repeated, tag = "2")]
+    pub outpoints: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// unix timestamp
+    #[prost(int64, tag = "3")]
+    pub expires_at: i64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RevokeTokensRequest {
+    /// base64 auth token
+    #[prost(string, tag = "1")]
+    pub token: ::prost::alloc::string::String,
+    /// hex-encoded hash of outpoints
+    #[prost(string, tag = "2")]
+    pub hash: ::prost::alloc::string::String,
+    /// txid:vout format
+    #[prost(string, tag = "3")]
+    pub outpoint: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub txid: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RevokeTokensResponse {
+    #[prost(int32, tag = "1")]
+    pub revoked_count: i32,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
@@ -2776,6 +3138,25 @@ pub mod admin_service_client {
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("ark.v1.AdminService", "GetRounds"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// GetExpiredRounds returns the sweepable rounds (those with a vtxo tree) whose
+        /// batch outputs have expired but have not been swept yet. It is meant to surface
+        /// rounds for which the sweep should have happened but likely failed.
+        pub async fn get_expired_rounds(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetExpiredRoundsRequest>,
+        ) -> std::result::Result<tonic::Response<super::GetExpiredRoundsResponse>, tonic::Status>
+        {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path =
+                http::uri::PathAndQuery::from_static("/ark.v1.AdminService/GetExpiredRounds");
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ark.v1.AdminService", "GetExpiredRounds"));
             self.inner.unary(req, path, codec).await
         }
         pub async fn create_note(
@@ -3049,6 +3430,36 @@ pub mod admin_service_client {
                 .insert(GrpcMethod::new("ark.v1.AdminService", "RevokeAuth"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn list_tokens(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListTokensRequest>,
+        ) -> std::result::Result<tonic::Response<super::ListTokensResponse>, tonic::Status>
+        {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/ark.v1.AdminService/ListTokens");
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ark.v1.AdminService", "ListTokens"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn revoke_tokens(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RevokeTokensRequest>,
+        ) -> std::result::Result<tonic::Response<super::RevokeTokensResponse>, tonic::Status>
+        {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/ark.v1.AdminService/RevokeTokens");
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ark.v1.AdminService", "RevokeTokens"));
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn get_expiring_liquidity(
             &mut self,
             request: impl tonic::IntoRequest<super::GetExpiringLiquidityRequest>,
@@ -3088,6 +3499,22 @@ pub mod admin_service_client {
             ));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn get_collected_fees(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetCollectedFeesRequest>,
+        ) -> std::result::Result<tonic::Response<super::GetCollectedFeesResponse>, tonic::Status>
+        {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path =
+                http::uri::PathAndQuery::from_static("/ark.v1.AdminService/GetCollectedFees");
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ark.v1.AdminService", "GetCollectedFees"));
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn sweep(
             &mut self,
             request: impl tonic::IntoRequest<super::SweepRequest>,
@@ -3100,6 +3527,54 @@ pub mod admin_service_client {
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("ark.v1.AdminService", "Sweep"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn get_settings(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetSettingsRequest>,
+        ) -> std::result::Result<tonic::Response<super::GetSettingsResponse>, tonic::Status>
+        {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/ark.v1.AdminService/GetSettings");
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ark.v1.AdminService", "GetSettings"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn update_settings(
+            &mut self,
+            request: impl tonic::IntoRequest<super::UpdateSettingsRequest>,
+        ) -> std::result::Result<tonic::Response<super::UpdateSettingsResponse>, tonic::Status>
+        {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/ark.v1.AdminService/UpdateSettings");
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("ark.v1.AdminService", "UpdateSettings"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn get_main_account_utxos(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetMainAccountUtxosRequest>,
+        ) -> std::result::Result<tonic::Response<super::GetMainAccountUtxosResponse>, tonic::Status>
+        {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path =
+                http::uri::PathAndQuery::from_static("/ark.v1.AdminService/GetMainAccountUtxos");
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new(
+                "ark.v1.AdminService",
+                "GetMainAccountUtxos",
+            ));
             self.inner.unary(req, path, codec).await
         }
     }

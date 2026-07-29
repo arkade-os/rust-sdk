@@ -494,7 +494,7 @@ where
         let claim_txs = timeout_op(
             self.inner.timeout,
             self.network_client()
-                .get_virtual_txs(vec![claim_txid.to_string()], None),
+                .get_virtual_txs(vec![claim_txid.to_string()], None, None),
         )
         .await?
         .map_err(|e| Error::ad_hoc(e.to_string()))
@@ -2827,7 +2827,7 @@ where
             .map_err(|e| Error::ad_hoc(e.to_string()))?;
 
         // Fetch submarine swap fees (ARK -> BTC)
-        let submarine_url = format!("{}/v2/swap/submarine", &self.inner.boltz_url);
+        let submarine_url = format!("{}/v2/swap/submarine", self.inner.boltz_url);
         let submarine_response = client
             .get(&submarine_url)
             .send()

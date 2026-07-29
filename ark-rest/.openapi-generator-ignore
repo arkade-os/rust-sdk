@@ -21,3 +21,10 @@
 #docs/*.md
 # Then explicitly reverse the ignore rule for a single file:
 #!docs/README.md
+
+# Hand-maintained files the generator must not overwrite.
+README.md
+Cargo.toml
+src/lib.rs
+.travis.yml
+git_push.sh

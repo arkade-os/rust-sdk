@@ -12,6 +12,7 @@ use crate::apis::indexer_service_api::indexer_service_get_virtual_txs;
 use crate::apis::indexer_service_api::indexer_service_get_vtxos;
 use crate::apis::indexer_service_api::indexer_service_subscribe_for_scripts;
 use crate::apis::indexer_service_api::indexer_service_unsubscribe_for_scripts;
+use crate::apis::indexer_service_api::indexer_service_update_subscription;
 use crate::models;
 use crate::models::ConfirmRegistrationRequest;
 use crate::models::Intent;
@@ -25,11 +26,13 @@ use ark_core::server::FinalizeOffchainTxResponse;
 use ark_core::server::GetVtxosRequest;
 use ark_core::server::GetVtxosRequestFilter;
 use ark_core::server::GetVtxosRequestReference;
+use ark_core::server::IndexerAuth;
 use ark_core::server::IndexerPage;
 use ark_core::server::NoncePks;
 use ark_core::server::PartialSigTree;
 use ark_core::server::StreamEvent;
 use ark_core::server::SubmitOffchainTxResponse;
+use ark_core::server::SubscriptionFilter;
 use ark_core::server::SubscriptionResponse;
 use ark_core::server::VirtualTxOutPoint;
 use ark_core::server::VirtualTxsResponse;
@@ -312,21 +315,53 @@ impl Client {
                 (None, Some(o.iter().map(|o| o.to_string()).collect()))
             }
         };
-        let (spendable_only, spent_only, recoverable_only, pending_only) = match filter {
-            None => (Some(false), Some(false), Some(false), Some(false)),
-            Some(filter) => match filter {
-                GetVtxosRequestFilter::Spendable => {
-                    (Some(true), Some(false), Some(false), Some(false))
-                }
-                GetVtxosRequestFilter::Spent => (Some(false), Some(true), Some(false), Some(false)),
-                GetVtxosRequestFilter::Recoverable => {
-                    (Some(false), Some(false), Some(true), Some(false))
-                }
-                GetVtxosRequestFilter::PendingOnly => {
-                    (Some(false), Some(false), Some(false), Some(true))
-                }
-            },
-        };
+        let (spendable_only, spent_only, recoverable_only, pending_only, renewable_only) =
+            match filter {
+                None => (
+                    Some(false),
+                    Some(false),
+                    Some(false),
+                    Some(false),
+                    Some(false),
+                ),
+                Some(filter) => match filter {
+                    GetVtxosRequestFilter::Spendable => (
+                        Some(true),
+                        Some(false),
+                        Some(false),
+                        Some(false),
+                        Some(false),
+                    ),
+                    GetVtxosRequestFilter::Spent => (
+                        Some(false),
+                        Some(true),
+                        Some(false),
+                        Some(false),
+                        Some(false),
+                    ),
+                    GetVtxosRequestFilter::Recoverable => (
+                        Some(false),
+                        Some(false),
+                        Some(true),
+                        Some(false),
+                        Some(false),
+                    ),
+                    GetVtxosRequestFilter::PendingOnly => (
+                        Some(false),
+                        Some(false),
+                        Some(false),
+                        Some(true),
+                        Some(false),
+                    ),
+                    GetVtxosRequestFilter::Renewable => (
+                        Some(false),
+                        Some(false),
+                        Some(false),
+                        Some(false),
+                        Some(true),
+                    ),
+                },
+            };
 
         let page_period_size: Option<i32> = request.page().map(|p| p.size);
         let page_period_index: Option<i32> = request.page().map(|p| p.index);
@@ -345,8 +380,9 @@ impl Client {
                     spent_only,
                     recoverable_only,
                     pending_only,
-                    before,
                     after,
+                    before,
+                    renewable_only,
                     page_period_size,
                     page_period_index,
                 )
@@ -700,9 +736,40 @@ impl Client {
         Ok(())
     }
 
+    /// Update the filter of an existing subscription.
+    ///
+    /// The filter's expressions are always overwritten as a whole (an empty list clears them),
+    /// whereas the scripts are added to and removed from the subscription's existing script set.
+    pub async fn update_subscription(
+        &self,
+        subscription_id: String,
+        filter: SubscriptionFilter,
+    ) -> Result<(), Error> {
+        let configuration = self.configuration()?;
+        self.guarded(async {
+            indexer_service_update_subscription(
+                &configuration,
+                models::UpdateSubscriptionRequest {
+                    subscription_id: Some(subscription_id),
+                    filter: Some(subscription_filter_to_model(&filter)),
+                },
+            )
+            .await
+            .map_err(Error::request)
+        })
+        .await?;
+
+        Ok(())
+    }
+
+    /// Gets a subscription stream that returns subscription responses.
+    ///
+    /// An optional [`SubscriptionFilter`] can be provided to set the subscription's filter when
+    /// the stream is opened.
     pub async fn get_subscription(
         &self,
         subscription_id: String,
+        filter: Option<SubscriptionFilter>,
     ) -> Result<impl Stream<Item = Result<SubscriptionResponse, Error>> + Unpin, Error> {
         let configuration = self.configuration()?;
 
@@ -712,10 +779,24 @@ impl Client {
             configuration.base_path,
         );
 
+        let mut query = Vec::new();
+        if let Some(filter) = filter {
+            for expression in &filter.expressions {
+                query.push(("filter.expressions", expression.clone()));
+            }
+            for script in &filter.add_scripts {
+                query.push(("filter.scripts.add", script.to_hex_string()));
+            }
+            for script in &filter.remove_scripts {
+                query.push(("filter.scripts.remove", script.to_hex_string()));
+            }
+        }
+
         // Create the request for SSE
         let request = configuration
             .client
             .get(&url)
+            .query(&query)
             .header("Accept", "text/event-stream")
             .send()
             .await
@@ -783,20 +864,40 @@ impl Client {
         Ok(Box::pin(stream))
     }
 
+    /// Get virtual transactions by TXID.
+    ///
+    /// An [`IndexerAuth`] can be provided to prove ownership if the server requires it; when an
+    /// intent is passed, the server ignores `txids`.
     pub async fn get_virtual_txs(
         &self,
         txids: Vec<String>,
         size_and_index: Option<(i32, i32)>,
+        auth: Option<IndexerAuth>,
     ) -> Result<VirtualTxsResponse, Error> {
         let (size, index) = size_and_index
             .map(|(sz, indx)| (Some(sz), Some(indx)))
             .unwrap_or_default();
+        let (token, intent_proof, intent_message) = match &auth {
+            Some(IndexerAuth::Token(token)) => (Some(token.as_str()), None, None),
+            Some(IndexerAuth::Intent { proof, message }) => {
+                (None, Some(proof.as_str()), Some(message.as_str()))
+            }
+            None => (None, None, None),
+        };
         let configuration = self.configuration()?;
         let response = self
             .guarded(async {
-                indexer_service_get_virtual_txs(&configuration, txids, size, index)
-                    .await
-                    .map_err(Error::request)
+                indexer_service_get_virtual_txs(
+                    &configuration,
+                    txids,
+                    token,
+                    size,
+                    index,
+                    intent_proof,
+                    intent_message,
+                )
+                .await
+                .map_err(Error::request)
             })
             .await?;
 
@@ -824,7 +925,32 @@ impl Client {
                 next: a.next.unwrap_or_default(),
                 total: a.total.unwrap_or_default(),
             }),
+            auth_token: response.auth_token.filter(|t| !t.is_empty()),
         })
+    }
+}
+
+fn subscription_filter_to_model(filter: &SubscriptionFilter) -> models::SubscriptionFilter {
+    models::SubscriptionFilter {
+        expressions: Some(filter.expressions.clone()),
+        scripts: (!filter.add_scripts.is_empty() || !filter.remove_scripts.is_empty()).then(|| {
+            models::ScriptFilter {
+                add: Some(
+                    filter
+                        .add_scripts
+                        .iter()
+                        .map(|s| s.to_hex_string())
+                        .collect(),
+                ),
+                remove: Some(
+                    filter
+                        .remove_scripts
+                        .iter()
+                        .map(|s| s.to_hex_string())
+                        .collect(),
+                ),
+            }
+        }),
     }
 }
 
