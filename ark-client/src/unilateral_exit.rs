@@ -15,7 +15,6 @@ use ark_core::unilateral_exit::finalize_unilateral_exit_tree;
 use ark_core::unilateral_exit::UnilateralExitTree;
 use backon::ExponentialBuilder;
 use backon::Retryable;
-use bitcoin::key::Secp256k1;
 use bitcoin::psbt;
 use bitcoin::Address;
 use bitcoin::Amount;
@@ -277,9 +276,10 @@ where
                 let pks = extract_checksig_pubkeys(script);
 
                 for pk in pks {
-                    if let Ok(keypair) = self.keypair_by_pk(&pk) {
-                        let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &keypair);
-                        let pk = keypair.x_only_public_key().0;
+                    if self.can_sign_for_pk(&pk) {
+                        let sig = self
+                            .sign_for_pk(&pk, &msg)
+                            .map_err(|e| ark_core::Error::ad_hoc(e.to_string()))?;
                         res.push((sig, pk))
                     }
                 }

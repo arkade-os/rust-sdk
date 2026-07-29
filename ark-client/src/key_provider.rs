@@ -5,6 +5,7 @@ use bitcoin::key::Keypair;
 use bitcoin::secp256k1::Secp256k1;
 use std::sync::Arc;
 
+#[derive(Clone, Copy)]
 pub enum KeypairIndex {
     /// Increments the index and returns a new keypair
     New,

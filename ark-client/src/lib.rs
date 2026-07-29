@@ -35,6 +35,7 @@ use bitcoin::bip32::DerivationPath;
 use bitcoin::bip32::Xpriv;
 use bitcoin::key::Keypair;
 use bitcoin::key::Secp256k1;
+use bitcoin::secp256k1;
 use bitcoin::secp256k1::schnorr::Signature;
 use bitcoin::secp256k1::All;
 use bitcoin::secp256k1::Message;
@@ -60,6 +61,7 @@ use std::time::Instant;
 pub mod contract;
 pub mod error;
 pub mod key_provider;
+pub mod signer;
 pub mod swap_storage;
 pub mod vtxo_watcher;
 pub mod wallet;
@@ -111,6 +113,7 @@ pub use migration::MigrationLegReport;
 pub use migration::MigrationSkipReason;
 pub use migration::MigrationVtxoRef;
 pub use migration::MAX_VTXOS_PER_SETTLEMENT;
+pub use signer::Signer;
 pub use swap_storage::InMemorySwapStorage;
 #[cfg(feature = "sqlite")]
 pub use swap_storage::SqliteSwapStorage;
@@ -442,7 +445,7 @@ impl Default for OfflineClientConfig {
 pub struct OfflineClient<B, W, S> {
     // TODO: We could introduce a generic interface so that consumers can use either GRPC or REST.
     network_client: ark_grpc::Client,
-    key_provider: Arc<dyn KeyProvider>,
+    signer: Arc<dyn Signer>,
     discoverable_key_provider: Option<Arc<dyn DiscoverableKeyProvider>>,
     blockchain: Arc<B>,
     secp: Secp256k1<All>,
@@ -656,7 +659,14 @@ where
         wallet: Arc<W>,
         swap_storage: Arc<S>,
     ) -> Self {
-        Self::with_key_provider_parts(config, key_provider, None, blockchain, wallet, swap_storage)
+        Self::with_signer_parts(
+            config,
+            Arc::new(key_provider),
+            None,
+            blockchain,
+            wallet,
+            swap_storage,
+        )
     }
 
     /// Create a new offline client with a discoverable key provider.
@@ -670,11 +680,11 @@ where
     where
         P: DiscoverableKeyProvider + 'static,
     {
-        let core_key_provider: Arc<dyn KeyProvider> = key_provider.clone();
+        let signer: Arc<dyn Signer> = key_provider.clone();
         let discoverable_key_provider: Arc<dyn DiscoverableKeyProvider> = key_provider;
-        Self::with_key_provider_parts(
+        Self::with_signer_parts(
             config,
-            core_key_provider,
+            signer,
             Some(discoverable_key_provider),
             blockchain,
             wallet,
@@ -682,9 +692,9 @@ where
         )
     }
 
-    fn with_key_provider_parts(
+    fn with_signer_parts(
         config: OfflineClientConfig,
-        key_provider: Arc<dyn KeyProvider>,
+        signer: Arc<dyn Signer>,
         discoverable_key_provider: Option<Arc<dyn DiscoverableKeyProvider>>,
         blockchain: Arc<B>,
         wallet: Arc<W>,
@@ -714,7 +724,7 @@ where
         };
         Self {
             network_client,
-            key_provider,
+            signer,
             discoverable_key_provider,
             blockchain,
             secp,
@@ -728,6 +738,21 @@ where
             delegator_pk: config.delegator_pk,
             historical_delegator_pks,
         }
+    }
+
+    /// Create a new offline client with a generic [`Signer`].
+    ///
+    /// Use this to keep secret key material outside the client: all Schnorr signing goes through
+    /// the signer. This supports threshold signature schemes (e.g. FROST), hardware wallets and
+    /// remote signers. All flows work with such a client; see [`Signer`] for details.
+    pub fn with_signer(
+        config: OfflineClientConfig,
+        signer: Arc<dyn Signer>,
+        blockchain: Arc<B>,
+        wallet: Arc<W>,
+        swap_storage: Arc<S>,
+    ) -> Self {
+        Self::with_signer_parts(config, signer, None, blockchain, wallet, swap_storage)
     }
 
     /// Create a new offline client with a static keypair.
@@ -1107,10 +1132,7 @@ where
         server_info: &server::Info,
     ) -> Result<(ArkAddress, Vtxo), Error> {
         let server_signer = server_info.signer_pk.into();
-        let owner = self
-            .next_keypair(KeypairIndex::LastUnused)?
-            .public_key()
-            .into();
+        let owner = self.next_signing_pk(KeypairIndex::LastUnused)?;
 
         self.persist_offchain_vtxo_contract(server_info, server_signer, owner)
     }
@@ -1164,10 +1186,7 @@ where
         &self,
         server_info: &server::Info,
     ) -> Result<Vec<(ArkAddress, Vtxo)>, Error> {
-        let owner = self
-            .next_keypair(KeypairIndex::LastUnused)?
-            .x_only_public_key()
-            .0;
+        let owner = self.next_signing_pk(KeypairIndex::LastUnused)?;
         let candidate_delays = ark_core::candidate_exit_delays(
             server_info.unilateral_exit_delay,
             server_info.network,
@@ -1205,7 +1224,7 @@ where
         &self,
         server_info: &server::Info,
     ) -> Result<Vec<(ArkAddress, Vtxo)>, Error> {
-        let pks = self.inner.key_provider.get_cached_pks()?;
+        let pks = self.owner_pks()?;
 
         // Build addresses for current signer + all deprecated signers so VTXOs under any
         // known server key are discovered and visible in the balance.
@@ -1612,10 +1631,7 @@ where
     // At the moment we are always generating the same address.
     pub async fn get_boarding_address(&self) -> Result<Address, Error> {
         let server_info = &self.server_info().await?;
-        let owner = self
-            .next_keypair(KeypairIndex::LastUnused)?
-            .x_only_public_key()
-            .0;
+        let owner = self.next_signing_pk(KeypairIndex::LastUnused)?;
 
         let contract = BoardingContract {
             server: server_info.signer_pk.into(),
@@ -1679,10 +1695,7 @@ where
     ) -> Result<Vec<AnnotatedBoardingOutput>, Error> {
         let candidate_delays =
             ark_core::candidate_exit_delays(server_info.boarding_exit_delay, server_info.network)?;
-        let owner = self
-            .next_keypair(KeypairIndex::LastUnused)?
-            .x_only_public_key()
-            .0;
+        let owner = self.next_signing_pk(KeypairIndex::LastUnused)?;
         let key_index = self.derivation_index_for_pk(&owner);
         let state = self
             .state
@@ -2014,16 +2027,47 @@ where
         Ok(all_vtxos)
     }
 
-    fn next_keypair(&self, keypair_index: KeypairIndex) -> Result<Keypair, Error> {
-        self.inner.key_provider.get_next_keypair(keypair_index)
-    }
-    fn keypair_by_pk(&self, pk: &XOnlyPublicKey) -> Result<Keypair, Error> {
-        self.inner.key_provider.get_keypair_for_pk(pk)
+    /// The next x-only public key to use for receiving.
+    fn next_signing_pk(&self, keypair_index: KeypairIndex) -> Result<XOnlyPublicKey, Error> {
+        self.inner.signer.next_signing_pk(keypair_index)
     }
 
+    /// Like [`Self::next_signing_pk`], but as a full public key.
+    ///
+    /// Signers without raw keypairs expose x-only keys (BIP340), which lift to the even-parity
+    /// point.
+    fn next_signing_public_key(
+        &self,
+        keypair_index: KeypairIndex,
+    ) -> Result<secp256k1::PublicKey, Error> {
+        match self.inner.signer.next_keypair(keypair_index)? {
+            Some(kp) => Ok(kp.public_key()),
+            None => {
+                let pk = self.inner.signer.next_signing_pk(keypair_index)?;
+                Ok(pk.public_key(secp256k1::Parity::Even))
+            }
+        }
+    }
+
+    /// All x-only public keys this wallet can sign for.
+    fn owner_pks(&self) -> Result<Vec<XOnlyPublicKey>, Error> {
+        self.inner.signer.signing_pks()
+    }
+
+    /// Whether this wallet can produce a Schnorr signature for the given public key.
+    fn can_sign_for_pk(&self, pk: &XOnlyPublicKey) -> bool {
+        if matches!(self.inner.signer.keypair_for_pk(pk), Ok(Some(_))) {
+            return true;
+        }
+        self.inner
+            .signer
+            .signing_pks()
+            .is_ok_and(|pks| pks.contains(pk))
+    }
+
+    /// Produce a BIP340 signature for `pk`.
     fn sign_for_pk(&self, pk: &XOnlyPublicKey, msg: &Message) -> Result<Signature, Error> {
-        let keypair = self.keypair_by_pk(pk)?;
-        Ok(self.secp().sign_schnorr_no_aux_rand(msg, &keypair))
+        self.inner.signer.sign_schnorr(pk, msg)
     }
 
     fn boarding_outputs(&self) -> Result<Vec<AnnotatedBoardingOutput>, Error> {
@@ -2491,7 +2535,7 @@ mod digest_guard_tests {
         let secp = Secp256k1::new();
         let secret_key = SecretKey::from_slice(&[1; 32]).unwrap();
         let keypair = Keypair::from_secret_key(&secp, &secret_key);
-        let public_key = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
+        let public_key = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
         let (xonly, _) = keypair.x_only_public_key();
         let address = Address::p2tr(&secp, xonly, None, Network::Regtest);
 
