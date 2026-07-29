@@ -3,6 +3,9 @@ use crate::key_provider::KeypairIndex;
 use crate::utils::sleep;
 use crate::utils::timeout_op;
 use crate::utils::unix_now;
+use crate::utils::unix_now_millis;
+use crate::vtxo_cache::InMemoryVtxoCache;
+use crate::vtxo_cache::VtxoCacheStore;
 use crate::wallet::OnchainWallet;
 use ark_core::asset::AssetId;
 use ark_core::build_anchor_tx;
@@ -73,6 +76,7 @@ mod migration;
 mod send_vtxo;
 mod unilateral_exit;
 mod utils;
+pub mod vtxo_cache;
 
 pub use ark_core::server::DeprecatedSignerStatus;
 pub use ark_core::server::ServerSignerStatus;
@@ -455,6 +459,7 @@ pub struct OfflineClient<B, W, S> {
     contract_store: Arc<Mutex<Option<Box<dyn ContractStore>>>>,
     delegator_pk: Option<XOnlyPublicKey>,
     historical_delegator_pks: Vec<XOnlyPublicKey>,
+    vtxo_cache: Arc<dyn VtxoCacheStore>,
 }
 
 /// A client to interact with Ark server
@@ -464,6 +469,7 @@ pub struct Client<B, W, S> {
     inner: OfflineClient<B, W, S>,
     state: Arc<RwLock<ServerState>>,
     server_info_refresh_lock: Arc<tokio::sync::Mutex<()>>,
+    vtxo_sync_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 struct ServerState {
@@ -722,12 +728,20 @@ where
             swap_storage,
             boltz_url: config.boltz_url.trim_end_matches('/').to_string(),
             boltz_referral_id,
+            vtxo_cache: Arc::new(InMemoryVtxoCache::new()),
             timeout: config.timeout,
             server_info_ttl: config.server_info_ttl,
             contract_store: Arc::new(Mutex::new(None)),
             delegator_pk: config.delegator_pk,
             historical_delegator_pks,
         }
+    }
+
+    /// Use a custom [`VtxoCacheStore`] implementation instead of the default
+    /// [`InMemoryVtxoCache`], e.g. to share a persistent VTXO cache between processes.
+    pub fn with_vtxo_cache(mut self, vtxo_cache: Arc<dyn VtxoCacheStore>) -> Self {
+        self.vtxo_cache = vtxo_cache;
+        self
     }
 
     /// Create a new offline client with a static keypair.
@@ -865,6 +879,7 @@ where
             inner: self,
             state,
             server_info_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            vtxo_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
 
         client.hydrate_persisted_contract_keys()?;
@@ -1707,12 +1722,79 @@ where
         manager.annotated_boarding_outputs_for_exit_delays(&candidate_delays)
     }
 
+    /// Get the VTXOs for the given addresses, using the configured [`VtxoCacheStore`] to avoid
+    /// refetching the full VTXO history on every call.
+    ///
+    /// Scripts seen for the first time are fetched in full. For known scripts we only fetch the
+    /// delta since the last sync (the server filters by the VTXO's `updated_at` timestamp, which
+    /// is bumped on creation, spend, settlement and unroll), plus a targeted refresh by outpoint
+    /// of the cached unspent VTXOs, whose swept/expiry state can change server-side without
+    /// bumping `updated_at`. Spent VTXOs are terminal and are never refetched.
+    ///
+    /// Use [`Client::clear_vtxo_cache`] to force a full refetch.
     pub async fn get_virtual_tx_outpoints(
         &self,
         addresses: impl Iterator<Item = ArkAddress>,
     ) -> Result<Vec<VirtualTxOutPoint>, Error> {
-        let request = GetVtxosRequest::new_for_addresses(addresses);
-        self.fetch_all_vtxos(request).await
+        let scripts: HashSet<ScriptBuf> = addresses
+            .map(|address| address.to_p2tr_script_pubkey())
+            .collect();
+
+        if scripts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Holding the lock for the whole sync serializes concurrent callers, so the same delta is
+        // not fetched twice.
+        let _sync_guard = self.vtxo_sync_lock.lock().await;
+
+        let cache = &self.inner.vtxo_cache;
+
+        let now_ms = unix_now_millis()?;
+
+        let synced_scripts = cache.synced_scripts().await?;
+        let unknown_scripts = scripts
+            .iter()
+            .filter(|script| !synced_scripts.contains(*script))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        // Cached unspent VTXOs to refresh by outpoint, collected before the fetches below so we
+        // don't refetch what they just returned.
+        let refresh_outpoints = cache.unspent_outpoints_for(&scripts).await?;
+
+        if !unknown_scripts.is_empty() {
+            let request = GetVtxosRequest::new_for_scripts(unknown_scripts.clone());
+            let vtxos = self.fetch_all_vtxos(request).await?;
+            cache.upsert(vtxos).await?;
+        }
+
+        // The delta must cover _all_ synced scripts, not just the requested ones, because the
+        // watermark below is global: anything the delta skips now would be skipped forever.
+        if !synced_scripts.is_empty() {
+            let after = (cache.last_sync_ms().await? - vtxo_cache::SYNC_MARGIN_MS).max(1) as u64;
+            let request = GetVtxosRequest::new_for_scripts(synced_scripts.into_iter().collect())
+                .with_after(after);
+            let vtxos = self.fetch_all_vtxos(request).await?;
+            cache.upsert(vtxos).await?;
+        }
+
+        if !refresh_outpoints.is_empty() {
+            let request = GetVtxosRequest::new_for_outpoints(&refresh_outpoints);
+            let vtxos = self.fetch_all_vtxos(request).await?;
+            cache.upsert(vtxos).await?;
+        }
+
+        cache.mark_synced(unknown_scripts).await?;
+        cache.set_last_sync_ms(now_ms).await?;
+
+        cache.vtxos_for(&scripts).await
+    }
+
+    /// Clear the VTXO cache, forcing the next VTXO query to fetch everything from the server
+    /// again.
+    pub async fn clear_vtxo_cache(&self) -> Result<(), Error> {
+        self.inner.vtxo_cache.clear().await
     }
 
     pub async fn list_vtxos(&self) -> Result<AnnotatedVtxoList, Error> {

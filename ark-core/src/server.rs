@@ -263,6 +263,16 @@ impl GetVtxosRequest {
         }
     }
 
+    pub fn new_for_scripts(scripts: Vec<ScriptBuf>) -> Self {
+        Self {
+            reference: GetVtxosRequestReference::Scripts(scripts),
+            filter: None,
+            page: None,
+            before: None,
+            after: None,
+        }
+    }
+
     pub fn new_for_outpoints(outpoints: &[OutPoint]) -> Self {
         Self {
             reference: GetVtxosRequestReference::OutPoints(outpoints.to_vec()),
