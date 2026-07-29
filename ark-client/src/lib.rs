@@ -2204,6 +2204,54 @@ where
             .await
             .map_err(Into::into)
     }
+
+    /// Subscribe to VTXO script notifications and open the event stream in a single call
+    ///
+    /// The server creates the subscription automatically and returns its ID alongside the
+    /// stream. Use the returned ID with [`Self::update_subscription`] to add or remove scripts.
+    ///
+    /// # Arguments
+    ///
+    /// * `scripts` - Vector of ArkAddress to subscribe to
+    ///
+    /// # Returns
+    ///
+    /// Returns the server-assigned subscription ID together with a stream of SubscriptionResponse
+    /// messages
+    pub async fn subscribe_to_scripts_stream(
+        &self,
+        scripts: Vec<ArkAddress>,
+    ) -> Result<
+        (
+            String,
+            impl Stream<Item = Result<SubscriptionResponse, ark_grpc::Error>> + Unpin,
+        ),
+        Error,
+    > {
+        self.network_client()
+            .subscribe_to_scripts_stream(scripts)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Add or remove scripts on an existing subscription
+    ///
+    /// # Arguments
+    ///
+    /// * `subscription_id` - The subscription ID returned by [`Self::subscribe_to_scripts_stream`]
+    /// * `add` - Scripts (ArkAddress) to start receiving notifications for
+    /// * `remove` - Scripts (ArkAddress) to stop receiving notifications for
+    pub async fn update_subscription(
+        &self,
+        subscription_id: String,
+        add: Vec<ArkAddress>,
+        remove: Vec<ArkAddress>,
+    ) -> Result<(), Error> {
+        self.network_client()
+            .update_subscription(subscription_id, add, remove)
+            .await
+            .map_err(Into::into)
+    }
 }
 
 #[cfg(test)]
