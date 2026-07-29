@@ -13,11 +13,14 @@ use crate::generated::ark::v1::IndexerChainedTxType;
 use crate::generated::ark::v1::Intent;
 use crate::generated::ark::v1::Outpoint;
 use crate::generated::ark::v1::RegisterIntentRequest;
+use crate::generated::ark::v1::ScriptFilter;
 use crate::generated::ark::v1::SubmitSignedForfeitTxsRequest;
 use crate::generated::ark::v1::SubmitTreeNoncesRequest;
 use crate::generated::ark::v1::SubmitTreeSignaturesRequest;
 use crate::generated::ark::v1::SubscribeForScriptsRequest;
+use crate::generated::ark::v1::SubscriptionFilter;
 use crate::generated::ark::v1::UnsubscribeForScriptsRequest;
+use crate::generated::ark::v1::UpdateSubscriptionRequest;
 use crate::Error;
 use ark_core::asset::AssetId;
 use ark_core::history;
@@ -778,6 +781,11 @@ impl Client {
             loop {
                 match stream.try_next().await {
                     Ok(Some(response)) => {
+                        if let Some(get_subscription_response::Data::SubscriptionStarted(_)) =
+                            response.data
+                        {
+                            continue;
+                        }
                         match SubscriptionResponse::try_from(response) {
                             Ok(subscription_response) => {
                                 yield Ok(subscription_response);
@@ -798,6 +806,136 @@ impl Client {
         };
 
         Ok(stream.boxed())
+    }
+
+    /// Subscribes to tx notifications for the given vtxo scripts in a single call.
+    ///
+    /// Sends an empty `subscription_id` so the server creates the subscription and starts
+    /// streaming immediately. Returns the server-assigned id together with the stream, pass the
+    /// id to [`Self::update_subscription`] to add or remove scripts later.
+    pub async fn subscribe_to_scripts_stream(
+        &self,
+        scripts: Vec<ArkAddress>,
+    ) -> Result<
+        (
+            String,
+            impl Stream<Item = Result<SubscriptionResponse, Error>> + Unpin,
+        ),
+        Error,
+    > {
+        let scripts = scripts
+            .iter()
+            .map(|address| address.to_p2tr_script_pubkey().to_hex_string())
+            .collect::<Vec<_>>();
+
+        let response = self
+            .indexer()?
+            .request(move |mut client| async move {
+                client
+                    .get_subscription(GetSubscriptionRequest {
+                        subscription_id: String::new(),
+                        filter: Some(SubscriptionFilter {
+                            expressions: Vec::new(),
+                            scripts: Some(ScriptFilter {
+                                add: scripts,
+                                remove: Vec::new(),
+                            }),
+                        }),
+                    })
+                    .await
+            })
+            .await?;
+
+        let mut stream = response.into_inner();
+
+        // The server-created subscription reports its id in a subscription_started frame ahead
+        // of any tx events, capture it before handing back the stream.
+        let subscription_id = loop {
+            match stream.try_next().await.map_err(Error::event_stream)? {
+                Some(response) => match response.data {
+                    Some(get_subscription_response::Data::SubscriptionStarted(started)) => {
+                        break started.subscription_id;
+                    }
+                    Some(get_subscription_response::Data::Heartbeat(_)) => continue,
+                    _ => {
+                        return Err(Error::conversion(
+                            "expected subscription_started as first subscription event",
+                        ))
+                    }
+                },
+                None => {
+                    return Err(Error::conversion(
+                        "subscription stream closed before subscription_started",
+                    ))
+                }
+            }
+        };
+
+        let stream = stream! {
+            loop {
+                match stream.try_next().await {
+                    Ok(Some(response)) => {
+                        // A subscription_started frame carries the subscription id, not a tx
+                        // event. Skip it.
+                        if let Some(get_subscription_response::Data::SubscriptionStarted(_)) =
+                            response.data
+                        {
+                            continue;
+                        }
+                        match SubscriptionResponse::try_from(response) {
+                            Ok(subscription_response) => {
+                                yield Ok(subscription_response);
+                            }
+                            Err(e) => {
+                                yield Err(e);
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        break;
+                    }
+                    Err(e) => {
+                        yield Err(Error::event_stream(e));
+                    }
+                }
+            }
+        };
+
+        Ok((subscription_id, stream.boxed()))
+    }
+
+    /// Adds or removes scripts on a subscription previously opened with
+    /// [`Self::subscribe_to_scripts_stream`].
+    pub async fn update_subscription(
+        &self,
+        subscription_id: String,
+        add: Vec<ArkAddress>,
+        remove: Vec<ArkAddress>,
+    ) -> Result<(), Error> {
+        let add = add
+            .iter()
+            .map(|address| address.to_p2tr_script_pubkey().to_hex_string())
+            .collect::<Vec<_>>();
+        let remove = remove
+            .iter()
+            .map(|address| address.to_p2tr_script_pubkey().to_hex_string())
+            .collect::<Vec<_>>();
+
+        self.indexer()?
+            .request(move |mut client| async move {
+                client
+                    .update_subscription(UpdateSubscriptionRequest {
+                        subscription_id,
+                        filter: Some(SubscriptionFilter {
+                            expressions: Vec::new(),
+                            scripts: Some(ScriptFilter { add, remove }),
+                        }),
+                    })
+                    .await
+            })
+            .await?;
+
+        Ok(())
     }
 
     pub async fn estimate_fees(
