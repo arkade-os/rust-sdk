@@ -1940,19 +1940,32 @@ where
                         | SwapStatus::TransactionServerConfirmed => {
                             // Fetch the full status to get the server's lockup txid.
                             let url = format!("{}/v2/swap/{swap_id}", self.inner.boltz_url);
-                            let txid = async {
-                                reqwest::Client::new()
-                                    .get(&url)
-                                    .send()
+                            let response = reqwest::Client::new()
+                                .get(&url)
+                                .send()
+                                .await
+                                .map_err(|e| Error::ad_hoc(e.to_string()))
+                                .context("failed to fetch chain swap status")?;
+
+                            let status = response.status();
+                            if !status.is_success() {
+                                let error_text = response
+                                    .text()
                                     .await
-                                    .ok()?
-                                    .json::<GetSwapStatusResponse>()
-                                    .await
-                                    .ok()?
-                                    .transaction
-                                    .map(|t| t.id)
+                                    .map_err(|e| Error::ad_hoc(e.to_string()))
+                                    .context("failed to read chain swap status error response")?;
+                                return Err(Error::ad_hoc(format!(
+                                    "failed to fetch chain swap status ({status}): {error_text}"
+                                )));
                             }
-                            .await;
+
+                            let txid = response
+                                .json::<GetSwapStatusResponse>()
+                                .await
+                                .map_err(|e| Error::ad_hoc(e.to_string()))
+                                .context("failed to decode chain swap status response")?
+                                .transaction
+                                .map(|t| t.id);
 
                             tracing::info!(
                                 swap_id,
