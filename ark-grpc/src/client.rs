@@ -703,6 +703,9 @@ impl Client {
     /// Note: for new subscriptions, don't provide a `subscription_id`
     ///
     /// Returns the subscription id if successful
+    #[deprecated(
+        note = "use `subscribe_to_scripts_stream` to open a subscription, or `update_subscription` to add scripts"
+    )]
     pub async fn subscribe_to_scripts(
         &self,
         scripts: Vec<ArkAddress>,
@@ -734,6 +737,7 @@ impl Client {
     }
 
     /// Allows to remove scripts from an existing subscription.
+    #[deprecated(note = "use `update_subscription` with the `remove` argument")]
     pub async fn unsubscribe_from_scripts(
         &self,
         scripts: Vec<ArkAddress>,
@@ -759,6 +763,9 @@ impl Client {
     }
 
     /// Gets a subscription stream that returns subscription responses.
+    #[deprecated(
+        note = "use `subscribe_to_scripts_stream`, which creates the subscription and opens the stream in a single call"
+    )]
     pub async fn get_subscription(
         &self,
         subscription_id: String,

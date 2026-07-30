@@ -2151,6 +2151,10 @@ where
     /// # Returns
     ///
     /// Returns the subscription ID if successful
+    #[deprecated(
+        note = "use `subscribe_to_scripts_stream` to open a subscription, or `update_subscription` to add scripts"
+    )]
+    #[allow(deprecated)]
     pub async fn subscribe_to_scripts(
         &self,
         scripts: Vec<ArkAddress>,
@@ -2171,6 +2175,8 @@ where
     ///
     /// * `scripts` - Vector of ArkAddress to unsubscribe from
     /// * `subscription_id` - The subscription ID to update
+    #[deprecated(note = "use `update_subscription` with the `remove` argument")]
+    #[allow(deprecated)]
     pub async fn unsubscribe_from_scripts(
         &self,
         scripts: Vec<ArkAddress>,
@@ -2194,6 +2200,10 @@ where
     /// # Returns
     ///
     /// Returns a Stream of SubscriptionResponse messages
+    #[deprecated(
+        note = "use `subscribe_to_scripts_stream`, which creates the subscription and opens the stream in a single call"
+    )]
+    #[allow(deprecated)]
     pub async fn get_subscription(
         &self,
         subscription_id: String,
