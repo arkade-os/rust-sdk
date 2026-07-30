@@ -575,7 +575,7 @@ where
             match status_result {
                 Ok(status) => {
                     tracing::debug!(swap_id, current = ?status, "Swap status");
-                    match status {
+                    match &status {
                         SwapStatus::InvoicePaid => {
                             let deadline = tokio::time::Instant::now() + self.inner.timeout;
 
@@ -599,16 +599,25 @@ where
                                 tokio::time::sleep(Duration::from_secs(1)).await;
                             }
                         }
-                        SwapStatus::InvoiceExpired => {
-                            return Err(Error::ad_hoc(format!(
-                                "invoice expired for swap {swap_id}"
-                            )));
-                        }
                         SwapStatus::Error { error } => {
-                            tracing::error!(
+                            tracing::error!(swap_id, error, "Boltz reported swap error");
+                            return Err(swap_wait_failure_error(
+                                &status,
                                 swap_id,
-                                "Got error from swap updates subscription: {error}"
-                            );
+                                "invoice payment",
+                            ));
+                        }
+                        SwapStatus::TransactionRefunded
+                        | SwapStatus::TransactionFailed
+                        | SwapStatus::TransactionLockupFailed
+                        | SwapStatus::InvoiceFailedToPay
+                        | SwapStatus::InvoiceExpired
+                        | SwapStatus::SwapExpired => {
+                            return Err(swap_wait_failure_error(
+                                &status,
+                                swap_id,
+                                "invoice payment",
+                            ));
                         }
                         SwapStatus::InvoiceSet
                         | SwapStatus::InvoicePending
@@ -617,14 +626,11 @@ where
                         | SwapStatus::TransactionConfirmed
                         | SwapStatus::TransactionServerMempool
                         | SwapStatus::TransactionServerConfirmed
-                        | SwapStatus::TransactionRefunded
-                        | SwapStatus::TransactionFailed
                         | SwapStatus::TransactionClaimed
-                        | SwapStatus::TransactionLockupFailed
-                        | SwapStatus::InvoiceSettled
-                        | SwapStatus::InvoiceFailedToPay
-                        | SwapStatus::SwapExpired
-                        | SwapStatus::Other(_) => {}
+                        | SwapStatus::InvoiceSettled => {}
+                        SwapStatus::Other(status) => {
+                            tracing::debug!(swap_id, status, "Ignoring unknown swap status");
+                        }
                     }
                 }
                 Err(e) => return Err(e),
@@ -1478,37 +1484,34 @@ where
                 Ok(status) => {
                     tracing::debug!(swap_id, current = ?status, "Swap status");
 
-                    match status {
+                    match &status {
                         SwapStatus::TransactionMempool | SwapStatus::TransactionConfirmed => {
                             tracing::debug!(swap_id, "VHTLC funding detected");
                             return Ok(());
                         }
-                        SwapStatus::InvoiceExpired => {
-                            return Err(Error::ad_hoc(format!(
-                                "invoice expired for swap {swap_id}"
-                            )));
-                        }
                         SwapStatus::Error { error } => {
-                            tracing::error!(
-                                swap_id,
-                                "Got error from swap updates subscription: {error}"
-                            );
+                            tracing::error!(swap_id, error, "Boltz reported swap error");
+                            return Err(swap_wait_failure_error(&status, swap_id, "VHTLC funding"));
                         }
-                        // TODO: We may still need to handle some of these explicitly.
-                        SwapStatus::Created
-                        | SwapStatus::TransactionRefunded
+                        SwapStatus::TransactionRefunded
                         | SwapStatus::TransactionFailed
-                        | SwapStatus::TransactionClaimed
                         | SwapStatus::TransactionLockupFailed
+                        | SwapStatus::InvoiceFailedToPay
+                        | SwapStatus::InvoiceExpired
+                        | SwapStatus::SwapExpired => {
+                            return Err(swap_wait_failure_error(&status, swap_id, "VHTLC funding"));
+                        }
+                        SwapStatus::Created
+                        | SwapStatus::TransactionClaimed
                         | SwapStatus::TransactionServerMempool
                         | SwapStatus::TransactionServerConfirmed
                         | SwapStatus::InvoiceSet
                         | SwapStatus::InvoicePending
                         | SwapStatus::InvoicePaid
-                        | SwapStatus::InvoiceSettled
-                        | SwapStatus::InvoiceFailedToPay
-                        | SwapStatus::SwapExpired
-                        | SwapStatus::Other(_) => {}
+                        | SwapStatus::InvoiceSettled => {}
+                        SwapStatus::Other(status) => {
+                            tracing::debug!(swap_id, status, "Ignoring unknown swap status");
+                        }
                     }
                 }
                 Err(e) => return Err(e),
@@ -1932,7 +1935,7 @@ where
             match status_result {
                 Ok(status) => {
                     tracing::debug!(swap_id, current = ?status, "Chain swap status");
-                    match status {
+                    match &status {
                         SwapStatus::TransactionServerMempool
                         | SwapStatus::TransactionServerConfirmed => {
                             // Fetch the full status to get the server's lockup txid.
@@ -1958,30 +1961,38 @@ where
                             );
                             return Ok(txid);
                         }
-                        SwapStatus::SwapExpired => {
-                            return Err(Error::ad_hoc(format!("chain swap expired: {swap_id}")));
-                        }
-                        SwapStatus::TransactionRefunded | SwapStatus::TransactionFailed => {
-                            return Err(Error::ad_hoc(format!(
-                                "chain swap failed or refunded: {swap_id}"
-                            )));
-                        }
                         SwapStatus::Error { error } => {
-                            tracing::error!(swap_id, "Got error from chain swap updates: {error}");
+                            tracing::error!(swap_id, error, "Boltz reported chain swap error");
+                            return Err(swap_wait_failure_error(
+                                &status,
+                                swap_id,
+                                "chain swap server lockup",
+                            ));
+                        }
+                        SwapStatus::TransactionRefunded
+                        | SwapStatus::TransactionFailed
+                        | SwapStatus::TransactionLockupFailed
+                        | SwapStatus::InvoiceFailedToPay
+                        | SwapStatus::InvoiceExpired
+                        | SwapStatus::SwapExpired => {
+                            return Err(swap_wait_failure_error(
+                                &status,
+                                swap_id,
+                                "chain swap server lockup",
+                            ));
                         }
                         // User lockup detected — still waiting for server side.
                         SwapStatus::Created
                         | SwapStatus::TransactionMempool
                         | SwapStatus::TransactionConfirmed
                         | SwapStatus::TransactionClaimed
-                        | SwapStatus::TransactionLockupFailed
                         | SwapStatus::InvoiceSet
                         | SwapStatus::InvoicePending
                         | SwapStatus::InvoicePaid
-                        | SwapStatus::InvoiceSettled
-                        | SwapStatus::InvoiceFailedToPay
-                        | SwapStatus::InvoiceExpired
-                        | SwapStatus::Other(_) => {}
+                        | SwapStatus::InvoiceSettled => {}
+                        SwapStatus::Other(status) => {
+                            tracing::debug!(swap_id, status, "Ignoring unknown chain swap status");
+                        }
                     }
                 }
                 Err(e) => return Err(e),
@@ -5127,20 +5138,54 @@ impl SwapStatus {
     /// Boltz status can still leave a user-claimable/refundable VHTLC. Use observed VTXO liveness
     /// for contract deactivation instead.
     pub fn is_terminal(&self) -> bool {
-        matches!(
-            self,
+        match self {
             Self::TransactionRefunded
-                | Self::TransactionFailed
-                | Self::TransactionClaimed
-                | Self::TransactionLockupFailed
-                | Self::InvoicePaid
-                | Self::InvoiceSettled
-                | Self::InvoiceFailedToPay
-                | Self::InvoiceExpired
-                | Self::SwapExpired
-                | Self::Error { .. }
-        )
+            | Self::TransactionFailed
+            | Self::TransactionClaimed
+            | Self::TransactionLockupFailed
+            | Self::InvoicePaid
+            | Self::InvoiceSettled
+            | Self::InvoiceFailedToPay
+            | Self::InvoiceExpired
+            | Self::SwapExpired
+            | Self::Error { .. } => true,
+            Self::Created
+            | Self::TransactionMempool
+            | Self::TransactionConfirmed
+            | Self::TransactionServerMempool
+            | Self::TransactionServerConfirmed
+            | Self::InvoiceSet
+            | Self::InvoicePending
+            | Self::Other(_) => false,
+        }
     }
+}
+
+fn swap_wait_failure_error(status: &SwapStatus, swap_id: &str, awaited: &str) -> Error {
+    let reason = match status {
+        SwapStatus::Error { error } => format!("Boltz returned error: {error}"),
+        SwapStatus::TransactionRefunded => "transaction was refunded".to_string(),
+        SwapStatus::TransactionFailed => "transaction failed".to_string(),
+        SwapStatus::TransactionLockupFailed => "lockup transaction failed".to_string(),
+        SwapStatus::InvoiceFailedToPay => "invoice failed to pay".to_string(),
+        SwapStatus::InvoiceExpired => "invoice expired".to_string(),
+        SwapStatus::SwapExpired => "swap expired".to_string(),
+        SwapStatus::TransactionClaimed => "transaction was claimed".to_string(),
+        SwapStatus::InvoicePaid => "invoice was paid".to_string(),
+        SwapStatus::InvoiceSettled => "invoice was settled".to_string(),
+        SwapStatus::Created => "swap is still created".to_string(),
+        SwapStatus::TransactionMempool => "transaction is in mempool".to_string(),
+        SwapStatus::TransactionConfirmed => "transaction is confirmed".to_string(),
+        SwapStatus::TransactionServerMempool => "server transaction is in mempool".to_string(),
+        SwapStatus::TransactionServerConfirmed => "server transaction is confirmed".to_string(),
+        SwapStatus::InvoiceSet => "invoice is set".to_string(),
+        SwapStatus::InvoicePending => "invoice is pending".to_string(),
+        SwapStatus::Other(status) => format!("unknown status: {status}"),
+    };
+
+    Error::ad_hoc(format!(
+        "swap {swap_id} cannot complete {awaited}: {reason}"
+    ))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Copy)]
