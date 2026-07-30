@@ -1821,19 +1821,21 @@ where
 
         let delta_after = (cache.last_sync_ms().await? - vtxo_cache::SYNC_MARGIN_MS).max(1) as u64;
 
-        // The three fetches are independent, so they run concurrently.
-        let unknown_fut = async {
+        // The three fetches are independent, so they run concurrently. Each future is boxed:
+        // inlining three copies of the fetch future into this one makes it large enough to
+        // overflow the stack in debug builds.
+        let unknown_fut = Box::pin(async {
             if unknown_scripts.is_empty() {
                 return Ok(Vec::new());
             }
 
             let request = GetVtxosRequest::new_for_scripts(unknown_scripts.clone());
             self.fetch_all_vtxos(request).await
-        };
+        });
 
         // The delta must cover _all_ synced scripts, not just the requested ones, because the
         // watermark below is global: anything the delta skips now would be skipped forever.
-        let delta_fut = async {
+        let delta_fut = Box::pin(async {
             if synced_scripts.is_empty() {
                 return Ok(Vec::new());
             }
@@ -1842,16 +1844,16 @@ where
                 GetVtxosRequest::new_for_scripts(synced_scripts.iter().cloned().collect())
                     .with_after(delta_after);
             self.fetch_all_vtxos(request).await
-        };
+        });
 
-        let refresh_fut = async {
+        let refresh_fut = Box::pin(async {
             if refresh_outpoints.is_empty() {
                 return Ok(Vec::new());
             }
 
             let request = GetVtxosRequest::new_for_outpoints(&refresh_outpoints);
             self.fetch_all_vtxos(request).await
-        };
+        });
 
         let (unknown_vtxos, delta_vtxos, refresh_vtxos) =
             futures::try_join!(unknown_fut, delta_fut, refresh_fut)?;
