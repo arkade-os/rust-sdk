@@ -207,7 +207,7 @@ pub struct PendingVhtlcSpendFailure {
 /// Configuration for the background Boltz VHTLC watcher.
 #[derive(Clone, Copy, Debug)]
 pub struct BoltzVhtlcWatcherConfig {
-    /// How often to refresh the VHTLC subscription and retry status-driven refund actions.
+    /// How often to refresh subscriptions and retry claim/refund lifecycle actions.
     pub refresh_interval: Duration,
 }
 
@@ -220,6 +220,9 @@ impl Default for BoltzVhtlcWatcherConfig {
 }
 
 /// Handle to stop the background Boltz VHTLC watcher.
+///
+/// Keep this handle alive for as long as the watcher should run. Dropping it stops the watcher.
+#[must_use = "dropping the handle stops the Boltz VHTLC watcher"]
 pub struct BoltzVhtlcWatcherHandle {
     stop_tx: tokio::sync::watch::Sender<bool>,
 }
@@ -1853,7 +1856,10 @@ where
     /// [`ChainSwapDirection::BtcToArk`], the user should send BTC to the `user_lockup_address`.
     ///
     /// After funding, use [`Self::wait_for_chain_swap_server_lockup`] to wait for Boltz to
-    /// lock their side, then [`Self::claim_chain_swap`] to claim.
+    /// lock their side. Then claim with the direction-specific method:
+    ///
+    /// - [`ChainSwapDirection::BtcToArk`] uses [`Self::claim_chain_swap`].
+    /// - [`ChainSwapDirection::ArkToBtc`] uses [`Self::claim_chain_swap_btc`].
     pub async fn create_chain_swap(
         &self,
         direction: ChainSwapDirection,
@@ -2033,7 +2039,10 @@ where
     /// Wait for Boltz to lock funds on their side of the chain swap.
     ///
     /// Returns when the server's lockup transaction is detected in the mempool or confirmed.
-    /// After this returns, use [`Self::claim_chain_swap`] to claim the funds.
+    /// After this returns, claim with the direction-specific method:
+    ///
+    /// - [`ChainSwapDirection::BtcToArk`] uses [`Self::claim_chain_swap`].
+    /// - [`ChainSwapDirection::ArkToBtc`] uses [`Self::claim_chain_swap_btc`].
     ///
     /// Returns the server's lockup transaction ID if available.
     pub async fn wait_for_chain_swap_server_lockup(
@@ -2966,6 +2975,10 @@ where
     /// spends a VHTLC, reconciles contract state, and retries refunds for locally stored refundable
     /// statuses. This keeps VHTLC lifecycle handling event-driven instead of tying contract
     /// deactivation to Boltz status polling.
+    ///
+    /// Keep the returned handle alive for as long as the watcher should run. Dropping the handle
+    /// stops the watcher.
+    #[must_use = "dropping the handle stops the Boltz VHTLC watcher"]
     pub fn start_boltz_vhtlc_watcher(self: &Arc<Self>) -> BoltzVhtlcWatcherHandle
     where
         B: Send + Sync + 'static,
@@ -2975,6 +2988,10 @@ where
     }
 
     /// Start a background watcher for active Boltz VHTLC contracts with custom configuration.
+    ///
+    /// Keep the returned handle alive for as long as the watcher should run. Dropping the handle
+    /// stops the watcher.
+    #[must_use = "dropping the handle stops the Boltz VHTLC watcher"]
     pub fn start_boltz_vhtlc_watcher_with_config(
         self: &Arc<Self>,
         config: BoltzVhtlcWatcherConfig,
