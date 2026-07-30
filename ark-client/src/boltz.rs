@@ -42,6 +42,7 @@ use bitcoin::psbt;
 use bitcoin::secp256k1;
 use bitcoin::secp256k1::schnorr;
 use bitcoin::taproot::LeafVersion;
+use bitcoin::taproot::TapLeafHash;
 use bitcoin::Amount;
 use bitcoin::Psbt;
 use bitcoin::PublicKey;
@@ -57,6 +58,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_with::serde_as;
 use serde_with::DisplayFromStr;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::str::FromStr;
@@ -368,6 +370,32 @@ fn classify_vhtlc_contract_liveness(
     }
 
     VhtlcContractLiveness::Spent
+}
+
+fn validated_boltz_tap_script_sigs(
+    input: &psbt::Input,
+    expected_pk: XOnlyPublicKey,
+    expected_leaf_hash: TapLeafHash,
+) -> Result<BTreeMap<(XOnlyPublicKey, TapLeafHash), bitcoin::taproot::Signature>, Error> {
+    let mut sigs = BTreeMap::new();
+
+    for ((pk, leaf_hash), sig) in &input.tap_script_sigs {
+        if *pk != expected_pk || *leaf_hash != expected_leaf_hash {
+            return Err(Error::ad_hoc(format!(
+                "unexpected Boltz tap script signature for pubkey {pk} and leaf hash {leaf_hash}"
+            )));
+        }
+
+        sigs.insert((*pk, *leaf_hash), *sig);
+    }
+
+    if sigs.is_empty() {
+        return Err(Error::ad_hoc(format!(
+            "missing Boltz tap script signature for pubkey {expected_pk} and leaf hash {expected_leaf_hash}"
+        )));
+    }
+
+    Ok(sigs)
 }
 
 impl<B, W, S> Client<B, W, S>
@@ -1044,6 +1072,8 @@ where
 
         // Use the collaborative refund script which requires sender + receiver + server signatures.
         let refund_script = vhtlc.refund_script();
+        let boltz_refund_pk = swap_data.claim_public_key.inner.x_only_public_key().0;
+        let refund_leaf_hash = TapLeafHash::from_script(&refund_script, LeafVersion::TapScript);
 
         let spend_info = vhtlc.taproot_spend_info();
         let script_ver = (refund_script, LeafVersion::TapScript);
@@ -1150,12 +1180,14 @@ where
         let ark_txid = boltz_signed_ark_tx.unsigned_tx.compute_txid();
 
         // Extract Boltz's signatures before sending to arkd (server strips incoming sigs).
-        let boltz_tap_script_sigs = boltz_signed_checkpoint
-            .inputs
-            .first()
-            .ok_or_else(|| Error::ad_hoc("boltz checkpoint has no inputs"))?
-            .tap_script_sigs
-            .clone();
+        let boltz_tap_script_sigs = validated_boltz_tap_script_sigs(
+            boltz_signed_checkpoint
+                .inputs
+                .first()
+                .ok_or_else(|| Error::ad_hoc("boltz checkpoint has no inputs"))?,
+            boltz_refund_pk,
+            refund_leaf_hash,
+        )?;
 
         // Submit to arkd for server signature.
         // We send the Boltz-signed transactions so arkd can add its signature.
@@ -2345,8 +2377,7 @@ where
         };
 
         // Compute the taproot script-path sighash
-        let leaf_hash =
-            bitcoin::taproot::TapLeafHash::from_script(&claim_script, LeafVersion::TapScript);
+        let leaf_hash = TapLeafHash::from_script(&claim_script, LeafVersion::TapScript);
 
         let prevouts = [TxOut {
             value: utxo.amount,
@@ -2654,8 +2685,7 @@ where
         };
 
         // Sign with the refund key
-        let leaf_hash =
-            bitcoin::taproot::TapLeafHash::from_script(&refund_script, LeafVersion::TapScript);
+        let leaf_hash = TapLeafHash::from_script(&refund_script, LeafVersion::TapScript);
 
         let prevouts = [TxOut {
             value: utxo.amount,
@@ -3272,6 +3302,19 @@ where
         //
         // Re-send the ark tx and each checkpoint to Boltz's refund endpoint to get fresh
         // signatures from them.
+        let mut swap_data = self
+            .swap_storage()
+            .get_submarine(swap_id)
+            .await?
+            .ok_or_else(|| Error::ad_hoc(format!("submarine swap not found: {swap_id}")))?;
+        let server_info = self.server_info().await?;
+        let vhtlc = self
+            .submarine_vhtlc_script(&mut swap_data, &server_info)
+            .await?;
+        let refund_script = vhtlc.refund_script();
+        let boltz_refund_pk = swap_data.claim_public_key.inner.x_only_public_key().0;
+        let refund_leaf_hash = TapLeafHash::from_script(&refund_script, LeafVersion::TapScript);
+
         let url = format!(
             "{}/v2/swap/submarine/{swap_id}/refund/ark",
             self.inner.boltz_url
@@ -3319,12 +3362,14 @@ where
                 .context("could not parse Boltz-signed checkpoint PSBT")?;
 
             // Extract Boltz's tap_script_sigs.
-            let boltz_tap_script_sigs = boltz_signed_checkpoint
-                .inputs
-                .first()
-                .ok_or_else(|| Error::ad_hoc("Boltz checkpoint has no inputs"))?
-                .tap_script_sigs
-                .clone();
+            let boltz_tap_script_sigs = validated_boltz_tap_script_sigs(
+                boltz_signed_checkpoint
+                    .inputs
+                    .first()
+                    .ok_or_else(|| Error::ad_hoc("Boltz checkpoint has no inputs"))?,
+                boltz_refund_pk,
+                refund_leaf_hash,
+            )?;
 
             // Start from the server's checkpoint (which has the server's signature).
             let mut final_checkpoint = checkpoint_psbt.clone();
@@ -6072,6 +6117,52 @@ mod tests {
 
         assert!(VhtlcContractLiveness::Spent.should_deactivate_contract());
         assert!(!VhtlcContractLiveness::Recoverable.should_deactivate_contract());
+    }
+
+    fn test_taproot_signature(byte: u8) -> bitcoin::taproot::Signature {
+        let secp = Secp256k1::new();
+        let keypair = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[byte; 32]).unwrap());
+        let msg = secp256k1::Message::from_digest([byte; 32]);
+        bitcoin::taproot::Signature {
+            signature: secp.sign_schnorr_no_aux_rand(&msg, &keypair),
+            sighash_type: bitcoin::TapSighashType::Default,
+        }
+    }
+
+    #[test]
+    fn validates_expected_boltz_tap_script_signature() {
+        let secp = Secp256k1::new();
+        let keypair = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[4; 32]).unwrap());
+        let pk = keypair.x_only_public_key().0;
+        let script = ScriptBuf::new_p2tr(&secp, keypair.x_only_public_key().0, None);
+        let leaf_hash = TapLeafHash::from_script(&script, LeafVersion::TapScript);
+        let sig = test_taproot_signature(5);
+        let mut input = psbt::Input::default();
+        input.tap_script_sigs.insert((pk, leaf_hash), sig);
+
+        let validated = validated_boltz_tap_script_sigs(&input, pk, leaf_hash).unwrap();
+
+        assert_eq!(validated.len(), 1);
+        assert_eq!(validated.get(&(pk, leaf_hash)), Some(&sig));
+    }
+
+    #[test]
+    fn rejects_unexpected_boltz_tap_script_signature() {
+        let secp = Secp256k1::new();
+        let expected_keypair =
+            Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[4; 32]).unwrap());
+        let unexpected_keypair =
+            Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[5; 32]).unwrap());
+        let expected_pk = expected_keypair.x_only_public_key().0;
+        let unexpected_pk = unexpected_keypair.x_only_public_key().0;
+        let script = ScriptBuf::new_p2tr(&secp, expected_pk, None);
+        let leaf_hash = TapLeafHash::from_script(&script, LeafVersion::TapScript);
+        let mut input = psbt::Input::default();
+        input
+            .tap_script_sigs
+            .insert((unexpected_pk, leaf_hash), test_taproot_signature(6));
+
+        assert!(validated_boltz_tap_script_sigs(&input, expected_pk, leaf_hash).is_err());
     }
 
     #[test]
