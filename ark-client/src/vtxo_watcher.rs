@@ -13,6 +13,7 @@ use crate::Blockchain;
 use crate::Client;
 use crate::Error;
 use ark_core::intent;
+use ark_core::server::SubscriptionFilter;
 use ark_core::server::SubscriptionResponse;
 use ark_core::server::VirtualTxOutPoint;
 use ark_core::ArkAddress;
@@ -158,29 +159,18 @@ async fn run_watcher_loop<B, W, S>(
             }
         };
 
-        let subscription_id = match client.subscribe_to_scripts(addresses.clone(), None).await {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::warn!("Failed to subscribe: {e}, retrying in {backoff:?}");
-                if wait_or_stop(&mut stop_rx, backoff).await {
-                    return;
+        let (subscription_id, mut stream) =
+            match client.subscribe_to_scripts_stream(addresses.clone()).await {
+                Ok(subscription) => subscription,
+                Err(e) => {
+                    tracing::warn!("Failed to subscribe: {e}, retrying in {backoff:?}");
+                    if wait_or_stop(&mut stop_rx, backoff).await {
+                        return;
+                    }
+                    backoff = (backoff * 2).min(MAX_BACKOFF);
+                    continue;
                 }
-                backoff = (backoff * 2).min(MAX_BACKOFF);
-                continue;
-            }
-        };
-
-        let mut stream = match client.get_subscription(subscription_id.clone(), None).await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("Failed to get subscription stream: {e}, retrying in {backoff:?}");
-                if wait_or_stop(&mut stop_rx, backoff).await {
-                    return;
-                }
-                backoff = (backoff * 2).min(MAX_BACKOFF);
-                continue;
-            }
-        };
+            };
 
         tracing::info!("VTXO watcher connected");
         backoff = INITIAL_BACKOFF;
@@ -458,8 +448,16 @@ where
         return Ok(());
     }
 
+    let filter = SubscriptionFilter {
+        expressions: Vec::new(),
+        add_scripts: new_addrs
+            .iter()
+            .map(|addr| addr.to_p2tr_script_pubkey())
+            .collect(),
+        remove_scripts: Vec::new(),
+    };
     client
-        .subscribe_to_scripts(new_addrs.clone(), Some(subscription_id.to_string()))
+        .update_subscription(subscription_id.to_string(), filter)
         .await?;
 
     let added = new_addrs.len();

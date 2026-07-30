@@ -735,6 +735,9 @@ impl Client {
     /// Note: for new subscriptions, don't provide a `subscription_id`
     ///
     /// Returns the subscription id if successful
+    #[deprecated(
+        note = "use `subscribe_to_scripts_stream` to open a subscription, or `update_subscription` to add scripts"
+    )]
     pub async fn subscribe_to_scripts(
         &self,
         scripts: Vec<ArkAddress>,
@@ -766,6 +769,7 @@ impl Client {
     }
 
     /// Allows to remove scripts from an existing subscription.
+    #[deprecated(note = "use `update_subscription` with the filter's `remove_scripts`")]
     pub async fn unsubscribe_from_scripts(
         &self,
         scripts: Vec<ArkAddress>,
@@ -863,6 +867,55 @@ impl Client {
         };
 
         Ok(stream.boxed())
+    }
+
+    /// Subscribes to tx notifications for the given vtxo scripts in a single call.
+    ///
+    /// Sends an empty `subscription_id` so the server creates the subscription and starts
+    /// streaming immediately. Returns the server-assigned id, read from the first
+    /// [`SubscriptionResponse::SubscriptionStarted`] frame together with the remaining stream.
+    pub async fn subscribe_to_scripts_stream(
+        &self,
+        scripts: Vec<ArkAddress>,
+    ) -> Result<
+        (
+            String,
+            impl Stream<Item = Result<SubscriptionResponse, Error>> + Unpin,
+        ),
+        Error,
+    > {
+        let filter = SubscriptionFilter {
+            expressions: Vec::new(),
+            add_scripts: scripts
+                .iter()
+                .map(|address| address.to_p2tr_script_pubkey())
+                .collect(),
+            remove_scripts: Vec::new(),
+        };
+
+        let mut stream = self.get_subscription(String::new(), Some(filter)).await?;
+
+        let subscription_id = loop {
+            match stream.next().await {
+                Some(Ok(SubscriptionResponse::SubscriptionStarted { subscription_id })) => {
+                    break subscription_id;
+                }
+                Some(Ok(SubscriptionResponse::Heartbeat)) => continue,
+                Some(Ok(SubscriptionResponse::Event(_))) => {
+                    return Err(Error::conversion(
+                        "expected subscription_started as the first subscription event",
+                    ))
+                }
+                Some(Err(e)) => return Err(e),
+                None => {
+                    return Err(Error::conversion(
+                        "subscription stream closed before subscription_started",
+                    ))
+                }
+            }
+        };
+
+        Ok((subscription_id, stream))
     }
 
     pub async fn estimate_fees(
