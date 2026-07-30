@@ -36,6 +36,7 @@ use bitcoin::hashes::ripemd160;
 use bitcoin::hashes::sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::io::Write;
+use bitcoin::key::Keypair;
 use bitcoin::key::Secp256k1;
 use bitcoin::psbt;
 use bitcoin::secp256k1;
@@ -791,7 +792,7 @@ where
             &server_info,
         )?;
 
-        let kp = self.keypair_by_pk(&refunder_pk)?;
+        let kp = self.swap_keypair_by_pk(&refunder_pk, swap_data.key_derivation_index, swap_id)?;
         let sign_fn =
             |_: &mut psbt::Input,
              msg: secp256k1::Message|
@@ -817,7 +818,7 @@ where
             .ok_or_else(|| Error::ad_hoc("no checkpoint PSBTs found"))?
             .clone();
 
-        let kp = self.keypair_by_pk(&refunder_pk)?;
+        let kp = self.swap_keypair_by_pk(&refunder_pk, swap_data.key_derivation_index, swap_id)?;
         let sign_fn =
             |_: &mut psbt::Input,
              msg: secp256k1::Message|
@@ -1022,7 +1023,7 @@ where
         )?;
 
         // Sign the ark transaction with the sender's (user's) key.
-        let kp = self.keypair_by_pk(&refunder_pk)?;
+        let kp = self.swap_keypair_by_pk(&refunder_pk, swap_data.key_derivation_index, swap_id)?;
         let sign_fn =
             |_: &mut psbt::Input,
              msg: secp256k1::Message|
@@ -1115,7 +1116,7 @@ where
             .ok_or_else(|| Error::ad_hoc("no signed checkpoint PSBTs returned"))?
             .clone();
 
-        let kp = self.keypair_by_pk(&refunder_pk)?;
+        let kp = self.swap_keypair_by_pk(&refunder_pk, swap_data.key_derivation_index, swap_id)?;
         let sign_fn =
             |_: &mut psbt::Input,
              msg: secp256k1::Message|
@@ -1620,7 +1621,7 @@ where
         .map_err(Error::from)
         .context("failed to build offchain TXs")?;
 
-        let kp = self.keypair_by_pk(&claimer_pk)?;
+        let kp = self.swap_keypair_by_pk(&claimer_pk, swap.key_derivation_index, swap_id)?;
         let sign_fn =
             |input: &mut psbt::Input,
              msg: secp256k1::Message|
@@ -2077,7 +2078,7 @@ where
         .map_err(Error::from)
         .context("failed to build offchain TXs")?;
 
-        let kp = self.keypair_by_pk(&claimer_pk)?;
+        let kp = self.swap_keypair_by_pk(&claimer_pk, swap.claim_key_derivation_index, swap_id)?;
         let sign_fn =
             |input: &mut psbt::Input,
              msg: secp256k1::Message|
@@ -2288,7 +2289,9 @@ where
             .map_err(|e| Error::ad_hoc(format!("failed to compute sighash: {e}")))?;
 
         let msg = secp256k1::Message::from_digest(sighash.to_byte_array());
-        let claim_kp = self.keypair_by_pk(&swap.claim_public_key.inner.x_only_public_key().0)?;
+        let claim_pk = swap.claim_public_key.inner.x_only_public_key().0;
+        let claim_kp =
+            self.swap_keypair_by_pk(&claim_pk, swap.claim_key_derivation_index, swap_id)?;
         let signature = secp.sign_schnorr_no_aux_rand(&msg, &claim_kp);
 
         // Build witness: <signature> <preimage> <claim_script> <control_block>
@@ -2407,7 +2410,8 @@ where
             &server_info,
         )?;
 
-        let kp = self.keypair_by_pk(&refunder_pk)?;
+        let kp =
+            self.swap_keypair_by_pk(&refunder_pk, swap.refund_key_derivation_index, swap_id)?;
         let sign_fn =
             |_: &mut psbt::Input,
              msg: secp256k1::Message|
@@ -2432,7 +2436,8 @@ where
             .ok_or_else(|| Error::ad_hoc("no checkpoint PSBTs found"))?
             .clone();
 
-        let kp = self.keypair_by_pk(&refunder_pk)?;
+        let kp =
+            self.swap_keypair_by_pk(&refunder_pk, swap.refund_key_derivation_index, swap_id)?;
         let sign_fn =
             |_: &mut psbt::Input,
              msg: secp256k1::Message|
@@ -2593,7 +2598,9 @@ where
             .map_err(|e| Error::ad_hoc(format!("failed to compute sighash: {e}")))?;
 
         let msg = secp256k1::Message::from_digest(sighash.to_byte_array());
-        let refund_kp = self.keypair_by_pk(&swap.refund_public_key.inner.x_only_public_key().0)?;
+        let refund_pk = swap.refund_public_key.inner.x_only_public_key().0;
+        let refund_kp =
+            self.swap_keypair_by_pk(&refund_pk, swap.refund_key_derivation_index, swap_id)?;
         let signature = secp.sign_schnorr_no_aux_rand(&msg, &refund_kp);
 
         // Witness for refund: <signature> <refund_script> <control_block>
@@ -3807,55 +3814,45 @@ where
         Ok(vhtlc)
     }
 
-    /// Ensure a swap key is loaded into the key provider's cache so
-    /// `keypair_by_pk` can find it during intent signing.
-    ///
-    /// Returns `true` if the key is available (already cached or successfully derived).
-    /// Returns `false` for legacy swap data without a stored derivation index.
-    fn ensure_swap_key_cached(
+    /// Return a swap keypair, deriving it from the persisted swap index if needed.
+    fn swap_keypair_by_pk(
         &self,
         pk: &XOnlyPublicKey,
         key_derivation_index: Option<u32>,
         swap_id: &str,
-    ) -> bool {
-        // Already in cache — nothing to do.
-        if self.keypair_by_pk(pk).is_ok() {
-            return true;
+    ) -> Result<Keypair, Error> {
+        if let Ok(kp) = self.keypair_by_pk(pk) {
+            return Ok(kp);
         }
 
-        let Some(index) = key_derivation_index else {
-            tracing::warn!(
-                swap_id,
-                "Legacy swap data without derivation index, skipping recovery"
-            );
-            return false;
-        };
+        let index = key_derivation_index.ok_or_else(|| {
+            Error::ad_hoc(format!(
+                "legacy swap {swap_id} is missing key derivation index for pubkey {pk}"
+            ))
+        })?;
 
-        let Some(key_provider) = self.inner.discoverable_key_provider.as_ref() else {
-            return false;
-        };
+        let key_provider = self.inner.discoverable_key_provider.as_ref().ok_or_else(|| {
+            Error::ad_hoc(format!(
+                "swap key {pk} for swap {swap_id} is not cached and no discoverable key provider is configured"
+            ))
+        })?;
 
-        match key_provider.derive_at_discovery_index(index) {
-            Ok(Some(kp)) if kp.x_only_public_key().0 == *pk => {
-                if let Err(e) = key_provider.cache_discovered_keypair(index, kp) {
-                    tracing::warn!(swap_id, %e, "Failed to cache swap key");
-                    return false;
-                }
-                true
-            }
-            Ok(_) => {
-                tracing::warn!(
-                    swap_id,
-                    index,
-                    "Key at stored derivation index does not match swap pubkey"
-                );
-                false
-            }
-            Err(e) => {
-                tracing::warn!(swap_id, index, %e, "Failed to derive key at stored index");
-                false
-            }
+        let kp = key_provider
+            .derive_at_discovery_index(index)
+            .with_context(|| format!("failed to derive swap key at index {index}"))?
+            .ok_or_else(|| Error::ad_hoc(format!("no swap key at derivation index {index}")))?;
+
+        if kp.x_only_public_key().0 != *pk {
+            return Err(Error::ad_hoc(format!(
+                "key at derivation index {index} does not match swap pubkey {pk}"
+            )));
         }
+
+        key_provider
+            .cache_discovered_keypair(index, kp)
+            .with_context(|| format!("failed to cache swap key at index {index}"))?;
+
+        Ok(kp)
     }
 
     async fn collect_active_vhtlc_infos(&self) -> Result<Vec<VhtlcInfo>, Error> {
@@ -3879,12 +3876,17 @@ where
                 continue;
             }
 
-            // Ensure the refund key (sender) is in the key cache.
-            if !self.ensure_swap_key_cached(
+            // Ensure the refund key (sender) is available for pending intent signing.
+            if let Err(error) = self.swap_keypair_by_pk(
                 &swap.refund_public_key.inner.x_only_public_key().0,
                 swap.key_derivation_index,
                 &swap.id,
             ) {
+                tracing::warn!(
+                    swap_id = %swap.id,
+                    ?error,
+                    "Skipping submarine swap with unavailable refund key"
+                );
                 continue;
             }
 
@@ -3916,12 +3918,17 @@ where
                 continue;
             }
 
-            // Ensure the claim key (receiver) is in the key cache.
-            if !self.ensure_swap_key_cached(
+            // Ensure the claim key (receiver) is available for pending intent signing.
+            if let Err(error) = self.swap_keypair_by_pk(
                 &swap.claim_public_key.inner.x_only_public_key().0,
                 swap.key_derivation_index,
                 &swap.id,
             ) {
+                tracing::warn!(
+                    swap_id = %swap.id,
+                    ?error,
+                    "Skipping reverse swap with unavailable claim key"
+                );
                 continue;
             }
 
