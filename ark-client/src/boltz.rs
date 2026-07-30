@@ -62,6 +62,7 @@ use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -73,6 +74,8 @@ const MAX_BOLT11_DESCRIPTION_BYTES: usize = 639;
 const VHTLC_WATCHER_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const VHTLC_WATCHER_MAX_BACKOFF: Duration = Duration::from_secs(30);
 const VHTLC_WATCHER_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+const VHTLC_REFUND_RETRY_INITIAL_BACKOFF: Duration = Duration::from_secs(30);
+const VHTLC_REFUND_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(30 * 60);
 
 fn validate_invoice_description(description: Option<&str>) -> Result<(), Error> {
     if let Some(d) = description {
@@ -238,6 +241,12 @@ struct BoltzVhtlcActionLog {
     refunded: HashSet<String>,
     claims_in_flight: HashSet<String>,
     refunds_in_flight: HashSet<String>,
+    refund_retries: HashMap<String, RefundRetryState>,
+}
+
+struct RefundRetryState {
+    failures: u32,
+    retry_after: Instant,
 }
 
 impl BoltzVhtlcActionLog {
@@ -267,14 +276,39 @@ impl BoltzVhtlcActionLog {
         {
             return false;
         }
+
+        if let Some(retry) = self.refund_retries.get(swap_id) {
+            if Instant::now() < retry.retry_after {
+                return false;
+            }
+        }
+
         self.refunds_in_flight.insert(swap_id.to_string())
     }
 
     fn finish_refund(&mut self, swap_id: &str, succeeded: bool) {
         self.refunds_in_flight.remove(swap_id);
         if succeeded {
+            self.refund_retries.remove(swap_id);
             self.refunded.insert(swap_id.to_string());
+            return;
         }
+
+        let retry = self
+            .refund_retries
+            .entry(swap_id.to_string())
+            .or_insert(RefundRetryState {
+                failures: 0,
+                retry_after: Instant::now(),
+            });
+        retry.failures = retry.failures.saturating_add(1);
+        let multiplier = 1_u32
+            .checked_shl(retry.failures.saturating_sub(1).min(10))
+            .unwrap_or(1);
+        let backoff = VHTLC_REFUND_RETRY_INITIAL_BACKOFF
+            .saturating_mul(multiplier)
+            .min(VHTLC_REFUND_RETRY_MAX_BACKOFF);
+        retry.retry_after = Instant::now() + backoff;
     }
 }
 
@@ -4746,11 +4780,28 @@ where
     W: OnchainWallet,
     S: SwapStorage + 'static,
 {
+    let server_info = client.server_info().await?;
+
     for swap in client.swap_storage().list_all_submarine().await? {
         if !is_submarine_refundable_status(&swap.status)
             || client.vhtlc_contract_is_inactive(swap.contract_script_pubkey.as_ref())?
-            || !action_log.begin_refund(&swap.id)
         {
+            continue;
+        }
+
+        let liveness = client
+            .observe_vhtlc_contract_liveness(&server_info, swap.vhtlc_address)
+            .await?;
+        if !is_refundable_vhtlc_liveness(liveness) {
+            tracing::debug!(
+                swap_id = %swap.id,
+                ?liveness,
+                "Skipping auto-refund for non-refundable VHTLC liveness"
+            );
+            continue;
+        }
+
+        if !action_log.begin_refund(&swap.id) {
             continue;
         }
 
@@ -4786,8 +4837,24 @@ where
         if swap.direction != ChainSwapDirection::ArkToBtc
             || !is_chain_refundable_status(&swap.status)
             || client.vhtlc_contract_is_inactive(swap.contract_script_pubkey.as_ref())?
-            || !action_log.begin_refund(&swap.id)
         {
+            continue;
+        }
+
+        let address = swap.chain_vhtlc_address()?;
+        let liveness = client
+            .observe_vhtlc_contract_liveness(&server_info, address)
+            .await?;
+        if !is_refundable_vhtlc_liveness(liveness) {
+            tracing::debug!(
+                swap_id = %swap.id,
+                ?liveness,
+                "Skipping auto-refund for non-refundable chain VHTLC liveness"
+            );
+            continue;
+        }
+
+        if !action_log.begin_refund(&swap.id) {
             continue;
         }
 
@@ -4804,6 +4871,13 @@ where
     }
 
     Ok(())
+}
+
+fn is_refundable_vhtlc_liveness(liveness: VhtlcContractLiveness) -> bool {
+    matches!(
+        liveness,
+        VhtlcContractLiveness::Funded | VhtlcContractLiveness::Recoverable
+    )
 }
 
 fn is_submarine_refundable_status(status: &SwapStatus) -> bool {
@@ -5998,6 +6072,47 @@ mod tests {
 
         assert!(VhtlcContractLiveness::Spent.should_deactivate_contract());
         assert!(!VhtlcContractLiveness::Recoverable.should_deactivate_contract());
+    }
+
+    #[test]
+    fn refund_action_log_backs_off_after_failure() {
+        let mut log = BoltzVhtlcActionLog::default();
+
+        assert!(log.begin_refund("swap-1"));
+        log.finish_refund("swap-1", false);
+
+        assert!(!log.begin_refund("swap-1"));
+    }
+
+    #[test]
+    fn refund_action_log_clears_backoff_after_success() {
+        let mut log = BoltzVhtlcActionLog::default();
+
+        assert!(log.begin_refund("swap-1"));
+        log.finish_refund("swap-1", false);
+        assert!(log.refund_retries.contains_key("swap-1"));
+
+        log.refund_retries.get_mut("swap-1").unwrap().retry_after = Instant::now();
+        assert!(log.begin_refund("swap-1"));
+        log.finish_refund("swap-1", true);
+
+        assert!(!log.refund_retries.contains_key("swap-1"));
+        assert!(!log.begin_refund("swap-1"));
+    }
+
+    #[test]
+    fn only_funded_or_recoverable_vhtlcs_are_refundable() {
+        assert!(!is_refundable_vhtlc_liveness(
+            VhtlcContractLiveness::Unfunded
+        ));
+        assert!(!is_refundable_vhtlc_liveness(
+            VhtlcContractLiveness::PendingSpend
+        ));
+        assert!(is_refundable_vhtlc_liveness(VhtlcContractLiveness::Funded));
+        assert!(is_refundable_vhtlc_liveness(
+            VhtlcContractLiveness::Recoverable
+        ));
+        assert!(!is_refundable_vhtlc_liveness(VhtlcContractLiveness::Spent));
     }
 
     #[test]
