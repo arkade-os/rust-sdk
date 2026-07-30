@@ -21,6 +21,7 @@ use ark_core::history::sort_transactions_by_created_at;
 use ark_core::history::OutgoingTransaction;
 use ark_core::server;
 use ark_core::server::GetVtxosRequest;
+use ark_core::server::SubscriptionFilter;
 use ark_core::server::SubscriptionResponse;
 use ark_core::server::VirtualTxOutPoint;
 use ark_core::ArkAddress;
@@ -1776,7 +1777,7 @@ where
         let vtxo_chain = timeout_op(
             self.inner.timeout,
             self.network_client()
-                .get_vtxo_chain(Some(out_point), Some((size, index))),
+                .get_vtxo_chain(Some(out_point), Some((size, index)), None, None),
         )
         .await
         .context("Failed to fetch VTXO chain")??;
@@ -2151,10 +2152,6 @@ where
     /// # Returns
     ///
     /// Returns the subscription ID if successful
-    #[deprecated(
-        note = "use `subscribe_to_scripts_stream` to open a subscription, or `update_subscription` to add scripts"
-    )]
-    #[allow(deprecated)]
     pub async fn subscribe_to_scripts(
         &self,
         scripts: Vec<ArkAddress>,
@@ -2175,8 +2172,6 @@ where
     ///
     /// * `scripts` - Vector of ArkAddress to unsubscribe from
     /// * `subscription_id` - The subscription ID to update
-    #[deprecated(note = "use `update_subscription` with the `remove` argument")]
-    #[allow(deprecated)]
     pub async fn unsubscribe_from_scripts(
         &self,
         scripts: Vec<ArkAddress>,
@@ -2196,69 +2191,34 @@ where
     /// # Arguments
     ///
     /// * `subscription_id` - The subscription ID to get the stream for
+    /// * `filter` - Optional [`SubscriptionFilter`] applied when the stream is opened
     ///
     /// # Returns
     ///
     /// Returns a Stream of SubscriptionResponse messages
-    #[deprecated(
-        note = "use `subscribe_to_scripts_stream`, which creates the subscription and opens the stream in a single call"
-    )]
-    #[allow(deprecated)]
     pub async fn get_subscription(
         &self,
         subscription_id: String,
+        filter: Option<SubscriptionFilter>,
     ) -> Result<impl Stream<Item = Result<SubscriptionResponse, ark_grpc::Error>> + Unpin, Error>
     {
         self.network_client()
-            .get_subscription(subscription_id)
+            .get_subscription(subscription_id, filter)
             .await
             .map_err(Into::into)
     }
 
-    /// Subscribe to VTXO script notifications and open the event stream in a single call
+    /// Update the filter of an existing subscription
     ///
-    /// The server creates the subscription automatically and returns its ID alongside the
-    /// stream. Use the returned ID with [`Self::update_subscription`] to add or remove scripts.
-    ///
-    /// # Arguments
-    ///
-    /// * `scripts` - Vector of ArkAddress to subscribe to
-    ///
-    /// # Returns
-    ///
-    /// Returns the server-assigned subscription ID together with a stream of SubscriptionResponse
-    /// messages
-    pub async fn subscribe_to_scripts_stream(
-        &self,
-        scripts: Vec<ArkAddress>,
-    ) -> Result<
-        (
-            String,
-            impl Stream<Item = Result<SubscriptionResponse, ark_grpc::Error>> + Unpin,
-        ),
-        Error,
-    > {
-        self.network_client()
-            .subscribe_to_scripts_stream(scripts)
-            .await
-            .map_err(Into::into)
-    }
-
-    /// Add or remove scripts on an existing subscription
-    ///
-    /// # Arguments
-    ///
-    /// * `subscription_id` - The subscription ID returned by [`Self::subscribe_to_scripts_stream`]
-    /// * `add` - Scripts (ArkAddress) to start receiving notifications for
-    /// * `remove` - Scripts (ArkAddress) to stop receiving notifications for
+    /// The filter's expressions are always overwritten as a whole (an empty list clears them),
+    /// whereas the scripts are added to and removed from the subscription's existing script set.
     pub async fn update_subscription(
         &self,
         subscription_id: String,
-        add: Vec<ArkAddress>,
-        remove: Vec<ArkAddress>,
+        filter: SubscriptionFilter,
     ) -> Result<(), Error> {
         self.network_client()
-            .update_subscription(subscription_id, add, remove)
+            .update_subscription(subscription_id, filter)
             .await
             .map_err(Into::into)
     }

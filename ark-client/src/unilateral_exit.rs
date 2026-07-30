@@ -52,8 +52,12 @@ where
             let virtual_tx_outpoint = contract_vtxo.vtxo();
             let vtxo_chain_response = timeout_op(
                 self.inner.timeout,
-                self.network_client()
-                    .get_vtxo_chain(Some(virtual_tx_outpoint.outpoint), None),
+                self.network_client().get_vtxo_chain(
+                    Some(virtual_tx_outpoint.outpoint),
+                    None,
+                    None,
+                    None,
+                ),
             )
             .await
             .context(format!(
@@ -71,8 +75,11 @@ where
 
             let virtual_txs_response = timeout_op(
                 self.inner.timeout,
-                self.network_client()
-                    .get_virtual_txs(txs.iter().map(|tx| tx.to_string()).collect(), None),
+                self.network_client().get_virtual_txs(
+                    txs.iter().map(|tx| tx.to_string()).collect(),
+                    None,
+                    None,
+                ),
             )
             .await
             .context("failed to get virtual TXs")??;

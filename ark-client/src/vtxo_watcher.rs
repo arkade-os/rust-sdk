@@ -158,18 +158,29 @@ async fn run_watcher_loop<B, W, S>(
             }
         };
 
-        let (subscription_id, mut stream) =
-            match client.subscribe_to_scripts_stream(addresses.clone()).await {
-                Ok(subscription) => subscription,
-                Err(e) => {
-                    tracing::warn!("Failed to subscribe: {e}, retrying in {backoff:?}");
-                    if wait_or_stop(&mut stop_rx, backoff).await {
-                        return;
-                    }
-                    backoff = (backoff * 2).min(MAX_BACKOFF);
-                    continue;
+        let subscription_id = match client.subscribe_to_scripts(addresses.clone(), None).await {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!("Failed to subscribe: {e}, retrying in {backoff:?}");
+                if wait_or_stop(&mut stop_rx, backoff).await {
+                    return;
                 }
-            };
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+                continue;
+            }
+        };
+
+        let mut stream = match client.get_subscription(subscription_id.clone(), None).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("Failed to get subscription stream: {e}, retrying in {backoff:?}");
+                if wait_or_stop(&mut stop_rx, backoff).await {
+                    return;
+                }
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+                continue;
+            }
+        };
 
         tracing::info!("VTXO watcher connected");
         backoff = INITIAL_BACKOFF;
@@ -293,6 +304,9 @@ async fn run_watcher_loop<B, W, S>(
                 event = stream.next() => {
                     match event {
                         Some(Ok(SubscriptionResponse::Heartbeat)) => {}
+                        Some(Ok(SubscriptionResponse::SubscriptionStarted { subscription_id })) => {
+                            tracing::debug!(subscription_id, "Subscription started");
+                        }
                         Some(Ok(SubscriptionResponse::Event(event))) => {
                             if !event.new_vtxos.is_empty() {
                                 tracing::debug!(
@@ -445,7 +459,7 @@ where
     }
 
     client
-        .update_subscription(subscription_id.to_string(), new_addrs.clone(), Vec::new())
+        .subscribe_to_scripts(new_addrs.clone(), Some(subscription_id.to_string()))
         .await?;
 
     let added = new_addrs.len();
@@ -990,6 +1004,7 @@ mod tests {
             settled_by: None,
             ark_txid: None,
             assets: vec![],
+            depth: 0,
         };
         AnnotatedVtxo::new(
             StoredContract {

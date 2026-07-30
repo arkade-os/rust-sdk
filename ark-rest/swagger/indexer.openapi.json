@@ -435,9 +435,47 @@
           {
             "name": "subscriptionId",
             "in": "path",
+            "description": "If empty, server creates a new subscription automatically.",
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "filter.expressions",
+            "in": "query",
+            "description": "CEL expressions evaluated against each indexed tx envelope. The\nindexer combines them with OR.",
+            "style": "simple",
+            "schema": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "name": "filter.scripts.add",
+            "in": "query",
+            "style": "simple",
+            "schema": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "name": "filter.scripts.remove",
+            "in": "query",
+            "style": "simple",
+            "schema": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
             }
           }
         ],
@@ -506,6 +544,125 @@
         }
       }
     },
+    "/v1/indexer/subscription": {
+      "get": {
+        "tags": [
+          "IndexerService"
+        ],
+        "description": "GetSubscription is a server-side streaming RPC which allows clients to receive real-time\nnotifications on transactions related to the subscribed vtxo scripts.\nThe subscription can be created or updated by using the SubscribeForScripts and\nUnsubscribeForScripts RPCs.",
+        "operationId": "IndexerService_GetSubscription2",
+        "parameters": [
+          {
+            "name": "subscriptionId",
+            "in": "query",
+            "description": "If empty, server creates a new subscription automatically.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "filter.expressions",
+            "in": "query",
+            "description": "CEL expressions evaluated against each indexed tx envelope. The\nindexer combines them with OR.",
+            "style": "simple",
+            "schema": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "name": "filter.scripts.add",
+            "in": "query",
+            "style": "simple",
+            "schema": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "name": "filter.scripts.remove",
+            "in": "query",
+            "style": "simple",
+            "schema": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "a successful response. (streaming responses)",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetSubscriptionResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Status"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/indexer/subscription/update": {
+      "post": {
+        "tags": [
+          "IndexerService"
+        ],
+        "description": "UpdateSubscription updates an existing subscription created via\nGetSubscription. See UpdateSubscriptionRequest for the full set of\nsupported filter combinations and their semantics.",
+        "operationId": "IndexerService_UpdateSubscription",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateSubscriptionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "a successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateSubscriptionResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Status"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/indexer/virtualTx/{txids}": {
       "get": {
         "tags": [
@@ -528,6 +685,14 @@
             }
           },
           {
+            "name": "token",
+            "in": "query",
+            "description": "Valid auth_token can also be used if the ownership has already been proved.\nA valid token obtained from GetVtxoChain rpc can be recycled for this request.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "page.size",
             "in": "query",
             "schema": {
@@ -541,6 +706,20 @@
             "schema": {
               "type": "integer",
               "format": "int32"
+            }
+          },
+          {
+            "name": "intent.proof",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "intent.message",
+            "in": "query",
+            "schema": {
+              "type": "string"
             }
           }
         ],
@@ -594,6 +773,22 @@
             }
           },
           {
+            "name": "token",
+            "in": "query",
+            "description": "Valid auth_token can also be used if the ownership has already been proved.\nA valid token obtained from GetVirtualTxs rpc can be recycled for this request.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pageToken",
+            "in": "query",
+            "description": "Opaque cursor returned as next_page_token by a previous call. When set, the\nresponse resumes from where that page ended.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "page.size",
             "in": "query",
             "schema": {
@@ -607,6 +802,20 @@
             "schema": {
               "type": "integer",
               "format": "int32"
+            }
+          },
+          {
+            "name": "intent.proof",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "intent.message",
+            "in": "query",
+            "schema": {
+              "type": "string"
             }
           }
         ],
@@ -671,7 +880,7 @@
           {
             "name": "spendableOnly",
             "in": "query",
-            "description": "Retrieve only spendable vtxos",
+            "description": "The spendable_only, spent_only, recoverable_only, pending_only and\nrenewable_only filters are mutually exclusive, and are applied only when\nthe scripts filter is used. They are ignored when querying by outpoints.\nRetrieve only spendable vtxos",
             "schema": {
               "type": "boolean"
             }
@@ -687,7 +896,7 @@
           {
             "name": "recoverableOnly",
             "in": "query",
-            "description": "Retrieve only recoverable vtxos (notes, subdust or swept vtxos).\nThe 3 filters are mutually exclusive,",
+            "description": "Retrieve only recoverable vtxos (notes, subdust or swept vtxos).",
             "schema": {
               "type": "boolean"
             }
@@ -716,6 +925,14 @@
             "schema": {
               "type": "integer",
               "format": "int64"
+            }
+          },
+          {
+            "name": "renewableOnly",
+            "in": "query",
+            "description": "Retrieve the union of the spendable and recoverable vtxos.",
+            "schema": {
+              "type": "boolean"
             }
           },
           {
@@ -935,8 +1152,13 @@
         "title": "GetSubscriptionRequest",
         "type": "object",
         "properties": {
+          "filter": {
+            "$ref": "#/components/schemas/SubscriptionFilter",
+            "description": "Optional: filter to apply on stream creation. Only used when\nsubscription_id is empty; ignored otherwise. See\nUpdateSubscriptionRequest for filter semantics."
+          },
           "subscriptionId": {
-            "type": "string"
+            "type": "string",
+            "description": "If empty, server creates a new subscription automatically."
           }
         }
       },
@@ -949,6 +1171,9 @@
           },
           "heartbeat": {
             "$ref": "#/components/schemas/IndexerHeartbeat"
+          },
+          "subscriptionStarted": {
+            "$ref": "#/components/schemas/SubscriptionStartedEvent"
           }
         }
       },
@@ -956,8 +1181,16 @@
         "title": "GetVirtualTxsRequest",
         "type": "object",
         "properties": {
+          "intent": {
+            "$ref": "#/components/schemas/IndexerIntent",
+            "description": "Intent that directly proves ownership of the transaction inputs.\nIf passed, the txids field is ignored."
+          },
           "page": {
             "$ref": "#/components/schemas/IndexerPageRequest"
+          },
+          "token": {
+            "type": "string",
+            "description": "Valid auth_token can also be used if the ownership has already been proved.\nA valid token obtained from GetVtxoChain rpc can be recycled for this request."
           },
           "txids": {
             "type": "array",
@@ -971,6 +1204,10 @@
         "title": "GetVirtualTxsResponse",
         "type": "object",
         "properties": {
+          "authToken": {
+            "type": "string",
+            "description": "Auth token can be used for other rpcs related to this vtxo/tx that require proof of ownership."
+          },
           "page": {
             "$ref": "#/components/schemas/IndexerPageResponse"
           },
@@ -986,11 +1223,23 @@
         "title": "GetVtxoChainRequest",
         "type": "object",
         "properties": {
+          "intent": {
+            "$ref": "#/components/schemas/IndexerIntent",
+            "description": "Intent that directly proves ownership of the vtxo. If passed, the outpoint field is ignored."
+          },
           "outpoint": {
             "$ref": "#/components/schemas/IndexerOutpoint"
           },
           "page": {
             "$ref": "#/components/schemas/IndexerPageRequest"
+          },
+          "pageToken": {
+            "type": "string",
+            "description": "Opaque cursor returned as next_page_token by a previous call. When set, the\nresponse resumes from where that page ended."
+          },
+          "token": {
+            "type": "string",
+            "description": "Valid auth_token can also be used if the ownership has already been proved.\nA valid token obtained from GetVirtualTxs rpc can be recycled for this request."
           }
         }
       },
@@ -998,11 +1247,19 @@
         "title": "GetVtxoChainResponse",
         "type": "object",
         "properties": {
+          "authToken": {
+            "type": "string",
+            "description": "Auth token can be used for other rpcs related to this vtxo/tx that require proof of ownership."
+          },
           "chain": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/IndexerChain"
             }
+          },
+          "nextPageToken": {
+            "type": "string",
+            "description": "Opaque cursor for fetching the next page. Empty when there are no more pages."
           },
           "page": {
             "$ref": "#/components/schemas/IndexerPageResponse"
@@ -1093,7 +1350,11 @@
           },
           "recoverableOnly": {
             "type": "boolean",
-            "description": "Retrieve only recoverable vtxos (notes, subdust or swept vtxos).\nThe 3 filters are mutually exclusive,"
+            "description": "Retrieve only recoverable vtxos (notes, subdust or swept vtxos)."
+          },
+          "renewableOnly": {
+            "type": "boolean",
+            "description": "Retrieve the union of the spendable and recoverable vtxos."
           },
           "scripts": {
             "type": "array",
@@ -1104,7 +1365,7 @@
           },
           "spendableOnly": {
             "type": "boolean",
-            "description": "Retrieve only spendable vtxos"
+            "description": "The spendable_only, spent_only, recoverable_only, pending_only and\nrenewable_only filters are mutually exclusive, and are applied only when\nthe scripts filter is used. They are ignored when querying by outpoints.\nRetrieve only spendable vtxos"
           },
           "spentOnly": {
             "type": "boolean",
@@ -1199,6 +1460,18 @@
       "IndexerHeartbeat": {
         "title": "IndexerHeartbeat",
         "type": "object"
+      },
+      "IndexerIntent": {
+        "title": "IndexerIntent",
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "proof": {
+            "type": "string"
+          }
+        }
       },
       "IndexerNode": {
         "title": "IndexerNode",
@@ -1381,6 +1654,10 @@
             "type": "integer",
             "format": "int64"
           },
+          "depth": {
+            "type": "integer",
+            "format": "uint32"
+          },
           "expiresAt": {
             "type": "integer",
             "format": "int64"
@@ -1408,6 +1685,24 @@
           },
           "spentBy": {
             "type": "string"
+          }
+        }
+      },
+      "ScriptFilter": {
+        "title": "ScriptFilter",
+        "type": "object",
+        "properties": {
+          "add": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "remove": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       },
@@ -1455,6 +1750,33 @@
           }
         }
       },
+      "SubscriptionFilter": {
+        "title": "SubscriptionFilter",
+        "type": "object",
+        "description": "SubscriptionFilter is the payload carried by GetSubscription's initial\nfilter and by UpdateSubscription. See UpdateSubscriptionRequest for the\nper-call semantics of each field.\n\nAt runtime, a tx event is dispatched to a subscription when any of its\nexpressions evaluates to true on the event's tx, OR when the event\ncarries a vtxo whose script is in the subscription's script set.",
+        "properties": {
+          "expressions": {
+            "type": "array",
+            "description": "CEL expressions evaluated against each indexed tx envelope. The\nindexer combines them with OR.",
+            "items": {
+              "type": "string"
+            }
+          },
+          "scripts": {
+            "$ref": "#/components/schemas/ScriptFilter",
+            "description": "Script add/remove operations. Will be migrated to a CEL formula in a\nfuture protocol version and removed."
+          }
+        }
+      },
+      "SubscriptionStartedEvent": {
+        "title": "SubscriptionStartedEvent",
+        "type": "object",
+        "properties": {
+          "subscriptionId": {
+            "type": "string"
+          }
+        }
+      },
       "UnsubscribeForScriptsRequest": {
         "title": "UnsubscribeForScriptsRequest",
         "type": "object",
@@ -1473,6 +1795,23 @@
       },
       "UnsubscribeForScriptsResponse": {
         "title": "UnsubscribeForScriptsResponse",
+        "type": "object"
+      },
+      "UpdateSubscriptionRequest": {
+        "title": "UpdateSubscriptionRequest",
+        "type": "object",
+        "description": "UpdateSubscriptionRequest mutates an existing subscription. Both filter\nfields are optional and may be set together. The subscription_id must\nbe non-empty and the filter must be present; otherwise InvalidArgument\nis returned.\n\nExpressions (filter.expressions):\n- Always overwritten as a whole. The field's contents replace any\npreviously-set expressions even when the list is empty (which\nclears them entirely).\n- Duplicate expressions are deduplicated, since the underlying set\nis keyed by expression string.\n- Bounded by a server-side per-subscription cap; exceeding it returns\nInvalidArgument.\n\nScripts (filter.scripts):\n- When the scripts field is unset, scripts are left untouched.\n- When set with both `add` and `remove` empty, the call clears all\nscripts (mirrors UnsubscribeForScripts with an empty scripts list).\n- When set with `add` non-empty, those scripts are added.\n- When set with `remove` non-empty, those scripts are removed.\n- `add` and `remove` may be combined in a single call. When the two\nlists overlap, remove takes precedence, since add is applied first\nand remove second.\n- Both operations are idempotent: adding an already-subscribed\nscript is a no-op, and removing an unsubscribed script is a no-op.\n\nAtomicity:\n- All inputs (CEL expressions, scripts to add, scripts to remove) are\nvalidated before any state is mutated. If any single input fails\nvalidation, no mutations are applied and even valid entries in the\nsame request are discarded. An InvalidArgument response therefore\nguarantees the subscription is unchanged.\n- A successful response guarantees all requested mutations were\napplied.\n\nErrors:\n- NotFound: subscription_id does not match a live subscription.\n- InvalidArgument: any CEL compile error, any script parse error, or\nthe expressions cap exceeded.\n\nGetSubscription initial filter:\n- The same SubscriptionFilter shape is accepted by\nGetSubscriptionRequest.filter on stream creation, with the same\nsemantics as above and two exceptions.\n- `scripts.remove` is ignored on creation, since a freshly-created\nsubscription has no scripts to remove.\n- When `scripts` is set with both `add` and `remove` empty on\ncreation, the clear-all behavior does not fire either, since there\nis nothing to clear. An empty SubscriptionFilter is therefore a\nno-op on creation.",
+        "properties": {
+          "filter": {
+            "$ref": "#/components/schemas/SubscriptionFilter"
+          },
+          "subscriptionId": {
+            "type": "string"
+          }
+        }
+      },
+      "UpdateSubscriptionResponse": {
+        "title": "UpdateSubscriptionResponse",
         "type": "object"
       }
     }

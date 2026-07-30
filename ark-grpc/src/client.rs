@@ -13,14 +13,11 @@ use crate::generated::ark::v1::IndexerChainedTxType;
 use crate::generated::ark::v1::Intent;
 use crate::generated::ark::v1::Outpoint;
 use crate::generated::ark::v1::RegisterIntentRequest;
-use crate::generated::ark::v1::ScriptFilter;
 use crate::generated::ark::v1::SubmitSignedForfeitTxsRequest;
 use crate::generated::ark::v1::SubmitTreeNoncesRequest;
 use crate::generated::ark::v1::SubmitTreeSignaturesRequest;
 use crate::generated::ark::v1::SubscribeForScriptsRequest;
-use crate::generated::ark::v1::SubscriptionFilter;
 use crate::generated::ark::v1::UnsubscribeForScriptsRequest;
-use crate::generated::ark::v1::UpdateSubscriptionRequest;
 use crate::Error;
 use ark_core::asset::AssetId;
 use ark_core::history;
@@ -38,6 +35,7 @@ use ark_core::server::FinalizeOffchainTxResponse;
 use ark_core::server::GetVtxosRequest;
 use ark_core::server::GetVtxosRequestFilter;
 use ark_core::server::GetVtxosRequestReference;
+use ark_core::server::IndexerAuth;
 use ark_core::server::IndexerPage;
 use ark_core::server::Info;
 use ark_core::server::NoncePks;
@@ -47,6 +45,7 @@ use ark_core::server::StreamStartedEvent;
 use ark_core::server::StreamTransactionData;
 use ark_core::server::SubmitOffchainTxResponse;
 use ark_core::server::SubscriptionEvent;
+use ark_core::server::SubscriptionFilter;
 use ark_core::server::SubscriptionResponse;
 use ark_core::server::TreeNoncesAggregatedEvent;
 use ark_core::server::TreeNoncesEvent;
@@ -645,10 +644,17 @@ impl Client {
         Ok(stream.boxed())
     }
 
+    /// Get the chain of transactions for a VTXO.
+    ///
+    /// An [`IndexerAuth`] can be provided to prove ownership if the server requires it; when an
+    /// intent is passed, the server ignores `outpoint`. `page_token` is the opaque cursor
+    /// returned as `next_page_token` by a previous call.
     pub async fn get_vtxo_chain(
         &self,
         outpoint: Option<OutPoint>,
         size_and_index: Option<(i32, i32)>,
+        auth: Option<IndexerAuth>,
+        page_token: Option<String>,
     ) -> Result<VtxoChainResponse, Error> {
         let response = self
             .indexer()?
@@ -662,6 +668,17 @@ impl Client {
                         page: size_and_index.map(|(size, index)| {
                             generated::ark::v1::IndexerPageRequest { size, index }
                         }),
+                        page_token: page_token.unwrap_or_default(),
+                        auth: auth.map(|auth| match auth {
+                            IndexerAuth::Intent { proof, message } => {
+                                generated::ark::v1::get_vtxo_chain_request::Auth::Intent(
+                                    generated::ark::v1::IndexerIntent { proof, message },
+                                )
+                            }
+                            IndexerAuth::Token(token) => {
+                                generated::ark::v1::get_vtxo_chain_request::Auth::Token(token)
+                            }
+                        }),
                     })
                     .await
             })
@@ -671,10 +688,15 @@ impl Client {
         Ok(result)
     }
 
+    /// Get virtual transactions by TXID.
+    ///
+    /// An [`IndexerAuth`] can be provided to prove ownership if the server requires it; when an
+    /// intent is passed, the server ignores `txids`.
     pub async fn get_virtual_txs(
         &self,
         txids: Vec<String>,
         size_and_index: Option<(i32, i32)>,
+        auth: Option<IndexerAuth>,
     ) -> Result<VirtualTxsResponse, Error> {
         let response = self
             .indexer()?
@@ -684,6 +706,16 @@ impl Client {
                         txids,
                         page: size_and_index.map(|(size, index)| {
                             generated::ark::v1::IndexerPageRequest { size, index }
+                        }),
+                        auth: auth.map(|auth| match auth {
+                            IndexerAuth::Intent { proof, message } => {
+                                generated::ark::v1::get_virtual_txs_request::Auth::Intent(
+                                    generated::ark::v1::IndexerIntent { proof, message },
+                                )
+                            }
+                            IndexerAuth::Token(token) => {
+                                generated::ark::v1::get_virtual_txs_request::Auth::Token(token)
+                            }
                         }),
                     })
                     .await
@@ -703,9 +735,6 @@ impl Client {
     /// Note: for new subscriptions, don't provide a `subscription_id`
     ///
     /// Returns the subscription id if successful
-    #[deprecated(
-        note = "use `subscribe_to_scripts_stream` to open a subscription, or `update_subscription` to add scripts"
-    )]
     pub async fn subscribe_to_scripts(
         &self,
         scripts: Vec<ArkAddress>,
@@ -737,7 +766,6 @@ impl Client {
     }
 
     /// Allows to remove scripts from an existing subscription.
-    #[deprecated(note = "use `update_subscription` with the `remove` argument")]
     pub async fn unsubscribe_from_scripts(
         &self,
         scripts: Vec<ArkAddress>,
@@ -762,21 +790,48 @@ impl Client {
         Ok(())
     }
 
+    /// Update the filter of an existing subscription.
+    ///
+    /// The filter's expressions are always overwritten as a whole (an empty list clears them),
+    /// whereas the scripts are added to and removed from the subscription's existing script set.
+    pub async fn update_subscription(
+        &self,
+        subscription_id: String,
+        filter: SubscriptionFilter,
+    ) -> Result<(), Error> {
+        let filter = subscription_filter_to_generated(filter);
+
+        self.indexer()?
+            .request(move |mut client| async move {
+                client
+                    .update_subscription(generated::ark::v1::UpdateSubscriptionRequest {
+                        subscription_id,
+                        filter: Some(filter),
+                    })
+                    .await
+            })
+            .await?;
+
+        Ok(())
+    }
+
     /// Gets a subscription stream that returns subscription responses.
-    #[deprecated(
-        note = "use `subscribe_to_scripts_stream`, which creates the subscription and opens the stream in a single call"
-    )]
+    ///
+    /// An optional [`SubscriptionFilter`] can be provided to set the subscription's filter when
+    /// the stream is opened.
     pub async fn get_subscription(
         &self,
         subscription_id: String,
+        filter: Option<SubscriptionFilter>,
     ) -> Result<impl Stream<Item = Result<SubscriptionResponse, Error>> + Unpin, Error> {
+        let filter = filter.map(subscription_filter_to_generated);
         let response = self
             .indexer()?
             .request(move |mut client| async move {
                 client
                     .get_subscription(GetSubscriptionRequest {
                         subscription_id,
-                        filter: None,
+                        filter,
                     })
                     .await
             })
@@ -788,11 +843,6 @@ impl Client {
             loop {
                 match stream.try_next().await {
                     Ok(Some(response)) => {
-                        if let Some(get_subscription_response::Data::SubscriptionStarted(_)) =
-                            response.data
-                        {
-                            continue;
-                        }
                         match SubscriptionResponse::try_from(response) {
                             Ok(subscription_response) => {
                                 yield Ok(subscription_response);
@@ -813,136 +863,6 @@ impl Client {
         };
 
         Ok(stream.boxed())
-    }
-
-    /// Subscribes to tx notifications for the given vtxo scripts in a single call.
-    ///
-    /// Sends an empty `subscription_id` so the server creates the subscription and starts
-    /// streaming immediately. Returns the server-assigned id together with the stream, pass the
-    /// id to [`Self::update_subscription`] to add or remove scripts later.
-    pub async fn subscribe_to_scripts_stream(
-        &self,
-        scripts: Vec<ArkAddress>,
-    ) -> Result<
-        (
-            String,
-            impl Stream<Item = Result<SubscriptionResponse, Error>> + Unpin,
-        ),
-        Error,
-    > {
-        let scripts = scripts
-            .iter()
-            .map(|address| address.to_p2tr_script_pubkey().to_hex_string())
-            .collect::<Vec<_>>();
-
-        let response = self
-            .indexer()?
-            .request(move |mut client| async move {
-                client
-                    .get_subscription(GetSubscriptionRequest {
-                        subscription_id: String::new(),
-                        filter: Some(SubscriptionFilter {
-                            expressions: Vec::new(),
-                            scripts: Some(ScriptFilter {
-                                add: scripts,
-                                remove: Vec::new(),
-                            }),
-                        }),
-                    })
-                    .await
-            })
-            .await?;
-
-        let mut stream = response.into_inner();
-
-        // The server-created subscription reports its id in a subscription_started frame ahead
-        // of any tx events, capture it before handing back the stream.
-        let subscription_id = loop {
-            match stream.try_next().await.map_err(Error::event_stream)? {
-                Some(response) => match response.data {
-                    Some(get_subscription_response::Data::SubscriptionStarted(started)) => {
-                        break started.subscription_id;
-                    }
-                    Some(get_subscription_response::Data::Heartbeat(_)) => continue,
-                    _ => {
-                        return Err(Error::conversion(
-                            "expected subscription_started as first subscription event",
-                        ))
-                    }
-                },
-                None => {
-                    return Err(Error::conversion(
-                        "subscription stream closed before subscription_started",
-                    ))
-                }
-            }
-        };
-
-        let stream = stream! {
-            loop {
-                match stream.try_next().await {
-                    Ok(Some(response)) => {
-                        // A subscription_started frame carries the subscription id, not a tx
-                        // event. Skip it.
-                        if let Some(get_subscription_response::Data::SubscriptionStarted(_)) =
-                            response.data
-                        {
-                            continue;
-                        }
-                        match SubscriptionResponse::try_from(response) {
-                            Ok(subscription_response) => {
-                                yield Ok(subscription_response);
-                            }
-                            Err(e) => {
-                                yield Err(e);
-                            }
-                        }
-                    }
-                    Ok(None) => {
-                        break;
-                    }
-                    Err(e) => {
-                        yield Err(Error::event_stream(e));
-                    }
-                }
-            }
-        };
-
-        Ok((subscription_id, stream.boxed()))
-    }
-
-    /// Adds or removes scripts on a subscription previously opened with
-    /// [`Self::subscribe_to_scripts_stream`].
-    pub async fn update_subscription(
-        &self,
-        subscription_id: String,
-        add: Vec<ArkAddress>,
-        remove: Vec<ArkAddress>,
-    ) -> Result<(), Error> {
-        let add = add
-            .iter()
-            .map(|address| address.to_p2tr_script_pubkey().to_hex_string())
-            .collect::<Vec<_>>();
-        let remove = remove
-            .iter()
-            .map(|address| address.to_p2tr_script_pubkey().to_hex_string())
-            .collect::<Vec<_>>();
-
-        self.indexer()?
-            .request(move |mut client| async move {
-                client
-                    .update_subscription(UpdateSubscriptionRequest {
-                        subscription_id,
-                        filter: Some(SubscriptionFilter {
-                            expressions: Vec::new(),
-                            scripts: Some(ScriptFilter { add, remove }),
-                        }),
-                    })
-                    .await
-            })
-            .await?;
-
-        Ok(())
     }
 
     pub async fn estimate_fees(
@@ -1360,9 +1280,36 @@ impl TryFrom<Outpoint> for OutPoint {
     }
 }
 
+fn subscription_filter_to_generated(
+    filter: SubscriptionFilter,
+) -> generated::ark::v1::SubscriptionFilter {
+    generated::ark::v1::SubscriptionFilter {
+        expressions: filter.expressions,
+        scripts: (!filter.add_scripts.is_empty() || !filter.remove_scripts.is_empty()).then(|| {
+            generated::ark::v1::ScriptFilter {
+                add: filter
+                    .add_scripts
+                    .iter()
+                    .map(|s| s.to_hex_string())
+                    .collect(),
+                remove: filter
+                    .remove_scripts
+                    .iter()
+                    .map(|s| s.to_hex_string())
+                    .collect(),
+            }
+        }),
+    }
+}
+
 pub struct VtxoChainResponse {
     pub chains: VtxoChains,
     pub page: Option<IndexerPage>,
+    /// Token that can be recycled as [`IndexerAuth::Token`] for other indexer queries related to
+    /// the same vtxo.
+    pub auth_token: Option<String>,
+    /// Opaque cursor for fetching the next page. `None` when there are no more pages.
+    pub next_page_token: Option<String>,
 }
 
 pub struct ListVtxosResponse {
@@ -1387,6 +1334,8 @@ impl TryFrom<generated::ark::v1::GetVtxoChainResponse> for VtxoChainResponse {
                 .map(IndexerPage::try_from)
                 .transpose()
                 .map_err(Error::conversion)?,
+            auth_token: (!value.auth_token.is_empty()).then_some(value.auth_token),
+            next_page_token: (!value.next_page_token.is_empty()).then_some(value.next_page_token),
         })
     }
 }
@@ -1418,6 +1367,7 @@ impl TryFrom<generated::ark::v1::GetVirtualTxsResponse> for VirtualTxsResponse {
                 .map(IndexerPage::try_from)
                 .transpose()
                 .map_err(Error::conversion)?,
+            auth_token: (!value.auth_token.is_empty()).then_some(value.auth_token),
         })
     }
 }
@@ -1502,10 +1452,10 @@ impl TryFrom<generated::ark::v1::GetSubscriptionResponse> for SubscriptionRespon
         let value = match value.data {
             Some(get_subscription_response::Data::Heartbeat(_)) => return Ok(Self::Heartbeat),
             Some(get_subscription_response::Data::Event(event)) => event,
-            Some(get_subscription_response::Data::SubscriptionStarted(_)) => {
-                return Err(Error::conversion(
-                    "unexpected subscription_started event in subscription stream",
-                ));
+            Some(get_subscription_response::Data::SubscriptionStarted(event)) => {
+                return Ok(Self::SubscriptionStarted {
+                    subscription_id: event.subscription_id,
+                })
             }
             None => return Err(Error::conversion("empty subscription response")),
         };
@@ -1587,13 +1537,15 @@ impl TryFrom<generated::ark::v1::GetSubscriptionResponse> for SubscriptionRespon
 
 impl From<GetVtxosRequest> for generated::ark::v1::GetVtxosRequest {
     fn from(value: GetVtxosRequest) -> Self {
-        let (spendable_only, spent_only, recoverable_only, pending_only) = match value.filter() {
-            Some(GetVtxosRequestFilter::Spendable) => (true, false, false, false),
-            Some(GetVtxosRequestFilter::Spent) => (false, true, false, false),
-            Some(GetVtxosRequestFilter::Recoverable) => (false, false, true, false),
-            Some(GetVtxosRequestFilter::PendingOnly) => (false, false, false, true),
-            None => (false, false, false, false),
-        };
+        let (spendable_only, spent_only, recoverable_only, pending_only, renewable_only) =
+            match value.filter() {
+                Some(GetVtxosRequestFilter::Spendable) => (true, false, false, false, false),
+                Some(GetVtxosRequestFilter::Spent) => (false, true, false, false, false),
+                Some(GetVtxosRequestFilter::Recoverable) => (false, false, true, false, false),
+                Some(GetVtxosRequestFilter::PendingOnly) => (false, false, false, true, false),
+                Some(GetVtxosRequestFilter::Renewable) => (false, false, false, false, true),
+                None => (false, false, false, false, false),
+            };
 
         let page = value
             .page()
@@ -1609,6 +1561,7 @@ impl From<GetVtxosRequest> for generated::ark::v1::GetVtxosRequest {
                 spendable_only,
                 spent_only,
                 recoverable_only,
+                renewable_only,
                 page,
                 pending_only,
                 after: value.after().unwrap_or(0) as i64,
@@ -1620,6 +1573,7 @@ impl From<GetVtxosRequest> for generated::ark::v1::GetVtxosRequest {
                 spendable_only,
                 spent_only,
                 recoverable_only,
+                renewable_only,
                 page,
                 pending_only,
                 after: value.after().unwrap_or(0) as i64,

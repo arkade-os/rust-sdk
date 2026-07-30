@@ -202,6 +202,7 @@ impl TryFrom<&generated::ark::v1::IndexerVtxo> for server::VirtualTxOutPoint {
             settled_by,
             ark_txid,
             assets,
+            depth: value.depth,
         })
     }
 }
@@ -266,6 +267,7 @@ impl TryFrom<&generated::ark::v1::Vtxo> for server::VirtualTxOutPoint {
             settled_by,
             ark_txid,
             assets,
+            depth: value.depth,
         })
     }
 }

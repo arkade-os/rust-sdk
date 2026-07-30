@@ -458,6 +458,7 @@ impl TryFrom<IndexerVtxo> for ark_core::server::VirtualTxOutPoint {
             settled_by,
             ark_txid,
             assets,
+            depth: value.depth.unwrap_or_default() as u32,
         })
     }
 }
@@ -588,6 +589,12 @@ impl TryFrom<GetSubscriptionResponse> for ark_core::server::SubscriptionResponse
             Ok(ark_core::server::SubscriptionResponse::Event(Box::new(
                 subscription_event,
             )))
+        } else if let Some(started) = value.subscription_started {
+            Ok(
+                ark_core::server::SubscriptionResponse::SubscriptionStarted {
+                    subscription_id: started.subscription_id.unwrap_or_default(),
+                },
+            )
         } else {
             Err(ConversionError(
                 "GetSubscriptionResponse must have either event or heartbeat".to_string(),
