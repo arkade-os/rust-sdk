@@ -27,6 +27,9 @@ tonic-prost = "0.14"
 [build-dependencies]
 tonic-prost-build = "0.14"
 
+[dev-dependencies]
+futures = { version = "0.3", features = ["executor"] }
+
 [features]
 default = ["tls-webpki-roots"]
 tls-native-roots = ["tonic/tls-native-roots"]
