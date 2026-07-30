@@ -4363,7 +4363,7 @@ async fn run_boltz_vhtlc_watcher_loop<B, W, S>(
             }
         };
 
-        let mut stream = match client.get_subscription(subscription_id.clone()).await {
+        let mut stream = match client.get_subscription(subscription_id.clone(), None).await {
             Ok(stream) => stream,
             Err(error) => {
                 tracing::warn!(?error, "Failed to open VHTLC subscription stream");
@@ -4401,6 +4401,9 @@ async fn run_boltz_vhtlc_watcher_loop<B, W, S>(
                 event = stream.next() => {
                     match event {
                         Some(Ok(SubscriptionResponse::Heartbeat)) => {}
+                        Some(Ok(SubscriptionResponse::SubscriptionStarted { subscription_id })) => {
+                            tracing::debug!(subscription_id, "VHTLC subscription stream started");
+                        }
                         Some(Ok(SubscriptionResponse::Event(event))) => {
                             if let Err(error) = handle_boltz_vhtlc_subscription_event(
                                 client.as_ref(),
@@ -6140,6 +6143,7 @@ mod tests {
             settled_by: None,
             ark_txid: None,
             assets: Vec::new(),
+            depth: 0,
         }
     }
 
