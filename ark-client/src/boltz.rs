@@ -183,6 +183,22 @@ pub struct PendingVhtlcSpendTx {
     pub pending_tx: PendingTx,
 }
 
+/// Result of attempting to finalize all pending VHTLC spend transactions.
+#[derive(Clone, Debug)]
+pub struct ContinuePendingVhtlcSpendTxsResult {
+    pub finalized: Vec<Txid>,
+    pub failed: Vec<PendingVhtlcSpendFailure>,
+}
+
+/// A pending VHTLC spend transaction that could not be finalized.
+#[derive(Clone, Debug)]
+pub struct PendingVhtlcSpendFailure {
+    pub ark_txid: Txid,
+    pub swap_id: String,
+    pub spend_type: &'static str,
+    pub error: String,
+}
+
 /// Configuration for the background Boltz VHTLC watcher.
 #[derive(Clone, Copy, Debug)]
 pub struct BoltzVhtlcWatcherConfig {
@@ -3145,10 +3161,17 @@ where
     }
 
     /// Sign and finalize all pending VHTLC spend transactions.
-    pub async fn continue_pending_vhtlc_spend_txs(&self) -> Result<Vec<Txid>, Error> {
+    ///
+    /// Discovery failures are returned as errors. Per-transaction finalization failures are
+    /// collected in the result so callers can observe partial recovery without preventing other
+    /// pending transactions from being finalized.
+    pub async fn continue_pending_vhtlc_spend_txs(
+        &self,
+    ) -> Result<ContinuePendingVhtlcSpendTxsResult, Error> {
         let pending = self.list_pending_vhtlc_spend_txs().await?;
 
         let mut finalized = Vec::new();
+        let mut failed = Vec::new();
         for tx in &pending {
             match self.continue_pending_vhtlc_spend_tx(tx).await {
                 Ok(txid) => finalized.push(txid),
@@ -3159,11 +3182,17 @@ where
                         ?e,
                         "Failed to finalize pending VHTLC spend tx"
                     );
+                    failed.push(PendingVhtlcSpendFailure {
+                        ark_txid: tx.pending_tx.ark_txid,
+                        swap_id: tx.spend_type.swap_id().to_string(),
+                        spend_type: tx.spend_type.name(),
+                        error: e.to_string(),
+                    });
                 }
             }
         }
 
-        Ok(finalized)
+        Ok(ContinuePendingVhtlcSpendTxsResult { finalized, failed })
     }
 
     /// Sign and finalize a pending claim VHTLC checkpoint.
