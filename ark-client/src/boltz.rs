@@ -501,12 +501,20 @@ where
             invoice: request.invoice.clone(),
             created_at: created_at.as_secs(),
             key_derivation_index,
-            contract_script_pubkey: Some(script_pubkey),
+            contract_script_pubkey: Some(script_pubkey.clone()),
         };
 
-        self.swap_storage()
+        if let Err(error) = self
+            .swap_storage()
             .insert_submarine(swap_response.id.clone(), data.clone())
-            .await?;
+            .await
+        {
+            return Err(self.deactivate_orphaned_vhtlc_contract(
+                &script_pubkey,
+                &swap_response.id,
+                error,
+            ));
+        }
 
         tracing::info!(
             swap_id = swap_response.id,
@@ -596,7 +604,8 @@ where
             .insert_vhtlc_contract(vhtlc.options().clone(), key_derivation_index)
             .context("failed to persist VHTLC contract for submarine swap")?;
 
-        self.swap_storage()
+        if let Err(error) = self
+            .swap_storage()
             .insert_submarine(
                 swap_response.id.clone(),
                 SubmarineSwapData {
@@ -612,10 +621,17 @@ where
                     invoice: request.invoice.clone(),
                     created_at: created_at.as_secs(),
                     key_derivation_index,
-                    contract_script_pubkey: Some(script_pubkey),
+                    contract_script_pubkey: Some(script_pubkey.clone()),
                 },
             )
-            .await?;
+            .await
+        {
+            return Err(self.deactivate_orphaned_vhtlc_contract(
+                &script_pubkey,
+                &swap_response.id,
+                error,
+            ));
+        }
 
         let vhtlc_address = swap_response.address;
         let amount = swap_response.expected_amount;
@@ -1527,13 +1543,21 @@ where
             bolt11: response.invoice.to_string(),
             invoice_expiry: response.invoice.expiry_time().as_secs(),
             claim_address: recipient_address,
-            contract_script_pubkey: Some(script_pubkey),
+            contract_script_pubkey: Some(script_pubkey.clone()),
         };
 
-        self.swap_storage()
+        if let Err(error) = self
+            .swap_storage()
             .insert_reverse(response.id.clone(), swap.clone())
             .await
-            .context("failed to persist swap data")?;
+            .context("failed to persist swap data")
+        {
+            return Err(self.deactivate_orphaned_vhtlc_contract(
+                &script_pubkey,
+                &response.id,
+                error,
+            ));
+        }
 
         Ok(ReverseSwapResult {
             swap_id: swap.id,
@@ -1973,12 +1997,20 @@ where
             created_at: created_at.as_secs(),
             claim_key_derivation_index,
             refund_key_derivation_index,
-            contract_script_pubkey: Some(contract_script_pubkey),
+            contract_script_pubkey: Some(contract_script_pubkey.clone()),
         };
 
-        self.swap_storage()
+        if let Err(error) = self
+            .swap_storage()
             .insert_chain(swap_response.id.clone(), data.clone())
-            .await?;
+            .await
+        {
+            return Err(self.deactivate_orphaned_vhtlc_contract(
+                &contract_script_pubkey,
+                &swap_response.id,
+                error,
+            ));
+        }
 
         tracing::info!(
             swap_id = swap_response.id,
@@ -3769,6 +3801,22 @@ where
                 "Failed to reconcile VHTLC contract state from VTXO status"
             );
         }
+    }
+
+    fn deactivate_orphaned_vhtlc_contract(
+        &self,
+        script_pubkey: &ScriptBuf,
+        swap_id: &str,
+        error: Error,
+    ) -> Error {
+        if let Err(rollback_error) = self.mark_vhtlc_contract_inactive(Some(script_pubkey)) {
+            tracing::warn!(
+                swap_id,
+                ?rollback_error,
+                "Failed to deactivate orphaned VHTLC contract after swap persistence failure"
+            );
+        }
+        error
     }
 
     fn mark_vhtlc_contract_inactive(&self, script_pubkey: Option<&ScriptBuf>) -> Result<(), Error> {
@@ -7015,6 +7063,31 @@ mod tests {
             .unwrap();
         assert_eq!(stored.state, ContractState::Inactive);
         assert_eq!(stored.key_index, Some(9));
+    }
+
+    #[test]
+    fn deactivates_orphaned_contract_after_swap_persistence_failure() {
+        let client = test_client(test_server_info());
+        let script_pubkey = client
+            .insert_vhtlc_contract(fixture_opts(fixture_server_xonly()), Some(9))
+            .unwrap();
+
+        let error = client.deactivate_orphaned_vhtlc_contract(
+            &script_pubkey,
+            "swap-1",
+            Error::ad_hoc("swap storage failed"),
+        );
+
+        assert_eq!(error.to_string(), "swap storage failed");
+        let state = client.state.read().unwrap();
+        let stored = state
+            .contract_manager
+            .lock()
+            .unwrap()
+            .get(&script_pubkey)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state, ContractState::Inactive);
     }
 
     #[test]
