@@ -1264,7 +1264,8 @@ mod tests {
         assert!(valid_at <= end + 61);
     }
 
-    /// Distinct valid Arkade address derived from a seed byte, for exercising the script-diff logic.
+    /// Distinct valid Arkade address derived from a seed byte, for exercising the script-diff
+    /// logic.
     fn ark_address(seed: u8) -> ArkAddress {
         let secp = Secp256k1::new();
         let (server, _owner, delegator) = test_keys();
