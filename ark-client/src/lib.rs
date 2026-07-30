@@ -2155,6 +2155,8 @@ where
     #[deprecated(
         note = "use `subscribe_to_scripts_stream` to open a subscription, or `update_subscription` to add scripts"
     )]
+    // This deprecated wrapper intentionally forwards to the deprecated gRPC method; suppress the
+    // self-referential deprecation warning.
     #[allow(deprecated)]
     pub async fn subscribe_to_scripts(
         &self,
@@ -2177,6 +2179,8 @@ where
     /// * `scripts` - Vector of ArkAddress to unsubscribe from
     /// * `subscription_id` - The subscription ID to update
     #[deprecated(note = "use `update_subscription` with the filter's `remove_scripts`")]
+    // This deprecated wrapper intentionally forwards to the deprecated gRPC method; suppress the
+    // self-referential deprecation warning.
     #[allow(deprecated)]
     pub async fn unsubscribe_from_scripts(
         &self,
