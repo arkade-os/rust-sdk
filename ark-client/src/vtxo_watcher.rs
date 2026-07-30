@@ -58,6 +58,10 @@ impl Drop for VtxoWatcherHandle {
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
+/// Upper bound on how long to wait for the server to send the `subscription_started` frame that
+/// opens a oneshot subscription.
+const SUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Periodic key discovery settings for keeping script subscriptions fresh.
 const KEY_DISCOVERY_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -159,10 +163,18 @@ async fn run_watcher_loop<B, W, S>(
             }
         };
 
-        let (subscription_id, mut stream) =
-            match client.subscribe_to_scripts_stream(addresses.clone()).await {
-                Ok(subscription) => subscription,
-                Err(e) => {
+        // Race the subscription handshake against the stop signal so a stop while waiting for
+        // `subscription_started` cancels the in-flight stream immediately rather than blocking
+        // shutdown. The timeout bounds a server that only sends heartbeats so backoff can fire.
+        let subscribe = tokio::time::timeout(
+            SUBSCRIBE_TIMEOUT,
+            client.subscribe_to_scripts_stream(addresses.clone()),
+        );
+        let (subscription_id, mut stream) = tokio::select! {
+            _ = stop_rx.changed() => return,
+            result = subscribe => match result {
+                Ok(Ok(subscription)) => subscription,
+                Ok(Err(e)) => {
                     tracing::warn!("Failed to subscribe: {e}, retrying in {backoff:?}");
                     if wait_or_stop(&mut stop_rx, backoff).await {
                         return;
@@ -170,7 +182,18 @@ async fn run_watcher_loop<B, W, S>(
                     backoff = (backoff * 2).min(MAX_BACKOFF);
                     continue;
                 }
-            };
+                Err(_) => {
+                    tracing::warn!(
+                        "Timed out waiting for subscription to start, retrying in {backoff:?}"
+                    );
+                    if wait_or_stop(&mut stop_rx, backoff).await {
+                        return;
+                    }
+                    backoff = (backoff * 2).min(MAX_BACKOFF);
+                    continue;
+                }
+            },
+        };
 
         tracing::info!("VTXO watcher connected");
         backoff = INITIAL_BACKOFF;
