@@ -1799,10 +1799,6 @@ where
         .map_err(Error::ark_server)
         .context("failed to finalize offchain transaction")?;
 
-        self.mark_vhtlc_contract_inactive(swap.contract_script_pubkey.as_ref())?;
-
-        tracing::info!(swap_id, txid = %ark_txid, "Claimed VHTLC");
-
         // Update storage to persist the preimage
         let mut updated_swap = swap.clone();
         updated_swap.preimage = Some(preimage);
@@ -1810,6 +1806,10 @@ where
             .update_reverse(swap_id, updated_swap)
             .await
             .context("failed to update swap data with preimage")?;
+
+        self.mark_vhtlc_contract_inactive(swap.contract_script_pubkey.as_ref())?;
+
+        tracing::info!(swap_id, txid = %ark_txid, "Claimed VHTLC");
 
         Ok(ClaimVhtlcResult {
             swap_id: swap_id.to_string(),
