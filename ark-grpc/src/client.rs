@@ -82,6 +82,7 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::time::Duration;
 
 #[derive(Clone, Default)]
 struct HeaderState {
@@ -874,6 +875,10 @@ impl Client {
     /// Sends an empty `subscription_id` so the server creates the subscription and starts
     /// streaming immediately. Returns the server-assigned id, read from the first
     /// [`SubscriptionResponse::SubscriptionStarted`] frame together with the remaining stream.
+    ///
+    /// The wait for `subscription_started` is bounded by [`SUBSCRIPTION_START_TIMEOUT`]. A
+    /// degraded server that streams only heartbeats yields a timeout error rather than hanging
+    /// the call.
     pub async fn subscribe_to_scripts_stream(
         &self,
         scripts: Vec<ArkAddress>,
@@ -895,7 +900,17 @@ impl Client {
 
         let stream = self.get_subscription(String::new(), Some(filter)).await?;
 
-        read_subscription_started(stream).await
+        match tokio::time::timeout(
+            SUBSCRIPTION_START_TIMEOUT,
+            read_subscription_started(stream),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(Error::conversion(
+                "timed out waiting for subscription_started",
+            )),
+        }
     }
 
     pub async fn estimate_fees(
@@ -1615,6 +1630,10 @@ impl From<GetVtxosRequest> for generated::ark::v1::GetVtxosRequest {
         }
     }
 }
+
+/// Upper bound on waiting for the server's `subscription_started` frame, so a degraded server that
+/// streams only heartbeats can't hang [`Client::subscribe_to_scripts_stream`] indefinitely.
+const SUBSCRIPTION_START_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Consumes the leading frames of a freshly opened subscription stream up to the server's
 /// `subscription_started` frame, returning its id together with the remaining stream.

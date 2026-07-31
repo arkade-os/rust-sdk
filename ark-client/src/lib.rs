@@ -2246,6 +2246,10 @@ where
     ///
     /// Returns the server-assigned subscription ID together with a stream of SubscriptionResponse
     /// messages
+    ///
+    /// # Deadline
+    ///
+    /// The wait for the subscription to start is internally bounded
     pub async fn subscribe_to_scripts_stream(
         &self,
         scripts: Vec<ArkAddress>,
