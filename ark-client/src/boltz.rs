@@ -943,7 +943,11 @@ where
         .map_err(Error::ark_server)
         .context("failed to finalize offchain transaction")?;
 
-        self.mark_vhtlc_contract_inactive(swap_data.contract_script_pubkey.as_ref())?;
+        self.best_effort_mark_vhtlc_contract_inactive(
+            swap_id,
+            swap_data.contract_script_pubkey.as_ref(),
+            "refund",
+        );
 
         tracing::info!(txid = %ark_txid, "Refunded VHTLC");
 
@@ -1038,7 +1042,11 @@ where
             .await
             .context("failed to join batch")?;
 
-        self.mark_vhtlc_contract_inactive(swap_data.contract_script_pubkey.as_ref())?;
+        self.best_effort_mark_vhtlc_contract_inactive(
+            swap_id,
+            swap_data.contract_script_pubkey.as_ref(),
+            "settlement refund",
+        );
 
         tracing::info!(txid = %commitment_txid, "Refunded VHTLC via settlement");
 
@@ -1253,7 +1261,11 @@ where
         .map_err(Error::ark_server)
         .context("failed to finalize offchain transaction")?;
 
-        self.mark_vhtlc_contract_inactive(swap_data.contract_script_pubkey.as_ref())?;
+        self.best_effort_mark_vhtlc_contract_inactive(
+            swap_id,
+            swap_data.contract_script_pubkey.as_ref(),
+            "collaborative refund",
+        );
 
         tracing::info!(swap_id, txid = %ark_txid, "Refunded VHTLC via collaborative refund");
 
@@ -1807,7 +1819,11 @@ where
             .await
             .context("failed to update swap data with preimage")?;
 
-        self.mark_vhtlc_contract_inactive(swap.contract_script_pubkey.as_ref())?;
+        self.best_effort_mark_vhtlc_contract_inactive(
+            swap_id,
+            swap.contract_script_pubkey.as_ref(),
+            "claim",
+        );
 
         tracing::info!(swap_id, txid = %ark_txid, "Claimed VHTLC");
 
@@ -2298,7 +2314,11 @@ where
             .update_chain(swap_id, updated_swap.clone())
             .await
             .context("failed to update chain swap data")?;
-        self.mark_vhtlc_contract_inactive(updated_swap.contract_script_pubkey.as_ref())?;
+        self.best_effort_mark_vhtlc_contract_inactive(
+            swap_id,
+            updated_swap.contract_script_pubkey.as_ref(),
+            "chain claim",
+        );
 
         Ok(ark_txid)
     }
@@ -2612,7 +2632,11 @@ where
             .update_chain(swap_id, updated_swap.clone())
             .await
             .context("failed to update chain swap data")?;
-        self.mark_vhtlc_contract_inactive(updated_swap.contract_script_pubkey.as_ref())?;
+        self.best_effort_mark_vhtlc_contract_inactive(
+            swap_id,
+            updated_swap.contract_script_pubkey.as_ref(),
+            "chain refund",
+        );
 
         Ok(ark_txid)
     }
@@ -3872,6 +3896,22 @@ where
             .get(script_pubkey)?
             .is_some_and(|contract| contract.state == ContractState::Inactive);
         Ok(inactive)
+    }
+
+    fn best_effort_mark_vhtlc_contract_inactive(
+        &self,
+        swap_id: &str,
+        script_pubkey: Option<&ScriptBuf>,
+        action: &'static str,
+    ) {
+        if let Err(error) = self.mark_vhtlc_contract_inactive(script_pubkey) {
+            tracing::warn!(
+                swap_id,
+                action,
+                ?error,
+                "Failed to deactivate finalized VHTLC contract"
+            );
+        }
     }
 
     fn get_vhtlc_contract(
