@@ -876,9 +876,9 @@ impl Client {
     /// streaming immediately. Returns the server-assigned id, read from the first
     /// [`SubscriptionResponse::SubscriptionStarted`] frame together with the remaining stream.
     ///
-    /// The wait for `subscription_started` is bounded by [`SUBSCRIPTION_START_TIMEOUT`]. A
-    /// degraded server that streams only heartbeats yields a timeout error rather than hanging
-    /// the call.
+    /// Startup is bounded by a 30-second timeout, covering both opening the streaming
+    /// RPC and waiting for `subscription_started`. A transport that stalls on open, or a degraded
+    /// server that streams only heartbeats, yields a timeout error rather than hanging the call.
     pub async fn subscribe_to_scripts_stream(
         &self,
         scripts: Vec<ArkAddress>,
@@ -898,14 +898,12 @@ impl Client {
             remove_scripts: Vec::new(),
         };
 
-        let stream = self.get_subscription(String::new(), Some(filter)).await?;
+        let startup = async {
+            let stream = self.get_subscription(String::new(), Some(filter)).await?;
+            read_subscription_started(stream).await
+        };
 
-        match tokio::time::timeout(
-            SUBSCRIPTION_START_TIMEOUT,
-            read_subscription_started(stream),
-        )
-        .await
-        {
+        match tokio::time::timeout(SUBSCRIPTION_START_TIMEOUT, startup).await {
             Ok(result) => result,
             Err(_) => Err(Error::conversion(
                 "timed out waiting for subscription_started",
