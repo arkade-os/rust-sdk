@@ -4901,15 +4901,37 @@ where
     let server_info = client.server_info().await?;
 
     for swap in client.swap_storage().list_all_submarine().await? {
-        if !is_submarine_refundable_status(&swap.status)
-            || client.vhtlc_contract_is_inactive(swap.contract_script_pubkey.as_ref())?
-        {
+        if !is_submarine_refundable_status(&swap.status) {
             continue;
         }
 
-        let liveness = client
+        match client.vhtlc_contract_is_inactive(swap.contract_script_pubkey.as_ref()) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    swap_id = %swap.id,
+                    ?error,
+                    "Skipping submarine refund after contract-state check failed"
+                );
+                continue;
+            }
+        }
+
+        let liveness = match client
             .observe_vhtlc_contract_liveness(&server_info, swap.vhtlc_address)
-            .await?;
+            .await
+        {
+            Ok(liveness) => liveness,
+            Err(error) => {
+                tracing::warn!(
+                    swap_id = %swap.id,
+                    ?error,
+                    "Skipping submarine refund after VHTLC liveness check failed"
+                );
+                continue;
+            }
+        };
         if !is_refundable_vhtlc_liveness(liveness) {
             tracing::debug!(
                 swap_id = %swap.id,
@@ -4954,15 +4976,48 @@ where
     for swap in client.swap_storage().list_all_chain().await? {
         if swap.direction != ChainSwapDirection::ArkToBtc
             || !is_chain_refundable_status(&swap.status)
-            || client.vhtlc_contract_is_inactive(swap.contract_script_pubkey.as_ref())?
         {
             continue;
         }
 
-        let address = swap.chain_vhtlc_address()?;
-        let liveness = client
+        match client.vhtlc_contract_is_inactive(swap.contract_script_pubkey.as_ref()) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    swap_id = %swap.id,
+                    ?error,
+                    "Skipping chain refund after contract-state check failed"
+                );
+                continue;
+            }
+        }
+
+        let address = match swap.chain_vhtlc_address() {
+            Ok(address) => address,
+            Err(error) => {
+                tracing::warn!(
+                    swap_id = %swap.id,
+                    ?error,
+                    "Skipping chain refund with unresolved VHTLC address"
+                );
+                continue;
+            }
+        };
+        let liveness = match client
             .observe_vhtlc_contract_liveness(&server_info, address)
-            .await?;
+            .await
+        {
+            Ok(liveness) => liveness,
+            Err(error) => {
+                tracing::warn!(
+                    swap_id = %swap.id,
+                    ?error,
+                    "Skipping chain refund after VHTLC liveness check failed"
+                );
+                continue;
+            }
+        };
         if !is_refundable_vhtlc_liveness(liveness) {
             tracing::debug!(
                 swap_id = %swap.id,
