@@ -3618,10 +3618,12 @@ where
 
         for mut swap in self.swap_storage().list_all_chain().await? {
             if swap.contract_script_pubkey.is_some() {
+                self.best_effort_cache_chain_swap_key(&swap);
                 continue;
             }
             match self.chain_vhtlc_script(&mut swap, server_info).await {
                 Ok(_) => {
+                    self.best_effort_cache_chain_swap_key(&swap);
                     match swap.chain_vhtlc_address() {
                         Ok(vhtlc_address) => {
                             self.best_effort_reconcile_vhtlc_contract_state_from_vtxos(
@@ -3648,6 +3650,30 @@ where
         }
 
         Ok(migrated)
+    }
+
+    fn best_effort_cache_chain_swap_key(&self, swap: &ChainSwapData) {
+        let (pk, key_derivation_index, key_role) = match swap.direction {
+            ChainSwapDirection::ArkToBtc => (
+                swap.refund_public_key.inner.x_only_public_key().0,
+                swap.refund_key_derivation_index,
+                "refund",
+            ),
+            ChainSwapDirection::BtcToArk => (
+                swap.claim_public_key.inner.x_only_public_key().0,
+                swap.claim_key_derivation_index,
+                "claim",
+            ),
+        };
+
+        if let Err(error) = self.swap_keypair_by_pk(&pk, key_derivation_index, &swap.id) {
+            tracing::warn!(
+                swap_id = %swap.id,
+                key_role,
+                ?error,
+                "Failed to cache chain swap VHTLC key"
+            );
+        }
     }
 
     async fn swap_type_for_id(&self, swap_id: &str) -> Result<SwapType, Error> {
