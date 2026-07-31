@@ -3037,7 +3037,8 @@ where
                                 let current_status = current_status.status;
 
                                 let status_changed = last_status.as_ref() != Some(&current_status);
-                                if status_changed || current_status.is_terminal() {
+                                let status_terminal = current_status.is_terminal();
+                                if status_changed || status_terminal {
                                     if let Err(e) = self.persist_swap_status_for_type(swap_type, &swap_id, current_status.clone()).await {
                                         yield Err(e);
                                         break;
@@ -3048,6 +3049,10 @@ where
                                 if status_changed {
                                     last_status = Some(current_status.clone());
                                     yield Ok(current_status);
+                                }
+
+                                if status_terminal {
+                                    break;
                                 }
                             }
                             Err(e) => {
