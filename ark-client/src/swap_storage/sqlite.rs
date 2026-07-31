@@ -511,6 +511,7 @@ mod tests {
             invoice: Bolt11Invoice::from_str("lnbcrt10u1p5d55pjpp56ms94rkev7tdrwqyus5a63lny2mqzq9vh2rq3u4ym3v4lxv6xl4qdql2djkuepqw3hjqs2jfvsxzerywfjhxuccqz95xqztfsp57x0nwf7nzsndjdrvsre570ehg0szw34l284hswdz6zpqvktq9mrs9qxpqysgqllgxhxeny0tvtnxuqgn4s0t2qamc6yqc4t3pe6p2x5lgs8v8r3vxzxp3a3ax9j7d2ta5cduddln8n9se7q0jgg7s0h8t2vhljlu3wkcps9k8xs").unwrap(),
             created_at: 1234567890,
             key_derivation_index: None,
+            contract_script_pubkey: None,
         }
     }
 
@@ -541,6 +542,7 @@ mod tests {
             bolt11: "lnbc100u1ptest".to_string(),
             invoice_expiry: 3600,
             claim_address: None,
+            contract_script_pubkey: None,
         }
     }
 
