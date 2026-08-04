@@ -534,6 +534,48 @@ pub async fn set_up_client(
     (client, wallet)
 }
 
+/// Set up a client with a cap on the intent proof weight, forcing settlements with many inputs
+/// to be split across multiple batches.
+#[allow(unused)]
+pub async fn set_up_client_with_max_proof_weight(
+    _name: String,
+    regtest: Arc<Regtest>,
+    secp: Secp256k1<All>,
+    max_intent_proof_weight: u64,
+) -> (Client<Regtest, Wallet, InMemorySwapStorage>, Arc<Wallet>) {
+    let mut rng = thread_rng();
+
+    let sk = SecretKey::new(&mut rng);
+    let kp = Keypair::from_secret_key(&secp, &sk);
+
+    let network = Network::Regtest;
+
+    let wallet = Wallet::new(kp, network, "http://localhost:3000/api").unwrap();
+    let wallet = Arc::new(wallet);
+
+    let seed: [u8; 32] = rng.r#gen();
+    let xpriv = Xpriv::new_master(network, &seed).unwrap();
+
+    let client = OfflineClient::with_bip32(
+        OfflineClientConfig {
+            ark_server_url: "http://localhost:7070".to_string(),
+            boltz_url: "http://localhost:9069".to_string(),
+            max_intent_proof_weight: Some(max_intent_proof_weight),
+            ..Default::default()
+        },
+        xpriv,
+        None,
+        regtest,
+        wallet.clone(),
+        Arc::new(InMemorySwapStorage::default()),
+    )
+    .connect_with_retries(5)
+    .await
+    .unwrap();
+
+    (client, wallet)
+}
+
 #[allow(unused)]
 pub async fn set_up_client_with_delegator(
     _name: String,
