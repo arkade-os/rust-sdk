@@ -4,8 +4,7 @@ default:
 
 # Merge the swagger files into a single specification
 merge-swagger:
-    #!/usr/bin/env python3
-    exec python3 merge_swagger.py
+    python3 merge_swagger.py
 
 # Generate the Rust client from merged swagger spec
 generate:

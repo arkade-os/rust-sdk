@@ -1,7 +1,7 @@
 /*
  * Ark API
  *
- * Combined Ark Service, Indexer, Admin, Signer Manager, and Wallet API
+ * Combined Ark Service, Indexer, Signer Manager, and Wallet API
  *
  * The version of the OpenAPI document: 1.0.0
  *
@@ -14,8 +14,15 @@ use serde::Serialize;
 
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GetVtxoChainResponse {
+    /// Auth token can be used for other rpcs related to this vtxo/tx that require proof of
+    /// ownership.
+    #[serde(rename = "authToken", skip_serializing_if = "Option::is_none")]
+    pub auth_token: Option<String>,
     #[serde(rename = "chain", skip_serializing_if = "Option::is_none")]
     pub chain: Option<Vec<models::IndexerChain>>,
+    /// Opaque cursor for fetching the next page. Empty when there are no more pages.
+    #[serde(rename = "nextPageToken", skip_serializing_if = "Option::is_none")]
+    pub next_page_token: Option<String>,
     #[serde(rename = "page", skip_serializing_if = "Option::is_none")]
     pub page: Option<models::IndexerPageResponse>,
 }
@@ -23,7 +30,9 @@ pub struct GetVtxoChainResponse {
 impl GetVtxoChainResponse {
     pub fn new() -> GetVtxoChainResponse {
         GetVtxoChainResponse {
+            auth_token: None,
             chain: None,
+            next_page_token: None,
             page: None,
         }
     }

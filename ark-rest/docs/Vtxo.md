@@ -9,6 +9,7 @@
 | **assets**           | Option<[**Vec<models::Asset>**](Asset.md)>  |             | [optional] |
 | **commitment_txids** | Option<**Vec<String>**>                     |             | [optional] |
 | **created_at**       | Option<**i64**>                             |             | [optional] |
+| **depth**            | Option<**i32**>                             |             | [optional] |
 | **expires_at**       | Option<**i64**>                             |             | [optional] |
 | **is_preconfirmed**  | Option<**bool**>                            |             | [optional] |
 | **is_spent**         | Option<**bool**>                            |             | [optional] |

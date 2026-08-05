@@ -28,7 +28,7 @@ use std::str::FromStr;
 ///
 /// Update this when the SDK intentionally targets a newer arkd compatibility
 /// baseline.
-pub const TARGET_ARKD_VERSION: &str = "0.9.9";
+pub const TARGET_ARKD_VERSION: &str = "0.9.15";
 
 /// Version of this SDK, as `rust-sdk/<crate version>`.
 ///
@@ -379,6 +379,7 @@ pub enum GetVtxosRequestFilter {
     Spent,
     Recoverable,
     PendingOnly,
+    Renewable,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -406,6 +407,10 @@ pub struct VirtualTxOutPoint {
     pub ark_txid: Option<Txid>,
     /// Assets carried by this VTXO.
     pub assets: Vec<Asset>,
+    /// Number of pre-confirmed transactions between this VTXO and the closest batch-tree leaf.
+    ///
+    /// Zero for VTXOs that are batch-tree leaves themselves.
+    pub depth: u32,
 }
 
 impl VirtualTxOutPoint {
@@ -789,6 +794,35 @@ pub struct CommitmentTransaction {
 pub enum SubscriptionResponse {
     Event(Box<SubscriptionEvent>),
     Heartbeat,
+    SubscriptionStarted { subscription_id: String },
+}
+
+/// Filter for indexer subscriptions.
+///
+/// A tx event is dispatched to a subscription when any of its expressions evaluates to true on
+/// the event's tx, OR when the event carries a VTXO whose script is in the subscription's script
+/// set.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SubscriptionFilter {
+    /// CEL expressions evaluated against each indexed tx envelope. The indexer combines them
+    /// with OR. On update, the field's contents replace any previously set expressions, even
+    /// when the list is empty (which clears them entirely).
+    pub expressions: Vec<String>,
+    /// Scripts to add to the subscription's script set.
+    pub add_scripts: Vec<ScriptBuf>,
+    /// Scripts to remove from the subscription's script set.
+    pub remove_scripts: Vec<ScriptBuf>,
+}
+
+/// Proof of ownership for indexer queries that return transaction data.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IndexerAuth {
+    /// Intent that directly proves ownership of the queried vtxo or transaction inputs. If
+    /// passed, the outpoint/txids request fields are ignored by the server.
+    Intent { proof: String, message: String },
+    /// A token returned by a previous `GetVtxoChain` or `GetVirtualTxs` call, which can be
+    /// recycled once ownership has already been proved.
+    Token(String),
 }
 
 #[derive(Clone, Debug)]
@@ -840,6 +874,9 @@ pub struct FinalizeOffchainTxResponse {}
 pub struct VirtualTxsResponse {
     pub txs: Vec<Psbt>,
     pub page: Option<IndexerPage>,
+    /// Token that can be recycled as [`IndexerAuth::Token`] for other indexer queries related to
+    /// the same vtxos/txs.
+    pub auth_token: Option<String>,
 }
 
 #[derive(Debug)]

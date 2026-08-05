@@ -58,6 +58,7 @@ docs/IndexerAsset.md
 docs/IndexerBatch.md
 docs/IndexerChain.md
 docs/IndexerChainedTxType.md
+docs/IndexerIntent.md
 docs/IndexerNode.md
 docs/IndexerOutpoint.md
 docs/IndexerPageRequest.md
@@ -80,6 +81,7 @@ docs/RegisterIntentRequest.md
 docs/RegisterIntentResponse.md
 docs/RestoreRequest.md
 docs/ScheduledSession.md
+docs/ScriptFilter.md
 docs/SignerManagerServiceApi.md
 docs/Status.md
 docs/StreamStartedEvent.md
@@ -90,6 +92,8 @@ docs/SubmitTxRequest.md
 docs/SubmitTxResponse.md
 docs/SubscribeForScriptsRequest.md
 docs/SubscribeForScriptsResponse.md
+docs/SubscriptionFilter.md
+docs/SubscriptionStartedEvent.md
 docs/Tapscripts.md
 docs/TreeNoncesAggregatedEvent.md
 docs/TreeNoncesEvent.md
@@ -102,6 +106,7 @@ docs/UnlockRequest.md
 docs/UnsubscribeForScriptsRequest.md
 docs/UpdateStreamTopicsRequest.md
 docs/UpdateStreamTopicsResponse.md
+docs/UpdateSubscriptionRequest.md
 docs/Vtxo.md
 docs/WalletInitializerServiceApi.md
 docs/WalletServiceApi.md
@@ -171,6 +176,7 @@ src/models/indexer_asset.rs
 src/models/indexer_batch.rs
 src/models/indexer_chain.rs
 src/models/indexer_chained_tx_type.rs
+src/models/indexer_intent.rs
 src/models/indexer_node.rs
 src/models/indexer_outpoint.rs
 src/models/indexer_page_request.rs
@@ -193,6 +199,7 @@ src/models/register_intent_request.rs
 src/models/register_intent_response.rs
 src/models/restore_request.rs
 src/models/scheduled_session.rs
+src/models/script_filter.rs
 src/models/status.rs
 src/models/stream_started_event.rs
 src/models/submit_signed_forfeit_txs_request.rs
@@ -202,6 +209,8 @@ src/models/submit_tx_request.rs
 src/models/submit_tx_response.rs
 src/models/subscribe_for_scripts_request.rs
 src/models/subscribe_for_scripts_response.rs
+src/models/subscription_filter.rs
+src/models/subscription_started_event.rs
 src/models/tapscripts.rs
 src/models/tree_nonces_aggregated_event.rs
 src/models/tree_nonces_event.rs
@@ -214,6 +223,7 @@ src/models/unlock_request.rs
 src/models/unsubscribe_for_scripts_request.rs
 src/models/update_stream_topics_request.rs
 src/models/update_stream_topics_response.rs
+src/models/update_subscription_request.rs
 src/models/vtxo.rs
 src/models/withdraw_request.rs
 src/models/withdraw_response.rs

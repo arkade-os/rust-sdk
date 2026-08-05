@@ -1,7 +1,7 @@
 /*
  * Ark API
  *
- * Combined Ark Service, Indexer, Admin, Signer Manager, and Wallet API
+ * Combined Ark Service, Indexer, Signer Manager, and Wallet API
  *
  * The version of the OpenAPI document: 1.0.0
  *
@@ -14,6 +14,10 @@ use serde::Serialize;
 
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GetVirtualTxsResponse {
+    /// Auth token can be used for other rpcs related to this vtxo/tx that require proof of
+    /// ownership.
+    #[serde(rename = "authToken", skip_serializing_if = "Option::is_none")]
+    pub auth_token: Option<String>,
     #[serde(rename = "page", skip_serializing_if = "Option::is_none")]
     pub page: Option<models::IndexerPageResponse>,
     #[serde(rename = "txs", skip_serializing_if = "Option::is_none")]
@@ -23,6 +27,7 @@ pub struct GetVirtualTxsResponse {
 impl GetVirtualTxsResponse {
     pub fn new() -> GetVirtualTxsResponse {
         GetVirtualTxsResponse {
+            auth_token: None,
             page: None,
             txs: None,
         }

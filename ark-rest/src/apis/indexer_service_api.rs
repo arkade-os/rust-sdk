@@ -1,7 +1,7 @@
 /*
  * Ark API
  *
- * Combined Ark Service, Indexer, Admin, Signer Manager, and Wallet API
+ * Combined Ark Service, Indexer, Signer Manager, and Wallet API
  *
  * The version of the OpenAPI document: 1.0.0
  *
@@ -66,6 +66,14 @@ pub enum IndexerServiceGetSubscriptionError {
     UnknownValue(serde_json::Value),
 }
 
+/// struct for typed errors of method [`indexer_service_get_subscription2`]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum IndexerServiceGetSubscription2Error {
+    DefaultResponse(models::Status),
+    UnknownValue(serde_json::Value),
+}
+
 /// struct for typed errors of method [`indexer_service_get_virtual_txs`]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -122,6 +130,14 @@ pub enum IndexerServiceUnsubscribeForScriptsError {
     UnknownValue(serde_json::Value),
 }
 
+/// struct for typed errors of method [`indexer_service_update_subscription`]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum IndexerServiceUpdateSubscriptionError {
+    DefaultResponse(models::Status),
+    UnknownValue(serde_json::Value),
+}
+
 /// GetAsset returns the asset information and metadata for the specified asset ID.
 pub async fn indexer_service_get_asset(
     configuration: &configuration::Configuration,
@@ -131,9 +147,9 @@ pub async fn indexer_service_get_asset(
     let p_asset_id = asset_id;
 
     let uri_str = format!(
-        "{}/v1/indexer/asset/{}",
+        "{}/v1/indexer/asset/{asset_id}",
         configuration.base_path,
-        crate::apis::urlencode(p_asset_id)
+        asset_id = crate::apis::urlencode(p_asset_id)
     );
     let mut req_builder = configuration.client.request(reqwest::Method::GET, &uri_str);
 
@@ -407,17 +423,80 @@ pub async fn indexer_service_get_forfeit_txs(
 pub async fn indexer_service_get_subscription(
     configuration: &configuration::Configuration,
     subscription_id: &str,
+    filter_period_expressions: Option<Vec<String>>,
+    filter_period_scripts_period_add: Option<Vec<String>>,
+    filter_period_scripts_period_remove: Option<Vec<String>>,
 ) -> Result<models::GetSubscriptionResponse, Error<IndexerServiceGetSubscriptionError>> {
     // add a prefix to parameters to efficiently prevent name collisions
     let p_subscription_id = subscription_id;
+    let p_filter_period_expressions = filter_period_expressions;
+    let p_filter_period_scripts_period_add = filter_period_scripts_period_add;
+    let p_filter_period_scripts_period_remove = filter_period_scripts_period_remove;
 
     let uri_str = format!(
-        "{}/v1/indexer/script/subscription/{}",
+        "{}/v1/indexer/script/subscription/{subscription_id}",
         configuration.base_path,
-        crate::apis::urlencode(p_subscription_id)
+        subscription_id = crate::apis::urlencode(p_subscription_id)
     );
     let mut req_builder = configuration.client.request(reqwest::Method::GET, &uri_str);
 
+    if let Some(ref param_value) = p_filter_period_expressions {
+        req_builder = match "csv" {
+            "multi" => req_builder.query(
+                &param_value
+                    .into_iter()
+                    .map(|p| ("filter.expressions".to_owned(), p.to_string()))
+                    .collect::<Vec<(std::string::String, std::string::String)>>(),
+            ),
+            _ => req_builder.query(&[(
+                "filter.expressions",
+                &param_value
+                    .into_iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<String>>()
+                    .join(",")
+                    .to_string(),
+            )]),
+        };
+    }
+    if let Some(ref param_value) = p_filter_period_scripts_period_add {
+        req_builder = match "csv" {
+            "multi" => req_builder.query(
+                &param_value
+                    .into_iter()
+                    .map(|p| ("filter.scripts.add".to_owned(), p.to_string()))
+                    .collect::<Vec<(std::string::String, std::string::String)>>(),
+            ),
+            _ => req_builder.query(&[(
+                "filter.scripts.add",
+                &param_value
+                    .into_iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<String>>()
+                    .join(",")
+                    .to_string(),
+            )]),
+        };
+    }
+    if let Some(ref param_value) = p_filter_period_scripts_period_remove {
+        req_builder = match "csv" {
+            "multi" => req_builder.query(
+                &param_value
+                    .into_iter()
+                    .map(|p| ("filter.scripts.remove".to_owned(), p.to_string()))
+                    .collect::<Vec<(std::string::String, std::string::String)>>(),
+            ),
+            _ => req_builder.query(&[(
+                "filter.scripts.remove",
+                &param_value
+                    .into_iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<String>>()
+                    .join(",")
+                    .to_string(),
+            )]),
+        };
+    }
     if let Some(ref user_agent) = configuration.user_agent {
         req_builder = req_builder.header(reqwest::header::USER_AGENT, user_agent.clone());
     }
@@ -452,18 +531,137 @@ pub async fn indexer_service_get_subscription(
     }
 }
 
+/// GetSubscription is a server-side streaming RPC which allows clients to receive real-time
+/// notifications on transactions related to the subscribed vtxo scripts. The subscription can be
+/// created or updated by using the SubscribeForScripts and UnsubscribeForScripts RPCs.
+pub async fn indexer_service_get_subscription2(
+    configuration: &configuration::Configuration,
+    subscription_id: Option<&str>,
+    filter_period_expressions: Option<Vec<String>>,
+    filter_period_scripts_period_add: Option<Vec<String>>,
+    filter_period_scripts_period_remove: Option<Vec<String>>,
+) -> Result<models::GetSubscriptionResponse, Error<IndexerServiceGetSubscription2Error>> {
+    // add a prefix to parameters to efficiently prevent name collisions
+    let p_subscription_id = subscription_id;
+    let p_filter_period_expressions = filter_period_expressions;
+    let p_filter_period_scripts_period_add = filter_period_scripts_period_add;
+    let p_filter_period_scripts_period_remove = filter_period_scripts_period_remove;
+
+    let uri_str = format!("{}/v1/indexer/subscription", configuration.base_path);
+    let mut req_builder = configuration.client.request(reqwest::Method::GET, &uri_str);
+
+    if let Some(ref param_value) = p_subscription_id {
+        req_builder = req_builder.query(&[("subscriptionId", &param_value.to_string())]);
+    }
+    if let Some(ref param_value) = p_filter_period_expressions {
+        req_builder = match "csv" {
+            "multi" => req_builder.query(
+                &param_value
+                    .into_iter()
+                    .map(|p| ("filter.expressions".to_owned(), p.to_string()))
+                    .collect::<Vec<(std::string::String, std::string::String)>>(),
+            ),
+            _ => req_builder.query(&[(
+                "filter.expressions",
+                &param_value
+                    .into_iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<String>>()
+                    .join(",")
+                    .to_string(),
+            )]),
+        };
+    }
+    if let Some(ref param_value) = p_filter_period_scripts_period_add {
+        req_builder = match "csv" {
+            "multi" => req_builder.query(
+                &param_value
+                    .into_iter()
+                    .map(|p| ("filter.scripts.add".to_owned(), p.to_string()))
+                    .collect::<Vec<(std::string::String, std::string::String)>>(),
+            ),
+            _ => req_builder.query(&[(
+                "filter.scripts.add",
+                &param_value
+                    .into_iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<String>>()
+                    .join(",")
+                    .to_string(),
+            )]),
+        };
+    }
+    if let Some(ref param_value) = p_filter_period_scripts_period_remove {
+        req_builder = match "csv" {
+            "multi" => req_builder.query(
+                &param_value
+                    .into_iter()
+                    .map(|p| ("filter.scripts.remove".to_owned(), p.to_string()))
+                    .collect::<Vec<(std::string::String, std::string::String)>>(),
+            ),
+            _ => req_builder.query(&[(
+                "filter.scripts.remove",
+                &param_value
+                    .into_iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<String>>()
+                    .join(",")
+                    .to_string(),
+            )]),
+        };
+    }
+    if let Some(ref user_agent) = configuration.user_agent {
+        req_builder = req_builder.header(reqwest::header::USER_AGENT, user_agent.clone());
+    }
+
+    let req = req_builder.build()?;
+    let resp = configuration.client.execute(req).await?;
+
+    let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream");
+    let content_type = super::ContentType::from(content_type);
+
+    if !status.is_client_error() && !status.is_server_error() {
+        let content = resp.text().await?;
+        match content_type {
+            ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `models::GetSubscriptionResponse`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `models::GetSubscriptionResponse`")))),
+        }
+    } else {
+        let content = resp.text().await?;
+        let entity: Option<IndexerServiceGetSubscription2Error> =
+            serde_json::from_str(&content).ok();
+        Err(Error::ResponseError(ResponseContent {
+            status,
+            content,
+            entity,
+        }))
+    }
+}
+
 /// GetVirtualTxs returns the virtual transactions in hex format for the specified txids. The
 /// response may be paginated if the results span multiple pages.
 pub async fn indexer_service_get_virtual_txs(
     configuration: &configuration::Configuration,
     txids: Vec<String>,
+    token: Option<&str>,
     page_period_size: Option<i32>,
     page_period_index: Option<i32>,
+    intent_period_proof: Option<&str>,
+    intent_period_message: Option<&str>,
 ) -> Result<models::GetVirtualTxsResponse, Error<IndexerServiceGetVirtualTxsError>> {
     // add a prefix to parameters to efficiently prevent name collisions
     let p_txids = txids;
+    let p_token = token;
     let p_page_period_size = page_period_size;
     let p_page_period_index = page_period_index;
+    let p_intent_period_proof = intent_period_proof;
+    let p_intent_period_message = intent_period_message;
 
     let uri_str = format!(
         "{}/v1/indexer/virtualTx/{txids}",
@@ -472,11 +670,20 @@ pub async fn indexer_service_get_virtual_txs(
     );
     let mut req_builder = configuration.client.request(reqwest::Method::GET, &uri_str);
 
+    if let Some(ref param_value) = p_token {
+        req_builder = req_builder.query(&[("token", &param_value.to_string())]);
+    }
     if let Some(ref param_value) = p_page_period_size {
         req_builder = req_builder.query(&[("page.size", &param_value.to_string())]);
     }
     if let Some(ref param_value) = p_page_period_index {
         req_builder = req_builder.query(&[("page.index", &param_value.to_string())]);
+    }
+    if let Some(ref param_value) = p_intent_period_proof {
+        req_builder = req_builder.query(&[("intent.proof", &param_value.to_string())]);
+    }
+    if let Some(ref param_value) = p_intent_period_message {
+        req_builder = req_builder.query(&[("intent.message", &param_value.to_string())]);
     }
     if let Some(ref user_agent) = configuration.user_agent {
         req_builder = req_builder.header(reqwest::header::USER_AGENT, user_agent.clone());
@@ -518,14 +725,22 @@ pub async fn indexer_service_get_vtxo_chain(
     configuration: &configuration::Configuration,
     outpoint_period_txid: &str,
     outpoint_period_vout: i32,
+    token: Option<&str>,
+    page_token: Option<&str>,
     page_period_size: Option<i32>,
     page_period_index: Option<i32>,
+    intent_period_proof: Option<&str>,
+    intent_period_message: Option<&str>,
 ) -> Result<models::GetVtxoChainResponse, Error<IndexerServiceGetVtxoChainError>> {
     // add a prefix to parameters to efficiently prevent name collisions
     let p_outpoint_period_txid = outpoint_period_txid;
     let p_outpoint_period_vout = outpoint_period_vout;
+    let p_token = token;
+    let p_page_token = page_token;
     let p_page_period_size = page_period_size;
     let p_page_period_index = page_period_index;
+    let p_intent_period_proof = intent_period_proof;
+    let p_intent_period_message = intent_period_message;
 
     let uri_str = format!(
         "{}/v1/indexer/vtxo/{outpoint_txid}/{outpoint_vout}/chain",
@@ -535,11 +750,23 @@ pub async fn indexer_service_get_vtxo_chain(
     );
     let mut req_builder = configuration.client.request(reqwest::Method::GET, &uri_str);
 
+    if let Some(ref param_value) = p_token {
+        req_builder = req_builder.query(&[("token", &param_value.to_string())]);
+    }
+    if let Some(ref param_value) = p_page_token {
+        req_builder = req_builder.query(&[("pageToken", &param_value.to_string())]);
+    }
     if let Some(ref param_value) = p_page_period_size {
         req_builder = req_builder.query(&[("page.size", &param_value.to_string())]);
     }
     if let Some(ref param_value) = p_page_period_index {
         req_builder = req_builder.query(&[("page.index", &param_value.to_string())]);
+    }
+    if let Some(ref param_value) = p_intent_period_proof {
+        req_builder = req_builder.query(&[("intent.proof", &param_value.to_string())]);
+    }
+    if let Some(ref param_value) = p_intent_period_message {
+        req_builder = req_builder.query(&[("intent.message", &param_value.to_string())]);
     }
     if let Some(ref user_agent) = configuration.user_agent {
         req_builder = req_builder.header(reqwest::header::USER_AGENT, user_agent.clone());
@@ -713,6 +940,7 @@ pub async fn indexer_service_get_vtxos(
     pending_only: Option<bool>,
     after: Option<i64>,
     before: Option<i64>,
+    renewable_only: Option<bool>,
     page_period_size: Option<i32>,
     page_period_index: Option<i32>,
 ) -> Result<models::GetVtxosResponse, Error<IndexerServiceGetVtxosError>> {
@@ -725,6 +953,7 @@ pub async fn indexer_service_get_vtxos(
     let p_pending_only = pending_only;
     let p_after = after;
     let p_before = before;
+    let p_renewable_only = renewable_only;
     let p_page_period_size = page_period_size;
     let p_page_period_index = page_period_index;
 
@@ -786,6 +1015,9 @@ pub async fn indexer_service_get_vtxos(
     }
     if let Some(ref param_value) = p_before {
         req_builder = req_builder.query(&[("before", &param_value.to_string())]);
+    }
+    if let Some(ref param_value) = p_renewable_only {
+        req_builder = req_builder.query(&[("renewableOnly", &param_value.to_string())]);
     }
     if let Some(ref param_value) = p_page_period_size {
         req_builder = req_builder.query(&[("page.size", &param_value.to_string())]);
@@ -914,6 +1146,55 @@ pub async fn indexer_service_unsubscribe_for_scripts(
     } else {
         let content = resp.text().await?;
         let entity: Option<IndexerServiceUnsubscribeForScriptsError> =
+            serde_json::from_str(&content).ok();
+        Err(Error::ResponseError(ResponseContent {
+            status,
+            content,
+            entity,
+        }))
+    }
+}
+
+/// UpdateSubscription updates an existing subscription created via GetSubscription. See
+/// UpdateSubscriptionRequest for the full set of supported filter combinations and their semantics.
+pub async fn indexer_service_update_subscription(
+    configuration: &configuration::Configuration,
+    update_subscription_request: models::UpdateSubscriptionRequest,
+) -> Result<serde_json::Value, Error<IndexerServiceUpdateSubscriptionError>> {
+    // add a prefix to parameters to efficiently prevent name collisions
+    let p_update_subscription_request = update_subscription_request;
+
+    let uri_str = format!("{}/v1/indexer/subscription/update", configuration.base_path);
+    let mut req_builder = configuration
+        .client
+        .request(reqwest::Method::POST, &uri_str);
+
+    if let Some(ref user_agent) = configuration.user_agent {
+        req_builder = req_builder.header(reqwest::header::USER_AGENT, user_agent.clone());
+    }
+    req_builder = req_builder.json(&p_update_subscription_request);
+
+    let req = req_builder.build()?;
+    let resp = configuration.client.execute(req).await?;
+
+    let status = resp.status();
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream");
+    let content_type = super::ContentType::from(content_type);
+
+    if !status.is_client_error() && !status.is_server_error() {
+        let content = resp.text().await?;
+        match content_type {
+            ContentType::Json => serde_json::from_str(&content).map_err(Error::from),
+            ContentType::Text => return Err(Error::from(serde_json::Error::custom("Received `text/plain` content type response that cannot be converted to `serde_json::Value`"))),
+            ContentType::Unsupported(unknown_type) => return Err(Error::from(serde_json::Error::custom(format!("Received `{unknown_type}` content type response that cannot be converted to `serde_json::Value`")))),
+        }
+    } else {
+        let content = resp.text().await?;
+        let entity: Option<IndexerServiceUpdateSubscriptionError> =
             serde_json::from_str(&content).ok();
         Err(Error::ResponseError(ResponseContent {
             status,

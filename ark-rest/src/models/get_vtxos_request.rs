@@ -1,7 +1,7 @@
 /*
  * Ark API
  *
- * Combined Ark Service, Indexer, Admin, Signer Manager, and Wallet API
+ * Combined Ark Service, Indexer, Signer Manager, and Wallet API
  *
  * The version of the OpenAPI document: 1.0.0
  *
@@ -30,14 +30,18 @@ pub struct GetVtxosRequest {
     /// Include only spent vtxos that are not finalized.
     #[serde(rename = "pendingOnly", skip_serializing_if = "Option::is_none")]
     pub pending_only: Option<bool>,
-    /// Retrieve only recoverable vtxos (notes, subdust or swept vtxos). The 3 filters are mutually
-    /// exclusive,
+    /// Retrieve only recoverable vtxos (notes, subdust or swept vtxos).
     #[serde(rename = "recoverableOnly", skip_serializing_if = "Option::is_none")]
     pub recoverable_only: Option<bool>,
+    /// Retrieve the union of the spendable and recoverable vtxos.
+    #[serde(rename = "renewableOnly", skip_serializing_if = "Option::is_none")]
+    pub renewable_only: Option<bool>,
     /// Either specify a list of vtxo scripts.
     #[serde(rename = "scripts", skip_serializing_if = "Option::is_none")]
     pub scripts: Option<Vec<String>>,
-    /// Retrieve only spendable vtxos
+    /// The spendable_only, spent_only, recoverable_only, pending_only and renewable_only filters
+    /// are mutually exclusive, and are applied only when the scripts filter is used. They are
+    /// ignored when querying by outpoints. Retrieve only spendable vtxos
     #[serde(rename = "spendableOnly", skip_serializing_if = "Option::is_none")]
     pub spendable_only: Option<bool>,
     /// Retrieve only spent vtxos.
@@ -54,6 +58,7 @@ impl GetVtxosRequest {
             page: None,
             pending_only: None,
             recoverable_only: None,
+            renewable_only: None,
             scripts: None,
             spendable_only: None,
             spent_only: None,

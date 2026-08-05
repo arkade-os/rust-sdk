@@ -20,6 +20,7 @@ use ark_core::history::sort_transactions_by_created_at;
 use ark_core::history::OutgoingTransaction;
 use ark_core::server;
 use ark_core::server::GetVtxosRequest;
+use ark_core::server::SubscriptionFilter;
 use ark_core::server::SubscriptionResponse;
 use ark_core::server::VirtualTxOutPoint;
 use ark_core::ArkAddress;
@@ -75,6 +76,8 @@ mod utils;
 pub use ark_core::server::DeprecatedSignerStatus;
 pub use ark_core::server::ServerSignerStatus;
 pub use asset::IssueAssetResult;
+pub use boltz::BoltzVhtlcWatcherConfig;
+pub use boltz::BoltzVhtlcWatcherHandle;
 pub use boltz::ChainSwapAmount;
 pub use boltz::ChainSwapData;
 pub use boltz::ChainSwapDirection;
@@ -832,6 +835,16 @@ where
             server_info_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
 
+        match client.migrate_boltz_vhtlc_contracts(&server_info).await {
+            Ok(migrated) if migrated > 0 => {
+                tracing::info!(migrated, "Migrated Boltz VHTLC contracts at connect");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(?error, "Failed to migrate Boltz VHTLC contracts at connect");
+            }
+        }
+
         client.hydrate_persisted_contract_keys()?;
 
         // Eagerly persist the bounded baseline contract set. This mirrors the TS SDK split:
@@ -1097,29 +1110,28 @@ where
     }
 
     fn hydrate_persisted_contract_keys(&self) -> Result<(), Error> {
-        let state = self
-            .state
-            .read()
-            .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
-        let contracts = state
-            .contract_manager
-            .lock()
-            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?
-            .list()?;
+        if let Some(key_provider) = self.inner.discoverable_key_provider.as_ref() {
+            let state = self
+                .state
+                .read()
+                .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+            let contracts = state
+                .contract_manager
+                .lock()
+                .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?
+                .list()?;
 
-        let mut indices: Vec<u32> = contracts
-            .into_iter()
-            .filter_map(|contract| contract.key_index)
-            .collect();
-        indices.sort_unstable();
-        indices.dedup();
+            let mut indices: Vec<u32> = contracts
+                .into_iter()
+                .filter_map(|contract| contract.key_index)
+                .collect();
+            indices.sort_unstable();
+            indices.dedup();
 
-        let Some(key_provider) = self.inner.discoverable_key_provider.as_ref() else {
-            return Ok(());
+            for index in indices {
+                key_provider.cache_keypair_at_index(index)?;
+            }
         };
-        for index in indices {
-            key_provider.cache_keypair_at_index(index)?;
-        }
 
         Ok(())
     }
@@ -1737,7 +1749,7 @@ where
         let vtxo_chain = timeout_op(
             self.inner.timeout,
             self.network_client()
-                .get_vtxo_chain(Some(out_point), Some((size, index))),
+                .get_vtxo_chain(Some(out_point), Some((size, index)), None, None),
         )
         .await
         .context("Failed to fetch VTXO chain")??;
@@ -2152,6 +2164,7 @@ where
     /// # Arguments
     ///
     /// * `subscription_id` - The subscription ID to get the stream for
+    /// * `filter` - Optional [`SubscriptionFilter`] applied when the stream is opened
     ///
     /// # Returns
     ///
@@ -2159,10 +2172,26 @@ where
     pub async fn get_subscription(
         &self,
         subscription_id: String,
+        filter: Option<SubscriptionFilter>,
     ) -> Result<impl Stream<Item = Result<SubscriptionResponse, ark_grpc::Error>> + Unpin, Error>
     {
         self.network_client()
-            .get_subscription(subscription_id)
+            .get_subscription(subscription_id, filter)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Update the filter of an existing subscription
+    ///
+    /// The filter's expressions are always overwritten as a whole (an empty list clears them),
+    /// whereas the scripts are added to and removed from the subscription's existing script set.
+    pub async fn update_subscription(
+        &self,
+        subscription_id: String,
+        filter: SubscriptionFilter,
+    ) -> Result<(), Error> {
+        self.network_client()
+            .update_subscription(subscription_id, filter)
             .await
             .map_err(Into::into)
     }

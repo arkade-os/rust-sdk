@@ -9,6 +9,8 @@ use crate::timeout_op;
 use crate::Blockchain;
 use crate::Client;
 use crate::Error;
+use ark_core::contract::ContractState;
+use ark_core::contract::VhtlcContract;
 use ark_core::intent;
 use ark_core::script::extract_checksig_pubkeys;
 use ark_core::send::build_offchain_transactions;
@@ -20,6 +22,8 @@ use ark_core::send::VtxoInput;
 use ark_core::server::parse_sequence_number;
 use ark_core::server::Info;
 use ark_core::server::PendingTx;
+use ark_core::server::SubscriptionEvent;
+use ark_core::server::SubscriptionResponse;
 use ark_core::vhtlc::VhtlcOptions;
 use ark_core::vhtlc::VhtlcScript;
 use ark_core::ArkAddress;
@@ -31,11 +35,13 @@ use bitcoin::hashes::ripemd160;
 use bitcoin::hashes::sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::io::Write;
+use bitcoin::key::Keypair;
 use bitcoin::key::Secp256k1;
 use bitcoin::psbt;
 use bitcoin::secp256k1;
 use bitcoin::secp256k1::schnorr;
 use bitcoin::taproot::LeafVersion;
+use bitcoin::taproot::TapLeafHash;
 use bitcoin::Amount;
 use bitcoin::Psbt;
 use bitcoin::PublicKey;
@@ -51,7 +57,13 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_with::serde_as;
 use serde_with::DisplayFromStr;
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -60,6 +72,11 @@ use std::time::UNIX_EPOCH;
 /// BOLT11 tagged fields use a 10-bit length in 5-bit groups, capping the payload at
 /// `floor(1023 * 5 / 8) = 639` UTF-8 bytes.
 const MAX_BOLT11_DESCRIPTION_BYTES: usize = 639;
+const VHTLC_WATCHER_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+const VHTLC_WATCHER_MAX_BACKOFF: Duration = Duration::from_secs(30);
+const VHTLC_WATCHER_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+const VHTLC_REFUND_RETRY_INITIAL_BACKOFF: Duration = Duration::from_secs(30);
+const VHTLC_REFUND_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(30 * 60);
 
 fn validate_invoice_description(description: Option<&str>) -> Result<(), Error> {
     if let Some(d) = description {
@@ -75,7 +92,7 @@ fn validate_invoice_description(description: Option<&str>) -> Result<(), Error> 
 }
 
 /// The type of a Boltz swap.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub enum SwapType {
     Submarine,
     Reverse,
@@ -133,7 +150,7 @@ pub struct ClaimVhtlcResult {
 pub enum PendingVhtlcSpendType {
     /// Claim via `claim_script`: preimage + receiver + server.
     ///
-    /// Used in reverse submarine swaps (receiving Lightning → Ark).
+    /// Used in reverse submarine swaps (receiving Lightning → Arkade).
     Claim { swap_id: String, preimage: [u8; 32] },
     /// Collaborative refund via `refund_script`: sender + receiver (Boltz) + server.
     ///
@@ -168,6 +185,219 @@ impl PendingVhtlcSpendType {
 pub struct PendingVhtlcSpendTx {
     pub spend_type: PendingVhtlcSpendType,
     pub pending_tx: PendingTx,
+}
+
+/// Result of attempting to finalize all pending VHTLC spend transactions.
+#[derive(Clone, Debug)]
+pub struct ContinuePendingVhtlcSpendTxsResult {
+    pub finalized: Vec<Txid>,
+    pub failed: Vec<PendingVhtlcSpendFailure>,
+}
+
+/// A pending VHTLC spend transaction that could not be finalized.
+#[derive(Clone, Debug)]
+pub struct PendingVhtlcSpendFailure {
+    pub ark_txid: Txid,
+    pub swap_id: String,
+    pub spend_type: &'static str,
+    pub error: String,
+}
+
+/// Configuration for the background Boltz VHTLC watcher.
+#[derive(Clone, Copy, Debug)]
+pub struct BoltzVhtlcWatcherConfig {
+    /// How often to refresh subscriptions and retry claim/refund lifecycle actions.
+    pub refresh_interval: Duration,
+}
+
+impl Default for BoltzVhtlcWatcherConfig {
+    fn default() -> Self {
+        Self {
+            refresh_interval: VHTLC_WATCHER_REFRESH_INTERVAL,
+        }
+    }
+}
+
+/// Handle to stop the background Boltz VHTLC watcher.
+///
+/// Keep this handle alive for as long as the watcher should run. Dropping it stops the watcher.
+#[must_use = "dropping the handle stops the Boltz VHTLC watcher"]
+pub struct BoltzVhtlcWatcherHandle {
+    stop_tx: tokio::sync::watch::Sender<bool>,
+}
+
+impl BoltzVhtlcWatcherHandle {
+    /// Stop the background watcher.
+    pub fn stop(self) {
+        let _ = self.stop_tx.send(true);
+    }
+}
+
+impl Drop for BoltzVhtlcWatcherHandle {
+    fn drop(&mut self) {
+        let _ = self.stop_tx.send(true);
+    }
+}
+
+#[derive(Default)]
+struct BoltzVhtlcActionLog {
+    claimed: HashSet<String>,
+    refunded: HashSet<String>,
+    claims_in_flight: HashSet<String>,
+    refunds_in_flight: HashSet<String>,
+    refund_retries: HashMap<String, RefundRetryState>,
+}
+
+struct RefundRetryState {
+    failures: u32,
+    retry_after: Instant,
+}
+
+impl BoltzVhtlcActionLog {
+    fn begin_claim(&mut self, swap_id: &str) -> bool {
+        if self.claimed.contains(swap_id)
+            || self.refunded.contains(swap_id)
+            || self.claims_in_flight.contains(swap_id)
+            || self.refunds_in_flight.contains(swap_id)
+        {
+            return false;
+        }
+        self.claims_in_flight.insert(swap_id.to_string())
+    }
+
+    fn finish_claim(&mut self, swap_id: &str, succeeded: bool) {
+        self.claims_in_flight.remove(swap_id);
+        if succeeded {
+            self.claimed.insert(swap_id.to_string());
+        }
+    }
+
+    fn begin_refund(&mut self, swap_id: &str) -> bool {
+        if self.claimed.contains(swap_id)
+            || self.refunded.contains(swap_id)
+            || self.claims_in_flight.contains(swap_id)
+            || self.refunds_in_flight.contains(swap_id)
+        {
+            return false;
+        }
+
+        if let Some(retry) = self.refund_retries.get(swap_id) {
+            if Instant::now() < retry.retry_after {
+                return false;
+            }
+        }
+
+        self.refunds_in_flight.insert(swap_id.to_string())
+    }
+
+    fn finish_refund(&mut self, swap_id: &str, succeeded: bool) {
+        self.refunds_in_flight.remove(swap_id);
+        if succeeded {
+            self.refund_retries.remove(swap_id);
+            self.refunded.insert(swap_id.to_string());
+            return;
+        }
+
+        let retry = self
+            .refund_retries
+            .entry(swap_id.to_string())
+            .or_insert(RefundRetryState {
+                failures: 0,
+                retry_after: Instant::now(),
+            });
+        retry.failures = retry.failures.saturating_add(1);
+        let multiplier = 1_u32
+            .checked_shl(retry.failures.saturating_sub(1).min(10))
+            .unwrap_or(1);
+        let backoff = VHTLC_REFUND_RETRY_INITIAL_BACKOFF
+            .saturating_mul(multiplier)
+            .min(VHTLC_REFUND_RETRY_MAX_BACKOFF);
+        retry.retry_after = Instant::now() + backoff;
+    }
+}
+
+#[derive(Clone, Debug)]
+struct VhtlcLifecycleInfo {
+    swap_id: String,
+    swap_type: SwapType,
+    address: ArkAddress,
+    script_pubkey: ScriptBuf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SpentVhtlcAction {
+    Reconcile,
+    KeepActive,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VhtlcContractLiveness {
+    /// No VTXO exists yet. Keep watching: the VHTLC may still be funded later.
+    Unfunded,
+    /// A spend was submitted but not finalized. Keep active for pending-tx recovery.
+    PendingSpend,
+    /// VTXO exists and can still be spent cooperatively/offchain.
+    Funded,
+    /// VTXO exists and is recoverable/settleable.
+    Recoverable,
+    /// VTXO existed and no longer has any actionable offchain/recovery state.
+    Spent,
+}
+
+impl VhtlcContractLiveness {
+    fn should_deactivate_contract(self) -> bool {
+        matches!(self, Self::Spent)
+    }
+}
+
+fn classify_vhtlc_contract_liveness(
+    dust: Amount,
+    has_pending_spend: bool,
+    vtxos: Vec<ark_core::server::VirtualTxOutPoint>,
+) -> VhtlcContractLiveness {
+    if has_pending_spend {
+        return VhtlcContractLiveness::PendingSpend;
+    }
+
+    if vtxos.is_empty() {
+        return VhtlcContractLiveness::Unfunded;
+    }
+
+    let vtxos = VtxoList::new(dust, vtxos);
+    if vtxos.spendable_offchain().next().is_some() {
+        return VhtlcContractLiveness::Funded;
+    }
+    if vtxos.recoverable().next().is_some() {
+        return VhtlcContractLiveness::Recoverable;
+    }
+
+    VhtlcContractLiveness::Spent
+}
+
+fn validated_boltz_tap_script_sigs(
+    input: &psbt::Input,
+    expected_pk: XOnlyPublicKey,
+    expected_leaf_hash: TapLeafHash,
+) -> Result<BTreeMap<(XOnlyPublicKey, TapLeafHash), bitcoin::taproot::Signature>, Error> {
+    let mut sigs = BTreeMap::new();
+
+    for ((pk, leaf_hash), sig) in &input.tap_script_sigs {
+        if *pk != expected_pk || *leaf_hash != expected_leaf_hash {
+            return Err(Error::ad_hoc(format!(
+                "unexpected Boltz tap script signature for pubkey {pk} and leaf hash {leaf_hash}"
+            )));
+        }
+
+        sigs.insert((*pk, *leaf_hash), *sig);
+    }
+
+    if sigs.is_empty() {
+        return Err(Error::ad_hoc(format!(
+            "missing Boltz tap script signature for pubkey {expected_pk} and leaf hash {expected_leaf_hash}"
+        )));
+    }
+
+    Ok(sigs)
 }
 
 impl<B, S> Client<B, S>
@@ -245,6 +475,20 @@ where
             .map_err(Error::ad_hoc)
             .context("failed to compute created_at")?;
 
+        let server_info = self.server_info().await?;
+        let vhtlc = self.build_vhtlc_script(
+            &server_info,
+            swap_response.claim_public_key,
+            refund_public_key.into(),
+            preimage_hash,
+            &swap_response.timeout_block_heights,
+            &swap_response.address,
+        )?;
+
+        let script_pubkey = self
+            .insert_vhtlc_contract(vhtlc.options().clone(), key_derivation_index)
+            .context("failed to persist VHTLC contract for submarine swap")?;
+
         let data = SubmarineSwapData {
             id: swap_response.id.clone(),
             status: SwapStatus::Created,
@@ -258,11 +502,20 @@ where
             invoice: request.invoice.clone(),
             created_at: created_at.as_secs(),
             key_derivation_index,
+            contract_script_pubkey: Some(script_pubkey.clone()),
         };
 
-        self.swap_storage()
+        if let Err(error) = self
+            .swap_storage()
             .insert_submarine(swap_response.id.clone(), data.clone())
-            .await?;
+            .await
+        {
+            return Err(self.deactivate_orphaned_vhtlc_contract(
+                &script_pubkey,
+                &swap_response.id,
+                error,
+            ));
+        }
 
         tracing::info!(
             swap_id = swap_response.id,
@@ -275,7 +528,7 @@ where
     }
 
     /// Pay a BOLT11 invoice by performing a submarine swap via Boltz. This allows to make Lightning
-    /// payments with an Ark wallet.
+    /// payments with an Arkade wallet.
     ///
     /// # Arguments
     ///
@@ -283,7 +536,7 @@ where
     ///
     /// # Returns
     ///
-    /// - A [`SubmarineSwapResult`], including an identifier for the swap and the TXID of the Ark
+    /// - A [`SubmarineSwapResult`], including an identifier for the swap and the TXID of the Arkade
     ///   transaction that funds the VHTLC.
     pub async fn pay_ln_invoice(
         &self,
@@ -338,7 +591,22 @@ where
             .map_err(Error::ad_hoc)
             .context("failed to compute created_at")?;
 
-        self.swap_storage()
+        let server_info = self.server_info().await?;
+        let vhtlc = self.build_vhtlc_script(
+            &server_info,
+            swap_response.claim_public_key,
+            refund_public_key.into(),
+            preimage_hash,
+            &swap_response.timeout_block_heights,
+            &swap_response.address,
+        )?;
+
+        let script_pubkey = self
+            .insert_vhtlc_contract(vhtlc.options().clone(), key_derivation_index)
+            .context("failed to persist VHTLC contract for submarine swap")?;
+
+        if let Err(error) = self
+            .swap_storage()
             .insert_submarine(
                 swap_response.id.clone(),
                 SubmarineSwapData {
@@ -354,9 +622,17 @@ where
                     invoice: request.invoice.clone(),
                     created_at: created_at.as_secs(),
                     key_derivation_index,
+                    contract_script_pubkey: Some(script_pubkey.clone()),
                 },
             )
-            .await?;
+            .await
+        {
+            return Err(self.deactivate_orphaned_vhtlc_contract(
+                &script_pubkey,
+                &swap_response.id,
+                error,
+            ));
+        }
 
         let vhtlc_address = swap_response.address;
         let amount = swap_response.expected_amount;
@@ -386,14 +662,15 @@ where
     pub async fn wait_for_invoice_paid(&self, swap_id: &str) -> Result<[u8; 32], Error> {
         use futures::StreamExt;
 
-        let stream = self.subscribe_to_swap_updates(swap_id.to_string());
+        let stream =
+            self.subscribe_to_swap_updates_for_type(swap_id.to_string(), SwapType::Submarine);
         tokio::pin!(stream);
 
         while let Some(status_result) = stream.next().await {
             match status_result {
                 Ok(status) => {
                     tracing::debug!(swap_id, current = ?status, "Swap status");
-                    match status {
+                    match &status {
                         SwapStatus::InvoicePaid => {
                             let deadline = tokio::time::Instant::now() + self.inner.timeout;
 
@@ -414,19 +691,28 @@ where
                                     }
                                 }
 
-                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                tokio::time::sleep(Duration::from_secs(1)).await;
                             }
                         }
-                        SwapStatus::InvoiceExpired => {
-                            return Err(Error::ad_hoc(format!(
-                                "invoice expired for swap {swap_id}"
-                            )));
-                        }
                         SwapStatus::Error { error } => {
-                            tracing::error!(
+                            tracing::error!(swap_id, error, "Boltz reported swap error");
+                            return Err(swap_wait_failure_error(
+                                &status,
                                 swap_id,
-                                "Got error from swap updates subscription: {error}"
-                            );
+                                "invoice payment",
+                            ));
+                        }
+                        SwapStatus::TransactionRefunded
+                        | SwapStatus::TransactionFailed
+                        | SwapStatus::TransactionLockupFailed
+                        | SwapStatus::InvoiceFailedToPay
+                        | SwapStatus::InvoiceExpired
+                        | SwapStatus::SwapExpired => {
+                            return Err(swap_wait_failure_error(
+                                &status,
+                                swap_id,
+                                "invoice payment",
+                            ));
                         }
                         SwapStatus::InvoiceSet
                         | SwapStatus::InvoicePending
@@ -435,13 +721,11 @@ where
                         | SwapStatus::TransactionConfirmed
                         | SwapStatus::TransactionServerMempool
                         | SwapStatus::TransactionServerConfirmed
-                        | SwapStatus::TransactionRefunded
-                        | SwapStatus::TransactionFailed
                         | SwapStatus::TransactionClaimed
-                        | SwapStatus::TransactionLockupFailed
-                        | SwapStatus::InvoiceFailedToPay
-                        | SwapStatus::SwapExpired
-                        | SwapStatus::Other(_) => {}
+                        | SwapStatus::InvoiceSettled => {}
+                        SwapStatus::Other(status) => {
+                            tracing::debug!(swap_id, status, "Ignoring unknown swap status");
+                        }
                     }
                 }
                 Err(e) => return Err(e),
@@ -492,7 +776,7 @@ where
         let claim_txs = timeout_op(
             self.inner.timeout,
             self.network_client()
-                .get_virtual_txs(vec![claim_txid.to_string()], None),
+                .get_virtual_txs(vec![claim_txid.to_string()], None, None),
         )
         .await?
         .map_err(|e| Error::ad_hoc(e.to_string()))
@@ -534,44 +818,17 @@ where
     ///
     /// This path does not require a signature from Boltz.
     pub async fn refund_expired_vhtlc(&self, swap_id: &str) -> Result<Txid, Error> {
-        let swap_data = self
+        let mut swap_data = self
             .swap_storage()
             .get_submarine(swap_id)
             .await?
             .ok_or(Error::ad_hoc("Submarine swap not found"))?;
 
-        let timeout_block_heights = swap_data.timeout_block_heights;
         let server_info = self.server_info().await?;
 
-        let vhtlc = self.reconstruct_vhtlc_for_address(
-            &server_info,
-            |server| {
-                Ok(VhtlcOptions {
-                    sender: swap_data.refund_public_key.into(),
-                    receiver: swap_data.claim_public_key.into(),
-                    server,
-                    preimage_hash: swap_data.preimage_hash,
-                    refund_locktime: timeout_block_heights.refund,
-                    unilateral_claim_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_claim as i64,
-                    )
-                    .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
-                    unilateral_refund_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid unilateral refund timeout: {e}"))
-                    })?,
-                    unilateral_refund_without_receiver_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund_without_receiver as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
-                    })?,
-                })
-            },
-            &swap_data.vhtlc_address,
-        )?;
+        let vhtlc = self
+            .submarine_vhtlc_script(&mut swap_data, &server_info)
+            .await?;
         let vhtlc_address = vhtlc.address();
 
         let vhtlc_outpoint = {
@@ -636,7 +893,7 @@ where
             &server_info,
         )?;
 
-        let kp = self.keypair_by_pk(&refunder_pk)?;
+        let kp = self.swap_keypair_by_pk(&refunder_pk, swap_data.key_derivation_index, swap_id)?;
         let sign_fn =
             |_: &mut psbt::Input,
              msg: secp256k1::Message|
@@ -662,7 +919,7 @@ where
             .ok_or_else(|| Error::ad_hoc("no checkpoint PSBTs found"))?
             .clone();
 
-        let kp = self.keypair_by_pk(&refunder_pk)?;
+        let kp = self.swap_keypair_by_pk(&refunder_pk, swap_data.key_derivation_index, swap_id)?;
         let sign_fn =
             |_: &mut psbt::Input,
              msg: secp256k1::Message|
@@ -684,6 +941,12 @@ where
         .map_err(Error::ark_server)
         .context("failed to finalize offchain transaction")?;
 
+        self.best_effort_mark_vhtlc_contract_inactive(
+            swap_id,
+            swap_data.contract_script_pubkey.as_ref(),
+            "refund",
+        );
+
         tracing::info!(txid = %ark_txid, "Refunded VHTLC");
 
         Ok(ark_txid)
@@ -700,7 +963,7 @@ where
     where
         R: Rng + CryptoRng,
     {
-        let swap_data = self
+        let mut swap_data = self
             .swap_storage()
             .get_submarine(swap_id)
             .await?
@@ -709,35 +972,9 @@ where
         let timeout_block_heights = swap_data.timeout_block_heights;
         let server_info = self.server_info().await?;
 
-        let vhtlc = self.reconstruct_vhtlc_for_address(
-            &server_info,
-            |server| {
-                Ok(VhtlcOptions {
-                    sender: swap_data.refund_public_key.into(),
-                    receiver: swap_data.claim_public_key.into(),
-                    server,
-                    preimage_hash: swap_data.preimage_hash,
-                    refund_locktime: timeout_block_heights.refund,
-                    unilateral_claim_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_claim as i64,
-                    )
-                    .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
-                    unilateral_refund_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid unilateral refund timeout: {e}"))
-                    })?,
-                    unilateral_refund_without_receiver_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund_without_receiver as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
-                    })?,
-                })
-            },
-            &swap_data.vhtlc_address,
-        )?;
+        let vhtlc = self
+            .submarine_vhtlc_script(&mut swap_data, &server_info)
+            .await?;
         let vhtlc_address = vhtlc.address();
 
         let vhtlc_outpoint = {
@@ -803,6 +1040,12 @@ where
             .await
             .context("failed to join batch")?;
 
+        self.best_effort_mark_vhtlc_contract_inactive(
+            swap_id,
+            swap_data.contract_script_pubkey.as_ref(),
+            "settlement refund",
+        );
+
         tracing::info!(txid = %commitment_txid, "Refunded VHTLC via settlement");
 
         Ok(commitment_txid)
@@ -814,44 +1057,17 @@ where
     /// a submarine swap before the timelock expires. For refunds after timelock expiry without
     /// Boltz cooperation, use [`Client::refund_expired_vhtlc`] instead.
     pub async fn refund_vhtlc(&self, swap_id: &str) -> Result<Txid, Error> {
-        let swap_data = self
+        let mut swap_data = self
             .swap_storage()
             .get_submarine(swap_id)
             .await?
             .ok_or(Error::ad_hoc("submarine swap not found"))?;
 
-        let timeout_block_heights = swap_data.timeout_block_heights;
         let server_info = self.server_info().await?;
 
-        let vhtlc = self.reconstruct_vhtlc_for_address(
-            &server_info,
-            |server| {
-                Ok(VhtlcOptions {
-                    sender: swap_data.refund_public_key.into(),
-                    receiver: swap_data.claim_public_key.into(),
-                    server,
-                    preimage_hash: swap_data.preimage_hash,
-                    refund_locktime: timeout_block_heights.refund,
-                    unilateral_claim_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_claim as i64,
-                    )
-                    .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
-                    unilateral_refund_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid unilateral refund timeout: {e}"))
-                    })?,
-                    unilateral_refund_without_receiver_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund_without_receiver as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
-                    })?,
-                })
-            },
-            &swap_data.vhtlc_address,
-        )?;
+        let vhtlc = self
+            .submarine_vhtlc_script(&mut swap_data, &server_info)
+            .await?;
         let vhtlc_address = vhtlc.address();
 
         let vhtlc_outpoint = {
@@ -881,6 +1097,8 @@ where
 
         // Use the collaborative refund script which requires sender + receiver + server signatures.
         let refund_script = vhtlc.refund_script();
+        let boltz_refund_pk = swap_data.claim_public_key.inner.x_only_public_key().0;
+        let refund_leaf_hash = TapLeafHash::from_script(&refund_script, LeafVersion::TapScript);
 
         let spend_info = vhtlc.taproot_spend_info();
         let script_ver = (refund_script, LeafVersion::TapScript);
@@ -916,7 +1134,7 @@ where
         )?;
 
         // Sign the ark transaction with the sender's (user's) key.
-        let kp = self.keypair_by_pk(&refunder_pk)?;
+        let kp = self.swap_keypair_by_pk(&refunder_pk, swap_data.key_derivation_index, swap_id)?;
         let sign_fn =
             |_: &mut psbt::Input,
              msg: secp256k1::Message|
@@ -987,12 +1205,14 @@ where
         let ark_txid = boltz_signed_ark_tx.unsigned_tx.compute_txid();
 
         // Extract Boltz's signatures before sending to arkd (server strips incoming sigs).
-        let boltz_tap_script_sigs = boltz_signed_checkpoint
-            .inputs
-            .first()
-            .ok_or_else(|| Error::ad_hoc("boltz checkpoint has no inputs"))?
-            .tap_script_sigs
-            .clone();
+        let boltz_tap_script_sigs = validated_boltz_tap_script_sigs(
+            boltz_signed_checkpoint
+                .inputs
+                .first()
+                .ok_or_else(|| Error::ad_hoc("boltz checkpoint has no inputs"))?,
+            boltz_refund_pk,
+            refund_leaf_hash,
+        )?;
 
         // Submit to arkd for server signature.
         // We send the Boltz-signed transactions so arkd can add its signature.
@@ -1009,7 +1229,7 @@ where
             .ok_or_else(|| Error::ad_hoc("no signed checkpoint PSBTs returned"))?
             .clone();
 
-        let kp = self.keypair_by_pk(&refunder_pk)?;
+        let kp = self.swap_keypair_by_pk(&refunder_pk, swap_data.key_derivation_index, swap_id)?;
         let sign_fn =
             |_: &mut psbt::Input,
              msg: secp256k1::Message|
@@ -1038,6 +1258,12 @@ where
         .await?
         .map_err(Error::ark_server)
         .context("failed to finalize offchain transaction")?;
+
+        self.best_effort_mark_vhtlc_contract_inactive(
+            swap_id,
+            swap_data.contract_script_pubkey.as_ref(),
+            "collaborative refund",
+        );
 
         tracing::info!(swap_id, txid = %ark_txid, "Refunded VHTLC via collaborative refund");
 
@@ -1082,7 +1308,7 @@ where
     }
 
     /// Generate a BOLT11 invoice to perform a reverse submarine swap via Boltz. This allows to
-    /// receive Lightning payments into an Ark wallet.
+    /// receive Lightning payments into an Arkade wallet.
     ///
     /// # Arguments
     ///
@@ -1109,7 +1335,7 @@ where
     /// Generate a BOLT11 invoice to receive Lightning into another user's Arkade address.
     ///
     /// The local client still creates and claims the Boltz reverse-swap VHTLC, but the resulting
-    /// Ark output is sent to `recipient_address` instead of a fresh local address.
+    /// Arkade output is sent to `recipient_address` instead of a fresh local address.
     ///
     /// # Arguments
     ///
@@ -1301,6 +1527,20 @@ where
             Error::ad_hoc("onchain_amount not provided by Boltz and not specified in request")
         })?;
 
+        let server_info = self.server_info().await?;
+        let vhtlc = self.build_vhtlc_script(
+            &server_info,
+            claim_public_key.into(),
+            response.refund_public_key,
+            preimage_hash,
+            &response.timeout_block_heights,
+            &response.lockup_address,
+        )?;
+
+        let script_pubkey = self
+            .insert_vhtlc_contract(vhtlc.options().clone(), key_derivation_index)
+            .context("failed to persist VHTLC contract for reverse submarine swap")?;
+
         let swap = ReverseSwapData {
             id: response.id.clone(),
             status: SwapStatus::Created,
@@ -1316,12 +1556,21 @@ where
             bolt11: response.invoice.to_string(),
             invoice_expiry: response.invoice.expiry_time().as_secs(),
             claim_address: recipient_address,
+            contract_script_pubkey: Some(script_pubkey.clone()),
         };
 
-        self.swap_storage()
+        if let Err(error) = self
+            .swap_storage()
             .insert_reverse(response.id.clone(), swap.clone())
             .await
-            .context("failed to persist swap data")?;
+            .context("failed to persist swap data")
+        {
+            return Err(self.deactivate_orphaned_vhtlc_contract(
+                &script_pubkey,
+                &response.id,
+                error,
+            ));
+        }
 
         Ok(ReverseSwapResult {
             swap_id: swap.id,
@@ -1345,7 +1594,8 @@ where
     pub async fn wait_for_vhtlc_funding(&self, swap_id: &str) -> Result<(), Error> {
         use futures::StreamExt;
 
-        let stream = self.subscribe_to_swap_updates(swap_id.to_string());
+        let stream =
+            self.subscribe_to_swap_updates_for_type(swap_id.to_string(), SwapType::Reverse);
         tokio::pin!(stream);
 
         while let Some(status_result) = stream.next().await {
@@ -1353,36 +1603,34 @@ where
                 Ok(status) => {
                     tracing::debug!(swap_id, current = ?status, "Swap status");
 
-                    match status {
+                    match &status {
                         SwapStatus::TransactionMempool | SwapStatus::TransactionConfirmed => {
                             tracing::debug!(swap_id, "VHTLC funding detected");
                             return Ok(());
                         }
-                        SwapStatus::InvoiceExpired => {
-                            return Err(Error::ad_hoc(format!(
-                                "invoice expired for swap {swap_id}"
-                            )));
-                        }
                         SwapStatus::Error { error } => {
-                            tracing::error!(
-                                swap_id,
-                                "Got error from swap updates subscription: {error}"
-                            );
+                            tracing::error!(swap_id, error, "Boltz reported swap error");
+                            return Err(swap_wait_failure_error(&status, swap_id, "VHTLC funding"));
                         }
-                        // TODO: We may still need to handle some of these explicitly.
-                        SwapStatus::Created
-                        | SwapStatus::TransactionRefunded
+                        SwapStatus::TransactionRefunded
                         | SwapStatus::TransactionFailed
-                        | SwapStatus::TransactionClaimed
                         | SwapStatus::TransactionLockupFailed
+                        | SwapStatus::InvoiceFailedToPay
+                        | SwapStatus::InvoiceExpired
+                        | SwapStatus::SwapExpired => {
+                            return Err(swap_wait_failure_error(&status, swap_id, "VHTLC funding"));
+                        }
+                        SwapStatus::Created
+                        | SwapStatus::TransactionClaimed
                         | SwapStatus::TransactionServerMempool
                         | SwapStatus::TransactionServerConfirmed
                         | SwapStatus::InvoiceSet
                         | SwapStatus::InvoicePending
                         | SwapStatus::InvoicePaid
-                        | SwapStatus::InvoiceFailedToPay
-                        | SwapStatus::SwapExpired
-                        | SwapStatus::Other(_) => {}
+                        | SwapStatus::InvoiceSettled => {}
+                        SwapStatus::Other(status) => {
+                            tracing::debug!(swap_id, status, "Ignoring unknown swap status");
+                        }
                     }
                 }
                 Err(e) => return Err(e),
@@ -1410,7 +1658,7 @@ where
         swap_id: &str,
         preimage: [u8; 32],
     ) -> Result<ClaimVhtlcResult, Error> {
-        let swap = self
+        let mut swap = self
             .swap_storage()
             .get_reverse(swap_id)
             .await
@@ -1429,38 +1677,9 @@ where
 
         tracing::debug!(swap_id, "Claiming VHTLC with verified preimage");
 
-        let timeout_block_heights = swap.timeout_block_heights;
         let server_info = self.server_info().await?;
 
-        let vhtlc = self.reconstruct_vhtlc_for_address(
-            &server_info,
-            |server| {
-                Ok(VhtlcOptions {
-                    sender: swap.refund_public_key.into(),
-                    receiver: swap.claim_public_key.into(),
-                    server,
-                    preimage_hash: swap.preimage_hash,
-                    refund_locktime: timeout_block_heights.refund,
-                    unilateral_claim_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_claim as i64,
-                    )
-                    .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
-                    unilateral_refund_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid unilateral refund timeout: {e}"))
-                    })?,
-                    unilateral_refund_without_receiver_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund_without_receiver as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
-                    })?,
-                })
-            },
-            &swap.vhtlc_address,
-        )?;
+        let vhtlc = self.reverse_vhtlc_script(&mut swap, &server_info).await?;
         let vhtlc_address = vhtlc.address();
 
         // TODO: Ideally we can skip this if the vout is always the same (probably 0).
@@ -1524,7 +1743,7 @@ where
         .map_err(Error::from)
         .context("failed to build offchain TXs")?;
 
-        let kp = self.keypair_by_pk(&claimer_pk)?;
+        let kp = self.swap_keypair_by_pk(&claimer_pk, swap.key_derivation_index, swap_id)?;
         let sign_fn =
             |input: &mut psbt::Input,
              msg: secp256k1::Message|
@@ -1559,7 +1778,7 @@ where
 
         sign_ark_transaction(sign_fn, &mut ark_tx, 0)
             .map_err(Error::from)
-            .context("failed to sign Ark TX")?;
+            .context("failed to sign Arkade TX")?;
 
         let ark_txid = ark_tx.unsigned_tx.compute_txid();
 
@@ -1590,8 +1809,6 @@ where
         .map_err(Error::ark_server)
         .context("failed to finalize offchain transaction")?;
 
-        tracing::info!(swap_id, txid = %ark_txid, "Claimed VHTLC");
-
         // Update storage to persist the preimage
         let mut updated_swap = swap.clone();
         updated_swap.preimage = Some(preimage);
@@ -1599,6 +1816,14 @@ where
             .update_reverse(swap_id, updated_swap)
             .await
             .context("failed to update swap data with preimage")?;
+
+        self.best_effort_mark_vhtlc_contract_inactive(
+            swap_id,
+            swap.contract_script_pubkey.as_ref(),
+            "claim",
+        );
+
+        tracing::info!(swap_id, txid = %ark_txid, "Claimed VHTLC");
 
         Ok(ClaimVhtlcResult {
             swap_id: swap_id.to_string(),
@@ -1616,8 +1841,6 @@ where
     /// [`Self::get_ln_invoice`]). If the swap was created with [`Self::get_ln_invoice_from_hash`],
     /// use [`Self::wait_for_vhtlc_funding`] followed by [`Self::claim_vhtlc`] instead.
     pub async fn wait_for_vhtlc(&self, swap_id: &str) -> Result<ClaimVhtlcResult, Error> {
-        use futures::StreamExt;
-
         let swap = self
             .swap_storage()
             .get_reverse(swap_id)
@@ -1633,231 +1856,24 @@ where
             ))
         })?;
 
-        let stream = self.subscribe_to_swap_updates(swap_id.to_string());
-        tokio::pin!(stream);
-
-        while let Some(status_result) = stream.next().await {
-            match status_result {
-                Ok(status) => {
-                    tracing::debug!(current = ?status, "Swap status");
-
-                    match status {
-                        SwapStatus::TransactionMempool | SwapStatus::TransactionConfirmed => break,
-                        SwapStatus::InvoiceExpired => {
-                            return Err(Error::ad_hoc(format!(
-                                "invoice expired for swap {swap_id}"
-                            )));
-                        }
-                        SwapStatus::Error { error } => {
-                            tracing::error!(
-                                swap_id,
-                                "Got error from swap updates subscription: {error}"
-                            );
-                        }
-                        // TODO: We may still need to handle some of these explicitly.
-                        SwapStatus::Created
-                        | SwapStatus::TransactionRefunded
-                        | SwapStatus::TransactionFailed
-                        | SwapStatus::TransactionClaimed
-                        | SwapStatus::TransactionLockupFailed
-                        | SwapStatus::TransactionServerMempool
-                        | SwapStatus::TransactionServerConfirmed
-                        | SwapStatus::InvoiceSet
-                        | SwapStatus::InvoicePending
-                        | SwapStatus::InvoicePaid
-                        | SwapStatus::InvoiceFailedToPay
-                        | SwapStatus::SwapExpired
-                        | SwapStatus::Other(_) => {}
-                    }
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        tracing::debug!("Ark transaction for swap found");
-
-        let timeout_block_heights = swap.timeout_block_heights;
-        let server_info = self.server_info().await?;
-
-        let vhtlc = self.reconstruct_vhtlc_for_address(
-            &server_info,
-            |server| {
-                Ok(VhtlcOptions {
-                    sender: swap.refund_public_key.into(),
-                    receiver: swap.claim_public_key.into(),
-                    server,
-                    preimage_hash: swap.preimage_hash,
-                    refund_locktime: timeout_block_heights.refund,
-                    unilateral_claim_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_claim as i64,
-                    )
-                    .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
-                    unilateral_refund_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid unilateral refund timeout: {e}"))
-                    })?,
-                    unilateral_refund_without_receiver_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund_without_receiver as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
-                    })?,
-                })
-            },
-            &swap.vhtlc_address,
-        )?;
-        let vhtlc_address = vhtlc.address();
-
-        // TODO: Ideally we can skip this if the vout is always the same (probably 0).
-        let vhtlc_outpoint = {
-            let virtual_tx_outpoints = self
-                .get_virtual_tx_outpoints(std::iter::once(vhtlc_address))
-                .await?;
-
-            let vtxo_list = VtxoList::new(server_info.dust, virtual_tx_outpoints);
-
-            // We expect a single outpoint.
-            let mut unspent = vtxo_list.all_unspent();
-            let vhtlc_outpoint = unspent.next().ok_or_else(|| {
-                Error::ad_hoc(format!("no outpoint found for address {vhtlc_address}"))
-            })?;
-
-            vhtlc_outpoint.clone()
-        };
-
-        let claim_address = self.reverse_claim_address(&swap).await?;
-        let claim_amount = swap.amount;
-
-        let outputs = vec![SendReceiver {
-            address: claim_address,
-            amount: claim_amount,
-            assets: Vec::new(),
-        }];
-
-        let spend_info = vhtlc.taproot_spend_info();
-        let script_ver = (vhtlc.claim_script(), LeafVersion::TapScript);
-        let control_block = spend_info
-            .control_block(&script_ver)
-            .ok_or(Error::ad_hoc("control block not found for claim script"))?;
-
-        let script_pubkey = vhtlc.script_pubkey();
-
-        let claimer_pk = swap.claim_public_key.inner.x_only_public_key().0;
-        let vhtlc_input = VtxoInput::new(
-            script_ver.0,
-            None,
-            control_block,
-            vhtlc.tapscripts(),
-            script_pubkey,
-            claim_amount,
-            vhtlc_outpoint.outpoint,
-            vhtlc_outpoint.assets,
-        );
-
-        // The change address is superfluous because we are _draining_ the VHTLC.
-        let change_address = &claim_address;
-
-        let OffchainTransactions {
-            mut ark_tx,
-            checkpoint_txs,
-        } = build_offchain_transactions(
-            &outputs,
-            change_address,
-            std::slice::from_ref(&vhtlc_input),
-            &server_info,
-        )
-        .map_err(Error::from)
-        .context("failed to build offchain TXs")?;
-
-        let kp = self.keypair_by_pk(&claimer_pk)?;
-        let sign_fn =
-            |input: &mut psbt::Input,
-             msg: secp256k1::Message|
-             -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
-                // Add preimage to PSBT input.
-                {
-                    // Initialized with a 1, because we only have one witness element: the preimage.
-                    let mut bytes = vec![1];
-
-                    let length = VarInt::from(preimage.len() as u64);
-
-                    length
-                        .consensus_encode(&mut bytes)
-                        .expect("valid length encoding");
-
-                    bytes.write_all(&preimage).expect("valid preimage encoding");
-
-                    input.unknown.insert(
-                        psbt::raw::Key {
-                            type_value: 222,
-                            key: VTXO_CONDITION_KEY.to_vec(),
-                        },
-                        bytes,
-                    );
-                }
-
-                let sig = Secp256k1::new().sign_schnorr_no_aux_rand(&msg, &kp);
-                let pk = kp.x_only_public_key().0;
-
-                Ok(vec![(sig, pk)])
-            };
-
-        sign_ark_transaction(sign_fn, &mut ark_tx, 0)
-            .map_err(Error::from)
-            .context("failed to sign Ark TX")?;
-
-        let ark_txid = ark_tx.unsigned_tx.compute_txid();
-
-        let res = self
-            .network_client()
-            .submit_offchain_transaction_request(ark_tx, checkpoint_txs)
-            .await
-            .map_err(Error::from)
-            .context("failed to submit offchain TXs")?;
-
-        let mut checkpoint_psbt = res
-            .signed_checkpoint_txs
-            .first()
-            .ok_or_else(|| Error::ad_hoc("no checkpoint PSBTs found"))?
-            .clone();
-
-        sign_checkpoint_transaction(sign_fn, &mut checkpoint_psbt)
-            .map_err(Error::from)
-            .context("failed to sign checkpoint TX")?;
-
-        timeout_op(
-            self.inner.timeout,
-            self.network_client()
-                .finalize_offchain_transaction(ark_txid, vec![checkpoint_psbt]),
-        )
-        .await
-        .context("failed to finalize offchain transaction")?
-        .map_err(Error::ark_server)
-        .context("failed to finalize offchain transaction")?;
-
-        tracing::info!(txid = %ark_txid, "Spent VHTLC");
-
-        Ok(ClaimVhtlcResult {
-            swap_id: swap_id.to_string(),
-            claim_txid: ark_txid,
-            claim_amount,
-            preimage,
-        })
+        self.wait_for_vhtlc_funding(swap_id).await?;
+        self.claim_vhtlc(swap_id, preimage).await
     }
 
     // Chain swap.
 
-    /// Create a chain swap via Boltz for swapping between ARK and on-chain BTC.
+    /// Create a chain swap via Boltz for swapping between Arkade and on-chain BTC.
     ///
     /// Returns a [`ChainSwapResult`] containing the swap ID and the address the user must
     /// fund to initiate the swap. For [`ChainSwapDirection::ArkToBtc`], the user should send
-    /// Ark VTXOs to the `user_lockup_address` using [`Client::send_vtxo`]. For
+    /// Arkade VTXOs to the `user_lockup_address` using [`Client::send_vtxo`]. For
     /// [`ChainSwapDirection::BtcToArk`], the user should send BTC to the `user_lockup_address`.
     ///
     /// After funding, use [`Self::wait_for_chain_swap_server_lockup`] to wait for Boltz to
-    /// lock their side, then [`Self::claim_chain_swap`] to claim.
+    /// lock their side. Then claim with the direction-specific method:
+    ///
+    /// - [`ChainSwapDirection::BtcToArk`] uses [`Self::claim_chain_swap`].
+    /// - [`ChainSwapDirection::ArkToBtc`] uses [`Self::claim_chain_swap_btc`].
     pub async fn create_chain_swap(
         &self,
         direction: ChainSwapDirection,
@@ -1867,12 +1883,12 @@ where
         let preimage_hash = sha256::Hash::hash(&preimage);
 
         let claim_keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
-        let claim_public_key = claim_keypair.public_key();
+        let claim_public_key = PublicKey::new(claim_keypair.public_key());
         let claim_key_derivation_index =
             self.derivation_index_for_pk(&claim_keypair.x_only_public_key().0);
 
         let refund_keypair = self.next_keypair(crate::key_provider::KeypairIndex::New)?;
-        let refund_public_key = refund_keypair.public_key();
+        let refund_public_key = PublicKey::new(refund_keypair.public_key());
         let refund_key_derivation_index =
             self.derivation_index_for_pk(&refund_keypair.x_only_public_key().0);
 
@@ -1891,8 +1907,8 @@ where
             to,
             user_lock_amount,
             server_lock_amount,
-            claim_public_key: claim_public_key.into(),
-            refund_public_key: refund_public_key.into(),
+            claim_public_key,
+            refund_public_key,
             preimage_hash,
             referral_id: self.inner.boltz_referral_id.clone(),
         };
@@ -1933,7 +1949,7 @@ where
 
         // lockup_details = user's side (where user locks funds)
         // claim_details  = server's side (where user claims funds)
-        // The ARK side carries `timeouts` (full VHTLC timelocks).
+        // The Arkade side carries `timeouts` (full VHTLC timelocks).
         // The BTC side carries `swap_tree` and optionally `bip21`.
         let bip21 = swap_response
             .lockup_details
@@ -1945,14 +1961,47 @@ where
             .swap_tree
             .or(swap_response.claim_details.swap_tree.clone());
 
+        let chain_vhtlc_fields = chain_vhtlc_fields(
+            &direction,
+            claim_public_key,
+            refund_public_key,
+            swap_response.lockup_details.server_public_key,
+            swap_response.claim_details.server_public_key,
+            &swap_response.lockup_details.lockup_address,
+            &swap_response.claim_details.lockup_address,
+            swap_response.lockup_details.timeouts,
+            swap_response.claim_details.timeouts,
+            claim_key_derivation_index,
+            refund_key_derivation_index,
+        )?;
+
+        let server_info = self.server_info().await?;
+        let vhtlc = self.build_vhtlc_script(
+            &server_info,
+            chain_vhtlc_fields.claim_public_key,
+            chain_vhtlc_fields.refund_public_key,
+            ripemd160::Hash::hash(preimage_hash.as_byte_array()),
+            &chain_vhtlc_fields.timeouts,
+            &chain_vhtlc_fields.address,
+        )?;
+        let contract_script_pubkey = vhtlc.script_pubkey();
+
+        let stored_script_pubkey = self
+            .insert_vhtlc_contract(
+                vhtlc.options().clone(),
+                chain_vhtlc_fields.key_derivation_index,
+            )
+            .context("failed to persist chain VHTLC contract")?;
+        debug_assert_eq!(stored_script_pubkey, contract_script_pubkey);
+
         let data = ChainSwapData {
             id: swap_response.id.clone(),
             status: SwapStatus::Created,
             direction,
             preimage: Some(preimage),
             preimage_hash,
-            claim_public_key: claim_public_key.into(),
-            refund_public_key: refund_public_key.into(),
+            claim_public_key,
+            refund_public_key,
             server_claim_public_key: swap_response.lockup_details.server_public_key,
             server_refund_public_key: swap_response.claim_details.server_public_key,
             user_lockup_address: swap_response.lockup_details.lockup_address,
@@ -1968,11 +2017,20 @@ where
             created_at: created_at.as_secs(),
             claim_key_derivation_index,
             refund_key_derivation_index,
+            contract_script_pubkey: Some(contract_script_pubkey.clone()),
         };
 
-        self.swap_storage()
+        if let Err(error) = self
+            .swap_storage()
             .insert_chain(swap_response.id.clone(), data.clone())
-            .await?;
+            .await
+        {
+            return Err(self.deactivate_orphaned_vhtlc_contract(
+                &contract_script_pubkey,
+                &swap_response.id,
+                error,
+            ));
+        }
 
         tracing::info!(
             swap_id = swap_response.id,
@@ -1995,7 +2053,10 @@ where
     /// Wait for Boltz to lock funds on their side of the chain swap.
     ///
     /// Returns when the server's lockup transaction is detected in the mempool or confirmed.
-    /// After this returns, use [`Self::claim_chain_swap`] to claim the funds.
+    /// After this returns, claim with the direction-specific method:
+    ///
+    /// - [`ChainSwapDirection::BtcToArk`] uses [`Self::claim_chain_swap`].
+    /// - [`ChainSwapDirection::ArkToBtc`] uses [`Self::claim_chain_swap_btc`].
     ///
     /// Returns the server's lockup transaction ID if available.
     pub async fn wait_for_chain_swap_server_lockup(
@@ -2004,31 +2065,44 @@ where
     ) -> Result<Option<String>, Error> {
         use futures::StreamExt;
 
-        let stream = self.subscribe_to_swap_updates(swap_id.to_string());
+        let stream = self.subscribe_to_swap_updates_for_type(swap_id.to_string(), SwapType::Chain);
         tokio::pin!(stream);
 
         while let Some(status_result) = stream.next().await {
             match status_result {
                 Ok(status) => {
                     tracing::debug!(swap_id, current = ?status, "Chain swap status");
-                    match status {
+                    match &status {
                         SwapStatus::TransactionServerMempool
                         | SwapStatus::TransactionServerConfirmed => {
                             // Fetch the full status to get the server's lockup txid.
                             let url = format!("{}/v2/swap/{swap_id}", self.inner.boltz_url);
-                            let txid = async {
-                                reqwest::Client::new()
-                                    .get(&url)
-                                    .send()
+                            let response = reqwest::Client::new()
+                                .get(&url)
+                                .send()
+                                .await
+                                .map_err(|e| Error::ad_hoc(e.to_string()))
+                                .context("failed to fetch chain swap status")?;
+
+                            let status = response.status();
+                            if !status.is_success() {
+                                let error_text = response
+                                    .text()
                                     .await
-                                    .ok()?
-                                    .json::<GetSwapStatusResponse>()
-                                    .await
-                                    .ok()?
-                                    .transaction
-                                    .map(|t| t.id)
+                                    .map_err(|e| Error::ad_hoc(e.to_string()))
+                                    .context("failed to read chain swap status error response")?;
+                                return Err(Error::ad_hoc(format!(
+                                    "failed to fetch chain swap status ({status}): {error_text}"
+                                )));
                             }
-                            .await;
+
+                            let txid = response
+                                .json::<GetSwapStatusResponse>()
+                                .await
+                                .map_err(|e| Error::ad_hoc(e.to_string()))
+                                .context("failed to decode chain swap status response")?
+                                .transaction
+                                .map(|t| t.id);
 
                             tracing::info!(
                                 swap_id,
@@ -2037,29 +2111,38 @@ where
                             );
                             return Ok(txid);
                         }
-                        SwapStatus::SwapExpired => {
-                            return Err(Error::ad_hoc(format!("chain swap expired: {swap_id}")));
-                        }
-                        SwapStatus::TransactionRefunded | SwapStatus::TransactionFailed => {
-                            return Err(Error::ad_hoc(format!(
-                                "chain swap failed or refunded: {swap_id}"
-                            )));
-                        }
                         SwapStatus::Error { error } => {
-                            tracing::error!(swap_id, "Got error from chain swap updates: {error}");
+                            tracing::error!(swap_id, error, "Boltz reported chain swap error");
+                            return Err(swap_wait_failure_error(
+                                &status,
+                                swap_id,
+                                "chain swap server lockup",
+                            ));
+                        }
+                        SwapStatus::TransactionRefunded
+                        | SwapStatus::TransactionFailed
+                        | SwapStatus::TransactionLockupFailed
+                        | SwapStatus::InvoiceFailedToPay
+                        | SwapStatus::InvoiceExpired
+                        | SwapStatus::SwapExpired => {
+                            return Err(swap_wait_failure_error(
+                                &status,
+                                swap_id,
+                                "chain swap server lockup",
+                            ));
                         }
                         // User lockup detected — still waiting for server side.
                         SwapStatus::Created
                         | SwapStatus::TransactionMempool
                         | SwapStatus::TransactionConfirmed
                         | SwapStatus::TransactionClaimed
-                        | SwapStatus::TransactionLockupFailed
                         | SwapStatus::InvoiceSet
                         | SwapStatus::InvoicePending
                         | SwapStatus::InvoicePaid
-                        | SwapStatus::InvoiceFailedToPay
-                        | SwapStatus::InvoiceExpired
-                        | SwapStatus::Other(_) => {}
+                        | SwapStatus::InvoiceSettled => {}
+                        SwapStatus::Other(status) => {
+                            tracing::debug!(swap_id, status, "Ignoring unknown chain swap status");
+                        }
                     }
                 }
                 Err(e) => return Err(e),
@@ -2069,66 +2152,33 @@ where
         Err(Error::ad_hoc("Chain swap status stream ended unexpectedly"))
     }
 
-    /// Claim the Ark VHTLC from a chain swap after Boltz has locked funds.
+    /// Claim the Arkade VHTLC from a chain swap after Boltz has locked funds.
     ///
-    /// This claims the server's Ark VHTLC lockup using the stored preimage. It is intended
-    /// for [`ChainSwapDirection::BtcToArk`] swaps where the server locks an Ark VHTLC.
+    /// This claims the server's Arkade VHTLC lockup using the stored preimage. It is intended
+    /// for [`ChainSwapDirection::BtcToArk`] swaps where the server locks an Arkade VHTLC.
     ///
     /// Call this after [`Self::wait_for_chain_swap_server_lockup`] returns.
     pub async fn claim_chain_swap(&self, swap_id: &str) -> Result<Txid, Error> {
-        let swap = self
+        let mut swap = self
             .swap_storage()
             .get_chain(swap_id)
             .await
             .context("failed to get chain swap data")?
             .ok_or_else(|| Error::ad_hoc(format!("chain swap data not found: {swap_id}")))?;
 
+        if swap.direction != ChainSwapDirection::BtcToArk {
+            return Err(Error::ad_hoc(
+                "claim_chain_swap only applies to BtcToArk swaps; use claim_chain_swap_btc",
+            ));
+        }
+
         let preimage = swap
             .preimage
             .ok_or_else(|| Error::ad_hoc(format!("preimage not found for chain swap {swap_id}")))?;
 
-        let preimage_hash = ripemd160::Hash::hash(swap.preimage_hash.as_byte_array());
-
-        let timeout_block_heights = swap.server_timeout_block_heights.ok_or_else(|| {
-            Error::ad_hoc(format!(
-                "chain swap {swap_id} has no ARK-side VHTLC timeouts on server lockup \
-                 (this swap's server lockup is on-chain BTC, not an Ark VHTLC)"
-            ))
-        })?;
         let server_info = self.server_info().await?;
 
-        let expected_address = ArkAddress::decode(&swap.server_lockup_address)
-            .map_err(|e| Error::ad_hoc(format!("invalid server lockup address: {e}")))?;
-
-        let vhtlc = self.reconstruct_vhtlc_for_address(
-            &server_info,
-            |server| {
-                Ok(VhtlcOptions {
-                    sender: swap.server_refund_public_key.into(),
-                    receiver: swap.claim_public_key.into(),
-                    server,
-                    preimage_hash,
-                    refund_locktime: timeout_block_heights.refund,
-                    unilateral_claim_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_claim as i64,
-                    )
-                    .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
-                    unilateral_refund_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid unilateral refund timeout: {e}"))
-                    })?,
-                    unilateral_refund_without_receiver_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund_without_receiver as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
-                    })?,
-                })
-            },
-            &expected_address,
-        )?;
+        let vhtlc = self.chain_vhtlc_script(&mut swap, &server_info).await?;
         let vhtlc_address = vhtlc.address();
 
         let vhtlc_outpoint = {
@@ -2189,7 +2239,7 @@ where
         .map_err(Error::from)
         .context("failed to build offchain TXs")?;
 
-        let kp = self.keypair_by_pk(&claimer_pk)?;
+        let kp = self.swap_keypair_by_pk(&claimer_pk, swap.claim_key_derivation_index, swap_id)?;
         let sign_fn =
             |input: &mut psbt::Input,
              msg: secp256k1::Message|
@@ -2223,7 +2273,7 @@ where
 
         sign_ark_transaction(sign_fn, &mut ark_tx, 0)
             .map_err(Error::from)
-            .context("failed to sign Ark TX")?;
+            .context("failed to sign Arkade TX")?;
 
         let ark_txid = ark_tx.unsigned_tx.compute_txid();
 
@@ -2259,9 +2309,14 @@ where
         let mut updated_swap = swap.clone();
         updated_swap.status = SwapStatus::TransactionClaimed;
         self.swap_storage()
-            .update_chain(swap_id, updated_swap)
+            .update_chain(swap_id, updated_swap.clone())
             .await
             .context("failed to update chain swap data")?;
+        self.best_effort_mark_vhtlc_contract_inactive(
+            swap_id,
+            updated_swap.contract_script_pubkey.as_ref(),
+            "chain claim",
+        );
 
         Ok(ark_txid)
     }
@@ -2381,8 +2436,7 @@ where
         };
 
         // Compute the taproot script-path sighash
-        let leaf_hash =
-            bitcoin::taproot::TapLeafHash::from_script(&claim_script, LeafVersion::TapScript);
+        let leaf_hash = TapLeafHash::from_script(&claim_script, LeafVersion::TapScript);
 
         let prevouts = [TxOut {
             value: utxo.amount,
@@ -2399,7 +2453,9 @@ where
             .map_err(|e| Error::ad_hoc(format!("failed to compute sighash: {e}")))?;
 
         let msg = secp256k1::Message::from_digest(sighash.to_byte_array());
-        let claim_kp = self.keypair_by_pk(&swap.claim_public_key.inner.x_only_public_key().0)?;
+        let claim_pk = swap.claim_public_key.inner.x_only_public_key().0;
+        let claim_kp =
+            self.swap_keypair_by_pk(&claim_pk, swap.claim_key_derivation_index, swap_id)?;
         let signature = secp.sign_schnorr_no_aux_rand(&msg, &claim_kp);
 
         // Build witness: <signature> <preimage> <claim_script> <control_block>
@@ -2432,63 +2488,33 @@ where
         Ok(txid)
     }
 
-    /// Refund the Ark VHTLC from a chain swap after the timelock has expired.
+    /// Refund the Arkade VHTLC from a chain swap after the timelock has expired.
     ///
-    /// This is for [`ChainSwapDirection::ArkToBtc`] swaps where the user locked an Ark VHTLC
+    /// This is for [`ChainSwapDirection::ArkToBtc`] swaps where the user locked an Arkade VHTLC
     /// and needs to reclaim it (e.g. if Boltz never locked BTC or the swap expired).
     ///
     /// This path does not require a signature from Boltz.
     pub async fn refund_chain_swap(&self, swap_id: &str) -> Result<Txid, Error> {
-        let swap = self
+        let mut swap = self
             .swap_storage()
             .get_chain(swap_id)
             .await
             .context("failed to get chain swap data")?
             .ok_or_else(|| Error::ad_hoc(format!("chain swap data not found: {swap_id}")))?;
 
+        if swap.direction != ChainSwapDirection::ArkToBtc {
+            return Err(Error::ad_hoc(
+                "refund_chain_swap only applies to ArkToBtc swaps; use refund_chain_swap_btc",
+            ));
+        }
+
         let timeout_block_heights = swap.user_timeout_block_heights.ok_or_else(|| {
-            Error::ad_hoc(
-                "chain swap has no ARK-side VHTLC timeouts on user lockup \
-                 (user lockup is on-chain BTC, use refund_chain_swap_btc instead)",
-            )
+            Error::ad_hoc("chain swap is missing Arkade-side VHTLC timeouts for user lockup")
         })?;
 
-        let preimage_hash = ripemd160::Hash::hash(swap.preimage_hash.as_byte_array());
         let server_info = self.server_info().await?;
 
-        // User's lockup VHTLC: sender=user(refund), receiver=server(claim)
-        let expected_address = ArkAddress::decode(&swap.user_lockup_address)
-            .map_err(|e| Error::ad_hoc(format!("invalid user lockup address: {e}")))?;
-
-        let vhtlc = self.reconstruct_vhtlc_for_address(
-            &server_info,
-            |server| {
-                Ok(VhtlcOptions {
-                    sender: swap.refund_public_key.into(),
-                    receiver: swap.server_claim_public_key.into(),
-                    server,
-                    preimage_hash,
-                    refund_locktime: timeout_block_heights.refund,
-                    unilateral_claim_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_claim as i64,
-                    )
-                    .map_err(|e| Error::ad_hoc(format!("invalid unilateral claim timeout: {e}")))?,
-                    unilateral_refund_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid unilateral refund timeout: {e}"))
-                    })?,
-                    unilateral_refund_without_receiver_delay: parse_sequence_number(
-                        timeout_block_heights.unilateral_refund_without_receiver as i64,
-                    )
-                    .map_err(|e| {
-                        Error::ad_hoc(format!("invalid refund without receiver timeout: {e}"))
-                    })?,
-                })
-            },
-            &expected_address,
-        )?;
+        let vhtlc = self.chain_vhtlc_script(&mut swap, &server_info).await?;
         let vhtlc_address = vhtlc.address();
 
         let vhtlc_outpoint = {
@@ -2548,7 +2574,8 @@ where
             &server_info,
         )?;
 
-        let kp = self.keypair_by_pk(&refunder_pk)?;
+        let kp =
+            self.swap_keypair_by_pk(&refunder_pk, swap.refund_key_derivation_index, swap_id)?;
         let sign_fn =
             |_: &mut psbt::Input,
              msg: secp256k1::Message|
@@ -2573,7 +2600,8 @@ where
             .ok_or_else(|| Error::ad_hoc("no checkpoint PSBTs found"))?
             .clone();
 
-        let kp = self.keypair_by_pk(&refunder_pk)?;
+        let kp =
+            self.swap_keypair_by_pk(&refunder_pk, swap.refund_key_derivation_index, swap_id)?;
         let sign_fn =
             |_: &mut psbt::Input,
              msg: secp256k1::Message|
@@ -2594,14 +2622,19 @@ where
         .map_err(Error::ark_server)
         .context("failed to finalize offchain transaction")?;
 
-        tracing::info!(swap_id, txid = %ark_txid, "Refunded chain swap Ark VHTLC");
+        tracing::info!(swap_id, txid = %ark_txid, "Refunded chain swap Arkade VHTLC");
 
         let mut updated_swap = swap.clone();
         updated_swap.status = SwapStatus::TransactionRefunded;
         self.swap_storage()
-            .update_chain(swap_id, updated_swap)
+            .update_chain(swap_id, updated_swap.clone())
             .await
             .context("failed to update chain swap data")?;
+        self.best_effort_mark_vhtlc_contract_inactive(
+            swap_id,
+            updated_swap.contract_script_pubkey.as_ref(),
+            "chain refund",
+        );
 
         Ok(ark_txid)
     }
@@ -2609,7 +2642,7 @@ where
     /// Refund on-chain BTC from a chain swap after the timelock has expired.
     ///
     /// This is for [`ChainSwapDirection::BtcToArk`] swaps where the user locked on-chain BTC
-    /// and needs to reclaim it (e.g. if Boltz never locked the Ark VHTLC or the swap expired).
+    /// and needs to reclaim it (e.g. if Boltz never locked the Arkade VHTLC or the swap expired).
     pub async fn refund_chain_swap_btc(
         &self,
         swap_id: &str,
@@ -2715,8 +2748,7 @@ where
         };
 
         // Sign with the refund key
-        let leaf_hash =
-            bitcoin::taproot::TapLeafHash::from_script(&refund_script, LeafVersion::TapScript);
+        let leaf_hash = TapLeafHash::from_script(&refund_script, LeafVersion::TapScript);
 
         let prevouts = [TxOut {
             value: utxo.amount,
@@ -2733,7 +2765,9 @@ where
             .map_err(|e| Error::ad_hoc(format!("failed to compute sighash: {e}")))?;
 
         let msg = secp256k1::Message::from_digest(sighash.to_byte_array());
-        let refund_kp = self.keypair_by_pk(&swap.refund_public_key.inner.x_only_public_key().0)?;
+        let refund_pk = swap.refund_public_key.inner.x_only_public_key().0;
+        let refund_kp =
+            self.swap_keypair_by_pk(&refund_pk, swap.refund_key_derivation_index, swap_id)?;
         let signature = secp.sign_schnorr_no_aux_rand(&msg, &refund_kp);
 
         // Witness for refund: <signature> <refund_script> <control_block>
@@ -2770,15 +2804,7 @@ where
     /// for the live status.
     pub async fn get_swap_status(&self, swap_id: &str) -> Result<SwapStatusInfo, Error> {
         // Determine swap type from local storage.
-        let swap_type = if self.swap_storage().get_submarine(swap_id).await?.is_some() {
-            SwapType::Submarine
-        } else if self.swap_storage().get_reverse(swap_id).await?.is_some() {
-            SwapType::Reverse
-        } else if self.swap_storage().get_chain(swap_id).await?.is_some() {
-            SwapType::Chain
-        } else {
-            SwapType::Unknown
-        };
+        let swap_type = self.swap_type_for_id(swap_id).await?;
 
         // Query the Boltz API for live status.
         let url = format!("{}/v2/swap/{swap_id}", self.inner.boltz_url);
@@ -2806,6 +2832,9 @@ where
             .map_err(|e| Error::ad_hoc(e.to_string()))
             .context("failed to deserialize swap status response")?;
 
+        self.persist_swap_status_for_type(swap_type, swap_id, status_response.status.clone())
+            .await?;
+
         Ok(SwapStatusInfo {
             swap_id: swap_id.to_string(),
             swap_type,
@@ -2824,7 +2853,7 @@ where
             .build()
             .map_err(|e| Error::ad_hoc(e.to_string()))?;
 
-        // Fetch submarine swap fees (ARK -> BTC)
+        // Fetch submarine swap fees (Arkade -> BTC)
         let submarine_url = format!("{}/v2/swap/submarine", self.inner.boltz_url);
         let submarine_response = client
             .get(&submarine_url)
@@ -2855,7 +2884,7 @@ where
             miner_fees: submarine_pair_fees.miner_fees,
         };
 
-        // Fetch reverse swap fees (BTC -> ARK)
+        // Fetch reverse swap fees (BTC -> Arkade)
         let reverse_url = format!("{}/v2/swap/reverse", self.inner.boltz_url);
         let reverse_response = client
             .get(&reverse_url)
@@ -2943,6 +2972,69 @@ where
         swap_id: String,
     ) -> impl futures::Stream<Item = Result<SwapStatus, Error>> + '_ {
         async_stream::stream! {
+            use futures::StreamExt;
+
+            let swap_type = match self.swap_type_for_id(&swap_id).await {
+                Ok(swap_type) => swap_type,
+                Err(error) => {
+                    yield Err(error);
+                    return;
+                }
+            };
+            let stream = self.subscribe_to_swap_updates_for_type(swap_id, swap_type);
+            tokio::pin!(stream);
+
+            while let Some(status) = stream.next().await {
+                yield status;
+            }
+        }
+    }
+
+    /// Start a background watcher for active Boltz VHTLC contracts.
+    ///
+    /// The watcher subscribes directly to active VHTLC scripts and drives lifecycle actions from
+    /// VTXO events: it claims locally claimable VHTLCs, extracts submarine preimages after Boltz
+    /// spends a VHTLC, reconciles contract state, and retries refunds for locally stored refundable
+    /// statuses. This keeps VHTLC lifecycle handling event-driven instead of tying contract
+    /// deactivation to Boltz status polling.
+    ///
+    /// Keep the returned handle alive for as long as the watcher should run. Dropping the handle
+    /// stops the watcher.
+    #[must_use = "dropping the handle stops the Boltz VHTLC watcher"]
+    pub fn start_boltz_vhtlc_watcher(self: &Arc<Self>) -> BoltzVhtlcWatcherHandle
+    where
+        B: Send + Sync + 'static,
+    {
+        self.start_boltz_vhtlc_watcher_with_config(BoltzVhtlcWatcherConfig::default())
+    }
+
+    /// Start a background watcher for active Boltz VHTLC contracts with custom configuration.
+    ///
+    /// Keep the returned handle alive for as long as the watcher should run. Dropping the handle
+    /// stops the watcher.
+    #[must_use = "dropping the handle stops the Boltz VHTLC watcher"]
+    pub fn start_boltz_vhtlc_watcher_with_config(
+        self: &Arc<Self>,
+        config: BoltzVhtlcWatcherConfig,
+    ) -> BoltzVhtlcWatcherHandle
+    where
+        B: Send + Sync + 'static,
+    {
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let client = Arc::clone(self);
+        tokio::spawn(async move {
+            run_boltz_vhtlc_watcher_loop(client, stop_rx, config).await;
+            tracing::debug!("Boltz VHTLC watcher stopped");
+        });
+        BoltzVhtlcWatcherHandle { stop_tx }
+    }
+
+    fn subscribe_to_swap_updates_for_type(
+        &self,
+        swap_id: String,
+        swap_type: SwapType,
+    ) -> impl futures::Stream<Item = Result<SwapStatus, Error>> + '_ {
+        async_stream::stream! {
             let mut last_status: Option<SwapStatus> = None;
             let url = format!("{}/v2/swap/{swap_id}", self.inner.boltz_url);
 
@@ -2964,10 +3056,23 @@ where
                             Ok(current_status) => {
                                 let current_status = current_status.status;
 
-                                // Only yield if status has changed
-                                if last_status.as_ref() != Some(&current_status) {
+                                let status_changed = last_status.as_ref() != Some(&current_status);
+                                let status_terminal = current_status.is_terminal();
+                                if status_changed || status_terminal {
+                                    if let Err(e) = self.persist_swap_status_for_type(swap_type, &swap_id, current_status.clone()).await {
+                                        yield Err(e);
+                                        break;
+                                    }
+                                }
+
+                                // Only yield if status has changed.
+                                if status_changed {
                                     last_status = Some(current_status.clone());
                                     yield Ok(current_status);
+                                }
+
+                                if status_terminal {
+                                    break;
                                 }
                             }
                             Err(e) => {
@@ -2997,7 +3102,7 @@ where
                 }
 
                 // Poll every second
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
         }
     }
@@ -3006,8 +3111,8 @@ where
 
     /// List pending (submitted but not finalized) VHTLC spend transactions.
     ///
-    /// This checks all non-terminal swaps in storage, queries the server for pending VTXOs
-    /// on their VHTLC addresses, and determines the spend type from the PSBT data.
+    /// This checks swaps whose VHTLC contract is still active, queries the server for pending
+    /// VTXOs on their VHTLC addresses, and determines the spend type from the PSBT data.
     pub async fn list_pending_vhtlc_spend_txs(&self) -> Result<Vec<PendingVhtlcSpendTx>, Error> {
         let vhtlc_infos = self.collect_active_vhtlc_infos().await?;
 
@@ -3035,14 +3140,14 @@ where
         }
 
         // Map script_pubkey → VhtlcInfo for lookup.
-        let info_by_script: std::collections::HashMap<_, _> = vhtlc_infos
+        let info_by_script: HashMap<_, _> = vhtlc_infos
             .iter()
             .map(|info| (info.script_pubkey.clone(), info))
             .collect();
 
         let secp = Secp256k1::new();
         let mut results = Vec::new();
-        let mut seen_ark_txids = std::collections::HashSet::new();
+        let mut seen_ark_txids = HashSet::new();
 
         for vtxo in &vtxos {
             let info = match info_by_script.get(&vtxo.script) {
@@ -3194,10 +3299,17 @@ where
     }
 
     /// Sign and finalize all pending VHTLC spend transactions.
-    pub async fn continue_pending_vhtlc_spend_txs(&self) -> Result<Vec<Txid>, Error> {
+    ///
+    /// Discovery failures are returned as errors. Per-transaction finalization failures are
+    /// collected in the result so callers can observe partial recovery without preventing other
+    /// pending transactions from being finalized.
+    pub async fn continue_pending_vhtlc_spend_txs(
+        &self,
+    ) -> Result<ContinuePendingVhtlcSpendTxsResult, Error> {
         let pending = self.list_pending_vhtlc_spend_txs().await?;
 
         let mut finalized = Vec::new();
+        let mut failed = Vec::new();
         for tx in &pending {
             match self.continue_pending_vhtlc_spend_tx(tx).await {
                 Ok(txid) => finalized.push(txid),
@@ -3208,11 +3320,17 @@ where
                         ?e,
                         "Failed to finalize pending VHTLC spend tx"
                     );
+                    failed.push(PendingVhtlcSpendFailure {
+                        ark_txid: tx.pending_tx.ark_txid,
+                        swap_id: tx.spend_type.swap_id().to_string(),
+                        spend_type: tx.spend_type.name(),
+                        error: e.to_string(),
+                    });
                 }
             }
         }
 
-        Ok(finalized)
+        Ok(ContinuePendingVhtlcSpendTxsResult { finalized, failed })
     }
 
     /// Sign and finalize a pending claim VHTLC checkpoint.
@@ -3258,6 +3376,19 @@ where
         //
         // Re-send the ark tx and each checkpoint to Boltz's refund endpoint to get fresh
         // signatures from them.
+        let mut swap_data = self
+            .swap_storage()
+            .get_submarine(swap_id)
+            .await?
+            .ok_or_else(|| Error::ad_hoc(format!("submarine swap not found: {swap_id}")))?;
+        let server_info = self.server_info().await?;
+        let vhtlc = self
+            .submarine_vhtlc_script(&mut swap_data, &server_info)
+            .await?;
+        let refund_script = vhtlc.refund_script();
+        let boltz_refund_pk = swap_data.claim_public_key.inner.x_only_public_key().0;
+        let refund_leaf_hash = TapLeafHash::from_script(&refund_script, LeafVersion::TapScript);
+
         let url = format!(
             "{}/v2/swap/submarine/{swap_id}/refund/ark",
             self.inner.boltz_url
@@ -3305,12 +3436,14 @@ where
                 .context("could not parse Boltz-signed checkpoint PSBT")?;
 
             // Extract Boltz's tap_script_sigs.
-            let boltz_tap_script_sigs = boltz_signed_checkpoint
-                .inputs
-                .first()
-                .ok_or_else(|| Error::ad_hoc("Boltz checkpoint has no inputs"))?
-                .tap_script_sigs
-                .clone();
+            let boltz_tap_script_sigs = validated_boltz_tap_script_sigs(
+                boltz_signed_checkpoint
+                    .inputs
+                    .first()
+                    .ok_or_else(|| Error::ad_hoc("Boltz checkpoint has no inputs"))?,
+                boltz_refund_pk,
+                refund_leaf_hash,
+            )?;
 
             // Start from the server's checkpoint (which has the server's signature).
             let mut final_checkpoint = checkpoint_psbt.clone();
@@ -3433,56 +3566,557 @@ where
         )
     }
 
-    /// Collect info about all active (non-terminal) VHTLCs from swap storage.
-    /// Ensure a swap key is loaded into the key provider's cache so
-    /// `keypair_by_pk` can find it during intent signing.
-    ///
-    /// Returns `true` if the key is available (already cached or successfully derived).
-    /// Returns `false` for legacy swap data without a stored derivation index.
-    fn ensure_swap_key_cached(
+    pub(crate) async fn migrate_boltz_vhtlc_contracts(
+        &self,
+        server_info: &Info,
+    ) -> Result<u32, Error> {
+        let mut migrated = 0;
+
+        for mut swap in self.swap_storage().list_all_submarine().await? {
+            if swap.contract_script_pubkey.is_some() {
+                continue;
+            }
+            match self.submarine_vhtlc_script(&mut swap, server_info).await {
+                Ok(_) => {
+                    self.best_effort_reconcile_vhtlc_contract_state_from_vtxos(
+                        &swap.id,
+                        swap.vhtlc_address,
+                        swap.contract_script_pubkey.clone(),
+                    )
+                    .await;
+                    migrated += 1;
+                }
+                Err(error) => {
+                    tracing::warn!(swap_id = %swap.id, ?error, "Failed to migrate submarine VHTLC contract");
+                }
+            }
+        }
+
+        for mut swap in self.swap_storage().list_all_reverse().await? {
+            if swap.contract_script_pubkey.is_some() {
+                continue;
+            }
+            match self.reverse_vhtlc_script(&mut swap, server_info).await {
+                Ok(_) => {
+                    self.best_effort_reconcile_vhtlc_contract_state_from_vtxos(
+                        &swap.id,
+                        swap.vhtlc_address,
+                        swap.contract_script_pubkey.clone(),
+                    )
+                    .await;
+                    migrated += 1;
+                }
+                Err(error) => {
+                    tracing::warn!(swap_id = %swap.id, ?error, "Failed to migrate reverse VHTLC contract");
+                }
+            }
+        }
+
+        for mut swap in self.swap_storage().list_all_chain().await? {
+            if swap.contract_script_pubkey.is_some() {
+                self.best_effort_cache_chain_swap_key(&swap);
+                continue;
+            }
+            match self.chain_vhtlc_script(&mut swap, server_info).await {
+                Ok(_) => {
+                    self.best_effort_cache_chain_swap_key(&swap);
+                    match swap.chain_vhtlc_address() {
+                        Ok(vhtlc_address) => {
+                            self.best_effort_reconcile_vhtlc_contract_state_from_vtxos(
+                                &swap.id,
+                                vhtlc_address,
+                                swap.contract_script_pubkey.clone(),
+                            )
+                            .await;
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                swap_id = %swap.id,
+                                ?error,
+                                "Failed to resolve chain VHTLC address during contract-state reconciliation"
+                            );
+                        }
+                    }
+                    migrated += 1;
+                }
+                Err(error) => {
+                    tracing::warn!(swap_id = %swap.id, ?error, "Failed to migrate chain VHTLC contract");
+                }
+            }
+        }
+
+        Ok(migrated)
+    }
+
+    fn best_effort_cache_chain_swap_key(&self, swap: &ChainSwapData) {
+        let (pk, key_derivation_index, key_role) = match swap.direction {
+            ChainSwapDirection::ArkToBtc => (
+                swap.refund_public_key.inner.x_only_public_key().0,
+                swap.refund_key_derivation_index,
+                "refund",
+            ),
+            ChainSwapDirection::BtcToArk => (
+                swap.claim_public_key.inner.x_only_public_key().0,
+                swap.claim_key_derivation_index,
+                "claim",
+            ),
+        };
+
+        if let Err(error) = self.swap_keypair_by_pk(&pk, key_derivation_index, &swap.id) {
+            tracing::warn!(
+                swap_id = %swap.id,
+                key_role,
+                ?error,
+                "Failed to cache chain swap VHTLC key"
+            );
+        }
+    }
+
+    async fn swap_type_for_id(&self, swap_id: &str) -> Result<SwapType, Error> {
+        if self.swap_storage().get_submarine(swap_id).await?.is_some() {
+            Ok(SwapType::Submarine)
+        } else if self.swap_storage().get_reverse(swap_id).await?.is_some() {
+            Ok(SwapType::Reverse)
+        } else if self.swap_storage().get_chain(swap_id).await?.is_some() {
+            Ok(SwapType::Chain)
+        } else {
+            Ok(SwapType::Unknown)
+        }
+    }
+
+    async fn persist_swap_status_for_type(
+        &self,
+        swap_type: SwapType,
+        swap_id: &str,
+        status: SwapStatus,
+    ) -> Result<(), Error> {
+        match swap_type {
+            SwapType::Submarine => {
+                if self.swap_storage().get_submarine(swap_id).await?.is_some() {
+                    let should_reconcile = status.is_terminal();
+                    self.swap_storage()
+                        .update_status_submarine(swap_id, status)
+                        .await?;
+                    if should_reconcile {
+                        if let Some(swap) = self.swap_storage().get_submarine(swap_id).await? {
+                            self.best_effort_reconcile_vhtlc_contract_state_from_vtxos(
+                                swap_id,
+                                swap.vhtlc_address,
+                                swap.contract_script_pubkey,
+                            )
+                            .await;
+                        }
+                    }
+                }
+            }
+            SwapType::Reverse => {
+                if self.swap_storage().get_reverse(swap_id).await?.is_some() {
+                    let should_reconcile = status.is_terminal();
+                    self.swap_storage()
+                        .update_status_reverse(swap_id, status)
+                        .await?;
+                    if should_reconcile {
+                        if let Some(swap) = self.swap_storage().get_reverse(swap_id).await? {
+                            self.best_effort_reconcile_vhtlc_contract_state_from_vtxos(
+                                swap_id,
+                                swap.vhtlc_address,
+                                swap.contract_script_pubkey,
+                            )
+                            .await;
+                        }
+                    }
+                }
+            }
+            SwapType::Chain => {
+                if self.swap_storage().get_chain(swap_id).await?.is_some() {
+                    let should_reconcile = status.is_terminal();
+                    self.swap_storage()
+                        .update_status_chain(swap_id, status)
+                        .await?;
+                    if should_reconcile {
+                        if let Some(swap) = self.swap_storage().get_chain(swap_id).await? {
+                            match swap.chain_vhtlc_address() {
+                                Ok(vhtlc_address) => {
+                                    self.best_effort_reconcile_vhtlc_contract_state_from_vtxos(
+                                        swap_id,
+                                        vhtlc_address,
+                                        swap.contract_script_pubkey,
+                                    )
+                                    .await;
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        swap_id,
+                                        ?error,
+                                        "Failed to resolve chain VHTLC address during contract-state reconciliation"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            SwapType::Unknown => {}
+        }
+
+        Ok(())
+    }
+
+    fn insert_vhtlc_contract(
+        &self,
+        options: VhtlcOptions,
+        key_derivation_index: Option<u32>,
+    ) -> Result<ScriptBuf, Error> {
+        let contract = VhtlcContract { options };
+        let state = self
+            .state
+            .read()
+            .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+        let mut manager = state
+            .contract_manager
+            .lock()
+            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?;
+        let stored =
+            manager.insert_or_get(contract, ContractState::Active, key_derivation_index)?;
+        Ok(stored.script_pubkey)
+    }
+
+    async fn observe_vhtlc_contract_liveness(
+        &self,
+        server_info: &Info,
+        address: ArkAddress,
+    ) -> Result<VhtlcContractLiveness, Error> {
+        let pending_request =
+            ark_core::server::GetVtxosRequest::new_for_addresses(std::iter::once(address))
+                .pending_only()
+                .map_err(Error::from)?;
+        let pending_vtxos = self
+            .fetch_all_vtxos(pending_request)
+            .await
+            .context("failed to fetch pending VHTLC VTXOs")?;
+
+        let vtxos = self
+            .get_virtual_tx_outpoints(std::iter::once(address))
+            .await
+            .context("failed to fetch VHTLC VTXOs")?;
+
+        Ok(classify_vhtlc_contract_liveness(
+            server_info.dust,
+            !pending_vtxos.is_empty(),
+            vtxos,
+        ))
+    }
+
+    async fn reconcile_vhtlc_contract_state_from_vtxos(
+        &self,
+        swap_id: &str,
+        address: ArkAddress,
+        script_pubkey: Option<ScriptBuf>,
+    ) -> Result<(), Error> {
+        let Some(script_pubkey) = script_pubkey else {
+            return Ok(());
+        };
+
+        let server_info = self.server_info().await?;
+        let liveness = self
+            .observe_vhtlc_contract_liveness(&server_info, address)
+            .await?;
+
+        tracing::debug!(
+            swap_id,
+            %address,
+            ?liveness,
+            "Observed VHTLC contract liveness"
+        );
+
+        if liveness.should_deactivate_contract() {
+            self.mark_vhtlc_contract_inactive(Some(&script_pubkey))?;
+            tracing::info!(
+                swap_id,
+                %address,
+                "Marked spent VHTLC contract inactive"
+            );
+        }
+
+        Ok(())
+    }
+
+    async fn best_effort_reconcile_vhtlc_contract_state_from_vtxos(
+        &self,
+        swap_id: &str,
+        address: ArkAddress,
+        script_pubkey: Option<ScriptBuf>,
+    ) {
+        match self.vhtlc_contract_is_inactive(script_pubkey.as_ref()) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    swap_id,
+                    ?error,
+                    "Failed to check VHTLC contract state before reconciliation"
+                );
+            }
+        }
+
+        if let Err(error) = self
+            .reconcile_vhtlc_contract_state_from_vtxos(swap_id, address, script_pubkey)
+            .await
+        {
+            tracing::warn!(
+                swap_id,
+                ?error,
+                "Failed to reconcile VHTLC contract state from VTXO status"
+            );
+        }
+    }
+
+    fn deactivate_orphaned_vhtlc_contract(
+        &self,
+        script_pubkey: &ScriptBuf,
+        swap_id: &str,
+        error: Error,
+    ) -> Error {
+        if let Err(rollback_error) = self.mark_vhtlc_contract_inactive(Some(script_pubkey)) {
+            tracing::warn!(
+                swap_id,
+                ?rollback_error,
+                "Failed to deactivate orphaned VHTLC contract after swap persistence failure"
+            );
+        }
+        error
+    }
+
+    fn mark_vhtlc_contract_inactive(&self, script_pubkey: Option<&ScriptBuf>) -> Result<(), Error> {
+        let Some(script_pubkey) = script_pubkey else {
+            return Ok(());
+        };
+        let state = self
+            .state
+            .read()
+            .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+        let result = state
+            .contract_manager
+            .lock()
+            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?
+            .update_state(script_pubkey, ContractState::Inactive);
+        result
+    }
+
+    fn vhtlc_contract_is_inactive(&self, script_pubkey: Option<&ScriptBuf>) -> Result<bool, Error> {
+        let Some(script_pubkey) = script_pubkey else {
+            return Ok(false);
+        };
+        let state = self
+            .state
+            .read()
+            .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+        let inactive = state
+            .contract_manager
+            .lock()
+            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?
+            .get(script_pubkey)?
+            .is_some_and(|contract| contract.state == ContractState::Inactive);
+        Ok(inactive)
+    }
+
+    fn best_effort_mark_vhtlc_contract_inactive(
+        &self,
+        swap_id: &str,
+        script_pubkey: Option<&ScriptBuf>,
+        action: &'static str,
+    ) {
+        if let Err(error) = self.mark_vhtlc_contract_inactive(script_pubkey) {
+            tracing::warn!(
+                swap_id,
+                action,
+                ?error,
+                "Failed to deactivate finalized VHTLC contract"
+            );
+        }
+    }
+
+    fn get_vhtlc_contract(
+        &self,
+        script_pubkey: &ScriptBuf,
+    ) -> Result<Option<VhtlcContract>, Error> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+        let contract = state
+            .contract_manager
+            .lock()
+            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?
+            .get_typed(script_pubkey)?;
+        Ok(contract)
+    }
+
+    async fn submarine_vhtlc_script(
+        &self,
+        swap: &mut SubmarineSwapData,
+        server_info: &Info,
+    ) -> Result<VhtlcScript, Error> {
+        if let Some(script_pubkey) = &swap.contract_script_pubkey {
+            if let Some(contract) = self.get_vhtlc_contract(script_pubkey)? {
+                let vhtlc = vhtlc_script_from_contract(contract, &swap.vhtlc_address, server_info)?;
+
+                return Ok(vhtlc);
+            }
+
+            tracing::warn!(
+                swap_id = %swap.id,
+                "VHTLC contract reference missing; recreating from legacy swap data"
+            );
+        }
+
+        let vhtlc = self.build_vhtlc_script(
+            server_info,
+            swap.claim_public_key,
+            swap.refund_public_key,
+            swap.preimage_hash,
+            &swap.timeout_block_heights,
+            &swap.vhtlc_address,
+        )?;
+
+        let script_pubkey = self
+            .insert_vhtlc_contract(vhtlc.options().clone(), swap.key_derivation_index)
+            .context("failed to persist VHTLC contract")?;
+
+        swap.contract_script_pubkey = Some(script_pubkey);
+        self.swap_storage()
+            .update_submarine(&swap.id, swap.clone())
+            .await
+            .context("failed to persist VHTLC contract reference")?;
+
+        Ok(vhtlc)
+    }
+
+    fn build_chain_vhtlc_script(
+        &self,
+        swap: &ChainSwapData,
+        server_info: &Info,
+    ) -> Result<VhtlcScript, Error> {
+        let fields = swap.chain_vhtlc_fields()?;
+        self.build_vhtlc_script(
+            server_info,
+            fields.claim_public_key,
+            fields.refund_public_key,
+            ripemd160::Hash::hash(swap.preimage_hash.as_byte_array()),
+            &fields.timeouts,
+            &fields.address,
+        )
+    }
+
+    async fn chain_vhtlc_script(
+        &self,
+        swap: &mut ChainSwapData,
+        server_info: &Info,
+    ) -> Result<VhtlcScript, Error> {
+        if let Some(script_pubkey) = &swap.contract_script_pubkey {
+            if let Some(contract) = self.get_vhtlc_contract(script_pubkey)? {
+                let expected_address = swap.chain_vhtlc_address()?;
+                let vhtlc = vhtlc_script_from_contract(contract, &expected_address, server_info)?;
+
+                return Ok(vhtlc);
+            }
+
+            tracing::warn!(
+                swap_id = %swap.id,
+                "Chain VHTLC contract reference missing; recreating from swap data"
+            );
+        }
+
+        let vhtlc = self.build_chain_vhtlc_script(swap, server_info)?;
+
+        let script_pubkey = self
+            .insert_vhtlc_contract(vhtlc.options().clone(), swap.chain_vhtlc_key_index())
+            .context("failed to persist chain VHTLC contract")?;
+
+        swap.contract_script_pubkey = Some(script_pubkey);
+        self.swap_storage()
+            .update_chain(&swap.id, swap.clone())
+            .await
+            .context("failed to persist chain VHTLC contract reference")?;
+
+        Ok(vhtlc)
+    }
+
+    async fn reverse_vhtlc_script(
+        &self,
+        swap: &mut ReverseSwapData,
+        server_info: &Info,
+    ) -> Result<VhtlcScript, Error> {
+        if let Some(script_pubkey) = &swap.contract_script_pubkey {
+            if let Some(contract) = self.get_vhtlc_contract(script_pubkey)? {
+                return vhtlc_script_from_contract(contract, &swap.vhtlc_address, server_info);
+            }
+            tracing::warn!(
+                swap_id = %swap.id,
+                "VHTLC contract reference missing; recreating from legacy swap data"
+            );
+        }
+
+        let vhtlc = self.build_vhtlc_script(
+            server_info,
+            swap.claim_public_key,
+            swap.refund_public_key,
+            swap.preimage_hash,
+            &swap.timeout_block_heights,
+            &swap.vhtlc_address,
+        )?;
+
+        let script_pubkey = self
+            .insert_vhtlc_contract(vhtlc.options().clone(), swap.key_derivation_index)
+            .context("failed to persist VHTLC contract")?;
+
+        swap.contract_script_pubkey = Some(script_pubkey);
+        self.swap_storage()
+            .update_reverse(&swap.id, swap.clone())
+            .await
+            .context("failed to persist VHTLC contract reference")?;
+        Ok(vhtlc)
+    }
+
+    /// Return a swap keypair, deriving it from the persisted swap index if needed.
+    fn swap_keypair_by_pk(
         &self,
         pk: &XOnlyPublicKey,
         key_derivation_index: Option<u32>,
         swap_id: &str,
-    ) -> bool {
-        // Already in cache — nothing to do.
-        if self.keypair_by_pk(pk).is_ok() {
-            return true;
+    ) -> Result<Keypair, Error> {
+        if let Ok(kp) = self.keypair_by_pk(pk) {
+            return Ok(kp);
         }
 
-        let Some(index) = key_derivation_index else {
-            tracing::warn!(
-                swap_id,
-                "Legacy swap data without derivation index, skipping recovery"
-            );
-            return false;
-        };
+        let index = key_derivation_index.ok_or_else(|| {
+            Error::ad_hoc(format!(
+                "legacy swap {swap_id} is missing key derivation index for pubkey {pk}"
+            ))
+        })?;
 
-        let Some(key_provider) = self.inner.discoverable_key_provider.as_ref() else {
-            return false;
-        };
+        let key_provider = self.inner.discoverable_key_provider.as_ref().ok_or_else(|| {
+            Error::ad_hoc(format!(
+                "swap key {pk} for swap {swap_id} is not cached and no discoverable key provider is configured"
+            ))
+        })?;
 
-        match key_provider.derive_at_discovery_index(index) {
-            Ok(Some(kp)) if kp.x_only_public_key().0 == *pk => {
-                if let Err(e) = key_provider.cache_discovered_keypair(index, kp) {
-                    tracing::warn!(swap_id, %e, "Failed to cache swap key");
-                    return false;
-                }
-                true
-            }
-            Ok(_) => {
-                tracing::warn!(
-                    swap_id,
-                    index,
-                    "Key at stored derivation index does not match swap pubkey"
-                );
-                false
-            }
-            Err(e) => {
-                tracing::warn!(swap_id, index, %e, "Failed to derive key at stored index");
-                false
-            }
+        let kp = key_provider
+            .derive_at_discovery_index(index)
+            .with_context(|| format!("failed to derive swap key at index {index}"))?
+            .ok_or_else(|| Error::ad_hoc(format!("no swap key at derivation index {index}")))?;
+
+        if kp.x_only_public_key().0 != *pk {
+            return Err(Error::ad_hoc(format!(
+                "key at derivation index {index} does not match swap pubkey {pk}"
+            )));
         }
+
+        key_provider
+            .cache_discovered_keypair(index, kp)
+            .with_context(|| format!("failed to cache swap key at index {index}"))?;
+
+        Ok(kp)
     }
 
     async fn collect_active_vhtlc_infos(&self) -> Result<Vec<VhtlcInfo>, Error> {
@@ -3501,28 +4135,26 @@ where
         let server_info = self.server_info().await?;
         let mut infos = Vec::new();
 
-        for swap in &submarine_swaps {
-            if swap.status.is_terminal() {
+        for mut swap in submarine_swaps {
+            if self.vhtlc_contract_is_inactive(swap.contract_script_pubkey.as_ref())? {
                 continue;
             }
 
-            // Ensure the refund key (sender) is in the key cache.
-            if !self.ensure_swap_key_cached(
+            // Ensure the refund key (sender) is available for pending intent signing.
+            if let Err(error) = self.swap_keypair_by_pk(
                 &swap.refund_public_key.inner.x_only_public_key().0,
                 swap.key_derivation_index,
                 &swap.id,
             ) {
+                tracing::warn!(
+                    swap_id = %swap.id,
+                    ?error,
+                    "Skipping submarine swap with unavailable refund key"
+                );
                 continue;
             }
 
-            let vhtlc = self.build_vhtlc_script(
-                &server_info,
-                swap.claim_public_key,
-                swap.refund_public_key,
-                swap.preimage_hash,
-                &swap.timeout_block_heights,
-                &swap.vhtlc_address,
-            )?;
+            let vhtlc = self.submarine_vhtlc_script(&mut swap, &server_info).await?;
 
             // For submarine swaps, the user is the sender (refund key).
             // Use refund_without_receiver_script as the intent proof — it only requires
@@ -3545,28 +4177,26 @@ where
             });
         }
 
-        for swap in &reverse_swaps {
-            if swap.status.is_terminal() {
+        for mut swap in reverse_swaps {
+            if self.vhtlc_contract_is_inactive(swap.contract_script_pubkey.as_ref())? {
                 continue;
             }
 
-            // Ensure the claim key (receiver) is in the key cache.
-            if !self.ensure_swap_key_cached(
+            // Ensure the claim key (receiver) is available for pending intent signing.
+            if let Err(error) = self.swap_keypair_by_pk(
                 &swap.claim_public_key.inner.x_only_public_key().0,
                 swap.key_derivation_index,
                 &swap.id,
             ) {
+                tracing::warn!(
+                    swap_id = %swap.id,
+                    ?error,
+                    "Skipping reverse swap with unavailable claim key"
+                );
                 continue;
             }
 
-            let vhtlc = self.build_vhtlc_script(
-                &server_info,
-                swap.claim_public_key,
-                swap.refund_public_key,
-                swap.preimage_hash,
-                &swap.timeout_block_heights,
-                &swap.vhtlc_address,
-            )?;
+            let vhtlc = self.reverse_vhtlc_script(&mut swap, &server_info).await?;
 
             // For reverse swaps, the user is the receiver (claim key).
             // Use claim_script as the intent proof — we need to sign with the receiver key.
@@ -3744,6 +4374,797 @@ where
     }
 }
 
+async fn run_boltz_vhtlc_watcher_loop<B, S>(
+    client: Arc<Client<B, S>>,
+    mut stop_rx: tokio::sync::watch::Receiver<bool>,
+    config: BoltzVhtlcWatcherConfig,
+) where
+    B: Blockchain + Send + Sync + 'static,
+    S: SwapStorage + 'static,
+{
+    let refresh_interval = if config.refresh_interval.is_zero() {
+        VHTLC_WATCHER_REFRESH_INTERVAL
+    } else {
+        config.refresh_interval
+    };
+    let mut backoff = VHTLC_WATCHER_INITIAL_BACKOFF;
+    let mut action_log = BoltzVhtlcActionLog::default();
+
+    loop {
+        if *stop_rx.borrow() {
+            return;
+        }
+
+        drive_boltz_vhtlc_swaps(client.as_ref(), &mut action_log).await;
+
+        let addresses = match active_vhtlc_addresses(client.as_ref()).await {
+            Ok(addresses) => addresses,
+            Err(error) => {
+                tracing::warn!(?error, "Failed to collect active VHTLC addresses");
+                if wait_for_vhtlc_watcher_retry(&mut stop_rx, backoff).await {
+                    return;
+                }
+                backoff = (backoff * 2).min(VHTLC_WATCHER_MAX_BACKOFF);
+                continue;
+            }
+        };
+
+        if addresses.is_empty() {
+            if wait_for_vhtlc_watcher_retry(&mut stop_rx, refresh_interval).await {
+                return;
+            }
+            backoff = VHTLC_WATCHER_INITIAL_BACKOFF;
+            continue;
+        }
+
+        let subscription_id = match client.subscribe_to_scripts(addresses.clone(), None).await {
+            Ok(subscription_id) => subscription_id,
+            Err(error) => {
+                tracing::warn!(?error, "Failed to subscribe to VHTLC scripts");
+                if wait_for_vhtlc_watcher_retry(&mut stop_rx, backoff).await {
+                    return;
+                }
+                backoff = (backoff * 2).min(VHTLC_WATCHER_MAX_BACKOFF);
+                continue;
+            }
+        };
+
+        let mut stream = match client.get_subscription(subscription_id.clone(), None).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                tracing::warn!(?error, "Failed to open VHTLC subscription stream");
+                if wait_for_vhtlc_watcher_retry(&mut stop_rx, backoff).await {
+                    return;
+                }
+                backoff = (backoff * 2).min(VHTLC_WATCHER_MAX_BACKOFF);
+                continue;
+            }
+        };
+
+        tracing::info!(
+            watched_scripts = addresses.len(),
+            "Boltz VHTLC watcher connected"
+        );
+        backoff = VHTLC_WATCHER_INITIAL_BACKOFF;
+        let mut subscribed_addrs: HashSet<ArkAddress> = addresses.into_iter().collect();
+        let mut refresh_interval = tokio::time::interval(refresh_interval);
+
+        loop {
+            use futures::StreamExt;
+
+            tokio::select! {
+                _ = stop_rx.changed() => return,
+                _ = refresh_interval.tick() => {
+                    if let Err(error) = refresh_boltz_vhtlc_subscription(
+                        client.as_ref(),
+                        &subscription_id,
+                        &mut subscribed_addrs,
+                    ).await {
+                        tracing::warn!(?error, "Failed to refresh VHTLC watcher subscription");
+                    }
+                    drive_boltz_vhtlc_swaps(client.as_ref(), &mut action_log).await;
+                }
+                event = stream.next() => {
+                    match event {
+                        Some(Ok(SubscriptionResponse::Heartbeat)) => {}
+                        Some(Ok(SubscriptionResponse::SubscriptionStarted { subscription_id })) => {
+                            tracing::debug!(subscription_id, "VHTLC subscription stream started");
+                        }
+                        Some(Ok(SubscriptionResponse::Event(event))) => {
+                            if let Err(error) = handle_boltz_vhtlc_subscription_event(
+                                client.as_ref(),
+                                &event,
+                                &mut action_log,
+                            ).await {
+                                tracing::warn!(?error, "Failed to handle VHTLC subscription event");
+                            }
+                        }
+                        Some(Err(error)) => {
+                            tracing::warn!(?error, "VHTLC subscription stream error");
+                            break;
+                        }
+                        None => {
+                            tracing::debug!("VHTLC subscription stream ended");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if wait_for_vhtlc_watcher_retry(&mut stop_rx, backoff).await {
+            return;
+        }
+        backoff = (backoff * 2).min(VHTLC_WATCHER_MAX_BACKOFF);
+    }
+}
+
+async fn drive_boltz_vhtlc_swaps<B, S>(client: &Client<B, S>, action_log: &mut BoltzVhtlcActionLog)
+where
+    B: Blockchain,
+    S: SwapStorage + 'static,
+{
+    if let Err(error) = drive_claimable_vhtlc_swaps(client, action_log).await {
+        tracing::warn!(?error, "Failed to drive claimable VHTLC swaps");
+    }
+    if let Err(error) = drive_refundable_vhtlc_swaps(client, action_log).await {
+        tracing::warn!(?error, "Failed to drive refundable VHTLC swaps");
+    }
+}
+
+async fn active_vhtlc_addresses<B, S>(client: &Client<B, S>) -> Result<Vec<ArkAddress>, Error>
+where
+    B: Blockchain,
+    S: SwapStorage + 'static,
+{
+    let infos = collect_active_vhtlc_lifecycle_infos(client).await?;
+    Ok(infos.into_iter().map(|info| info.address).collect())
+}
+
+async fn refresh_boltz_vhtlc_subscription<B, S>(
+    client: &Client<B, S>,
+    subscription_id: &str,
+    subscribed_addrs: &mut HashSet<ArkAddress>,
+) -> Result<(), Error>
+where
+    B: Blockchain,
+    S: SwapStorage + 'static,
+{
+    let new_addrs: Vec<_> = active_vhtlc_addresses(client)
+        .await?
+        .into_iter()
+        .filter(|address| !subscribed_addrs.contains(address))
+        .collect();
+
+    if new_addrs.is_empty() {
+        return Ok(());
+    }
+
+    client
+        .subscribe_to_scripts(new_addrs.clone(), Some(subscription_id.to_string()))
+        .await?;
+
+    let added = new_addrs.len();
+    subscribed_addrs.extend(new_addrs);
+    tracing::info!(added, "Updated VHTLC watcher subscription");
+    Ok(())
+}
+
+async fn handle_boltz_vhtlc_subscription_event<B, S>(
+    client: &Client<B, S>,
+    event: &SubscriptionEvent,
+    action_log: &mut BoltzVhtlcActionLog,
+) -> Result<(), Error>
+where
+    B: Blockchain,
+    S: SwapStorage + 'static,
+{
+    if event.new_vtxos.is_empty() && event.spent_vtxos.is_empty() {
+        return Ok(());
+    }
+
+    tracing::debug!(
+        txid = %event.txid,
+        new_vtxos = event.new_vtxos.len(),
+        spent_vtxos = event.spent_vtxos.len(),
+        "Received VHTLC subscription event"
+    );
+
+    let infos = collect_active_vhtlc_lifecycle_infos(client).await?;
+    let info_by_script: HashMap<_, _> = infos
+        .into_iter()
+        .map(|info| (info.script_pubkey.clone(), info))
+        .collect();
+
+    for new_vtxo in &event.new_vtxos {
+        let Some(info) = info_by_script.get(&new_vtxo.script) else {
+            continue;
+        };
+        drive_funded_vhtlc_swap(client, info, action_log).await;
+    }
+
+    for spent_vtxo in &event.spent_vtxos {
+        let Some(info) = info_by_script.get(&spent_vtxo.script) else {
+            continue;
+        };
+        if drive_spent_vhtlc_swap(client, info).await == SpentVhtlcAction::Reconcile {
+            client
+                .reconcile_vhtlc_contract_state_from_vtxos(
+                    &info.swap_id,
+                    info.address,
+                    Some(info.script_pubkey.clone()),
+                )
+                .await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn collect_active_vhtlc_lifecycle_infos<B, S>(
+    client: &Client<B, S>,
+) -> Result<Vec<VhtlcLifecycleInfo>, Error>
+where
+    B: Blockchain,
+    S: SwapStorage + 'static,
+{
+    let submarine_swaps = client
+        .swap_storage()
+        .list_all_submarine()
+        .await
+        .context("failed to list submarine swaps")?;
+    let reverse_swaps = client
+        .swap_storage()
+        .list_all_reverse()
+        .await
+        .context("failed to list reverse swaps")?;
+    let chain_swaps = client
+        .swap_storage()
+        .list_all_chain()
+        .await
+        .context("failed to list chain swaps")?;
+    let server_info = client.server_info().await?;
+    let mut infos = Vec::new();
+
+    for mut swap in submarine_swaps {
+        match client.vhtlc_contract_is_inactive(swap.contract_script_pubkey.as_ref()) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    swap_id = %swap.id,
+                    ?error,
+                    "Skipping submarine swap after VHTLC contract state check failed"
+                );
+                continue;
+            }
+        }
+
+        let vhtlc = match client.submarine_vhtlc_script(&mut swap, &server_info).await {
+            Ok(vhtlc) => vhtlc,
+            Err(error) => {
+                tracing::warn!(
+                    swap_id = %swap.id,
+                    ?error,
+                    "Skipping submarine swap after VHTLC reconstruction failed"
+                );
+                continue;
+            }
+        };
+
+        infos.push(VhtlcLifecycleInfo {
+            swap_id: swap.id.clone(),
+            swap_type: SwapType::Submarine,
+            address: swap.vhtlc_address,
+            script_pubkey: vhtlc.script_pubkey(),
+        });
+    }
+
+    for mut swap in reverse_swaps {
+        match client.vhtlc_contract_is_inactive(swap.contract_script_pubkey.as_ref()) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    swap_id = %swap.id,
+                    ?error,
+                    "Skipping reverse swap after VHTLC contract state check failed"
+                );
+                continue;
+            }
+        }
+
+        let vhtlc = match client.reverse_vhtlc_script(&mut swap, &server_info).await {
+            Ok(vhtlc) => vhtlc,
+            Err(error) => {
+                tracing::warn!(
+                    swap_id = %swap.id,
+                    ?error,
+                    "Skipping reverse swap after VHTLC reconstruction failed"
+                );
+                continue;
+            }
+        };
+
+        infos.push(VhtlcLifecycleInfo {
+            swap_id: swap.id.clone(),
+            swap_type: SwapType::Reverse,
+            address: swap.vhtlc_address,
+            script_pubkey: vhtlc.script_pubkey(),
+        });
+    }
+
+    for mut swap in chain_swaps {
+        match client.vhtlc_contract_is_inactive(swap.contract_script_pubkey.as_ref()) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    swap_id = %swap.id,
+                    ?error,
+                    "Skipping chain swap after VHTLC contract state check failed"
+                );
+                continue;
+            }
+        }
+
+        let address = match swap.chain_vhtlc_address() {
+            Ok(address) => address,
+            Err(error) => {
+                tracing::warn!(
+                    swap_id = %swap.id,
+                    ?error,
+                    "Skipping chain swap with unresolved VHTLC address"
+                );
+                continue;
+            }
+        };
+
+        let vhtlc = match client.chain_vhtlc_script(&mut swap, &server_info).await {
+            Ok(vhtlc) => vhtlc,
+            Err(error) => {
+                tracing::warn!(
+                    swap_id = %swap.id,
+                    ?error,
+                    "Skipping chain swap after VHTLC reconstruction failed"
+                );
+                continue;
+            }
+        };
+
+        infos.push(VhtlcLifecycleInfo {
+            swap_id: swap.id.clone(),
+            swap_type: SwapType::Chain,
+            address,
+            script_pubkey: vhtlc.script_pubkey(),
+        });
+    }
+
+    Ok(infos)
+}
+
+async fn drive_claimable_vhtlc_swaps<B, S>(
+    client: &Client<B, S>,
+    action_log: &mut BoltzVhtlcActionLog,
+) -> Result<(), Error>
+where
+    B: Blockchain,
+    S: SwapStorage + 'static,
+{
+    let infos = collect_active_vhtlc_lifecycle_infos(client).await?;
+    let server_info = client.server_info().await?;
+
+    for info in infos {
+        if !matches!(info.swap_type, SwapType::Reverse | SwapType::Chain) {
+            continue;
+        }
+
+        let liveness = match client
+            .observe_vhtlc_contract_liveness(&server_info, info.address)
+            .await
+        {
+            Ok(liveness) => liveness,
+            Err(error) => {
+                tracing::warn!(
+                    swap_id = %info.swap_id,
+                    ?error,
+                    "Skipping claim retry after VHTLC liveness check failed"
+                );
+                continue;
+            }
+        };
+
+        if matches!(
+            liveness,
+            VhtlcContractLiveness::Funded | VhtlcContractLiveness::Recoverable
+        ) {
+            drive_funded_vhtlc_swap(client, &info, action_log).await;
+        }
+    }
+
+    Ok(())
+}
+
+async fn drive_funded_vhtlc_swap<B, S>(
+    client: &Client<B, S>,
+    info: &VhtlcLifecycleInfo,
+    action_log: &mut BoltzVhtlcActionLog,
+) where
+    B: Blockchain,
+    S: SwapStorage + 'static,
+{
+    match info.swap_type {
+        SwapType::Reverse => drive_reverse_vhtlc_claim(client, &info.swap_id, action_log).await,
+        SwapType::Chain => drive_chain_vhtlc_claim(client, &info.swap_id, action_log).await,
+        SwapType::Submarine | SwapType::Unknown => {}
+    }
+}
+
+async fn drive_reverse_vhtlc_claim<B, S>(
+    client: &Client<B, S>,
+    swap_id: &str,
+    action_log: &mut BoltzVhtlcActionLog,
+) where
+    B: Blockchain,
+    S: SwapStorage + 'static,
+{
+    let swap = match client.swap_storage().get_reverse(swap_id).await {
+        Ok(Some(swap)) => swap,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(
+                swap_id,
+                ?error,
+                "Failed to load reverse swap for VHTLC claim"
+            );
+            return;
+        }
+    };
+
+    let Some(preimage) = swap.preimage else {
+        tracing::debug!(
+            swap_id,
+            "Reverse VHTLC funded, but preimage is externally managed; skipping auto-claim"
+        );
+        return;
+    };
+
+    if !action_log.begin_claim(swap_id) {
+        return;
+    }
+
+    match client.claim_vhtlc(swap_id, preimage).await {
+        Ok(result) => {
+            action_log.finish_claim(swap_id, true);
+            if let Err(error) =
+                update_reverse_swap_status(client, swap_id, SwapStatus::TransactionClaimed).await
+            {
+                tracing::warn!(swap_id, ?error, "Failed to persist reverse claim status");
+            }
+            tracing::info!(
+                swap_id,
+                txid = %result.claim_txid,
+                "Auto-claimed reverse VHTLC from funding event"
+            );
+        }
+        Err(error) => {
+            action_log.finish_claim(swap_id, false);
+            tracing::warn!(swap_id, ?error, "Failed to auto-claim reverse VHTLC");
+        }
+    }
+}
+
+async fn drive_chain_vhtlc_claim<B, S>(
+    client: &Client<B, S>,
+    swap_id: &str,
+    action_log: &mut BoltzVhtlcActionLog,
+) where
+    B: Blockchain,
+    S: SwapStorage + 'static,
+{
+    let swap = match client.swap_storage().get_chain(swap_id).await {
+        Ok(Some(swap)) => swap,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(swap_id, ?error, "Failed to load chain swap for VHTLC claim");
+            return;
+        }
+    };
+
+    if swap.direction != ChainSwapDirection::BtcToArk {
+        return;
+    }
+    if swap.preimage.is_none() {
+        tracing::debug!(
+            swap_id,
+            "Chain VHTLC funded, but preimage is missing; skipping auto-claim"
+        );
+        return;
+    }
+    if !action_log.begin_claim(swap_id) {
+        return;
+    }
+
+    match client.claim_chain_swap(swap_id).await {
+        Ok(txid) => {
+            action_log.finish_claim(swap_id, true);
+            tracing::info!(swap_id, %txid, "Auto-claimed chain VHTLC from funding event");
+        }
+        Err(error) => {
+            action_log.finish_claim(swap_id, false);
+            tracing::warn!(swap_id, ?error, "Failed to auto-claim chain VHTLC");
+        }
+    }
+}
+
+async fn drive_spent_vhtlc_swap<B, S>(
+    client: &Client<B, S>,
+    info: &VhtlcLifecycleInfo,
+) -> SpentVhtlcAction
+where
+    B: Blockchain,
+    S: SwapStorage + 'static,
+{
+    if info.swap_type != SwapType::Submarine {
+        return SpentVhtlcAction::Reconcile;
+    }
+
+    match client.swap_storage().get_submarine(&info.swap_id).await {
+        Ok(Some(swap)) if swap.preimage.is_some() => return SpentVhtlcAction::Reconcile,
+        Ok(Some(_)) => {}
+        Ok(None) => return SpentVhtlcAction::Reconcile,
+        Err(error) => {
+            tracing::warn!(swap_id = %info.swap_id, ?error, "Failed to load submarine swap");
+            return SpentVhtlcAction::KeepActive;
+        }
+    }
+
+    match client.extract_submarine_swap_preimage(&info.swap_id).await {
+        Ok(_) => {
+            tracing::info!(
+                swap_id = %info.swap_id,
+                "Extracted submarine preimage from spent VHTLC event"
+            );
+            SpentVhtlcAction::Reconcile
+        }
+        Err(error) => {
+            tracing::warn!(
+                swap_id = %info.swap_id,
+                ?error,
+                "Could not extract submarine preimage from spent VHTLC; keeping contract active"
+            );
+            SpentVhtlcAction::KeepActive
+        }
+    }
+}
+
+async fn drive_refundable_vhtlc_swaps<B, S>(
+    client: &Client<B, S>,
+    action_log: &mut BoltzVhtlcActionLog,
+) -> Result<(), Error>
+where
+    B: Blockchain,
+    S: SwapStorage + 'static,
+{
+    let server_info = client.server_info().await?;
+
+    for swap in client.swap_storage().list_all_submarine().await? {
+        if !is_submarine_refundable_status(&swap.status) {
+            continue;
+        }
+
+        match client.vhtlc_contract_is_inactive(swap.contract_script_pubkey.as_ref()) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    swap_id = %swap.id,
+                    ?error,
+                    "Skipping submarine refund after contract-state check failed"
+                );
+                continue;
+            }
+        }
+
+        let liveness = match client
+            .observe_vhtlc_contract_liveness(&server_info, swap.vhtlc_address)
+            .await
+        {
+            Ok(liveness) => liveness,
+            Err(error) => {
+                tracing::warn!(
+                    swap_id = %swap.id,
+                    ?error,
+                    "Skipping submarine refund after VHTLC liveness check failed"
+                );
+                continue;
+            }
+        };
+        if !is_refundable_vhtlc_liveness(liveness) {
+            tracing::debug!(
+                swap_id = %swap.id,
+                ?liveness,
+                "Skipping auto-refund for non-refundable VHTLC liveness"
+            );
+            continue;
+        }
+
+        if !action_log.begin_refund(&swap.id) {
+            continue;
+        }
+
+        let result = if matches!(swap.status, SwapStatus::SwapExpired) {
+            client.refund_expired_vhtlc(&swap.id).await
+        } else {
+            client.refund_vhtlc(&swap.id).await
+        };
+
+        match result {
+            Ok(txid) => {
+                action_log.finish_refund(&swap.id, true);
+                if let Err(error) =
+                    update_submarine_swap_status(client, &swap.id, SwapStatus::TransactionRefunded)
+                        .await
+                {
+                    tracing::warn!(
+                        swap_id = %swap.id,
+                        ?error,
+                        "Failed to persist submarine refund status"
+                    );
+                }
+                tracing::info!(swap_id = %swap.id, %txid, "Auto-refunded submarine VHTLC");
+            }
+            Err(error) => {
+                action_log.finish_refund(&swap.id, false);
+                tracing::warn!(swap_id = %swap.id, ?error, "Failed to auto-refund submarine VHTLC");
+            }
+        }
+    }
+
+    for swap in client.swap_storage().list_all_chain().await? {
+        if swap.direction != ChainSwapDirection::ArkToBtc
+            || !is_chain_refundable_status(&swap.status)
+        {
+            continue;
+        }
+
+        match client.vhtlc_contract_is_inactive(swap.contract_script_pubkey.as_ref()) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    swap_id = %swap.id,
+                    ?error,
+                    "Skipping chain refund after contract-state check failed"
+                );
+                continue;
+            }
+        }
+
+        let address = match swap.chain_vhtlc_address() {
+            Ok(address) => address,
+            Err(error) => {
+                tracing::warn!(
+                    swap_id = %swap.id,
+                    ?error,
+                    "Skipping chain refund with unresolved VHTLC address"
+                );
+                continue;
+            }
+        };
+        let liveness = match client
+            .observe_vhtlc_contract_liveness(&server_info, address)
+            .await
+        {
+            Ok(liveness) => liveness,
+            Err(error) => {
+                tracing::warn!(
+                    swap_id = %swap.id,
+                    ?error,
+                    "Skipping chain refund after VHTLC liveness check failed"
+                );
+                continue;
+            }
+        };
+        if !is_refundable_vhtlc_liveness(liveness) {
+            tracing::debug!(
+                swap_id = %swap.id,
+                ?liveness,
+                "Skipping auto-refund for non-refundable chain VHTLC liveness"
+            );
+            continue;
+        }
+
+        if !action_log.begin_refund(&swap.id) {
+            continue;
+        }
+
+        match client.refund_chain_swap(&swap.id).await {
+            Ok(txid) => {
+                action_log.finish_refund(&swap.id, true);
+                tracing::info!(swap_id = %swap.id, %txid, "Auto-refunded chain VHTLC");
+            }
+            Err(error) => {
+                action_log.finish_refund(&swap.id, false);
+                tracing::warn!(swap_id = %swap.id, ?error, "Failed to auto-refund chain VHTLC");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn is_refundable_vhtlc_liveness(liveness: VhtlcContractLiveness) -> bool {
+    matches!(
+        liveness,
+        VhtlcContractLiveness::Funded | VhtlcContractLiveness::Recoverable
+    )
+}
+
+fn is_submarine_refundable_status(status: &SwapStatus) -> bool {
+    matches!(
+        status,
+        SwapStatus::InvoiceFailedToPay
+            | SwapStatus::TransactionLockupFailed
+            | SwapStatus::SwapExpired
+    )
+}
+
+fn is_chain_refundable_status(status: &SwapStatus) -> bool {
+    matches!(status, SwapStatus::SwapExpired)
+}
+
+async fn update_submarine_swap_status<B, S>(
+    client: &Client<B, S>,
+    swap_id: &str,
+    status: SwapStatus,
+) -> Result<(), Error>
+where
+    B: Blockchain,
+    S: SwapStorage + 'static,
+{
+    if client
+        .swap_storage()
+        .get_submarine(swap_id)
+        .await?
+        .is_some()
+    {
+        client
+            .swap_storage()
+            .update_status_submarine(swap_id, status)
+            .await?;
+    }
+    Ok(())
+}
+
+async fn update_reverse_swap_status<B, S>(
+    client: &Client<B, S>,
+    swap_id: &str,
+    status: SwapStatus,
+) -> Result<(), Error>
+where
+    B: Blockchain,
+    S: SwapStorage + 'static,
+{
+    if client.swap_storage().get_reverse(swap_id).await?.is_some() {
+        client
+            .swap_storage()
+            .update_status_reverse(swap_id, status)
+            .await?;
+    }
+    Ok(())
+}
+
+async fn wait_for_vhtlc_watcher_retry(
+    stop_rx: &mut tokio::sync::watch::Receiver<bool>,
+    duration: Duration,
+) -> bool {
+    tokio::select! {
+        _ = stop_rx.changed() => true,
+        _ = tokio::time::sleep(duration) => false,
+    }
+}
+
 /// Internal info about an active VHTLC, used during pending tx recovery.
 struct VhtlcInfo {
     swap_id: String,
@@ -3860,6 +5281,21 @@ fn extract_preimage_from_psbt(psbt: &Psbt) -> Result<[u8; 32], Error> {
     ))
 }
 
+fn vhtlc_script_from_contract(
+    contract: VhtlcContract,
+    expected_address: &ArkAddress,
+    server_info: &Info,
+) -> Result<VhtlcScript, Error> {
+    let vhtlc = VhtlcScript::new(contract.options, server_info.network)
+        .map_err(|e| Error::ad_hoc(format!("failed to build VHTLC: {e}")))?;
+
+    if vhtlc.address() != *expected_address {
+        return Err(Error::ad_hoc("stored VHTLC contract address mismatch"));
+    }
+
+    Ok(vhtlc)
+}
+
 /// The amount to be shared with Boltz when creating a reverse submarine swap.
 pub enum SwapAmount {
     /// Use this value if you need to set the value to be sent by the payer on Lightning.
@@ -3918,6 +5354,9 @@ pub struct SubmarineSwapData {
     /// `None` for legacy swap data created before this field was added.
     #[serde(default)]
     pub key_derivation_index: Option<u32>,
+    /// Script pubkey of the contract-store VHTLC row for this swap.
+    #[serde(default)]
+    pub contract_script_pubkey: Option<ScriptBuf>,
 }
 
 /// Data related to a reverse submarine swap.
@@ -3961,6 +5400,9 @@ pub struct ReverseSwapData {
     #[serde_as(as = "Option<DisplayFromStr>")]
     #[serde(default)]
     pub claim_address: Option<ArkAddress>,
+    /// Script pubkey of the contract-store VHTLC row for this swap.
+    #[serde(default)]
+    pub contract_script_pubkey: Option<ScriptBuf>,
 }
 
 /// All possible states of a Boltz swap.
@@ -4001,6 +5443,9 @@ pub enum SwapStatus {
     /// Lightning invoice successfully paid.
     #[serde(rename = "invoice.paid")]
     InvoicePaid,
+    /// Lightning invoice settled (reverse swaps).
+    #[serde(rename = "invoice.settled")]
+    InvoiceSettled,
     /// Lightning invoice payment failed.
     #[serde(rename = "invoice.failedToPay")]
     InvoiceFailedToPay,
@@ -4022,21 +5467,60 @@ pub enum SwapStatus {
 }
 
 impl SwapStatus {
-    /// Whether this status represents a terminal state (swap is done, no further action needed).
+    /// Whether this status represents a Boltz-terminal lifecycle state.
+    ///
+    /// Do not use this to decide whether an Arkade-side VHTLC contract is inactive: a terminal
+    /// Boltz status can still leave a user-claimable/refundable VHTLC. Use observed VTXO liveness
+    /// for contract deactivation instead.
     pub fn is_terminal(&self) -> bool {
-        matches!(
-            self,
+        match self {
             Self::TransactionRefunded
-                | Self::TransactionFailed
-                | Self::TransactionClaimed
-                | Self::TransactionLockupFailed
-                | Self::InvoicePaid
-                | Self::InvoiceFailedToPay
-                | Self::InvoiceExpired
-                | Self::SwapExpired
-                | Self::Error { .. }
-        )
+            | Self::TransactionFailed
+            | Self::TransactionClaimed
+            | Self::TransactionLockupFailed
+            | Self::InvoicePaid
+            | Self::InvoiceSettled
+            | Self::InvoiceFailedToPay
+            | Self::InvoiceExpired
+            | Self::SwapExpired
+            | Self::Error { .. } => true,
+            Self::Created
+            | Self::TransactionMempool
+            | Self::TransactionConfirmed
+            | Self::TransactionServerMempool
+            | Self::TransactionServerConfirmed
+            | Self::InvoiceSet
+            | Self::InvoicePending
+            | Self::Other(_) => false,
+        }
     }
+}
+
+fn swap_wait_failure_error(status: &SwapStatus, swap_id: &str, awaited: &str) -> Error {
+    let reason = match status {
+        SwapStatus::Error { error } => format!("Boltz returned error: {error}"),
+        SwapStatus::TransactionRefunded => "transaction was refunded".to_string(),
+        SwapStatus::TransactionFailed => "transaction failed".to_string(),
+        SwapStatus::TransactionLockupFailed => "lockup transaction failed".to_string(),
+        SwapStatus::InvoiceFailedToPay => "invoice failed to pay".to_string(),
+        SwapStatus::InvoiceExpired => "invoice expired".to_string(),
+        SwapStatus::SwapExpired => "swap expired".to_string(),
+        SwapStatus::TransactionClaimed => "transaction was claimed".to_string(),
+        SwapStatus::InvoicePaid => "invoice was paid".to_string(),
+        SwapStatus::InvoiceSettled => "invoice was settled".to_string(),
+        SwapStatus::Created => "swap is still created".to_string(),
+        SwapStatus::TransactionMempool => "transaction is in mempool".to_string(),
+        SwapStatus::TransactionConfirmed => "transaction is confirmed".to_string(),
+        SwapStatus::TransactionServerMempool => "server transaction is in mempool".to_string(),
+        SwapStatus::TransactionServerConfirmed => "server transaction is confirmed".to_string(),
+        SwapStatus::InvoiceSet => "invoice is set".to_string(),
+        SwapStatus::InvoicePending => "invoice is pending".to_string(),
+        SwapStatus::Other(status) => format!("unknown status: {status}"),
+    };
+
+    Error::ad_hoc(format!(
+        "swap {swap_id} cannot complete {awaited}: {reason}"
+    ))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Copy)]
@@ -4139,7 +5623,7 @@ struct RefundSwapResponse {
     error: Option<String>,
 }
 
-/// Fee information for submarine swaps (Ark -> Lightning).
+/// Fee information for submarine swaps (Arkade -> Lightning).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmarineSwapFees {
@@ -4158,7 +5642,7 @@ pub struct ReverseMinerFees {
     pub claim: u64,
 }
 
-/// Fee information for reverse swaps (Lightning -> Ark).
+/// Fee information for reverse swaps (Lightning -> Arkade).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReverseSwapFees {
@@ -4171,9 +5655,9 @@ pub struct ReverseSwapFees {
 /// Combined fee information for both swap types.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BoltzFees {
-    /// Fees for submarine swaps (Ark -> Lightning).
+    /// Fees for submarine swaps (Arkade -> Lightning).
     pub submarine: SubmarineSwapFees,
-    /// Fees for reverse swaps (Lightning -> Ark).
+    /// Fees for reverse swaps (Lightning -> Arkade).
     pub reverse: ReverseSwapFees,
 }
 
@@ -4257,13 +5741,13 @@ struct ReversePairsResponse {
 /// Direction of a chain swap.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ChainSwapDirection {
-    /// User locks Ark VHTLC, claims on-chain BTC.
+    /// User locks Arkade VHTLC, claims on-chain BTC.
     ArkToBtc,
-    /// User sends on-chain BTC, claims Ark VHTLC.
+    /// User sends on-chain BTC, claims Arkade VHTLC.
     BtcToArk,
 }
 
-/// Data for a pending chain swap (ARK ↔ BTC).
+/// Data for a pending chain swap (Arkade ↔ BTC).
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainSwapData {
@@ -4297,10 +5781,10 @@ pub struct ChainSwapData {
     pub user_timeout_block_height: u32,
     /// Timeout block height for Boltz's lockup.
     pub server_timeout_block_height: u32,
-    /// Full VHTLC timelocks for user's lockup (present when user locks on ARK side).
+    /// Full VHTLC timelocks for user's lockup (present when user locks on Arkade side).
     #[serde(default)]
     pub user_timeout_block_heights: Option<TimeoutBlockHeights>,
-    /// Full VHTLC timelocks for Boltz's lockup (present when server locks on ARK side).
+    /// Full VHTLC timelocks for Boltz's lockup (present when server locks on Arkade side).
     #[serde(default)]
     pub server_timeout_block_heights: Option<TimeoutBlockHeights>,
     /// BIP21 payment URI for funding (present for on-chain BTC lockup).
@@ -4317,6 +5801,141 @@ pub struct ChainSwapData {
     /// BIP32 derivation index for the refund key.
     #[serde(default)]
     pub refund_key_derivation_index: Option<u32>,
+    /// Script pubkey of the contract-store Arkade-side VHTLC row for this swap.
+    #[serde(default)]
+    pub contract_script_pubkey: Option<ScriptBuf>,
+}
+
+/// Direction-specific Arkade-side VHTLC inputs for a chain swap.
+///
+/// A Boltz chain swap always has two lockup legs:
+///
+/// - `lockup_details`: the user's lockup leg (`user_lockup_*` in [`ChainSwapData`])
+/// - `claim_details`: Boltz's/server's lockup leg (`server_lockup_*` in [`ChainSwapData`])
+///
+/// Exactly one of those legs is an Arkade VHTLC; the other is an on-chain BTC HTLC. The Arkade leg
+/// is the only part we persist in the contract manager as a [`VhtlcContract`]. This helper result
+/// keeps the direction table in one place so creation, lazy migration, and spend paths all agree on
+/// which keys, address, timeouts, and wallet derivation index define the Arkade-side VHTLC.
+///
+/// Direction table:
+///
+/// | Direction | Arkade-side leg | VHTLC receiver/claim key | VHTLC sender/refund key | Wallet key index |
+/// |-----------|--------------|--------------------------|-------------------------|------------------|
+/// | Arkade → BTC | user's lockup (`lockup_details`) | Boltz server claim key | wallet refund key | refund key index |
+/// | BTC → Arkade | server lockup (`claim_details`) | wallet claim key | Boltz server refund key | claim key index |
+///
+/// The `address` is parsed and retained here because it is part of VHTLC reconstruction: we build
+/// candidate scripts against the current and deprecated Arkade server signers, then keep the
+/// candidate whose Arkade address matches the one Boltz returned for the Arkade-side leg.
+struct ChainVhtlcFields {
+    claim_public_key: PublicKey,
+    refund_public_key: PublicKey,
+    timeouts: TimeoutBlockHeights,
+    address: ArkAddress,
+    key_derivation_index: Option<u32>,
+}
+
+/// Select the Arkade-side VHTLC fields from chain-swap data.
+///
+/// This deliberately accepts the raw fields rather than a [`ChainSwapData`] value so callers can
+/// use it before the swap row exists. Creation uses it to compute `contract_script_pubkey` first
+/// and then builds a fully-populated [`ChainSwapData`] in one struct literal. Lazy migration and
+/// spend paths call the same logic through [`ChainSwapData::chain_vhtlc_fields`].
+///
+/// The argument names use wallet/server and user/server lockup terminology to mirror Boltz's
+/// response and [`ChainSwapData`]:
+///
+/// - `wallet_claim_public_key` / `wallet_refund_public_key` are the user's generated swap keys.
+/// - `server_claim_public_key` comes from Boltz `lockup_details.server_public_key` and is used when
+///   Boltz claims the user's Arkade lockup in an Arkade→BTC swap.
+/// - `server_refund_public_key` comes from Boltz `claim_details.server_public_key` and is used when
+///   Boltz refunds its Arkade lockup in a BTC→Arkade swap.
+/// - `user_*` fields describe `lockup_details`; `server_*` fields describe `claim_details`.
+#[allow(clippy::too_many_arguments)]
+fn chain_vhtlc_fields(
+    direction: &ChainSwapDirection,
+    wallet_claim_public_key: PublicKey,
+    wallet_refund_public_key: PublicKey,
+    server_claim_public_key: PublicKey,
+    server_refund_public_key: PublicKey,
+    user_lockup_address: &str,
+    server_lockup_address: &str,
+    user_timeout_block_heights: Option<TimeoutBlockHeights>,
+    server_timeout_block_heights: Option<TimeoutBlockHeights>,
+    claim_key_derivation_index: Option<u32>,
+    refund_key_derivation_index: Option<u32>,
+) -> Result<ChainVhtlcFields, Error> {
+    let (claim_public_key, refund_public_key, timeouts, address, key_derivation_index) =
+        match direction {
+            ChainSwapDirection::ArkToBtc => (
+                server_claim_public_key,
+                wallet_refund_public_key,
+                user_timeout_block_heights.ok_or_else(|| {
+                    Error::ad_hoc(
+                        "chain swap is missing Arkade-side VHTLC timeouts for user lockup",
+                    )
+                })?,
+                user_lockup_address,
+                refund_key_derivation_index,
+            ),
+            ChainSwapDirection::BtcToArk => (
+                wallet_claim_public_key,
+                server_refund_public_key,
+                server_timeout_block_heights.ok_or_else(|| {
+                    Error::ad_hoc(
+                        "chain swap is missing Arkade-side VHTLC timeouts for server lockup",
+                    )
+                })?,
+                server_lockup_address,
+                claim_key_derivation_index,
+            ),
+        };
+
+    let address = ArkAddress::decode(address)
+        .map_err(|e| Error::ad_hoc(format!("invalid chain VHTLC address: {e}")))?;
+
+    Ok(ChainVhtlcFields {
+        claim_public_key,
+        refund_public_key,
+        timeouts,
+        address,
+        key_derivation_index,
+    })
+}
+
+impl ChainSwapData {
+    fn chain_vhtlc_fields(&self) -> Result<ChainVhtlcFields, Error> {
+        chain_vhtlc_fields(
+            &self.direction,
+            self.claim_public_key,
+            self.refund_public_key,
+            self.server_claim_public_key,
+            self.server_refund_public_key,
+            &self.user_lockup_address,
+            &self.server_lockup_address,
+            self.user_timeout_block_heights,
+            self.server_timeout_block_heights,
+            self.claim_key_derivation_index,
+            self.refund_key_derivation_index,
+        )
+    }
+
+    fn chain_vhtlc_key_index(&self) -> Option<u32> {
+        match self.direction {
+            ChainSwapDirection::ArkToBtc => self.refund_key_derivation_index,
+            ChainSwapDirection::BtcToArk => self.claim_key_derivation_index,
+        }
+    }
+
+    fn chain_vhtlc_address(&self) -> Result<ArkAddress, Error> {
+        let address = match self.direction {
+            ChainSwapDirection::ArkToBtc => &self.user_lockup_address,
+            ChainSwapDirection::BtcToArk => &self.server_lockup_address,
+        };
+        ArkAddress::decode(address)
+            .map_err(|e| Error::ad_hoc(format!("invalid chain VHTLC address: {e}")))
+    }
 }
 
 /// Result of creating a chain swap.
@@ -4427,6 +6046,282 @@ pub(crate) fn reconstruct_vhtlc_from_keys(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contract::ContractManager;
+    use crate::swap_storage::InMemorySwapStorage;
+    use crate::ExplorerUtxo;
+    use crate::OfflineClient;
+    use crate::OfflineClientConfig;
+    use crate::ServerState;
+    use crate::SpendStatus;
+    use crate::TxStatus;
+    use bitcoin::secp256k1::Keypair;
+    use bitcoin::secp256k1::SecretKey;
+    use bitcoin::Transaction;
+    use bitcoin::Txid;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::RwLock;
+    use std::time::Duration;
+    use std::time::Instant;
+
+    #[derive(Clone)]
+    struct DummyBlockchain;
+
+    impl Blockchain for DummyBlockchain {
+        async fn find_outpoints(
+            &self,
+            _address: &bitcoin::Address,
+        ) -> Result<Vec<ExplorerUtxo>, Error> {
+            Ok(Vec::new())
+        }
+
+        async fn find_tx(&self, _txid: &Txid) -> Result<Option<Transaction>, Error> {
+            Ok(None)
+        }
+
+        async fn get_tx_status(&self, _txid: &Txid) -> Result<TxStatus, Error> {
+            Ok(TxStatus { confirmed_at: None })
+        }
+
+        async fn get_output_status(&self, _txid: &Txid, _vout: u32) -> Result<SpendStatus, Error> {
+            Ok(SpendStatus { spend_txid: None })
+        }
+
+        async fn broadcast(&self, _tx: &Transaction) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn get_fee_rate(&self) -> Result<f64, Error> {
+            Ok(1.0)
+        }
+
+        async fn broadcast_package(&self, _txs: &[&Transaction]) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    type TestClient = Client<DummyBlockchain, InMemorySwapStorage>;
+
+    fn test_server_info() -> Info {
+        let secp = Secp256k1::new();
+        let secret_key = SecretKey::from_slice(&[1; 32]).unwrap();
+        let public_key = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
+        let keypair = Keypair::from_secret_key(&secp, &secret_key);
+        let address = bitcoin::Address::p2tr(
+            &secp,
+            keypair.x_only_public_key().0,
+            None,
+            bitcoin::Network::Testnet,
+        );
+        Info {
+            version: "test".to_string(),
+            signer_pk: public_key,
+            forfeit_pk: public_key,
+            forfeit_address: address,
+            checkpoint_tapscript: ScriptBuf::new(),
+            network: bitcoin::Network::Testnet,
+            session_duration: 60,
+            unilateral_exit_delay: bitcoin::Sequence::from_height(144),
+            boarding_exit_delay: bitcoin::Sequence::from_height(144),
+            utxo_min_amount: None,
+            utxo_max_amount: None,
+            vtxo_min_amount: None,
+            vtxo_max_amount: None,
+            dust: Amount::from_sat(1000),
+            fees: None,
+            scheduled_session: None,
+            deprecated_signers: vec![ark_core::server::DeprecatedSigner {
+                pk: secp256k1::PublicKey::from_x_only_public_key(
+                    fixture_server_xonly(),
+                    secp256k1::Parity::Even,
+                ),
+                cutoff_date: 0,
+            }],
+            service_status: Default::default(),
+            digest: "digest".to_string(),
+            max_tx_weight: 0,
+            max_op_return_outputs: 0,
+        }
+    }
+
+    fn test_client(server_info: Info) -> TestClient {
+        let secp = Secp256k1::new();
+        let keypair = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[3; 32]).unwrap());
+        let inner = OfflineClient::<DummyBlockchain, InMemorySwapStorage>::with_keypair(
+            OfflineClientConfig {
+                ark_server_url: "http://127.0.0.1:1".to_string(),
+                boltz_url: "http://127.0.0.1:1".to_string(),
+                timeout: Duration::from_millis(50),
+                ..Default::default()
+            },
+            keypair,
+            Arc::new(DummyBlockchain),
+            Arc::new(InMemorySwapStorage::default()),
+        );
+        let mut contract_manager = ContractManager::in_memory(server_info.network);
+        contract_manager.register_builtins().unwrap();
+        Client {
+            inner,
+            state: Arc::new(RwLock::new(ServerState {
+                fee_estimator: ark_fees::Estimator::new(Default::default()).unwrap(),
+                server_info,
+                server_info_refreshed_at: Instant::now(),
+                contract_manager: Mutex::new(contract_manager),
+            })),
+            server_info_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
+    fn fixture_vtxo(amount: Amount, is_spent: bool) -> ark_core::server::VirtualTxOutPoint {
+        ark_core::server::VirtualTxOutPoint {
+            outpoint: bitcoin::OutPoint {
+                txid: Txid::from_byte_array([1; 32]),
+                vout: 0,
+            },
+            created_at: 0,
+            expires_at: i64::MAX,
+            amount,
+            script: ScriptBuf::new(),
+            is_preconfirmed: false,
+            is_swept: false,
+            is_unrolled: false,
+            is_spent,
+            spent_by: None,
+            commitment_txids: Vec::new(),
+            settled_by: None,
+            ark_txid: None,
+            assets: Vec::new(),
+            depth: 0,
+        }
+    }
+
+    #[test]
+    fn classify_vhtlc_liveness_deactivates_only_spent_vtxos() {
+        let dust = Amount::from_sat(1000);
+
+        assert_eq!(
+            classify_vhtlc_contract_liveness(dust, true, Vec::new()),
+            VhtlcContractLiveness::PendingSpend
+        );
+        assert_eq!(
+            classify_vhtlc_contract_liveness(dust, false, Vec::new()),
+            VhtlcContractLiveness::Unfunded
+        );
+        assert_eq!(
+            classify_vhtlc_contract_liveness(
+                dust,
+                false,
+                vec![fixture_vtxo(Amount::from_sat(1000), false)]
+            ),
+            VhtlcContractLiveness::Funded
+        );
+        assert_eq!(
+            classify_vhtlc_contract_liveness(
+                dust,
+                false,
+                vec![fixture_vtxo(Amount::from_sat(1), false)]
+            ),
+            VhtlcContractLiveness::Recoverable
+        );
+        assert_eq!(
+            classify_vhtlc_contract_liveness(
+                dust,
+                false,
+                vec![fixture_vtxo(Amount::from_sat(1000), true)]
+            ),
+            VhtlcContractLiveness::Spent
+        );
+
+        assert!(VhtlcContractLiveness::Spent.should_deactivate_contract());
+        assert!(!VhtlcContractLiveness::Recoverable.should_deactivate_contract());
+    }
+
+    fn test_taproot_signature(byte: u8) -> bitcoin::taproot::Signature {
+        let secp = Secp256k1::new();
+        let keypair = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[byte; 32]).unwrap());
+        let msg = secp256k1::Message::from_digest([byte; 32]);
+        bitcoin::taproot::Signature {
+            signature: secp.sign_schnorr_no_aux_rand(&msg, &keypair),
+            sighash_type: bitcoin::TapSighashType::Default,
+        }
+    }
+
+    #[test]
+    fn validates_expected_boltz_tap_script_signature() {
+        let secp = Secp256k1::new();
+        let keypair = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[4; 32]).unwrap());
+        let pk = keypair.x_only_public_key().0;
+        let script = ScriptBuf::new_p2tr(&secp, keypair.x_only_public_key().0, None);
+        let leaf_hash = TapLeafHash::from_script(&script, LeafVersion::TapScript);
+        let sig = test_taproot_signature(5);
+        let mut input = psbt::Input::default();
+        input.tap_script_sigs.insert((pk, leaf_hash), sig);
+
+        let validated = validated_boltz_tap_script_sigs(&input, pk, leaf_hash).unwrap();
+
+        assert_eq!(validated.len(), 1);
+        assert_eq!(validated.get(&(pk, leaf_hash)), Some(&sig));
+    }
+
+    #[test]
+    fn rejects_unexpected_boltz_tap_script_signature() {
+        let secp = Secp256k1::new();
+        let expected_keypair =
+            Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[4; 32]).unwrap());
+        let unexpected_keypair =
+            Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[5; 32]).unwrap());
+        let expected_pk = expected_keypair.x_only_public_key().0;
+        let unexpected_pk = unexpected_keypair.x_only_public_key().0;
+        let script = ScriptBuf::new_p2tr(&secp, expected_pk, None);
+        let leaf_hash = TapLeafHash::from_script(&script, LeafVersion::TapScript);
+        let mut input = psbt::Input::default();
+        input
+            .tap_script_sigs
+            .insert((unexpected_pk, leaf_hash), test_taproot_signature(6));
+
+        assert!(validated_boltz_tap_script_sigs(&input, expected_pk, leaf_hash).is_err());
+    }
+
+    #[test]
+    fn refund_action_log_backs_off_after_failure() {
+        let mut log = BoltzVhtlcActionLog::default();
+
+        assert!(log.begin_refund("swap-1"));
+        log.finish_refund("swap-1", false);
+
+        assert!(!log.begin_refund("swap-1"));
+    }
+
+    #[test]
+    fn refund_action_log_clears_backoff_after_success() {
+        let mut log = BoltzVhtlcActionLog::default();
+
+        assert!(log.begin_refund("swap-1"));
+        log.finish_refund("swap-1", false);
+        assert!(log.refund_retries.contains_key("swap-1"));
+
+        log.refund_retries.get_mut("swap-1").unwrap().retry_after = Instant::now();
+        assert!(log.begin_refund("swap-1"));
+        log.finish_refund("swap-1", true);
+
+        assert!(!log.refund_retries.contains_key("swap-1"));
+        assert!(!log.begin_refund("swap-1"));
+    }
+
+    #[test]
+    fn only_funded_or_recoverable_vhtlcs_are_refundable() {
+        assert!(!is_refundable_vhtlc_liveness(
+            VhtlcContractLiveness::Unfunded
+        ));
+        assert!(!is_refundable_vhtlc_liveness(
+            VhtlcContractLiveness::PendingSpend
+        ));
+        assert!(is_refundable_vhtlc_liveness(VhtlcContractLiveness::Funded));
+        assert!(is_refundable_vhtlc_liveness(
+            VhtlcContractLiveness::Recoverable
+        ));
+        assert!(!is_refundable_vhtlc_liveness(VhtlcContractLiveness::Spent));
+    }
 
     #[test]
     fn test_deserialize_create_reverse_swap_response() {
@@ -4735,8 +6630,10 @@ mod tests {
         )
     }
 
-    // Expected Ark address from the fixture (vhtlc.json CSV > 16 case, testnet).
+    // Expected Arkade address from the fixture (vhtlc.json CSV > 16 case, testnet).
     const FIXTURE_ADDRESS: &str = "tark1qz4d2t2czchfaml2l3ad3gwde2qxpd0srhc7wkpnvtg99cnxyz8c3pnvvhnhumhwhqthmlxmdryakwx99s6508y8dunj9sty2p5mr7unh5re63";
+
+    const BOLT11_FIXTURE: &str = "lnbcrt10u1p5d55pjpp56ms94rkev7tdrwqyus5a63lny2mqzq9vh2rq3u4ym3v4lxv6xl4qdql2djkuepqw3hjqs2jfvsxzerywfjhxuccqz95xqztfsp57x0nwf7nzsndjdrvsre570ehg0szw34l284hswdz6zpqvktq9mrs9qxpqysgqllgxhxeny0tvtnxuqgn4s0t2qamc6yqc4t3pe6p2x5lgs8v8r3vxzxp3a3ax9j7d2ta5cduddln8n9se7q0jgg7s0h8t2vhljlu3wkcps9k8xs";
 
     // A second server key that produces a different address for the same other params.
     fn wrong_server_xonly() -> XOnlyPublicKey {
@@ -4747,6 +6644,683 @@ mod tests {
             .unwrap()
             .inner,
         )
+    }
+
+    fn public_key_from_xonly(pk: XOnlyPublicKey) -> PublicKey {
+        PublicKey::new(secp256k1::PublicKey::from_x_only_public_key(
+            pk,
+            secp256k1::Parity::Even,
+        ))
+    }
+
+    fn fixture_submarine_swap(contract_script_pubkey: Option<ScriptBuf>) -> SubmarineSwapData {
+        let opts = fixture_opts(fixture_server_xonly());
+        let vhtlc = VhtlcScript::new(opts.clone(), bitcoin::Network::Testnet).unwrap();
+        SubmarineSwapData {
+            id: "swap-1".to_string(),
+            preimage: None,
+            preimage_hash: opts.preimage_hash,
+            claim_public_key: public_key_from_xonly(opts.receiver),
+            refund_public_key: public_key_from_xonly(opts.sender),
+            amount: Amount::from_sat(1000),
+            timeout_block_heights: TimeoutBlockHeights {
+                refund: opts.refund_locktime,
+                unilateral_claim: opts.unilateral_claim_delay.to_consensus_u32(),
+                unilateral_refund: opts.unilateral_refund_delay.to_consensus_u32(),
+                unilateral_refund_without_receiver: opts
+                    .unilateral_refund_without_receiver_delay
+                    .to_consensus_u32(),
+            },
+            vhtlc_address: vhtlc.address(),
+            invoice: Bolt11Invoice::from_str(BOLT11_FIXTURE).unwrap(),
+            status: SwapStatus::Created,
+            created_at: 123,
+            key_derivation_index: Some(7),
+            contract_script_pubkey,
+        }
+    }
+
+    fn fixture_reverse_swap(contract_script_pubkey: Option<ScriptBuf>) -> ReverseSwapData {
+        let opts = fixture_opts(fixture_server_xonly());
+        let vhtlc = VhtlcScript::new(opts.clone(), bitcoin::Network::Testnet).unwrap();
+        ReverseSwapData {
+            id: "reverse-1".to_string(),
+            preimage: Some([1; 32]),
+            preimage_hash: opts.preimage_hash,
+            claim_public_key: public_key_from_xonly(opts.receiver),
+            refund_public_key: public_key_from_xonly(opts.sender),
+            amount: Amount::from_sat(1000),
+            timeout_block_heights: TimeoutBlockHeights {
+                refund: opts.refund_locktime,
+                unilateral_claim: opts.unilateral_claim_delay.to_consensus_u32(),
+                unilateral_refund: opts.unilateral_refund_delay.to_consensus_u32(),
+                unilateral_refund_without_receiver: opts
+                    .unilateral_refund_without_receiver_delay
+                    .to_consensus_u32(),
+            },
+            vhtlc_address: vhtlc.address(),
+            status: SwapStatus::Created,
+            created_at: 123,
+            key_derivation_index: Some(8),
+            bolt11: BOLT11_FIXTURE.to_string(),
+            invoice_expiry: 3600,
+            claim_address: None,
+            contract_script_pubkey,
+        }
+    }
+
+    fn fixture_chain_swap(
+        direction: ChainSwapDirection,
+        contract_script_pubkey: Option<ScriptBuf>,
+    ) -> ChainSwapData {
+        let mut opts = fixture_opts(fixture_server_xonly());
+        let preimage_hash = sha256::Hash::from_byte_array([2; 32]);
+        opts.preimage_hash = ripemd160::Hash::hash(preimage_hash.as_byte_array());
+        let vhtlc = VhtlcScript::new(opts.clone(), bitcoin::Network::Testnet).unwrap();
+        let timeouts = TimeoutBlockHeights {
+            refund: opts.refund_locktime,
+            unilateral_claim: opts.unilateral_claim_delay.to_consensus_u32(),
+            unilateral_refund: opts.unilateral_refund_delay.to_consensus_u32(),
+            unilateral_refund_without_receiver: opts
+                .unilateral_refund_without_receiver_delay
+                .to_consensus_u32(),
+        };
+        let ark_address = vhtlc.address().to_string();
+        let btc_address =
+            "tb1pxa78pf55g0aaurrd8c76fyax4df9e8y38fzps8sw2vkrecf9k3ss36a78m".to_string();
+        ChainSwapData {
+            id: "chain-1".to_string(),
+            status: SwapStatus::Created,
+            direction: direction.clone(),
+            preimage: Some([1; 32]),
+            preimage_hash,
+            claim_public_key: public_key_from_xonly(opts.receiver),
+            refund_public_key: public_key_from_xonly(opts.sender),
+            server_claim_public_key: public_key_from_xonly(opts.receiver),
+            server_refund_public_key: public_key_from_xonly(opts.sender),
+            user_lockup_address: match direction {
+                ChainSwapDirection::ArkToBtc => ark_address.clone(),
+                ChainSwapDirection::BtcToArk => btc_address.clone(),
+            },
+            server_lockup_address: match direction {
+                ChainSwapDirection::ArkToBtc => btc_address,
+                ChainSwapDirection::BtcToArk => ark_address,
+            },
+            user_lockup_amount: Amount::from_sat(1000),
+            server_lockup_amount: Amount::from_sat(900),
+            user_timeout_block_height: 265,
+            server_timeout_block_height: 265,
+            user_timeout_block_heights: matches!(direction, ChainSwapDirection::ArkToBtc)
+                .then_some(timeouts),
+            server_timeout_block_heights: matches!(direction, ChainSwapDirection::BtcToArk)
+                .then_some(timeouts),
+            bip21: None,
+            swap_tree: None,
+            created_at: 123,
+            claim_key_derivation_index: Some(7),
+            refund_key_derivation_index: Some(8),
+            contract_script_pubkey,
+        }
+    }
+
+    #[test]
+    fn submarine_swap_data_deserializes_legacy_missing_contract_reference() {
+        let script_pubkey = VhtlcScript::new(
+            fixture_opts(fixture_server_xonly()),
+            bitcoin::Network::Testnet,
+        )
+        .unwrap()
+        .script_pubkey();
+        let swap = fixture_submarine_swap(Some(script_pubkey));
+        let mut json = serde_json::to_value(&swap).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .remove("contract_script_pubkey");
+
+        let decoded: SubmarineSwapData = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded.id, swap.id);
+        assert_eq!(decoded.contract_script_pubkey, None);
+    }
+
+    #[test]
+    fn submarine_swap_data_roundtrips_contract_reference() {
+        let script_pubkey = VhtlcScript::new(
+            fixture_opts(fixture_server_xonly()),
+            bitcoin::Network::Testnet,
+        )
+        .unwrap()
+        .script_pubkey();
+        let swap = fixture_submarine_swap(Some(script_pubkey.clone()));
+
+        let decoded: SubmarineSwapData =
+            serde_json::from_value(serde_json::to_value(&swap).unwrap()).unwrap();
+        assert_eq!(decoded.contract_script_pubkey, Some(script_pubkey));
+    }
+
+    #[test]
+    fn reverse_swap_data_deserializes_legacy_missing_contract_reference() {
+        let script_pubkey = VhtlcScript::new(
+            fixture_opts(fixture_server_xonly()),
+            bitcoin::Network::Testnet,
+        )
+        .unwrap()
+        .script_pubkey();
+        let swap = fixture_reverse_swap(Some(script_pubkey));
+        let mut json = serde_json::to_value(&swap).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .remove("contract_script_pubkey");
+
+        let decoded: ReverseSwapData = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded.id, swap.id);
+        assert_eq!(decoded.contract_script_pubkey, None);
+    }
+
+    #[test]
+    fn reverse_swap_data_roundtrips_contract_reference() {
+        let script_pubkey = VhtlcScript::new(
+            fixture_opts(fixture_server_xonly()),
+            bitcoin::Network::Testnet,
+        )
+        .unwrap()
+        .script_pubkey();
+        let swap = fixture_reverse_swap(Some(script_pubkey.clone()));
+
+        let decoded: ReverseSwapData =
+            serde_json::from_value(serde_json::to_value(&swap).unwrap()).unwrap();
+        assert_eq!(decoded.contract_script_pubkey, Some(script_pubkey));
+    }
+
+    #[test]
+    fn chain_swap_data_deserializes_legacy_missing_contract_reference() {
+        let script_pubkey = VhtlcScript::new(
+            fixture_opts(fixture_server_xonly()),
+            bitcoin::Network::Testnet,
+        )
+        .unwrap()
+        .script_pubkey();
+        let swap = fixture_chain_swap(ChainSwapDirection::ArkToBtc, Some(script_pubkey));
+        let mut json = serde_json::to_value(&swap).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .remove("contract_script_pubkey");
+
+        let decoded: ChainSwapData = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded.id, swap.id);
+        assert_eq!(decoded.contract_script_pubkey, None);
+    }
+
+    #[test]
+    fn chain_swap_data_roundtrips_contract_reference() {
+        let script_pubkey = VhtlcScript::new(
+            fixture_opts(fixture_server_xonly()),
+            bitcoin::Network::Testnet,
+        )
+        .unwrap()
+        .script_pubkey();
+        let swap = fixture_chain_swap(ChainSwapDirection::BtcToArk, Some(script_pubkey.clone()));
+
+        let decoded: ChainSwapData =
+            serde_json::from_value(serde_json::to_value(&swap).unwrap()).unwrap();
+        assert_eq!(decoded.contract_script_pubkey, Some(script_pubkey));
+    }
+
+    #[tokio::test]
+    async fn terminal_submarine_status_keeps_vhtlc_contract_active_without_spent_vtxo() {
+        let server_info = test_server_info();
+        let client = test_client(server_info);
+        let script_pubkey = client
+            .insert_vhtlc_contract(fixture_opts(fixture_server_xonly()), Some(7))
+            .unwrap();
+        let mut swap = fixture_submarine_swap(Some(script_pubkey.clone()));
+        client
+            .swap_storage()
+            .insert_submarine(swap.id.clone(), swap.clone())
+            .await
+            .unwrap();
+
+        client
+            .persist_swap_status_for_type(
+                SwapType::Submarine,
+                &swap.id,
+                SwapStatus::TransactionClaimed,
+            )
+            .await
+            .unwrap();
+
+        swap = client
+            .swap_storage()
+            .get_submarine(&swap.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(swap.status, SwapStatus::TransactionClaimed);
+        let state = client.state.read().unwrap();
+        let stored = state
+            .contract_manager
+            .lock()
+            .unwrap()
+            .get(&script_pubkey)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state, ContractState::Active);
+    }
+
+    #[tokio::test]
+    async fn terminal_reverse_status_keeps_vhtlc_contract_active_without_spent_vtxo() {
+        let server_info = test_server_info();
+        let client = test_client(server_info);
+        let script_pubkey = client
+            .insert_vhtlc_contract(fixture_opts(fixture_server_xonly()), Some(8))
+            .unwrap();
+        let mut swap = fixture_reverse_swap(Some(script_pubkey.clone()));
+        client
+            .swap_storage()
+            .insert_reverse(swap.id.clone(), swap.clone())
+            .await
+            .unwrap();
+
+        client
+            .persist_swap_status_for_type(SwapType::Reverse, &swap.id, SwapStatus::InvoiceExpired)
+            .await
+            .unwrap();
+
+        swap = client
+            .swap_storage()
+            .get_reverse(&swap.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(swap.status, SwapStatus::InvoiceExpired);
+        let state = client.state.read().unwrap();
+        let stored = state
+            .contract_manager
+            .lock()
+            .unwrap()
+            .get(&script_pubkey)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state, ContractState::Active);
+    }
+
+    #[tokio::test]
+    async fn terminal_chain_status_keeps_vhtlc_contract_active_without_spent_vtxo() {
+        let server_info = test_server_info();
+        let client = test_client(server_info);
+        let script_pubkey = client
+            .insert_vhtlc_contract(fixture_opts(fixture_server_xonly()), Some(8))
+            .unwrap();
+        let mut swap =
+            fixture_chain_swap(ChainSwapDirection::ArkToBtc, Some(script_pubkey.clone()));
+        client
+            .swap_storage()
+            .insert_chain(swap.id.clone(), swap.clone())
+            .await
+            .unwrap();
+
+        client
+            .persist_swap_status_for_type(
+                SwapType::Chain,
+                &swap.id,
+                SwapStatus::TransactionRefunded,
+            )
+            .await
+            .unwrap();
+
+        swap = client
+            .swap_storage()
+            .get_chain(&swap.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(swap.status, SwapStatus::TransactionRefunded);
+        let state = client.state.read().unwrap();
+        let stored = state
+            .contract_manager
+            .lock()
+            .unwrap()
+            .get(&script_pubkey)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state, ContractState::Active);
+    }
+
+    #[tokio::test]
+    async fn non_terminal_swap_status_keeps_vhtlc_contract_active() {
+        let server_info = test_server_info();
+        let client = test_client(server_info);
+        let script_pubkey = client
+            .insert_vhtlc_contract(fixture_opts(fixture_server_xonly()), Some(7))
+            .unwrap();
+        let swap = fixture_submarine_swap(Some(script_pubkey.clone()));
+        client
+            .swap_storage()
+            .insert_submarine(swap.id.clone(), swap.clone())
+            .await
+            .unwrap();
+
+        client
+            .persist_swap_status_for_type(
+                SwapType::Submarine,
+                &swap.id,
+                SwapStatus::TransactionMempool,
+            )
+            .await
+            .unwrap();
+
+        let state = client.state.read().unwrap();
+        let stored = state
+            .contract_manager
+            .lock()
+            .unwrap()
+            .get(&script_pubkey)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state, ContractState::Active);
+    }
+
+    #[tokio::test]
+    async fn eager_migration_persists_missing_vhtlc_contract_refs() {
+        let server_info = test_server_info();
+        let client = test_client(server_info.clone());
+        let submarine = fixture_submarine_swap(None);
+        let reverse = fixture_reverse_swap(None);
+        client
+            .swap_storage()
+            .insert_submarine(submarine.id.clone(), submarine.clone())
+            .await
+            .unwrap();
+        let chain = fixture_chain_swap(ChainSwapDirection::ArkToBtc, None);
+        client
+            .swap_storage()
+            .insert_reverse(reverse.id.clone(), reverse.clone())
+            .await
+            .unwrap();
+        client
+            .swap_storage()
+            .insert_chain(chain.id.clone(), chain.clone())
+            .await
+            .unwrap();
+
+        let migrated = client
+            .migrate_boltz_vhtlc_contracts(&server_info)
+            .await
+            .unwrap();
+
+        assert_eq!(migrated, 3);
+        assert!(client
+            .swap_storage()
+            .get_submarine(&submarine.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .contract_script_pubkey
+            .is_some());
+        assert!(client
+            .swap_storage()
+            .get_reverse(&reverse.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .contract_script_pubkey
+            .is_some());
+        assert!(client
+            .swap_storage()
+            .get_chain(&chain.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .contract_script_pubkey
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn eager_migration_keeps_contract_active_without_spent_vtxo() {
+        let server_info = test_server_info();
+        let client = test_client(server_info.clone());
+        let mut swap = fixture_submarine_swap(None);
+        swap.status = SwapStatus::TransactionClaimed;
+        client
+            .swap_storage()
+            .insert_submarine(swap.id.clone(), swap.clone())
+            .await
+            .unwrap();
+
+        let migrated = client
+            .migrate_boltz_vhtlc_contracts(&server_info)
+            .await
+            .unwrap();
+
+        assert_eq!(migrated, 1);
+        let stored_swap = client
+            .swap_storage()
+            .get_submarine(&swap.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let script_pubkey = stored_swap.contract_script_pubkey.unwrap();
+        let state = client.state.read().unwrap();
+        let stored = state
+            .contract_manager
+            .lock()
+            .unwrap()
+            .get(&script_pubkey)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state, ContractState::Active);
+    }
+
+    #[test]
+    fn mark_vhtlc_contract_inactive_updates_contract_state() {
+        let server_info = test_server_info();
+        let client = test_client(server_info);
+        let script_pubkey = client
+            .insert_vhtlc_contract(fixture_opts(fixture_server_xonly()), Some(9))
+            .unwrap();
+
+        client
+            .mark_vhtlc_contract_inactive(Some(&script_pubkey))
+            .unwrap();
+
+        let state = client.state.read().unwrap();
+        let stored = state
+            .contract_manager
+            .lock()
+            .unwrap()
+            .get(&script_pubkey)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state, ContractState::Inactive);
+        assert_eq!(stored.key_index, Some(9));
+    }
+
+    #[test]
+    fn deactivates_orphaned_contract_after_swap_persistence_failure() {
+        let client = test_client(test_server_info());
+        let script_pubkey = client
+            .insert_vhtlc_contract(fixture_opts(fixture_server_xonly()), Some(9))
+            .unwrap();
+
+        let error = client.deactivate_orphaned_vhtlc_contract(
+            &script_pubkey,
+            "swap-1",
+            Error::ad_hoc("swap storage failed"),
+        );
+
+        assert_eq!(error.to_string(), "swap storage failed");
+        let state = client.state.read().unwrap();
+        let stored = state
+            .contract_manager
+            .lock()
+            .unwrap()
+            .get(&script_pubkey)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state, ContractState::Inactive);
+    }
+
+    #[test]
+    fn mark_vhtlc_contract_inactive_ignores_missing_reference() {
+        let client = test_client(test_server_info());
+
+        client.mark_vhtlc_contract_inactive(None).unwrap();
+
+        let state = client.state.read().unwrap();
+        assert!(state
+            .contract_manager
+            .lock()
+            .unwrap()
+            .list()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn submarine_vhtlc_script_lazily_migrates_legacy_swap() {
+        let server_info = test_server_info();
+        let client = test_client(server_info.clone());
+        let mut swap = fixture_submarine_swap(None);
+        client
+            .swap_storage()
+            .insert_submarine(swap.id.clone(), swap.clone())
+            .await
+            .unwrap();
+
+        let vhtlc = client
+            .submarine_vhtlc_script(&mut swap, &server_info)
+            .await
+            .unwrap();
+
+        let script_pubkey = swap.contract_script_pubkey.clone().unwrap();
+        assert_eq!(script_pubkey, vhtlc.script_pubkey());
+        let stored_swap = client
+            .swap_storage()
+            .get_submarine(&swap.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored_swap.contract_script_pubkey,
+            Some(script_pubkey.clone())
+        );
+        let state = client.state.read().unwrap();
+        let stored_contract = state
+            .contract_manager
+            .lock()
+            .unwrap()
+            .get(&script_pubkey)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored_contract.state, ContractState::Active);
+        assert_eq!(stored_contract.key_index, swap.key_derivation_index);
+    }
+
+    #[tokio::test]
+    async fn build_chain_vhtlc_script_does_not_require_stored_swap() {
+        let server_info = test_server_info();
+        let client = test_client(server_info.clone());
+        let swap = fixture_chain_swap(ChainSwapDirection::ArkToBtc, None);
+
+        let vhtlc = client
+            .build_chain_vhtlc_script(&swap, &server_info)
+            .unwrap();
+
+        assert_eq!(vhtlc.address(), swap.chain_vhtlc_address().unwrap());
+        assert_eq!(swap.chain_vhtlc_key_index(), Some(8));
+        assert!(client
+            .swap_storage()
+            .get_chain(&swap.id)
+            .await
+            .unwrap()
+            .is_none());
+        let state = client.state.read().unwrap();
+        assert!(state
+            .contract_manager
+            .lock()
+            .unwrap()
+            .list()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn chain_vhtlc_script_lazily_migrates_legacy_swap() {
+        let server_info = test_server_info();
+        let client = test_client(server_info.clone());
+        let mut swap = fixture_chain_swap(ChainSwapDirection::BtcToArk, None);
+        client
+            .swap_storage()
+            .insert_chain(swap.id.clone(), swap.clone())
+            .await
+            .unwrap();
+
+        let vhtlc = client
+            .chain_vhtlc_script(&mut swap, &server_info)
+            .await
+            .unwrap();
+
+        let script_pubkey = swap.contract_script_pubkey.clone().unwrap();
+        assert_eq!(script_pubkey, vhtlc.script_pubkey());
+        let stored_swap = client
+            .swap_storage()
+            .get_chain(&swap.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored_swap.contract_script_pubkey,
+            Some(script_pubkey.clone())
+        );
+        let state = client.state.read().unwrap();
+        let stored_contract = state
+            .contract_manager
+            .lock()
+            .unwrap()
+            .get(&script_pubkey)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored_contract.state, ContractState::Active);
+        assert_eq!(stored_contract.key_index, swap.chain_vhtlc_key_index());
+    }
+
+    #[tokio::test]
+    async fn reverse_vhtlc_script_lazily_migrates_legacy_swap() {
+        let server_info = test_server_info();
+        let client = test_client(server_info.clone());
+        let mut swap = fixture_reverse_swap(None);
+        client
+            .swap_storage()
+            .insert_reverse(swap.id.clone(), swap.clone())
+            .await
+            .unwrap();
+
+        let vhtlc = client
+            .reverse_vhtlc_script(&mut swap, &server_info)
+            .await
+            .unwrap();
+
+        let script_pubkey = swap.contract_script_pubkey.clone().unwrap();
+        assert_eq!(script_pubkey, vhtlc.script_pubkey());
+        let stored_swap = client
+            .swap_storage()
+            .get_reverse(&swap.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored_swap.contract_script_pubkey,
+            Some(script_pubkey.clone())
+        );
+        let state = client.state.read().unwrap();
+        let stored_contract = state
+            .contract_manager
+            .lock()
+            .unwrap()
+            .get(&script_pubkey)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored_contract.state, ContractState::Active);
+        assert_eq!(stored_contract.key_index, swap.key_derivation_index);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 /*
  * Ark API
  *
- * Combined Ark Service, Indexer, Admin, Signer Manager, and Wallet API
+ * Combined Ark Service, Indexer, Signer Manager, and Wallet API
  *
  * The version of the OpenAPI document: 1.0.0
  *
@@ -24,6 +24,8 @@ pub struct Vtxo {
     pub commitment_txids: Option<Vec<String>>,
     #[serde(rename = "createdAt", skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
+    #[serde(rename = "depth", skip_serializing_if = "Option::is_none")]
+    pub depth: Option<i32>,
     #[serde(rename = "expiresAt", skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
     #[serde(rename = "isPreconfirmed", skip_serializing_if = "Option::is_none")]
@@ -52,6 +54,7 @@ impl Vtxo {
             assets: None,
             commitment_txids: None,
             created_at: None,
+            depth: None,
             expires_at: None,
             is_preconfirmed: None,
             is_spent: None,
