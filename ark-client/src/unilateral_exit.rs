@@ -211,6 +211,11 @@ where
     ///
     /// To be able to spend a VTXO, the VTXO itself must be published on-chain (via something like
     /// `unilateral_off_board`), and then we must wait for the exit delay to pass.
+    ///
+    /// `change_address` MUST be spendable by the caller. Since all boarding outputs and VTXOs
+    /// are spent, the change can be nearly the entire exited balance, and funds sent to an address
+    /// the caller does not control are lost irrecoverably. Only the address network is validated
+    /// here.
     pub async fn send_on_chain(
         &self,
         to_address: Address,
@@ -237,6 +242,8 @@ where
     /// Build the on-chain send transaction without broadcasting.
     ///
     /// Primarily useful for testing. Exposed publicly behind the `test-utils` feature.
+    ///
+    /// `change_address` MUST be spendable by the caller.
     #[cfg(feature = "test-utils")]
     pub async fn create_send_on_chain_transaction(
         &self,
@@ -248,13 +255,25 @@ where
             .await
     }
 
+    /// `change_address` MUST be spendable by the caller.
     pub(crate) async fn create_send_on_chain_transaction_inner(
         &self,
         to_address: Address,
         to_amount: Amount,
         change_address: Address,
     ) -> Result<(Transaction, Vec<TxOut>), Error> {
-        let dust = self.server_info().await?.dust;
+        let server_info = self.server_info().await?;
+        let network = server_info.network;
+
+        for (label, address) in [("destination", &to_address), ("change", &change_address)] {
+            if !address.as_unchecked().is_valid_for_network(network) {
+                return Err(Error::ad_hoc(format!(
+                    "invalid {label} address {address}: not valid for network {network}"
+                )));
+            }
+        }
+
+        let dust = server_info.dust;
         if to_amount < dust {
             return Err(Error::ad_hoc(format!(
                 "invalid amount {to_amount}, must be greater than dust: {}",

@@ -525,6 +525,9 @@ impl RestoreCandidate {
 /// On-chain wallet operations needed to fee-bump a transaction via its P2A (anchor) output.
 ///
 /// The caller supplies these from their concrete on-chain wallet.
+///
+/// All three closures MUST be backed by the same underlying on-chain wallet. Mixing sources
+/// produces unsignable or unspendable transactions.
 #[allow(clippy::type_complexity)]
 pub struct AnchorSpendDeps<'a> {
     /// Returns a change address for the fee-bump child transaction.
