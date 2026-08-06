@@ -1,6 +1,7 @@
 use anyhow::Result;
 use ark_client::error::Error;
 use ark_client::error::ErrorContext;
+use ark_client::AnchorSpendDeps;
 use ark_core::SelectedUtxo;
 use ark_core::UtxoCoinSelection;
 use bdk_esplora::EsploraAsyncExt;
@@ -207,6 +208,14 @@ impl Wallet {
             total_selected,
             change_amount,
         })
+    }
+
+    pub fn anchor_spend_deps(&self) -> AnchorSpendDeps<'_> {
+        AnchorSpendDeps {
+            change_address: Box::new(move || self.get_onchain_address()),
+            select_coins: Box::new(move |target_amount| self.select_coins(target_amount)),
+            sign: Box::new(move |psbt| self.sign(psbt)),
+        }
     }
 }
 

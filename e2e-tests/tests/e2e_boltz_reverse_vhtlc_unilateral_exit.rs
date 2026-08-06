@@ -4,7 +4,6 @@ use crate::common::format_command_output;
 use crate::common::start_lnd_payment;
 use crate::common::wait_for_lnd_payment;
 use crate::common::wait_until_balance;
-use ark_client::AnchorSpendDeps;
 use ark_client::SwapAmount;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::key::Secp256k1;
@@ -93,20 +92,7 @@ pub async fn reverse_swap_claim_with_vhtlc_ancestor_can_exit_unilaterally() {
         }
     });
 
-    let bump_deps = AnchorSpendDeps {
-        change_address: Box::new({
-            let wallet = alice_wallet.clone();
-            move || wallet.get_onchain_address()
-        }),
-        select_coins: Box::new({
-            let wallet = alice_wallet.clone();
-            move |amount| wallet.select_coins(amount)
-        }),
-        sign: Box::new({
-            let wallet = alice_wallet.clone();
-            move |psbt| wallet.sign(psbt)
-        }),
-    };
+    let bump_deps = alice_wallet.anchor_spend_deps();
 
     for (i, unilateral_exit_tree) in unilateral_exit_trees.iter().enumerate() {
         while let Some(txid) = alice

@@ -527,7 +527,7 @@ impl RestoreCandidate {
 /// The caller supplies these from their concrete on-chain wallet.
 ///
 /// All three closures MUST be backed by the same underlying on-chain wallet. Mixing sources
-/// produces unsignable or unspendable transactions.
+/// produces unsignable or unspendable transactions
 #[allow(clippy::type_complexity)]
 pub struct AnchorSpendDeps<'a> {
     /// Returns a change address for the fee-bump child transaction.
@@ -2105,7 +2105,14 @@ where
             .map_err(|e| Error::ad_hoc(e.to_string()))?;
 
         // Sign the transaction
-        (deps.sign)(&mut psbt).context("failed to sign bump TX")?;
+        let is_finalized = (deps.sign)(&mut psbt).context("failed to sign bump TX")?;
+
+        if !is_finalized {
+            return Err(Error::ad_hoc(
+                "bump TX PSBT was not finalized: `sign` and `select_coins` must be backed by the \
+                 same on-chain wallet",
+            ));
+        }
 
         // Extract the final transaction
         let tx = psbt.extract_tx().map_err(Error::ad_hoc)?;
