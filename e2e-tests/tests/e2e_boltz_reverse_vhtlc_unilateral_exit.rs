@@ -4,7 +4,6 @@ use crate::common::format_command_output;
 use crate::common::start_lnd_payment;
 use crate::common::wait_for_lnd_payment;
 use crate::common::wait_until_balance;
-use ark_client::wallet::OnchainWallet;
 use ark_client::SwapAmount;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::key::Secp256k1;
@@ -32,7 +31,7 @@ pub async fn reverse_swap_claim_with_vhtlc_ancestor_can_exit_unilaterally() {
         set_up_client("alice".to_string(), regtest.clone(), secp.clone()).await;
 
     // The unilateral exit transactions are fee-bumped through Alice's on-chain wallet.
-    let alice_onchain_address = alice.get_onchain_address().unwrap();
+    let alice_onchain_address = alice_wallet.get_onchain_address().unwrap();
     for _ in 0..5 {
         regtest
             .faucet_fund(&alice_onchain_address, Amount::from_sat(100_000))
@@ -93,9 +92,11 @@ pub async fn reverse_swap_claim_with_vhtlc_ancestor_can_exit_unilaterally() {
         }
     });
 
+    let bump_deps = alice_wallet.anchor_spend_deps();
+
     for (i, unilateral_exit_tree) in unilateral_exit_trees.iter().enumerate() {
         while let Some(txid) = alice
-            .broadcast_next_unilateral_exit_node(unilateral_exit_tree)
+            .broadcast_next_unilateral_exit_node(unilateral_exit_tree, &bump_deps)
             .await
             .expect("to broadcast unilateral exit node")
         {
@@ -147,7 +148,11 @@ pub async fn reverse_swap_claim_with_vhtlc_ancestor_can_exit_unilaterally() {
     let (tx, prevouts) = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             match alice
-                .create_send_on_chain_transaction(send_address.clone(), send_amount)
+                .create_send_on_chain_transaction(
+                    send_address.clone(),
+                    send_amount,
+                    alice_wallet.get_onchain_address().unwrap(),
+                )
                 .await
             {
                 Ok(result) => return result,

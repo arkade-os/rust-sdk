@@ -1,8 +1,7 @@
 use anyhow::Result;
 use ark_client::error::Error;
 use ark_client::error::ErrorContext;
-use ark_client::wallet::Balance;
-use ark_client::wallet::OnchainWallet;
+use ark_client::AnchorSpendDeps;
 use ark_core::SelectedUtxo;
 use ark_core::UtxoCoinSelection;
 use bdk_esplora::EsploraAsyncExt;
@@ -67,8 +66,8 @@ impl Wallet {
     }
 }
 
-impl OnchainWallet for Wallet {
-    fn get_onchain_address(&self) -> Result<Address, Error> {
+impl Wallet {
+    pub fn get_onchain_address(&self) -> Result<Address, Error> {
         let info = self
             .inner
             .write()
@@ -78,7 +77,7 @@ impl OnchainWallet for Wallet {
         Ok(info.address)
     }
 
-    async fn sync(&self) -> Result<(), Error> {
+    pub async fn sync(&self) -> Result<(), Error> {
         let request = self
             .inner
             .read()
@@ -118,22 +117,17 @@ impl OnchainWallet for Wallet {
         Ok(())
     }
 
-    fn balance(&self) -> Result<Balance, Error> {
+    pub fn balance(&self) -> Result<bdk_wallet::Balance, Error> {
         let balance = self
             .inner
             .read()
             .map_err(|e| Error::consumer(format!("failed to get read lock: {e}")))?
             .balance();
 
-        Ok(Balance {
-            immature: balance.immature,
-            trusted_pending: balance.trusted_pending,
-            untrusted_pending: balance.untrusted_pending,
-            confirmed: balance.confirmed,
-        })
+        Ok(balance)
     }
 
-    fn prepare_send_to_address(
+    pub fn prepare_send_to_address(
         &self,
         address: Address,
         amount: Amount,
@@ -153,7 +147,7 @@ impl OnchainWallet for Wallet {
         Ok(psbt)
     }
 
-    fn sign(&self, psbt: &mut Psbt) -> Result<bool, Error> {
+    pub fn sign(&self, psbt: &mut Psbt) -> Result<bool, Error> {
         let options = SignOptions {
             trust_witness_utxo: true,
             ..SignOptions::default()
@@ -169,7 +163,7 @@ impl OnchainWallet for Wallet {
         Ok(finalized)
     }
 
-    fn select_coins(&self, target_amount: Amount) -> Result<UtxoCoinSelection, Error> {
+    pub fn select_coins(&self, target_amount: Amount) -> Result<UtxoCoinSelection, Error> {
         let wallet = self
             .inner
             .read()
@@ -214,6 +208,14 @@ impl OnchainWallet for Wallet {
             total_selected,
             change_amount,
         })
+    }
+
+    pub fn anchor_spend_deps(&self) -> AnchorSpendDeps<'_> {
+        AnchorSpendDeps {
+            change_address: Box::new(move || self.get_onchain_address()),
+            select_coins: Box::new(move |target_amount| self.select_coins(target_amount)),
+            sign: Box::new(move |psbt| self.sign(psbt)),
+        }
     }
 }
 

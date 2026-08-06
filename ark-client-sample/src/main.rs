@@ -5,7 +5,6 @@ use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
-use ark_bdk_wallet::Wallet;
 use ark_client::lightning_invoice::Bolt11Invoice;
 use ark_client::Blockchain;
 use ark_client::ChainSwapAmount;
@@ -419,7 +418,7 @@ fn format_timestamp(unix_secs: i64) -> Result<String> {
 }
 
 async fn find_unspent_boarding_outputs(
-    client: &ark_client::Client<EsploraClient, Wallet, SampleSwapStorage>,
+    client: &ark_client::Client<EsploraClient, SampleSwapStorage>,
     esplora_client: &EsploraClient,
 ) -> Result<Vec<ExplorerUtxo>> {
     let mut seen = HashSet::new();
@@ -446,13 +445,12 @@ async fn find_unspent_boarding_outputs(
 }
 
 #[cfg(feature = "sqlite")]
-fn apply_contract_store_path<B, W, S>(
+fn apply_contract_store_path<B, S>(
     config: &Config,
-    offline_client: OfflineClient<B, W, S>,
-) -> Result<OfflineClient<B, W, S>>
+    offline_client: OfflineClient<B, S>,
+) -> Result<OfflineClient<B, S>>
 where
     B: Blockchain,
-    W: ark_client::wallet::OnchainWallet,
     S: ark_client::SwapStorage + 'static,
 {
     match config.contract_store.unwrap_or(ContractStoreConfig::Sqlite) {
@@ -568,10 +566,6 @@ async fn main() -> Result<()> {
             let seed = mnemonic.to_seed("");
             let xpriv = Xpriv::new_master(Network::Regtest, &seed)?;
 
-            let wallet =
-                Wallet::new_from_xpriv(xpriv, Network::Regtest, config.esplora_url.as_str())?;
-            let wallet = Arc::new(wallet);
-
             let client_config = OfflineClientConfig {
                 ark_server_url: config.ark_server_url.clone(),
                 boltz_url: config.boltz_url.clone(),
@@ -585,7 +579,6 @@ async fn main() -> Result<()> {
                 xpriv,
                 None,
                 esplora_client.clone(),
-                wallet,
                 storage,
             );
             #[cfg(feature = "sqlite")]
@@ -599,9 +592,6 @@ async fn main() -> Result<()> {
             let sk = SecretKey::from_str(seed.trim())?;
             let kp = sk.keypair(&secp);
 
-            let wallet = Wallet::new(kp, Network::Regtest, config.esplora_url.as_str())?;
-            let wallet = Arc::new(wallet);
-
             let client_config = OfflineClientConfig {
                 ark_server_url: config.ark_server_url.clone(),
                 boltz_url: config.boltz_url.clone(),
@@ -610,13 +600,8 @@ async fn main() -> Result<()> {
                 ..Default::default()
             };
 
-            let offline_client = OfflineClient::with_keypair(
-                client_config,
-                kp,
-                esplora_client.clone(),
-                wallet,
-                storage,
-            );
+            let offline_client =
+                OfflineClient::with_keypair(client_config, kp, esplora_client.clone(), storage);
             #[cfg(feature = "sqlite")]
             let offline_client = apply_contract_store_path(&config, offline_client)?;
             let client = offline_client.connect().await.map_err(|e| anyhow!(e))?;
@@ -630,7 +615,7 @@ async fn main() -> Result<()> {
 
 async fn run_command(
     command: Commands,
-    client: ark_client::Client<EsploraClient, Wallet, SampleSwapStorage>,
+    client: ark_client::Client<EsploraClient, SampleSwapStorage>,
     esplora_client: Arc<EsploraClient>,
 ) -> Result<()> {
     let client = Arc::new(client);

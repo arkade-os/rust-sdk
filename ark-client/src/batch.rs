@@ -2,7 +2,6 @@ use crate::error::ErrorContext as _;
 use crate::swap_storage::SwapStorage;
 use crate::utils::sleep;
 use crate::utils::timeout_op;
-use crate::wallet::OnchainWallet;
 use crate::Blockchain;
 use crate::Client;
 use crate::Error;
@@ -51,10 +50,9 @@ use rand::Rng;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-impl<B, W, S> Client<B, W, S>
+impl<B, S> Client<B, S>
 where
     B: Blockchain,
-    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     /// Settle _all_ prior VTXOs and boarding outputs into the next batch, generating new confirmed

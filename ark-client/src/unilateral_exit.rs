@@ -4,7 +4,7 @@ use crate::error::ErrorContext;
 use crate::swap_storage::SwapStorage;
 use crate::utils::sleep;
 use crate::utils::timeout_op;
-use crate::wallet::OnchainWallet;
+use crate::AnchorSpendDeps;
 use crate::Blockchain;
 use crate::Client;
 use ark_core::build_unilateral_exit_tree_txids;
@@ -26,10 +26,9 @@ use std::collections::HashSet;
 
 // TODO: We should not _need_ to connect to the Ark server to perform unilateral exit. Currently we
 // do talk to the Ark server for simplicity.
-impl<B, W, S> Client<B, W, S>
+impl<B, S> Client<B, S>
 where
     B: Blockchain,
-    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     /// Build the unilateral exit transaction tree for all spendable VTXOs.
@@ -143,6 +142,7 @@ where
     pub async fn broadcast_next_unilateral_exit_node(
         &self,
         branch: &[Transaction],
+        deps: &AnchorSpendDeps<'_>,
     ) -> Result<Option<Txid>, Error> {
         let blockchain = &self.blockchain();
 
@@ -153,7 +153,7 @@ where
                 let is_not_published = blockchain.find_tx(&parent_txid).await?.is_none();
 
                 if is_not_published {
-                    let child_tx = self.bump_tx(parent_tx).await?;
+                    let child_tx = self.bump_tx(parent_tx, deps).await?;
                     let bump_txid = child_tx.compute_txid();
 
                     tracing::info!(
@@ -211,13 +211,19 @@ where
     ///
     /// To be able to spend a VTXO, the VTXO itself must be published on-chain (via something like
     /// `unilateral_off_board`), and then we must wait for the exit delay to pass.
+    ///
+    /// `change_address` MUST be spendable by the caller. Since all boarding outputs and VTXOs
+    /// are spent, the change can be nearly the entire exited balance, and funds sent to an address
+    /// the caller does not control are lost irrecoverably. Only the address network is validated
+    /// here.
     pub async fn send_on_chain(
         &self,
         to_address: Address,
         to_amount: Amount,
+        change_address: Address,
     ) -> Result<Txid, Error> {
         let (tx, _) = self
-            .create_send_on_chain_transaction_inner(to_address, to_amount)
+            .create_send_on_chain_transaction_inner(to_address, to_amount, change_address)
             .await?;
 
         let txid = tx.compute_txid();
@@ -236,22 +242,38 @@ where
     /// Build the on-chain send transaction without broadcasting.
     ///
     /// Primarily useful for testing. Exposed publicly behind the `test-utils` feature.
+    ///
+    /// `change_address` MUST be spendable by the caller.
     #[cfg(feature = "test-utils")]
     pub async fn create_send_on_chain_transaction(
         &self,
         to_address: Address,
         to_amount: Amount,
+        change_address: Address,
     ) -> Result<(Transaction, Vec<TxOut>), Error> {
-        self.create_send_on_chain_transaction_inner(to_address, to_amount)
+        self.create_send_on_chain_transaction_inner(to_address, to_amount, change_address)
             .await
     }
 
+    /// `change_address` MUST be spendable by the caller.
     pub(crate) async fn create_send_on_chain_transaction_inner(
         &self,
         to_address: Address,
         to_amount: Amount,
+        change_address: Address,
     ) -> Result<(Transaction, Vec<TxOut>), Error> {
-        let dust = self.server_info().await?.dust;
+        let server_info = self.server_info().await?;
+        let network = server_info.network;
+
+        for (label, address) in [("destination", &to_address), ("change", &change_address)] {
+            if !address.as_unchecked().is_valid_for_network(network) {
+                return Err(Error::ad_hoc(format!(
+                    "invalid {label} address {address}: not valid for network {network}"
+                )));
+            }
+        }
+
+        let dust = server_info.dust;
         if to_amount < dust {
             return Err(Error::ad_hoc(format!(
                 "invalid amount {to_amount}, must be greater than dust: {}",
@@ -263,8 +285,6 @@ where
         let fee = Amount::from_sat(1_000);
 
         let (onchain_inputs, vtxo_inputs) = coin_select_for_onchain(self, to_amount + fee).await?;
-
-        let change_address = self.inner.wallet.get_onchain_address()?;
 
         let sign = move |input: &mut psbt::Input, msg: bitcoin::secp256k1::Message| match &input
             .witness_script
@@ -309,5 +329,311 @@ where
             .collect();
 
         Ok((tx, prevouts))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contract::ContractManager;
+    use crate::swap_storage::InMemorySwapStorage;
+    use crate::ExplorerUtxo;
+    use crate::OfflineClient;
+    use crate::OfflineClientConfig;
+    use crate::ServerState;
+    use crate::SpendStatus;
+    use crate::TxStatus;
+    use ark_core::anchor_output;
+    use ark_core::server::Info;
+    use ark_core::SelectedUtxo;
+    use ark_core::UtxoCoinSelection;
+    use bitcoin::key::Keypair;
+    use bitcoin::secp256k1;
+    use bitcoin::secp256k1::SecretKey;
+    use bitcoin::Network;
+    use bitcoin::Psbt;
+    use bitcoin::ScriptBuf;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::RwLock;
+    use std::time::Duration;
+    use std::time::Instant;
+
+    const DUST: Amount = Amount::from_sat(1_000);
+
+    #[derive(Clone)]
+    struct DummyBlockchain;
+
+    impl Blockchain for DummyBlockchain {
+        async fn find_outpoints(&self, _address: &Address) -> Result<Vec<ExplorerUtxo>, Error> {
+            Ok(Vec::new())
+        }
+
+        async fn find_tx(&self, _txid: &Txid) -> Result<Option<Transaction>, Error> {
+            Ok(None)
+        }
+
+        async fn get_tx_status(&self, _txid: &Txid) -> Result<TxStatus, Error> {
+            Ok(TxStatus { confirmed_at: None })
+        }
+
+        async fn get_output_status(&self, _txid: &Txid, _vout: u32) -> Result<SpendStatus, Error> {
+            Ok(SpendStatus { spend_txid: None })
+        }
+
+        async fn broadcast(&self, _tx: &Transaction) -> Result<(), Error> {
+            Ok(())
+        }
+
+        async fn get_fee_rate(&self) -> Result<f64, Error> {
+            Ok(1.0)
+        }
+
+        async fn broadcast_package(&self, _txs: &[&Transaction]) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    fn p2tr_address(network: Network, byte: u8) -> Address {
+        let secp = Secp256k1::new();
+        let keypair = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[byte; 32]).unwrap());
+
+        Address::p2tr(&secp, keypair.x_only_public_key().0, None, network)
+    }
+
+    fn test_server_info(network: Network) -> Info {
+        let secp = Secp256k1::new();
+        let secret_key = SecretKey::from_slice(&[1; 32]).unwrap();
+        let public_key = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
+
+        Info {
+            version: "test".to_string(),
+            signer_pk: public_key,
+            forfeit_pk: public_key,
+            forfeit_address: p2tr_address(network, 1),
+            checkpoint_tapscript: ScriptBuf::new(),
+            network,
+            session_duration: 60,
+            unilateral_exit_delay: bitcoin::Sequence::from_height(144),
+            boarding_exit_delay: bitcoin::Sequence::from_height(144),
+            utxo_min_amount: None,
+            utxo_max_amount: None,
+            vtxo_min_amount: None,
+            vtxo_max_amount: None,
+            dust: DUST,
+            fees: None,
+            scheduled_session: None,
+            deprecated_signers: Vec::new(),
+            service_status: Default::default(),
+            digest: "digest".to_string(),
+            max_tx_weight: 0,
+            max_op_return_outputs: 0,
+        }
+    }
+
+    fn test_client(network: Network) -> Client<DummyBlockchain, InMemorySwapStorage> {
+        let secp = Secp256k1::new();
+        let keypair = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[3; 32]).unwrap());
+        let inner = OfflineClient::<DummyBlockchain, InMemorySwapStorage>::with_keypair(
+            OfflineClientConfig {
+                // No test in this module is allowed to reach the network: every assertion must be
+                // made before the client would call out to the Ark server.
+                ark_server_url: "http://127.0.0.1:1".to_string(),
+                boltz_url: "http://127.0.0.1:1".to_string(),
+                timeout: Duration::from_millis(50),
+                ..Default::default()
+            },
+            keypair,
+            Arc::new(DummyBlockchain),
+            Arc::new(InMemorySwapStorage::default()),
+        );
+
+        let server_info = test_server_info(network);
+        let mut contract_manager = ContractManager::in_memory(server_info.network);
+        contract_manager.register_builtins().unwrap();
+
+        Client {
+            inner,
+            state: Arc::new(RwLock::new(ServerState {
+                fee_estimator: ark_fees::Estimator::new(Default::default()).unwrap(),
+                server_info,
+                server_info_refreshed_at: Instant::now(),
+                contract_manager: Mutex::new(contract_manager),
+            })),
+            server_info_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_on_chain_rejects_wrong_network_change_address() {
+        let client = test_client(Network::Regtest);
+
+        let error = client
+            .create_send_on_chain_transaction_inner(
+                p2tr_address(Network::Regtest, 4),
+                DUST * 2,
+                p2tr_address(Network::Bitcoin, 5),
+            )
+            .await
+            .expect_err("mainnet change address must be rejected on a regtest server");
+
+        assert!(
+            error.to_string().contains("invalid change address"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_on_chain_rejects_wrong_network_destination_address() {
+        let client = test_client(Network::Regtest);
+
+        let error = client
+            .create_send_on_chain_transaction_inner(
+                p2tr_address(Network::Bitcoin, 4),
+                DUST * 2,
+                p2tr_address(Network::Regtest, 5),
+            )
+            .await
+            .expect_err("mainnet destination address must be rejected on a regtest server");
+
+        assert!(
+            error.to_string().contains("invalid destination address"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_on_chain_accepts_addresses_on_the_server_network() {
+        let client = test_client(Network::Regtest);
+
+        let error = client
+            .create_send_on_chain_transaction_inner(
+                p2tr_address(Network::Regtest, 4),
+                DUST - Amount::ONE_SAT,
+                p2tr_address(Network::Regtest, 5),
+            )
+            .await
+            .expect_err("an amount below dust must be rejected");
+
+        assert!(
+            error.to_string().contains("must be greater than dust"),
+            "unexpected error: {error}"
+        );
+    }
+
+    fn tx_with_anchor_output() -> Transaction {
+        Transaction {
+            version: bitcoin::transaction::Version::non_standard(3),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: vec![anchor_output()],
+        }
+    }
+
+    fn funded_coin_selection() -> UtxoCoinSelection {
+        UtxoCoinSelection {
+            selected_utxos: vec![SelectedUtxo {
+                outpoint: bitcoin::OutPoint {
+                    txid: Txid::from_raw_hash(bitcoin::hashes::Hash::all_zeros()),
+                    vout: 0,
+                },
+                amount: Amount::from_sat(100_000),
+                address: p2tr_address(Network::Regtest, 6),
+            }],
+            total_selected: Amount::from_sat(100_000),
+            change_amount: Amount::from_sat(50_000),
+        }
+    }
+
+    fn deps_with(
+        change_address: impl Fn() -> Result<Address, Error> + Send + Sync + 'static,
+        select_coins: impl Fn(Amount) -> Result<UtxoCoinSelection, Error> + Send + Sync + 'static,
+        sign: impl Fn(&mut Psbt) -> Result<bool, Error> + Send + Sync + 'static,
+    ) -> AnchorSpendDeps<'static> {
+        AnchorSpendDeps {
+            change_address: Box::new(change_address),
+            select_coins: Box::new(select_coins),
+            sign: Box::new(sign),
+        }
+    }
+
+    #[tokio::test]
+    async fn bump_tx_propagates_change_address_error() {
+        let client = test_client(Network::Regtest);
+        let deps = deps_with(
+            || Err(Error::wallet("no change address")),
+            |_| Ok(funded_coin_selection()),
+            |_| Ok(true),
+        );
+
+        let error = client
+            .bump_tx(&tx_with_anchor_output(), &deps)
+            .await
+            .expect_err("a failing change address closure must fail the bump");
+
+        assert!(
+            error.to_string().contains("no change address"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bump_tx_propagates_select_coins_error() {
+        let client = test_client(Network::Regtest);
+        let deps = deps_with(
+            || Ok(p2tr_address(Network::Regtest, 5)),
+            |_| Err(Error::wallet("insufficient funds")),
+            |_| Ok(true),
+        );
+
+        let error = client
+            .bump_tx(&tx_with_anchor_output(), &deps)
+            .await
+            .expect_err("a failing coin selection closure must fail the bump");
+
+        assert!(
+            error.to_string().contains("insufficient funds"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bump_tx_propagates_sign_error() {
+        let client = test_client(Network::Regtest);
+        let deps = deps_with(
+            || Ok(p2tr_address(Network::Regtest, 5)),
+            |_| Ok(funded_coin_selection()),
+            |_| Err(Error::wallet("cannot sign")),
+        );
+
+        let error = client
+            .bump_tx(&tx_with_anchor_output(), &deps)
+            .await
+            .expect_err("a failing signing closure must fail the bump");
+
+        assert!(
+            error.to_string().contains("cannot sign"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bump_tx_rejects_psbt_that_sign_could_not_finalize() {
+        let client = test_client(Network::Regtest);
+        let deps = deps_with(
+            || Ok(p2tr_address(Network::Regtest, 5)),
+            |_| Ok(funded_coin_selection()),
+            |_| Ok(false),
+        );
+
+        let error = client
+            .bump_tx(&tx_with_anchor_output(), &deps)
+            .await
+            .expect_err("an unfinalized PSBT must not be extracted");
+
+        assert!(
+            error.to_string().contains("was not finalized"),
+            "unexpected error: {error}"
+        );
     }
 }
