@@ -1,8 +1,8 @@
 # ark-client
 
-High-level client library for interacting with Arkade servers.
+High-level client library for building Arkade wallets in Rust.
 
-`ark-client` provides the main wallet/client abstractions for receiving, selecting, and sending VTXOs, boarding funds on-chain, estimating fees, watching VTXO state, and coordinating Arkade rounds through the supported transport clients.
+`ark-client` provides the wallet abstractions of the SDK. Use it to receive, select, and send virtual outputs, board funds from onchain, estimate fees, track the state of a virtual output, and join batch swaps through the operator. It talks to the operator through either supported transport client, `ark-grpc` or `ark-rest`.
 
 ## Install
 

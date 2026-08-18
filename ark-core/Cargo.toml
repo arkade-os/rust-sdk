@@ -7,7 +7,7 @@ keywords = { workspace = true }
 license = { workspace = true }
 repository = { workspace = true }
 rust-version = "1.86"
-description = "Core types and utilities for Ark"
+description = "Core Arkade types and transaction utilities"
 
 [lints]
 workspace = true

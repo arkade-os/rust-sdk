@@ -7,7 +7,7 @@ keywords = { workspace = true }
 license = { workspace = true }
 repository = { workspace = true }
 rust-version = "1.86"
-description = "Client for the Ark introspector service"
+description = "Client for the Arkade introspector service"
 
 [lints]
 workspace = true

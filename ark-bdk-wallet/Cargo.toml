@@ -7,7 +7,7 @@ keywords = { workspace = true }
 license = { workspace = true }
 repository = { workspace = true }
 rust-version = "1.86"
-description = "Implementation of ark-client on-chain wallet traits using bdk"
+description = "Implementation of the ark-client onchain wallet traits using bdk"
 
 [lints]
 workspace = true
