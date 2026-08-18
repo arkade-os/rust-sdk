@@ -1,6 +1,9 @@
 #![allow(clippy::unwrap_used)]
 
 use crate::common::wait_until_balance;
+use ark_bdk_wallet::Wallet;
+use ark_client::Client;
+use ark_client::InMemorySwapStorage;
 use ark_core::send::SendReceiver;
 use bitcoin::key::Secp256k1;
 use bitcoin::Amount;
@@ -60,7 +63,7 @@ pub async fn settlement_is_chunked_when_proof_weight_exceeds_limit() {
     let n_payments = 8;
     let payment_amount = Amount::from_sat(100_000);
 
-    for _ in 0..n_payments {
+    for i in 0..n_payments {
         alice
             .send(vec![SendReceiver::bitcoin(
                 bob_offchain_address,
@@ -69,9 +72,10 @@ pub async fn settlement_is_chunked_when_proof_weight_exceeds_limit() {
             .await
             .unwrap();
 
-        // FIXME: We should not need to sleep here. We were running into an error when finalising
-        // the offchain transaction: the virtual TXID could not be found in the DB.
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        // Wait for the payment to land before sending the next one: sending again while the
+        // previous offchain transaction is still finalizing fails with "virtual TXID could not
+        // be found in the DB".
+        wait_until_pre_confirmed_vtxo_count(&bob, i as usize + 1).await;
     }
 
     let bob_total = payment_amount * n_payments;
@@ -100,4 +104,23 @@ pub async fn settlement_is_chunked_when_proof_weight_exceeds_limit() {
         .confirmed()
         .fold(Amount::ZERO, |acc, vtxo| acc + vtxo.vtxo().amount);
     assert_eq!(confirmed_total, bob_total);
+}
+
+/// Wait until the client's pre-confirmed VTXO count reaches `count`.
+async fn wait_until_pre_confirmed_vtxo_count(
+    client: &Client<Regtest, Wallet, InMemorySwapStorage>,
+    count: usize,
+) {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let vtxos = client.list_vtxos().await.unwrap();
+            if vtxos.pre_confirmed().count() >= count {
+                return;
+            }
+
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {count} pre-confirmed VTXOs"));
 }
