@@ -642,6 +642,16 @@ where
             outputs.push(intent::Output::AssetPacket(packet.to_txout()));
         }
 
+        // A delegate is a single pre-signed intent, so it cannot be chunked at settlement time.
+        // Reject an oversized intent now, while the owner can still act on it.
+        if let Some(max_weight) = self.max_intent_proof_weight(&server_info) {
+            let weight = intent::estimate_proof_weight(&vtxo_inputs, &outputs)?.to_wu();
+
+            if weight > max_weight {
+                return Err(Error::intent_proof_too_large(weight, max_weight));
+            }
+        }
+
         let delegate = batch::prepare_delegate_psbts(
             vtxo_inputs,
             outputs,
@@ -691,6 +701,9 @@ where
     ///
     /// This method allows Bob to settle Alice's VTXOs using the pre-signed intent and forfeit
     /// transactions from the [`Delegate`] struct.
+    ///
+    /// NOTE: the intent is pre-signed, so its proof weight cannot be checked or chunked here; it
+    /// is validated against the server's proof weight limit in [`Self::generate_delegate`].
     ///
     /// # Arguments
     ///
