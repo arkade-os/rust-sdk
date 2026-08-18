@@ -78,7 +78,7 @@ where
         // Get off-chain address and send all funds to this address, no change output 🦄
         let (to_address, _) = self.get_offchain_address_with_server_info(&server_info)?;
 
-        let (boarding_inputs, vtxo_inputs, total_amount) = self
+        let (boarding_inputs, vtxo_inputs, _) = self
             .fetch_commitment_transaction_inputs(&server_info, now)
             .await?;
 
@@ -94,30 +94,9 @@ where
             return Ok(None);
         }
 
-        let join_next_batch = || async {
-            self.join_next_batch(
-                &mut rng.clone(),
-                &server_info,
-                boarding_inputs.clone(),
-                vtxo_inputs.clone(),
-                BatchOutputType::Board {
-                    to_address,
-                    to_amount: total_amount,
-                },
-            )
-            .await
-        };
-
-        // Joining a batch can fail depending on the timing, so we try a few times.
-        let commitment_txid = join_next_batch
-            .retry(ExponentialBuilder::default().with_max_times(0))
-            .sleep(sleep)
-            .when(|err| !err.is_server_info_changed())
-            .notify(|err: &Error, dur: std::time::Duration| {
-                tracing::warn!("Retrying joining next batch after {dur:?}. Error: {err}",);
-            })
-            .await
-            .context("Failed to join batch")?;
+        let commitment_txid = self
+            .join_batches_chunked(rng, &server_info, boarding_inputs, vtxo_inputs, to_address)
+            .await?;
 
         tracing::info!(%commitment_txid, "Settlement success");
 
@@ -218,29 +197,15 @@ where
             return Ok(None);
         }
 
-        let join_next_batch = || async {
-            self.join_next_batch(
-                &mut rng.clone(),
+        let commitment_txid = self
+            .join_batches_chunked(
+                rng,
                 &server_info,
-                boarding_inputs.clone(),
-                all_vtxo_inputs.clone(),
-                BatchOutputType::Board {
-                    to_address,
-                    to_amount: total_amount,
-                },
+                boarding_inputs,
+                all_vtxo_inputs,
+                to_address,
             )
-            .await
-        };
-
-        let commitment_txid = join_next_batch
-            .retry(ExponentialBuilder::default().with_max_times(0))
-            .sleep(sleep)
-            .when(|err| !err.is_server_info_changed())
-            .notify(|err: &Error, dur: std::time::Duration| {
-                tracing::warn!("Retrying joining next batch after {dur:?}. Error: {err}");
-            })
-            .await
-            .context("Failed to join batch")?;
+            .await?;
 
         tracing::info!(%commitment_txid, num_notes = notes.len(), "Settlement with notes success");
 
@@ -315,34 +280,100 @@ where
             return Ok(None);
         }
 
-        let join_next_batch = || async {
-            self.join_next_batch(
-                &mut rng.clone(),
-                server_info,
-                boarding_inputs.clone(),
-                vtxo_inputs.clone(),
-                BatchOutputType::Board {
-                    to_address,
-                    to_amount: total_amount,
-                },
-            )
-            .await
-        };
-
-        // Joining a batch can fail depending on the timing, so we try a few times.
-        let commitment_txid = join_next_batch
-            .retry(ExponentialBuilder::default().with_max_times(0))
-            .sleep(sleep)
-            .when(|err| !err.is_server_info_changed())
-            .notify(|err: &Error, dur: std::time::Duration| {
-                tracing::warn!("Retrying joining next batch after {dur:?}. Error: {err}",);
-            })
-            .await
-            .context("Failed to join batch")?;
+        let commitment_txid = self
+            .join_batches_chunked(rng, server_info, boarding_inputs, vtxo_inputs, to_address)
+            .await?;
 
         tracing::info!(%commitment_txid, "Settlement of specific VTXOs success");
 
         Ok(Some(commitment_txid))
+    }
+
+    /// Settle the given inputs into `to_address`, splitting them across multiple sequential
+    /// batches if a single intent proof would exceed the proof weight limit.
+    ///
+    /// Returns the commitment transaction ID of the last batch joined.
+    async fn join_batches_chunked<R>(
+        &self,
+        rng: &mut R,
+        server_info: &server::Info,
+        boarding_inputs: Vec<batch::OnChainInput>,
+        vtxo_inputs: Vec<intent::Input>,
+        to_address: ArkAddress,
+    ) -> Result<Txid, Error>
+    where
+        R: Rng + CryptoRng + Clone,
+    {
+        let chunks = match self.max_intent_proof_weight(server_info) {
+            Some(max_weight) => chunk_settlement_inputs(
+                boarding_inputs,
+                vtxo_inputs,
+                &to_address,
+                max_weight,
+                server_info.dust,
+            )?,
+            None => {
+                let mut chunk = SettlementChunk::new();
+                for input in boarding_inputs {
+                    chunk.push(SettlementInput::Onchain(input));
+                }
+                for input in vtxo_inputs {
+                    chunk.push(SettlementInput::Vtxo(input));
+                }
+                vec![chunk]
+            }
+        };
+
+        let n_chunks = chunks.len();
+        if n_chunks > 1 {
+            tracing::info!(
+                n_chunks,
+                "Settlement inputs exceed the intent proof weight limit; \
+                 splitting settlement across multiple batches"
+            );
+        }
+
+        let mut commitment_txid = None;
+
+        for (i, chunk) in chunks.into_iter().enumerate() {
+            let join_next_batch = || async {
+                self.join_next_batch(
+                    &mut rng.clone(),
+                    server_info,
+                    chunk.onchain_inputs.clone(),
+                    chunk.vtxo_inputs.clone(),
+                    BatchOutputType::Board {
+                        to_address,
+                        to_amount: chunk.total_amount,
+                    },
+                )
+                .await
+            };
+
+            // Joining a batch can fail depending on the timing, so we try a few times.
+            let txid = join_next_batch
+                .retry(ExponentialBuilder::default().with_max_times(3))
+                .sleep(sleep)
+                .when(|err| !err.is_server_info_changed() && !err.is_intent_proof_too_large())
+                .notify(|err: &Error, dur: std::time::Duration| {
+                    tracing::warn!("Retrying joining next batch after {dur:?}. Error: {err}",);
+                })
+                .await
+                .context("Failed to join batch")?;
+
+            if n_chunks > 1 {
+                tracing::info!(
+                    commitment_txid = %txid,
+                    chunk = i + 1,
+                    n_chunks,
+                    "Settled batch chunk"
+                );
+            }
+
+            commitment_txid = Some(txid);
+        }
+
+        commitment_txid.ok_or_else(|| Error::ad_hoc("no settlement chunks to join"))
     }
 
     /// Settle _some_ prior VTXOs and boarding outputs into the next batch, generating UTXOs as
@@ -409,7 +440,7 @@ where
         let commitment_txid = join_next_batch
             .retry(ExponentialBuilder::default().with_max_times(3))
             .sleep(sleep)
-            .when(|err| !err.is_server_info_changed())
+            .when(|err| !err.is_server_info_changed() && !err.is_intent_proof_too_large())
             .notify(|err: &Error, dur: std::time::Duration| {
                 tracing::warn!("Retrying joining next batch after {dur:?}. Error: {err}");
             })
@@ -494,7 +525,7 @@ where
         let commitment_txid = join_next_batch
             .retry(ExponentialBuilder::default().with_max_times(3))
             .sleep(sleep)
-            .when(|err| !err.is_server_info_changed())
+            .when(|err| !err.is_server_info_changed() && !err.is_intent_proof_too_large())
             .notify(|err: &Error, dur: std::time::Duration| {
                 tracing::warn!("Retrying joining next batch after {dur:?}. Error: {err}");
             })
@@ -611,6 +642,16 @@ where
             outputs.push(intent::Output::AssetPacket(packet.to_txout()));
         }
 
+        // A delegate is a single pre-signed intent, so it cannot be chunked at settlement time.
+        // Reject an oversized intent now, while the owner can still act on it.
+        if let Some(max_weight) = self.max_intent_proof_weight(&server_info) {
+            let weight = intent::estimate_proof_weight(&vtxo_inputs, &outputs)?.to_wu();
+
+            if weight > max_weight {
+                return Err(Error::intent_proof_too_large(weight, max_weight));
+            }
+        }
+
         let delegate = batch::prepare_delegate_psbts(
             vtxo_inputs,
             outputs,
@@ -660,6 +701,9 @@ where
     ///
     /// This method allows Bob to settle Alice's VTXOs using the pre-signed intent and forfeit
     /// transactions from the [`Delegate`] struct.
+    ///
+    /// NOTE: the intent is pre-signed, so its proof weight cannot be checked or chunked here; it
+    /// is validated against the server's proof weight limit in [`Self::generate_delegate`].
     ///
     /// # Arguments
     ///
@@ -1257,28 +1301,7 @@ where
 
         let vtxo_input_outpoints = vtxo_inputs.iter().map(|i| i.outpoint()).collect::<Vec<_>>();
 
-        let inputs = {
-            let boarding_inputs = onchain_inputs.clone().into_iter().map(|o| {
-                intent::Input::new(
-                    o.outpoint(),
-                    o.sequence(),
-                    None,
-                    TxOut {
-                        value: o.amount(),
-                        script_pubkey: o.script_pubkey().clone(),
-                    },
-                    o.tapscripts().to_vec(),
-                    o.spend_info().clone(),
-                    true,
-                    false,
-                    Vec::new(),
-                )
-            });
-
-            boarding_inputs
-                .chain(vtxo_inputs.clone())
-                .collect::<Vec<_>>()
-        };
+        let inputs = combined_intent_inputs(&onchain_inputs, &vtxo_inputs);
 
         let mut outputs = vec![];
 
@@ -1434,6 +1457,20 @@ where
         })
     }
 
+    /// The effective upper bound for the weight of an intent proof, if any: the server's
+    /// advertised `max_tx_weight`, further capped by the configured `max_intent_proof_weight`.
+    fn max_intent_proof_weight(&self, server_info: &server::Info) -> Option<u64> {
+        let server_max = u64::try_from(server_info.max_tx_weight)
+            .ok()
+            .filter(|w| *w > 0);
+
+        match (server_max, self.inner.max_intent_proof_weight) {
+            (Some(server), Some(config)) => Some(server.min(config)),
+            (Some(server), None) => Some(server),
+            (None, config) => config,
+        }
+    }
+
     pub(crate) async fn join_next_batch<R>(
         &self,
         rng: &mut R,
@@ -1462,6 +1499,17 @@ where
             onchain_inputs,
             vtxo_inputs,
         } = prepared;
+
+        // Fail fast if the server would reject the intent proof for being too heavy: retrying
+        // with the same inputs can never succeed.
+        if let Some(max_weight) = self.max_intent_proof_weight(server_info) {
+            let inputs = combined_intent_inputs(&onchain_inputs, &vtxo_inputs);
+            let weight = intent::estimate_proof_weight(&inputs, &outputs)?.to_wu();
+
+            if weight > max_weight {
+                return Err(Error::intent_proof_too_large(weight, max_weight));
+            }
+        }
 
         let onchain_input_outpoints = onchain_inputs
             .iter()
@@ -1982,6 +2030,310 @@ pub(crate) enum BatchOutputType {
     },
 }
 
+/// Combine boarding outputs and VTXOs into the flat input list used to build an intent proof,
+/// mirroring the conversion done when registering the intent.
+fn combined_intent_inputs(
+    onchain_inputs: &[batch::OnChainInput],
+    vtxo_inputs: &[intent::Input],
+) -> Vec<intent::Input> {
+    onchain_inputs
+        .iter()
+        .map(|o| {
+            intent::Input::new(
+                o.outpoint(),
+                o.sequence(),
+                None,
+                TxOut {
+                    value: o.amount(),
+                    script_pubkey: o.script_pubkey().clone(),
+                },
+                o.tapscripts().to_vec(),
+                o.spend_info().clone(),
+                true,
+                false,
+                Vec::new(),
+            )
+        })
+        .chain(vtxo_inputs.iter().cloned())
+        .collect()
+}
+
+/// Estimate the weight of the intent proof for settling the given inputs into a single offchain
+/// VTXO at `to_address`.
+fn estimate_settlement_proof_weight(
+    onchain_inputs: &[batch::OnChainInput],
+    vtxo_inputs: &[intent::Input],
+    to_address: &ArkAddress,
+) -> Result<u64, Error> {
+    let inputs = combined_intent_inputs(onchain_inputs, vtxo_inputs);
+
+    let total_amount = inputs
+        .iter()
+        .fold(Amount::ZERO, |acc, input| acc + input.amount());
+
+    let mut outputs = vec![intent::Output::Offchain(TxOut {
+        value: total_amount,
+        script_pubkey: to_address.to_p2tr_script_pubkey(),
+    })];
+
+    if let Some(packet) = create_asset_preservation_packet(&inputs, &outputs)? {
+        outputs.push(intent::Output::AssetPacket(packet.to_txout()));
+    }
+
+    let weight = intent::estimate_proof_weight(&inputs, &outputs)?;
+
+    Ok(weight.to_wu())
+}
+
+/// A subset of settlement inputs whose intent proof fits under the proof weight limit.
+#[derive(Debug)]
+struct SettlementChunk {
+    onchain_inputs: Vec<batch::OnChainInput>,
+    vtxo_inputs: Vec<intent::Input>,
+    total_amount: Amount,
+}
+
+impl SettlementChunk {
+    fn new() -> Self {
+        Self {
+            onchain_inputs: Vec::new(),
+            vtxo_inputs: Vec::new(),
+            total_amount: Amount::ZERO,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.onchain_inputs.is_empty() && self.vtxo_inputs.is_empty()
+    }
+
+    fn push(&mut self, input: SettlementInput) {
+        match input {
+            SettlementInput::Onchain(input) => {
+                self.total_amount += input.amount();
+                self.onchain_inputs.push(input);
+            }
+            SettlementInput::Vtxo(input) => {
+                self.total_amount += input.amount();
+                self.vtxo_inputs.push(input);
+            }
+        }
+    }
+
+    fn pop(&mut self, input_was_onchain: bool) -> SettlementInput {
+        if input_was_onchain {
+            let input = self.onchain_inputs.pop().expect("just pushed");
+            self.total_amount -= input.amount();
+            SettlementInput::Onchain(input)
+        } else {
+            let input = self.vtxo_inputs.pop().expect("just pushed");
+            self.total_amount -= input.amount();
+            SettlementInput::Vtxo(input)
+        }
+    }
+
+    /// All inputs in this chunk as `(is_onchain, index, amount)`.
+    fn input_amounts(&self) -> Vec<(bool, usize, Amount)> {
+        self.onchain_inputs
+            .iter()
+            .enumerate()
+            .map(|(i, input)| (true, i, input.amount()))
+            .chain(
+                self.vtxo_inputs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, input)| (false, i, input.amount())),
+            )
+            .collect()
+    }
+
+    fn remove(&mut self, is_onchain: bool, index: usize) -> SettlementInput {
+        if is_onchain {
+            let input = self.onchain_inputs.remove(index);
+            self.total_amount -= input.amount();
+            SettlementInput::Onchain(input)
+        } else {
+            let input = self.vtxo_inputs.remove(index);
+            self.total_amount -= input.amount();
+            SettlementInput::Vtxo(input)
+        }
+    }
+
+    fn clone_input(&self, is_onchain: bool, index: usize) -> SettlementInput {
+        if is_onchain {
+            SettlementInput::Onchain(self.onchain_inputs[index].clone())
+        } else {
+            SettlementInput::Vtxo(self.vtxo_inputs[index].clone())
+        }
+    }
+
+    fn estimate_proof_weight(&self, to_address: &ArkAddress) -> Result<u64, Error> {
+        estimate_settlement_proof_weight(&self.onchain_inputs, &self.vtxo_inputs, to_address)
+    }
+}
+
+enum SettlementInput {
+    Onchain(batch::OnChainInput),
+    Vtxo(intent::Input),
+}
+
+impl SettlementInput {
+    fn is_onchain(&self) -> bool {
+        matches!(self, SettlementInput::Onchain(_))
+    }
+}
+
+/// Split settlement inputs into chunks whose intent proofs each fit under `max_weight` weight
+/// units, preserving input order (boarding outputs first, then VTXOs).
+///
+/// Every chunk settles into its own offchain VTXO of the chunk's total amount, so each chunk
+/// must also clear the `dust` threshold; chunks that fall short are topped up by moving inputs
+/// over from other chunks.
+///
+/// Returns an error if a single input on its own already exceeds the limit, or if the chunks
+/// cannot be balanced to clear the dust threshold. Errors surface before any batch is joined, so
+/// a settlement never fails halfway through its chunks.
+const SINGLE_INPUT_TOO_LARGE_CONTEXT: &str =
+    "a single input's proof alone exceeds the weight limit; it cannot be batch-settled";
+
+fn chunk_settlement_inputs(
+    onchain_inputs: Vec<batch::OnChainInput>,
+    vtxo_inputs: Vec<intent::Input>,
+    to_address: &ArkAddress,
+    max_weight: u64,
+    dust: Amount,
+) -> Result<Vec<SettlementChunk>, Error> {
+    let inputs = onchain_inputs
+        .into_iter()
+        .map(SettlementInput::Onchain)
+        .chain(vtxo_inputs.into_iter().map(SettlementInput::Vtxo));
+
+    let mut chunks = Vec::new();
+    let mut current = SettlementChunk::new();
+
+    for input in inputs {
+        let is_onchain = input.is_onchain();
+
+        current.push(input);
+
+        let weight = current.estimate_proof_weight(to_address)?;
+
+        if weight > max_weight {
+            let input = current.pop(is_onchain);
+
+            if current.is_empty() {
+                // A single input already busts the limit; splitting cannot help.
+                return Err(Error::intent_proof_too_large(weight, max_weight)
+                    .context(SINGLE_INPUT_TOO_LARGE_CONTEXT));
+            }
+
+            chunks.push(std::mem::replace(&mut current, SettlementChunk::new()));
+
+            current.push(input);
+
+            let weight = current.estimate_proof_weight(to_address)?;
+            if weight > max_weight {
+                return Err(Error::intent_proof_too_large(weight, max_weight)
+                    .context(SINGLE_INPUT_TOO_LARGE_CONTEXT));
+            }
+        }
+    }
+
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+
+    rebalance_sub_dust_chunks(&mut chunks, to_address, max_weight, dust)?;
+
+    Ok(chunks)
+}
+
+/// Top up chunks whose total amount is below the dust threshold by moving inputs over from
+/// other chunks, without pushing any chunk's intent proof over `max_weight`.
+///
+/// Before chunking existed, small recoverable VTXOs were always carried by larger inputs into a
+/// single above-dust output; this preserves that behavior across chunk boundaries.
+///
+/// A lone chunk is left untouched: its sub-dust failure mode predates chunking and is reported
+/// by `prepare_intent` ("cannot settle into sub-dust VTXO").
+fn rebalance_sub_dust_chunks(
+    chunks: &mut Vec<SettlementChunk>,
+    to_address: &ArkAddress,
+    max_weight: u64,
+    dust: Amount,
+) -> Result<(), Error> {
+    if chunks.len() <= 1 {
+        return Ok(());
+    }
+
+    for receiver in 0..chunks.len() {
+        while !chunks[receiver].is_empty() && chunks[receiver].total_amount < dust {
+            if !move_input_into_chunk(chunks, receiver, to_address, max_weight, dust)? {
+                let amount = chunks[receiver].total_amount;
+                return Err(Error::ad_hoc(format!(
+                    "cannot balance settlement chunks: chunk amount {amount} is below the dust \
+                     threshold {dust} and no input can be moved into it without exceeding the \
+                     proof weight limit {max_weight}"
+                )));
+            }
+        }
+    }
+
+    // Donors may have been drained empty; drop them.
+    chunks.retain(|chunk| !chunk.is_empty());
+
+    Ok(())
+}
+
+/// Move a single input from some other chunk into `chunks[receiver]`, keeping every donor either
+/// empty or above the dust threshold and the receiver's proof under `max_weight`.
+///
+/// Returns `false` if no input can be moved.
+fn move_input_into_chunk(
+    chunks: &mut [SettlementChunk],
+    receiver: usize,
+    to_address: &ArkAddress,
+    max_weight: u64,
+    dust: Amount,
+) -> Result<bool, Error> {
+    // Prefer donating from the richest chunk, and prefer big inputs, so the receiver clears the
+    // dust threshold in as few moves as possible.
+    let mut donors: Vec<usize> = (0..chunks.len()).filter(|i| *i != receiver).collect();
+    donors.sort_by_key(|i| std::cmp::Reverse(chunks[*i].total_amount));
+
+    for donor in donors {
+        let mut candidates = chunks[donor].input_amounts();
+        candidates.sort_by_key(|(_, _, amount)| std::cmp::Reverse(*amount));
+
+        for (is_onchain, index, amount) in candidates {
+            // The donor must stay settleable: either it keeps an above-dust total or it is
+            // drained completely.
+            let donor_remaining = chunks[donor].total_amount - amount;
+            let donor_drained = donor_remaining == Amount::ZERO;
+            if donor_remaining < dust && !donor_drained {
+                continue;
+            }
+
+            // Simulate the move with a clone first, so a rejected candidate leaves the donor
+            // untouched and the remaining candidate indices valid.
+            let candidate = chunks[donor].clone_input(is_onchain, index);
+            chunks[receiver].push(candidate);
+            let over_weight = chunks[receiver].estimate_proof_weight(to_address)? > max_weight;
+            chunks[receiver].pop(is_onchain);
+
+            if over_weight {
+                continue;
+            }
+
+            let input = chunks[donor].remove(is_onchain, index);
+            chunks[receiver].push(input);
+
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
 /// Prepared intent data ready for batch registration.
 pub(crate) struct PreparedIntent {
     /// The signed intent.
@@ -1996,4 +2348,207 @@ pub(crate) struct PreparedIntent {
     pub onchain_inputs: Vec<batch::OnChainInput>,
     /// The original VTXO inputs (needed for forfeit signing).
     pub vtxo_inputs: Vec<intent::Input>,
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use ark_core::script::multisig_script;
+    use bitcoin::hashes::Hash;
+    use bitcoin::taproot::LeafVersion;
+    use bitcoin::taproot::TaprootBuilder;
+    use bitcoin::Network;
+    use bitcoin::Sequence;
+
+    fn test_address_and_spend_info() -> (
+        ArkAddress,
+        bitcoin::ScriptBuf,
+        bitcoin::taproot::ControlBlock,
+    ) {
+        let secp = Secp256k1::new();
+
+        let server_pk: PublicKey =
+            "0250929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0"
+                .parse()
+                .unwrap();
+        let owner_pk: PublicKey =
+            "03dff1d77f2a671c5f36183726db2341be58f8be17d2a3d1d2cd47b7b0f5f2d624"
+                .parse()
+                .unwrap();
+
+        let server_xonly = server_pk.x_only_public_key().0;
+        let owner_xonly = owner_pk.x_only_public_key().0;
+
+        let spend_script = multisig_script(server_xonly, owner_xonly);
+        let spend_info = TaprootBuilder::new()
+            .add_leaf(0, spend_script.clone())
+            .unwrap()
+            .finalize(&secp, server_xonly)
+            .unwrap();
+        let control_block = spend_info
+            .control_block(&(spend_script.clone(), LeafVersion::TapScript))
+            .unwrap();
+
+        let address = ArkAddress::new(Network::Regtest, server_xonly, spend_info.output_key());
+
+        (address, spend_script, control_block)
+    }
+
+    fn vtxo_input(outpoint_tag: u8, amount: Amount) -> intent::Input {
+        let (address, spend_script, control_block) = test_address_and_spend_info();
+
+        intent::Input::new(
+            OutPoint::new(Txid::from_byte_array([outpoint_tag; 32]), 0),
+            Sequence::MAX,
+            None,
+            TxOut {
+                value: amount,
+                script_pubkey: address.to_p2tr_script_pubkey(),
+            },
+            vec![spend_script.clone()],
+            (spend_script, control_block),
+            false,
+            false,
+            Vec::new(),
+        )
+    }
+
+    fn vtxo_inputs(amounts: &[u64]) -> Vec<intent::Input> {
+        amounts
+            .iter()
+            .enumerate()
+            .map(|(i, amount)| vtxo_input(i as u8 + 1, Amount::from_sat(*amount)))
+            .collect()
+    }
+
+    /// The estimated proof weight for settling `n` identical test inputs.
+    fn weight_of(n: usize) -> u64 {
+        let (address, _, _) = test_address_and_spend_info();
+        let inputs = vtxo_inputs(&vec![10_000; n]);
+        estimate_settlement_proof_weight(&[], &inputs, &address).unwrap()
+    }
+
+    fn chunk_outpoints(chunks: &[SettlementChunk]) -> Vec<OutPoint> {
+        chunks
+            .iter()
+            .flat_map(|chunk| chunk.vtxo_inputs.iter().map(|input| input.outpoint()))
+            .collect()
+    }
+
+    const DUST: Amount = Amount::from_sat(330);
+
+    #[test]
+    fn estimated_proof_weight_grows_per_input() {
+        let w1 = weight_of(1);
+        let w2 = weight_of(2);
+        let w3 = weight_of(3);
+
+        assert!(w1 < w2);
+        assert!(w2 < w3);
+
+        // Each identical input adds the same weight: input base (outpoint, script length,
+        // sequence) plus its witness (two 64-byte signatures, leaf script, control block).
+        assert_eq!(w2 - w1, w3 - w2);
+        let per_input = w2 - w1;
+        assert!(
+            (300..600).contains(&per_input),
+            "unexpected per-input weight: {per_input}"
+        );
+    }
+
+    #[test]
+    fn one_chunk_when_everything_fits() {
+        let (address, _, _) = test_address_and_spend_info();
+        let inputs = vtxo_inputs(&[10_000; 10]);
+
+        let chunks =
+            chunk_settlement_inputs(Vec::new(), inputs.clone(), &address, weight_of(10), DUST)
+                .unwrap();
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].total_amount, Amount::from_sat(100_000));
+        assert_eq!(
+            chunk_outpoints(&chunks),
+            inputs.iter().map(|i| i.outpoint()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn splits_into_weight_bounded_chunks_preserving_order() {
+        let (address, _, _) = test_address_and_spend_info();
+        let inputs = vtxo_inputs(&[10_000; 10]);
+        let max_weight = weight_of(3);
+
+        let chunks =
+            chunk_settlement_inputs(Vec::new(), inputs.clone(), &address, max_weight, DUST)
+                .unwrap();
+
+        assert_eq!(chunks.len(), 4); // 3 + 3 + 3 + 1.
+
+        for chunk in chunks.iter() {
+            assert!(chunk.estimate_proof_weight(&address).unwrap() <= max_weight);
+            assert!(chunk.total_amount >= DUST);
+        }
+
+        assert_eq!(
+            chunk_outpoints(&chunks),
+            inputs.iter().map(|i| i.outpoint()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn errors_when_a_single_input_exceeds_the_limit() {
+        let (address, _, _) = test_address_and_spend_info();
+        let inputs = vtxo_inputs(&[10_000; 3]);
+
+        let err = chunk_settlement_inputs(Vec::new(), inputs, &address, weight_of(1) - 1, DUST)
+            .unwrap_err();
+
+        assert!(err.is_intent_proof_too_large());
+        assert!(err.to_string().contains("cannot be batch-settled"));
+    }
+
+    #[test]
+    fn rebalances_sub_dust_trailing_chunk() {
+        let (address, _, _) = test_address_and_spend_info();
+        // Six healthy inputs and one sub-dust input which ends up alone in the trailing chunk.
+        let inputs = vtxo_inputs(&[10_000, 10_000, 10_000, 10_000, 10_000, 10_000, 100]);
+        let max_weight = weight_of(3);
+
+        let chunks =
+            chunk_settlement_inputs(Vec::new(), inputs.clone(), &address, max_weight, DUST)
+                .unwrap();
+
+        for chunk in chunks.iter() {
+            assert!(chunk.estimate_proof_weight(&address).unwrap() <= max_weight);
+            assert!(chunk.total_amount >= DUST);
+        }
+
+        // No input was lost or duplicated.
+        let mut outpoints = chunk_outpoints(&chunks);
+        outpoints.sort();
+        let mut expected = inputs.iter().map(|i| i.outpoint()).collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(outpoints, expected);
+
+        let total = chunks
+            .iter()
+            .fold(Amount::ZERO, |acc, chunk| acc + chunk.total_amount);
+        assert_eq!(total, Amount::from_sat(60_100));
+    }
+
+    #[test]
+    fn errors_when_sub_dust_chunks_cannot_be_balanced() {
+        let (address, _, _) = test_address_and_spend_info();
+        // Two sub-dust inputs which cannot share a chunk: the proof weight limit only fits one
+        // input per chunk.
+        let inputs = vtxo_inputs(&[100, 100]);
+
+        let err =
+            chunk_settlement_inputs(Vec::new(), inputs, &address, weight_of(1), DUST).unwrap_err();
+
+        assert!(err.to_string().contains("cannot balance settlement chunks"));
+    }
 }
