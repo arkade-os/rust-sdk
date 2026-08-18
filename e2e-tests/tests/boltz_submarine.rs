@@ -20,7 +20,7 @@ mod common;
 #[tokio::test]
 #[ignore]
 pub async fn submarine_swap() {
-    // Requires the arkade-regtest Boltz profile.
+    // Requires the Boltz regtest environment. See scripts/boltz-setup.sh.
 
     init_tracing();
     let regtest = Arc::new(Regtest::new());
