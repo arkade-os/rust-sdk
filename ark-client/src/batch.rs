@@ -2178,6 +2178,9 @@ impl SettlementInput {
 /// Returns an error if a single input on its own already exceeds the limit, or if the chunks
 /// cannot be balanced to clear the dust threshold. Errors surface before any batch is joined, so
 /// a settlement never fails halfway through its chunks.
+const SINGLE_INPUT_TOO_LARGE_CONTEXT: &str =
+    "a single input's proof alone exceeds the weight limit; it cannot be batch-settled";
+
 fn chunk_settlement_inputs(
     onchain_inputs: Vec<batch::OnChainInput>,
     vtxo_inputs: Vec<intent::Input>,
@@ -2205,7 +2208,8 @@ fn chunk_settlement_inputs(
 
             if current.is_empty() {
                 // A single input already busts the limit; splitting cannot help.
-                return Err(Error::intent_proof_too_large(weight, max_weight));
+                return Err(Error::intent_proof_too_large(weight, max_weight)
+                    .context(SINGLE_INPUT_TOO_LARGE_CONTEXT));
             }
 
             chunks.push(std::mem::replace(&mut current, SettlementChunk::new()));
@@ -2214,7 +2218,8 @@ fn chunk_settlement_inputs(
 
             let weight = current.estimate_proof_weight(to_address)?;
             if weight > max_weight {
-                return Err(Error::intent_proof_too_large(weight, max_weight));
+                return Err(Error::intent_proof_too_large(weight, max_weight)
+                    .context(SINGLE_INPUT_TOO_LARGE_CONTEXT));
             }
         }
     }

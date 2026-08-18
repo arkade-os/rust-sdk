@@ -223,7 +223,7 @@ impl fmt::Display for IntentProofTooLargeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "intent proof weight {} exceeds the server's maximum transaction weight {}. Settle fewer inputs per batch",
+            "intent proof weight {} WU exceeds the server's maximum transaction weight {} WU. Settle fewer inputs per batch",
             self.weight, self.max_weight
         )
     }
