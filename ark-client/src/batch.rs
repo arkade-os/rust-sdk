@@ -305,9 +305,13 @@ where
         R: Rng + CryptoRng + Clone,
     {
         let chunks = match self.max_intent_proof_weight(server_info) {
-            Some(max_weight) => {
-                chunk_settlement_inputs(boarding_inputs, vtxo_inputs, &to_address, max_weight)?
-            }
+            Some(max_weight) => chunk_settlement_inputs(
+                boarding_inputs,
+                vtxo_inputs,
+                &to_address,
+                max_weight,
+                server_info.dust,
+            )?,
             None => {
                 let mut chunk = SettlementChunk::new();
                 for input in boarding_inputs {
@@ -2112,6 +2116,45 @@ impl SettlementChunk {
             SettlementInput::Vtxo(input)
         }
     }
+
+    /// All inputs in this chunk as `(is_onchain, index, amount)`.
+    fn input_amounts(&self) -> Vec<(bool, usize, Amount)> {
+        self.onchain_inputs
+            .iter()
+            .enumerate()
+            .map(|(i, input)| (true, i, input.amount()))
+            .chain(
+                self.vtxo_inputs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, input)| (false, i, input.amount())),
+            )
+            .collect()
+    }
+
+    fn remove(&mut self, is_onchain: bool, index: usize) -> SettlementInput {
+        if is_onchain {
+            let input = self.onchain_inputs.remove(index);
+            self.total_amount -= input.amount();
+            SettlementInput::Onchain(input)
+        } else {
+            let input = self.vtxo_inputs.remove(index);
+            self.total_amount -= input.amount();
+            SettlementInput::Vtxo(input)
+        }
+    }
+
+    fn clone_input(&self, is_onchain: bool, index: usize) -> SettlementInput {
+        if is_onchain {
+            SettlementInput::Onchain(self.onchain_inputs[index].clone())
+        } else {
+            SettlementInput::Vtxo(self.vtxo_inputs[index].clone())
+        }
+    }
+
+    fn estimate_proof_weight(&self, to_address: &ArkAddress) -> Result<u64, Error> {
+        estimate_settlement_proof_weight(&self.onchain_inputs, &self.vtxo_inputs, to_address)
+    }
 }
 
 enum SettlementInput {
@@ -2128,12 +2171,19 @@ impl SettlementInput {
 /// Split settlement inputs into chunks whose intent proofs each fit under `max_weight` weight
 /// units, preserving input order (boarding outputs first, then VTXOs).
 ///
-/// Returns an error if a single input on its own already exceeds the limit.
+/// Every chunk settles into its own offchain VTXO of the chunk's total amount, so each chunk
+/// must also clear the `dust` threshold; chunks that fall short are topped up by moving inputs
+/// over from other chunks.
+///
+/// Returns an error if a single input on its own already exceeds the limit, or if the chunks
+/// cannot be balanced to clear the dust threshold. Errors surface before any batch is joined, so
+/// a settlement never fails halfway through its chunks.
 fn chunk_settlement_inputs(
     onchain_inputs: Vec<batch::OnChainInput>,
     vtxo_inputs: Vec<intent::Input>,
     to_address: &ArkAddress,
     max_weight: u64,
+    dust: Amount,
 ) -> Result<Vec<SettlementChunk>, Error> {
     let inputs = onchain_inputs
         .into_iter()
@@ -2148,11 +2198,7 @@ fn chunk_settlement_inputs(
 
         current.push(input);
 
-        let weight = estimate_settlement_proof_weight(
-            &current.onchain_inputs,
-            &current.vtxo_inputs,
-            to_address,
-        )?;
+        let weight = current.estimate_proof_weight(to_address)?;
 
         if weight > max_weight {
             let input = current.pop(is_onchain);
@@ -2166,11 +2212,7 @@ fn chunk_settlement_inputs(
 
             current.push(input);
 
-            let weight = estimate_settlement_proof_weight(
-                &current.onchain_inputs,
-                &current.vtxo_inputs,
-                to_address,
-            )?;
+            let weight = current.estimate_proof_weight(to_address)?;
             if weight > max_weight {
                 return Err(Error::intent_proof_too_large(weight, max_weight));
             }
@@ -2181,7 +2223,96 @@ fn chunk_settlement_inputs(
         chunks.push(current);
     }
 
+    rebalance_sub_dust_chunks(&mut chunks, to_address, max_weight, dust)?;
+
     Ok(chunks)
+}
+
+/// Top up chunks whose total amount is below the dust threshold by moving inputs over from
+/// other chunks, without pushing any chunk's intent proof over `max_weight`.
+///
+/// Before chunking existed, small recoverable VTXOs were always carried by larger inputs into a
+/// single above-dust output; this preserves that behavior across chunk boundaries.
+///
+/// A lone chunk is left untouched: its sub-dust failure mode predates chunking and is reported
+/// by `prepare_intent` ("cannot settle into sub-dust VTXO").
+fn rebalance_sub_dust_chunks(
+    chunks: &mut Vec<SettlementChunk>,
+    to_address: &ArkAddress,
+    max_weight: u64,
+    dust: Amount,
+) -> Result<(), Error> {
+    if chunks.len() <= 1 {
+        return Ok(());
+    }
+
+    for receiver in 0..chunks.len() {
+        while !chunks[receiver].is_empty() && chunks[receiver].total_amount < dust {
+            if !move_input_into_chunk(chunks, receiver, to_address, max_weight, dust)? {
+                let amount = chunks[receiver].total_amount;
+                return Err(Error::ad_hoc(format!(
+                    "cannot balance settlement chunks: chunk amount {amount} is below the dust \
+                     threshold {dust} and no input can be moved into it without exceeding the \
+                     proof weight limit {max_weight}"
+                )));
+            }
+        }
+    }
+
+    // Donors may have been drained empty; drop them.
+    chunks.retain(|chunk| !chunk.is_empty());
+
+    Ok(())
+}
+
+/// Move a single input from some other chunk into `chunks[receiver]`, keeping every donor either
+/// empty or above the dust threshold and the receiver's proof under `max_weight`.
+///
+/// Returns `false` if no input can be moved.
+fn move_input_into_chunk(
+    chunks: &mut [SettlementChunk],
+    receiver: usize,
+    to_address: &ArkAddress,
+    max_weight: u64,
+    dust: Amount,
+) -> Result<bool, Error> {
+    // Prefer donating from the richest chunk, and prefer big inputs, so the receiver clears the
+    // dust threshold in as few moves as possible.
+    let mut donors: Vec<usize> = (0..chunks.len()).filter(|i| *i != receiver).collect();
+    donors.sort_by_key(|i| std::cmp::Reverse(chunks[*i].total_amount));
+
+    for donor in donors {
+        let mut candidates = chunks[donor].input_amounts();
+        candidates.sort_by_key(|(_, _, amount)| std::cmp::Reverse(*amount));
+
+        for (is_onchain, index, amount) in candidates {
+            // The donor must stay settleable: either it keeps an above-dust total or it is
+            // drained completely.
+            let donor_remaining = chunks[donor].total_amount - amount;
+            let donor_drained = donor_remaining == Amount::ZERO;
+            if donor_remaining < dust && !donor_drained {
+                continue;
+            }
+
+            // Simulate the move with a clone first, so a rejected candidate leaves the donor
+            // untouched and the remaining candidate indices valid.
+            let candidate = chunks[donor].clone_input(is_onchain, index);
+            chunks[receiver].push(candidate);
+            let over_weight = chunks[receiver].estimate_proof_weight(to_address)? > max_weight;
+            chunks[receiver].pop(is_onchain);
+
+            if over_weight {
+                continue;
+            }
+
+            let input = chunks[donor].remove(is_onchain, index);
+            chunks[receiver].push(input);
+
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 /// Prepared intent data ready for batch registration.
