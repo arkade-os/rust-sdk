@@ -1,9 +1,27 @@
-//! Background VTXO watcher that auto-delegates and auto-renews VTXOs.
+//! Background watcher that delegates and renews virtual outputs.
 //!
-//! Full behavior:
-//! - On new VTXOs received: submit them to the delegator service for future renewal
-//! - On new VTXOs received: self-renew VTXOs that are close to expiry (safety net)
-//! - On stream error: reconnect with exponential backoff
+//! Every virtual output has an expiry. It lives in a batch output, and that batch output is swept
+//! once its expiry passes. Renewal moves a virtual output into a fresh batch swap before that
+//! happens, and this watcher does it without the application having to schedule anything.
+//!
+//! Start it with [`Client::start_vtxo_watcher`]. It does three things:
+//!
+//! - **Delegates.** New virtual outputs are submitted to the delegate service, which renews them on
+//!   the wallet's behalf.
+//! - **Renews.** As a safety net, it self-renews virtual outputs with less than 10% of their
+//!   lifetime remaining, and anything already recoverable. It checks on a 60-second tick, and skips
+//!   the pass when the selected amounts do not reach the operator's dust threshold — a settlement
+//!   cannot produce a sub-dust virtual output.
+//! - **Migrates.** On a periodic, backed-off pass it rotates funds off any deprecated operator
+//!   signer the wallet still holds pre-cutoff outputs under. Turn this arm off with
+//!   [`VtxoWatcherConfig::migrate_deprecated_signers`]; renewal and delegation are unaffected.
+//!
+//! The watcher reconnects on stream errors with exponential backoff, and stops when the returned
+//! [`VtxoWatcherHandle`] is dropped.
+//!
+//! Renewal is also available synchronously: see [`Client::settle`] for the periodic case, and
+//! [`Client::settle_all`] when isolated sub-dust amounts need healthy outputs to carry them over
+//! the dust threshold.
 
 use crate::error::ErrorContext;
 use crate::swap_storage::SwapStorage;
