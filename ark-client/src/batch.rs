@@ -2086,6 +2086,7 @@ fn estimate_settlement_proof_weight(
 }
 
 /// A subset of settlement inputs whose intent proof fits under the proof weight limit.
+#[derive(Debug)]
 struct SettlementChunk {
     onchain_inputs: Vec<batch::OnChainInput>,
     vtxo_inputs: Vec<intent::Input>,
@@ -2347,4 +2348,207 @@ pub(crate) struct PreparedIntent {
     pub onchain_inputs: Vec<batch::OnChainInput>,
     /// The original VTXO inputs (needed for forfeit signing).
     pub vtxo_inputs: Vec<intent::Input>,
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use ark_core::script::multisig_script;
+    use bitcoin::hashes::Hash;
+    use bitcoin::taproot::LeafVersion;
+    use bitcoin::taproot::TaprootBuilder;
+    use bitcoin::Network;
+    use bitcoin::Sequence;
+
+    fn test_address_and_spend_info() -> (
+        ArkAddress,
+        bitcoin::ScriptBuf,
+        bitcoin::taproot::ControlBlock,
+    ) {
+        let secp = Secp256k1::new();
+
+        let server_pk: PublicKey =
+            "0250929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0"
+                .parse()
+                .unwrap();
+        let owner_pk: PublicKey =
+            "03dff1d77f2a671c5f36183726db2341be58f8be17d2a3d1d2cd47b7b0f5f2d624"
+                .parse()
+                .unwrap();
+
+        let server_xonly = server_pk.x_only_public_key().0;
+        let owner_xonly = owner_pk.x_only_public_key().0;
+
+        let spend_script = multisig_script(server_xonly, owner_xonly);
+        let spend_info = TaprootBuilder::new()
+            .add_leaf(0, spend_script.clone())
+            .unwrap()
+            .finalize(&secp, server_xonly)
+            .unwrap();
+        let control_block = spend_info
+            .control_block(&(spend_script.clone(), LeafVersion::TapScript))
+            .unwrap();
+
+        let address = ArkAddress::new(Network::Regtest, server_xonly, spend_info.output_key());
+
+        (address, spend_script, control_block)
+    }
+
+    fn vtxo_input(outpoint_tag: u8, amount: Amount) -> intent::Input {
+        let (address, spend_script, control_block) = test_address_and_spend_info();
+
+        intent::Input::new(
+            OutPoint::new(Txid::from_byte_array([outpoint_tag; 32]), 0),
+            Sequence::MAX,
+            None,
+            TxOut {
+                value: amount,
+                script_pubkey: address.to_p2tr_script_pubkey(),
+            },
+            vec![spend_script.clone()],
+            (spend_script, control_block),
+            false,
+            false,
+            Vec::new(),
+        )
+    }
+
+    fn vtxo_inputs(amounts: &[u64]) -> Vec<intent::Input> {
+        amounts
+            .iter()
+            .enumerate()
+            .map(|(i, amount)| vtxo_input(i as u8 + 1, Amount::from_sat(*amount)))
+            .collect()
+    }
+
+    /// The estimated proof weight for settling `n` identical test inputs.
+    fn weight_of(n: usize) -> u64 {
+        let (address, _, _) = test_address_and_spend_info();
+        let inputs = vtxo_inputs(&vec![10_000; n]);
+        estimate_settlement_proof_weight(&[], &inputs, &address).unwrap()
+    }
+
+    fn chunk_outpoints(chunks: &[SettlementChunk]) -> Vec<OutPoint> {
+        chunks
+            .iter()
+            .flat_map(|chunk| chunk.vtxo_inputs.iter().map(|input| input.outpoint()))
+            .collect()
+    }
+
+    const DUST: Amount = Amount::from_sat(330);
+
+    #[test]
+    fn estimated_proof_weight_grows_per_input() {
+        let w1 = weight_of(1);
+        let w2 = weight_of(2);
+        let w3 = weight_of(3);
+
+        assert!(w1 < w2);
+        assert!(w2 < w3);
+
+        // Each identical input adds the same weight: input base (outpoint, script length,
+        // sequence) plus its witness (two 64-byte signatures, leaf script, control block).
+        assert_eq!(w2 - w1, w3 - w2);
+        let per_input = w2 - w1;
+        assert!(
+            (300..600).contains(&per_input),
+            "unexpected per-input weight: {per_input}"
+        );
+    }
+
+    #[test]
+    fn one_chunk_when_everything_fits() {
+        let (address, _, _) = test_address_and_spend_info();
+        let inputs = vtxo_inputs(&[10_000; 10]);
+
+        let chunks =
+            chunk_settlement_inputs(Vec::new(), inputs.clone(), &address, weight_of(10), DUST)
+                .unwrap();
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].total_amount, Amount::from_sat(100_000));
+        assert_eq!(
+            chunk_outpoints(&chunks),
+            inputs.iter().map(|i| i.outpoint()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn splits_into_weight_bounded_chunks_preserving_order() {
+        let (address, _, _) = test_address_and_spend_info();
+        let inputs = vtxo_inputs(&[10_000; 10]);
+        let max_weight = weight_of(3);
+
+        let chunks =
+            chunk_settlement_inputs(Vec::new(), inputs.clone(), &address, max_weight, DUST)
+                .unwrap();
+
+        assert_eq!(chunks.len(), 4); // 3 + 3 + 3 + 1.
+
+        for chunk in chunks.iter() {
+            assert!(chunk.estimate_proof_weight(&address).unwrap() <= max_weight);
+            assert!(chunk.total_amount >= DUST);
+        }
+
+        assert_eq!(
+            chunk_outpoints(&chunks),
+            inputs.iter().map(|i| i.outpoint()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn errors_when_a_single_input_exceeds_the_limit() {
+        let (address, _, _) = test_address_and_spend_info();
+        let inputs = vtxo_inputs(&[10_000; 3]);
+
+        let err = chunk_settlement_inputs(Vec::new(), inputs, &address, weight_of(1) - 1, DUST)
+            .unwrap_err();
+
+        assert!(err.is_intent_proof_too_large());
+        assert!(err.to_string().contains("cannot be batch-settled"));
+    }
+
+    #[test]
+    fn rebalances_sub_dust_trailing_chunk() {
+        let (address, _, _) = test_address_and_spend_info();
+        // Six healthy inputs and one sub-dust input which ends up alone in the trailing chunk.
+        let inputs = vtxo_inputs(&[10_000, 10_000, 10_000, 10_000, 10_000, 10_000, 100]);
+        let max_weight = weight_of(3);
+
+        let chunks =
+            chunk_settlement_inputs(Vec::new(), inputs.clone(), &address, max_weight, DUST)
+                .unwrap();
+
+        for chunk in chunks.iter() {
+            assert!(chunk.estimate_proof_weight(&address).unwrap() <= max_weight);
+            assert!(chunk.total_amount >= DUST);
+        }
+
+        // No input was lost or duplicated.
+        let mut outpoints = chunk_outpoints(&chunks);
+        outpoints.sort();
+        let mut expected = inputs.iter().map(|i| i.outpoint()).collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(outpoints, expected);
+
+        let total = chunks
+            .iter()
+            .fold(Amount::ZERO, |acc, chunk| acc + chunk.total_amount);
+        assert_eq!(total, Amount::from_sat(60_100));
+    }
+
+    #[test]
+    fn errors_when_sub_dust_chunks_cannot_be_balanced() {
+        let (address, _, _) = test_address_and_spend_info();
+        // Two sub-dust inputs which cannot share a chunk: the proof weight limit only fits one
+        // input per chunk.
+        let inputs = vtxo_inputs(&[100, 100]);
+
+        let err =
+            chunk_settlement_inputs(Vec::new(), inputs, &address, weight_of(1), DUST).unwrap_err();
+
+        assert!(err.to_string().contains("cannot balance settlement chunks"));
+    }
 }
