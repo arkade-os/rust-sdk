@@ -19,6 +19,24 @@ pub(crate) fn unix_now() -> Result<i64, Error> {
     }
 }
 
+/// Current time as Unix milliseconds. Uses `js_sys::Date` on wasm32, `std::time` elsewhere.
+pub(crate) fn unix_now_millis() -> Result<i64, Error> {
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| Error::ad_hoc(format!("system clock before UNIX_EPOCH: {e}")))?
+            .as_millis();
+
+        i64::try_from(millis).map_err(|_| Error::ad_hoc("unix timestamp overflow"))
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        Ok(js_sys::Date::now() as i64)
+    }
+}
+
 pub(crate) async fn sleep(duration: Duration) {
     #[cfg(target_arch = "wasm32")]
     {
