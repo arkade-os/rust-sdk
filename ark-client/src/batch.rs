@@ -348,7 +348,7 @@ where
 
             // Joining a batch can fail depending on the timing, so we try a few times.
             let txid = join_next_batch
-                .retry(ExponentialBuilder::default().with_max_times(0))
+                .retry(ExponentialBuilder::default().with_max_times(3))
                 .sleep(sleep)
                 .when(|err| !err.is_server_info_changed() && !err.is_intent_proof_too_large())
                 .notify(|err: &Error, dur: std::time::Duration| {
