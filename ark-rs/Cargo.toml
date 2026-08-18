@@ -7,7 +7,11 @@ keywords = { workspace = true }
 license = { workspace = true }
 repository = { workspace = true }
 rust-version = "1.86"
-description = "Collection of Rust crates designed to simplify building Bitcoin wallets with seamless support for both on-chain and off-chain transactions via the Ark protocol"
+description = "Rust crates for building Bitcoin wallets and applications with Arkade"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [lints]
 workspace = true

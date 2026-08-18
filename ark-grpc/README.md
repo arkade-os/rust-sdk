@@ -1,6 +1,6 @@
 # ark-grpc
 
-gRPC transport client for Arkade servers.
+gRPC transport client for the Arkade operator.
 
 This crate contains the generated Arkade gRPC types plus a Rust client wrapper used by the higher-level `ark-client` crate.
 

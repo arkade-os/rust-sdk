@@ -7,7 +7,7 @@ keywords = { workspace = true }
 license = { workspace = true }
 repository = { workspace = true }
 rust-version = "1.86"
-description = "gRPC client for Ark server communication"
+description = "gRPC transport client for the Arkade operator"
 
 [lints]
 workspace = true

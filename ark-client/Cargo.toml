@@ -7,7 +7,7 @@ keywords = { workspace = true }
 license = { workspace = true }
 repository = { workspace = true }
 rust-version = "1.86"
-description = "Main client library for interacting with Ark servers"
+description = "High-level client library for building Arkade wallets in Rust"
 
 [lints]
 workspace = true

@@ -7,7 +7,7 @@ keywords = { workspace = true }
 license = { workspace = true }
 repository = { workspace = true }
 rust-version = "1.86"
-description = "REST client for Ark server communication"
+description = "REST transport client for the Arkade operator"
 
 [lints]
 workspace = true

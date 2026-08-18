@@ -1,8 +1,11 @@
 # ark-rs
 
-Rust crates for building Bitcoin wallets and applications that use the Arkade protocol.
+Rust crates for building Bitcoin wallets and applications with Arkade.
 
-This repository contains the Arkade Rust SDK: protocol types, transport clients, wallet integration, fee estimation, and development/test utilities.
+[![crates.io](https://img.shields.io/crates/v/ark-rs)](https://crates.io/crates/ark-rs)
+[![docs.rs](https://img.shields.io/docsrs/ark-rs)](https://docs.rs/ark-rs)
+
+This repository contains the Arkade Rust SDK: core types, transport clients, wallet integration, fee estimation, and development and test utilities.
 
 ## Crates
 
@@ -10,9 +13,9 @@ This repository contains the Arkade Rust SDK: protocol types, transport clients,
 | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------- |
 | [`ark-rs`](./ark-rs)                                   | Convenience crate that re-exports the main SDK crates behind feature flags.                             |
 | [`ark-core`](./ark-core)                               | Core Arkade protocol types and transaction utilities.                                                   |
-| [`ark-client`](./ark-client)                           | High-level client library for interacting with Arkade servers.                                          |
-| [`ark-grpc`](./ark-grpc)                               | gRPC transport client for Arkade servers.                                                               |
-| [`ark-rest`](./ark-rest)                               | REST transport client for Arkade servers.                                                               |
+| [`ark-client`](./ark-client)                           | High-level client library for building Arkade wallets in Rust.                                          |
+| [`ark-grpc`](./ark-grpc)                               | gRPC transport client for the Arkade operator.                                                          |
+| [`ark-rest`](./ark-rest)                               | REST transport client for the Arkade operator.                                                          |
 | [`ark-bdk-wallet`](./ark-bdk-wallet)                   | [`bdk_wallet`](https://crates.io/crates/bdk_wallet)-based implementation of `ark-client` wallet traits. |
 | [`ark-fees`](./ark-fees)                               | CEL-based fee estimation library for Arkade transactions.                                               |
 | [`ark-delegator`](./ark-delegator)                     | REST client for Arkade delegator services.                                                              |
@@ -49,9 +52,9 @@ Optional `ark-rs` features:
 
 ## Examples and documentation
 
-- API documentation is published on [docs.rs](https://docs.rs/releases/search?query=ark-rs).
+- API documentation is published on [docs.rs/ark-rs](https://docs.rs/ark-rs).
 - The [`ark-client-sample`](./ark-client-sample) crate shows how to wire the client in a CLI application.
-- The [`e2e-tests`](./e2e-tests/tests) directory contains integration examples against a local Arkade server.
+- The [`e2e-tests`](./e2e-tests/tests) directory contains integration examples that run against a local operator.
 
 ## Development
 
