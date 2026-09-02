@@ -6,5 +6,5 @@ pub fn to_musig_pk(pk: PublicKey) -> musig::PublicKey {
 }
 
 pub fn from_musig_xonly(pk: musig::XOnlyPublicKey) -> XOnlyPublicKey {
-    XOnlyPublicKey::from_slice(&pk.serialize()).expect("valid conversion")
+    XOnlyPublicKey::from_slice(&pk.to_byte_array()).expect("valid conversion")
 }

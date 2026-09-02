@@ -5220,7 +5220,7 @@ fn reconstruct_btc_htlc(
         .map_err(|e| Error::ad_hoc(format!("invalid user key for musig: {e}")))?;
 
     let key_agg = musig::musig::KeyAggCache::new(&[&musig_server_pk, &musig_user_pk]);
-    let internal_key = XOnlyPublicKey::from_slice(&key_agg.agg_pk().serialize())
+    let internal_key = XOnlyPublicKey::from_slice(&key_agg.agg_pk().to_byte_array())
         .map_err(|e| Error::ad_hoc(format!("invalid aggregated key: {e}")))?;
 
     let secp = Secp256k1::new();
