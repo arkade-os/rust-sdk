@@ -2,6 +2,7 @@ use crate::Error;
 use crate::VTXO_INPUT_INDEX;
 use bitcoin::taproot::Signature;
 use bitcoin::Psbt;
+use bitcoin::Sequence;
 use bitcoin::Txid;
 use std::collections::HashMap;
 
@@ -29,6 +30,8 @@ impl TxGraph {
 
         for chunk in chunks {
             let txid = chunk.tx.unsigned_tx.compute_txid();
+            Self::validate_finality(txid, &chunk.tx)?;
+
             chunks_by_txid.insert(txid, chunk);
         }
 
@@ -105,6 +108,28 @@ impl TxGraph {
         })
     }
 
+    /// A non-final transaction cannot be broadcast on demand, so a non-final graph would give us an
+    /// unroll path that is unusable exactly when we need it.
+    fn validate_finality(txid: Txid, tx: &Psbt) -> Result<(), Error> {
+        let lock_time = tx.unsigned_tx.lock_time.to_consensus_u32();
+        if lock_time != 0 {
+            return Err(Error::ad_hoc(format!(
+                "non-zero lock time ({lock_time}) in tx graph chunk {txid}",
+            )));
+        }
+
+        for input in &tx.unsigned_tx.input {
+            let sequence = input.sequence;
+            if sequence != Sequence::MAX {
+                return Err(Error::ad_hoc(format!(
+                    "non-final sequence ({sequence:#x}) in tx graph chunk {txid}",
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn nb_of_nodes(&self) -> usize {
         let mut nb = 1;
         for child in self.children.values() {
@@ -179,5 +204,97 @@ impl TxGraph {
         }
 
         leaves
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin::absolute::LockTime;
+    use bitcoin::transaction::Version;
+    use bitcoin::Amount;
+    use bitcoin::ScriptBuf;
+    use bitcoin::Transaction;
+    use bitcoin::TxIn;
+    use bitcoin::TxOut;
+
+    fn chunk(value: u64, lock_time: LockTime, sequence: Sequence) -> TxGraphChunk {
+        let tx = Transaction {
+            version: Version(3),
+            lock_time,
+            input: vec![TxIn {
+                sequence,
+                ..Default::default()
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(value),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        };
+
+        TxGraphChunk {
+            txid: None,
+            tx: Psbt::from_unsigned_tx(tx).unwrap(),
+            children: HashMap::new(),
+        }
+    }
+
+    fn final_chunk(value: u64) -> TxGraphChunk {
+        chunk(value, LockTime::ZERO, Sequence::MAX)
+    }
+
+    fn txid(chunk: &TxGraphChunk) -> Txid {
+        chunk.tx.unsigned_tx.compute_txid()
+    }
+
+    #[test]
+    fn accepts_final_graph() {
+        let child = final_chunk(1_000);
+
+        let mut root = final_chunk(2_000);
+        root.children.insert(0, txid(&child));
+
+        let graph = TxGraph::new(vec![root, child]).unwrap();
+
+        assert_eq!(graph.nb_of_nodes(), 2);
+    }
+
+    #[test]
+    fn rejects_non_zero_lock_time() {
+        let non_final = chunk(1_000, LockTime::from_consensus(800_000), Sequence::MAX);
+        let non_final_txid = txid(&non_final);
+
+        let error = TxGraph::new(vec![non_final]).unwrap_err().to_string();
+
+        assert!(error.contains("lock time"), "{error}");
+        assert!(error.contains("800000"), "{error}");
+        assert!(error.contains(&non_final_txid.to_string()), "{error}");
+    }
+
+    #[test]
+    fn rejects_non_final_sequence() {
+        let non_final = chunk(1_000, LockTime::ZERO, Sequence::from_height(144));
+        let non_final_txid = txid(&non_final);
+
+        let error = TxGraph::new(vec![non_final]).unwrap_err().to_string();
+
+        assert!(error.contains("sequence"), "{error}");
+        assert!(error.contains("0x90"), "{error}");
+        assert!(error.contains(&non_final_txid.to_string()), "{error}");
+    }
+
+    #[test]
+    fn rejects_non_final_sequence_in_non_root_chunk() {
+        let child = chunk(1_000, LockTime::ZERO, Sequence::ENABLE_RBF_NO_LOCKTIME);
+        let child_txid = txid(&child);
+
+        let mut root = final_chunk(2_000);
+        root.children.insert(0, child_txid);
+
+        let error = TxGraph::new(vec![root, child]).unwrap_err().to_string();
+
+        assert!(error.contains("sequence"), "{error}");
+        assert!(error.contains("0xfffffffd"), "{error}");
+        assert!(error.contains(&child_txid.to_string()), "{error}");
     }
 }
