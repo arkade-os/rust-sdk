@@ -273,6 +273,12 @@ pub struct OfflineClientConfig {
     pub boltz_referral_id: BoltzReferralId,
     pub delegator_pk: Option<XOnlyPublicKey>,
     pub historical_delegator_pks: Vec<XOnlyPublicKey>,
+    /// Upper bound on the weight of the intent proof transaction used when joining a batch.
+    ///
+    /// Settlements whose proof would exceed this bound are split across multiple sequential
+    /// batches. The effective bound is the minimum of this value and the server's advertised
+    /// `max_tx_weight`; leave as `None` (the default) to just use the server's limit.
+    pub max_intent_proof_weight: Option<u64>,
 }
 
 impl Default for OfflineClientConfig {
@@ -285,6 +291,7 @@ impl Default for OfflineClientConfig {
             boltz_referral_id: BoltzReferralId::default(),
             delegator_pk: None,
             historical_delegator_pks: Vec::new(),
+            max_intent_proof_weight: None,
         }
     }
 }
@@ -457,6 +464,7 @@ pub struct OfflineClient<B, W, S> {
     contract_store: Arc<Mutex<Option<Box<dyn ContractStore>>>>,
     delegator_pk: Option<XOnlyPublicKey>,
     historical_delegator_pks: Vec<XOnlyPublicKey>,
+    max_intent_proof_weight: Option<u64>,
 }
 
 /// A client to interact with Ark server
@@ -729,6 +737,7 @@ where
             contract_store: Arc::new(Mutex::new(None)),
             delegator_pk: config.delegator_pk,
             historical_delegator_pks,
+            max_intent_proof_weight: config.max_intent_proof_weight,
         }
     }
 
