@@ -3,6 +3,9 @@ use crate::key_provider::KeypairIndex;
 use crate::utils::sleep;
 use crate::utils::timeout_op;
 use crate::utils::unix_now;
+use crate::utils::unix_now_millis;
+use crate::vtxo_cache::InMemoryVtxoCache;
+use crate::vtxo_cache::VtxoCacheStore;
 use crate::wallet::OnchainWallet;
 use ark_core::asset::AssetId;
 use ark_core::build_anchor_tx;
@@ -73,6 +76,7 @@ mod migration;
 mod send_vtxo;
 mod unilateral_exit;
 mod utils;
+pub mod vtxo_cache;
 
 pub use ark_core::server::DeprecatedSignerStatus;
 pub use ark_core::server::ServerSignerStatus;
@@ -457,6 +461,7 @@ pub struct OfflineClient<B, W, S> {
     contract_store: Arc<Mutex<Option<Box<dyn ContractStore>>>>,
     delegator_pk: Option<XOnlyPublicKey>,
     historical_delegator_pks: Vec<XOnlyPublicKey>,
+    vtxo_cache: Arc<dyn VtxoCacheStore>,
 }
 
 /// A client to interact with Ark server
@@ -466,6 +471,7 @@ pub struct Client<B, W, S> {
     inner: OfflineClient<B, W, S>,
     state: Arc<RwLock<ServerState>>,
     server_info_refresh_lock: Arc<tokio::sync::Mutex<()>>,
+    vtxo_sync_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 struct ServerState {
@@ -586,6 +592,62 @@ pub struct OffChainBalance {
 }
 
 impl OffChainBalance {
+    /// Compute the offchain balance from an already-fetched VTXO list, e.g. one returned by
+    /// [`Client::list_vtxos`].
+    ///
+    /// Use this when you need both the balance and the VTXO list, so a single VTXO sync serves
+    /// both instead of fetching the list twice.
+    pub fn from_vtxo_list(
+        vtxo_list: &AnnotatedVtxoList,
+        server_info: &server::Info,
+        now: i64,
+    ) -> Result<Self, Error> {
+        let spendable_outpoints: HashSet<OutPoint> = vtxo_list
+            .spendable_offchain_at(server_info, now)
+            .map(|entry| entry.vtxo().outpoint)
+            .collect();
+
+        let pre_confirmed = vtxo_list
+            .pre_confirmed()
+            .filter(|entry| spendable_outpoints.contains(&entry.vtxo().outpoint))
+            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo().amount);
+
+        let confirmed = vtxo_list
+            .confirmed()
+            .filter(|entry| spendable_outpoints.contains(&entry.vtxo().outpoint))
+            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo().amount);
+
+        let recoverable = vtxo_list
+            .recoverable()
+            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo().amount);
+
+        let pending_recovery = vtxo_list
+            .pending_recovery_due_to_signer_at(server_info, now)
+            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo().amount);
+
+        // Aggregate asset balances from currently offchain-spendable VTXOs only.
+        let mut asset_balances: HashMap<AssetId, u64> = HashMap::new();
+        for entry in vtxo_list.spendable_offchain_at(server_info, now) {
+            for asset in &entry.vtxo().assets {
+                let total = asset_balances
+                    .get(&asset.asset_id)
+                    .copied()
+                    .unwrap_or(0)
+                    .checked_add(asset.amount)
+                    .ok_or_else(|| Error::ad_hoc("asset balance overflow"))?;
+                asset_balances.insert(asset.asset_id, total);
+            }
+        }
+
+        Ok(OffChainBalance {
+            pre_confirmed,
+            confirmed,
+            recoverable,
+            pending_recovery,
+            asset_balances,
+        })
+    }
+
     pub fn pre_confirmed(&self) -> Amount {
         self.pre_confirmed
     }
@@ -724,12 +786,20 @@ where
             swap_storage,
             boltz_url: config.boltz_url.trim_end_matches('/').to_string(),
             boltz_referral_id,
+            vtxo_cache: Arc::new(InMemoryVtxoCache::new()),
             timeout: config.timeout,
             server_info_ttl: config.server_info_ttl,
             contract_store: Arc::new(Mutex::new(None)),
             delegator_pk: config.delegator_pk,
             historical_delegator_pks,
         }
+    }
+
+    /// Use a custom [`VtxoCacheStore`] implementation instead of the default
+    /// [`InMemoryVtxoCache`], e.g. to share a persistent VTXO cache between processes.
+    pub fn with_vtxo_cache(mut self, vtxo_cache: Arc<dyn VtxoCacheStore>) -> Self {
+        self.vtxo_cache = vtxo_cache;
+        self
     }
 
     /// Create a new offline client with a static keypair.
@@ -867,6 +937,7 @@ where
             inner: self,
             state,
             server_info_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            vtxo_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
 
         match client.migrate_boltz_vhtlc_contracts(&server_info).await {
@@ -1718,12 +1789,100 @@ where
         manager.annotated_boarding_outputs_for_exit_delays(&candidate_delays)
     }
 
+    /// Get the VTXOs for the given addresses, using the configured [`VtxoCacheStore`] to avoid
+    /// refetching the full VTXO history on every call.
+    ///
+    /// Scripts seen for the first time are fetched in full. For known scripts we only fetch the
+    /// delta since the last sync (the server filters by the VTXO's `updated_at` timestamp, which
+    /// is bumped on creation, spend, settlement and unroll), plus a targeted refresh by outpoint
+    /// of the cached unspent VTXOs, whose swept/expiry state can change server-side without
+    /// bumping `updated_at`. Spent VTXOs are terminal and are never refetched.
+    ///
+    /// Use [`Client::clear_vtxo_cache`] to force a full refetch.
     pub async fn get_virtual_tx_outpoints(
         &self,
         addresses: impl Iterator<Item = ArkAddress>,
     ) -> Result<Vec<VirtualTxOutPoint>, Error> {
-        let request = GetVtxosRequest::new_for_addresses(addresses);
-        self.fetch_all_vtxos(request).await
+        let scripts: HashSet<ScriptBuf> = addresses
+            .map(|address| address.to_p2tr_script_pubkey())
+            .collect();
+
+        if scripts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Holding the lock for the whole sync serializes concurrent callers, so the same delta is
+        // not fetched twice.
+        let _sync_guard = self.vtxo_sync_lock.lock().await;
+
+        let cache = &self.inner.vtxo_cache;
+
+        let now_ms = unix_now_millis()?;
+
+        let synced_scripts = cache.synced_scripts().await?;
+        let unknown_scripts = scripts
+            .iter()
+            .filter(|script| !synced_scripts.contains(*script))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        // Cached unspent VTXOs to refresh by outpoint, collected before the fetches below so we
+        // don't refetch what they just returned.
+        let refresh_outpoints = cache.unspent_outpoints_for(&scripts).await?;
+
+        let delta_after = (cache.last_sync_ms().await? - vtxo_cache::SYNC_MARGIN_MS).max(1) as u64;
+
+        // The three fetches are independent, so they run concurrently. Each future is boxed:
+        // inlining three copies of the fetch future into this one makes it large enough to
+        // overflow the stack in debug builds.
+        let unknown_fut = Box::pin(async {
+            if unknown_scripts.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            let request = GetVtxosRequest::new_for_scripts(unknown_scripts.clone());
+            self.fetch_all_vtxos(request).await
+        });
+
+        // The delta must cover _all_ synced scripts, not just the requested ones, because the
+        // watermark below is global: anything the delta skips now would be skipped forever.
+        let delta_fut = Box::pin(async {
+            if synced_scripts.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            let request =
+                GetVtxosRequest::new_for_scripts(synced_scripts.iter().cloned().collect())
+                    .with_after(delta_after);
+            self.fetch_all_vtxos(request).await
+        });
+
+        let refresh_fut = Box::pin(async {
+            if refresh_outpoints.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            let request = GetVtxosRequest::new_for_outpoints(&refresh_outpoints);
+            self.fetch_all_vtxos(request).await
+        });
+
+        let (unknown_vtxos, delta_vtxos, refresh_vtxos) =
+            futures::try_join!(unknown_fut, delta_fut, refresh_fut)?;
+
+        cache.upsert(unknown_vtxos).await?;
+        cache.upsert(delta_vtxos).await?;
+        cache.upsert(refresh_vtxos).await?;
+
+        cache.mark_synced(unknown_scripts).await?;
+        cache.set_last_sync_ms(now_ms).await?;
+
+        cache.vtxos_for(&scripts).await
+    }
+
+    /// Clear the VTXO cache, forcing the next VTXO query to fetch everything from the server
+    /// again.
+    pub async fn clear_vtxo_cache(&self) -> Result<(), Error> {
+        self.inner.vtxo_cache.clear().await
     }
 
     pub async fn list_vtxos(&self) -> Result<AnnotatedVtxoList, Error> {
@@ -1797,54 +1956,27 @@ where
     }
 
     pub async fn offchain_balance(&self) -> Result<OffChainBalance, Error> {
-        let vtxo_list = self.list_vtxos().await.context("failed to list VTXOs")?;
-        let now = unix_now()?;
+        let (_, balance) = self.offchain_balance_with_vtxos().await?;
+        Ok(balance)
+    }
+
+    /// Get the offchain balance together with the VTXO list it was computed from.
+    ///
+    /// Prefer this over calling [`Client::offchain_balance`] and [`Client::list_vtxos`]
+    /// back-to-back: a single VTXO sync serves both.
+    pub async fn offchain_balance_with_vtxos(
+        &self,
+    ) -> Result<(AnnotatedVtxoList, OffChainBalance), Error> {
         let server_info = self.server_info().await?;
+        let vtxo_list = self
+            .list_vtxos_with_server_info(&server_info)
+            .await
+            .context("failed to list VTXOs")?;
+        let now = unix_now()?;
 
-        let spendable_outpoints: HashSet<OutPoint> = vtxo_list
-            .spendable_offchain_at(&server_info, now)
-            .map(|entry| entry.vtxo().outpoint)
-            .collect();
+        let balance = OffChainBalance::from_vtxo_list(&vtxo_list, &server_info, now)?;
 
-        let pre_confirmed = vtxo_list
-            .pre_confirmed()
-            .filter(|entry| spendable_outpoints.contains(&entry.vtxo().outpoint))
-            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo().amount);
-
-        let confirmed = vtxo_list
-            .confirmed()
-            .filter(|entry| spendable_outpoints.contains(&entry.vtxo().outpoint))
-            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo().amount);
-
-        let recoverable = vtxo_list
-            .recoverable()
-            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo().amount);
-
-        let pending_recovery = vtxo_list
-            .pending_recovery_due_to_signer_at(&server_info, now)
-            .fold(Amount::ZERO, |acc, entry| acc + entry.vtxo().amount);
-
-        // Aggregate asset balances from currently offchain-spendable VTXOs only.
-        let mut asset_balances: HashMap<AssetId, u64> = HashMap::new();
-        for entry in vtxo_list.spendable_offchain_at(&server_info, now) {
-            for asset in &entry.vtxo().assets {
-                let total = asset_balances
-                    .get(&asset.asset_id)
-                    .copied()
-                    .unwrap_or(0)
-                    .checked_add(asset.amount)
-                    .ok_or_else(|| Error::ad_hoc("asset balance overflow"))?;
-                asset_balances.insert(asset.asset_id, total);
-            }
-        }
-
-        Ok(OffChainBalance {
-            pre_confirmed,
-            confirmed,
-            recoverable,
-            pending_recovery,
-            asset_balances,
-        })
+        Ok((vtxo_list, balance))
     }
 
     /// Get information about an asset by its ID.
@@ -2000,7 +2132,11 @@ where
 
         let mut all_vtxos = Vec::new();
         let mut cursor = 0;
-        const PAGE_SIZE: i32 = 100;
+        // The server honors the requested page size (its per-endpoint "max" is only the default
+        // for requests that don't set one), and every page request re-runs the full vtxo query
+        // server-side before paginating in memory — so fewer, larger pages are strictly cheaper
+        // on both ends. 2000 vtxos fit comfortably within tonic's 4 MiB response limit.
+        const PAGE_SIZE: i32 = 2000;
 
         loop {
             let paged_request = request.clone().with_page(PAGE_SIZE, cursor);
