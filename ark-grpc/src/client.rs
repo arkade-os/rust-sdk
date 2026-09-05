@@ -82,6 +82,7 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::time::Duration;
 
 #[derive(Clone, Default)]
 struct HeaderState {
@@ -735,6 +736,9 @@ impl Client {
     /// Note: for new subscriptions, don't provide a `subscription_id`
     ///
     /// Returns the subscription id if successful
+    #[deprecated(
+        note = "use `subscribe_to_scripts_stream` to open a subscription, or `update_subscription` to add scripts"
+    )]
     pub async fn subscribe_to_scripts(
         &self,
         scripts: Vec<ArkAddress>,
@@ -766,6 +770,7 @@ impl Client {
     }
 
     /// Allows to remove scripts from an existing subscription.
+    #[deprecated(note = "use `update_subscription` with the filter's `remove_scripts`")]
     pub async fn unsubscribe_from_scripts(
         &self,
         scripts: Vec<ArkAddress>,
@@ -863,6 +868,47 @@ impl Client {
         };
 
         Ok(stream.boxed())
+    }
+
+    /// Subscribes to tx notifications for the given vtxo scripts in a single call.
+    ///
+    /// Sends an empty `subscription_id` so the server creates the subscription and starts
+    /// streaming immediately. Returns the server-assigned id, read from the first
+    /// [`SubscriptionResponse::SubscriptionStarted`] frame together with the remaining stream.
+    ///
+    /// Startup is bounded by a 30-second timeout, covering both opening the streaming
+    /// RPC and waiting for `subscription_started`. A transport that stalls on open, or a degraded
+    /// server that streams only heartbeats, yields a timeout error rather than hanging the call.
+    pub async fn subscribe_to_scripts_stream(
+        &self,
+        scripts: Vec<ArkAddress>,
+    ) -> Result<
+        (
+            String,
+            impl Stream<Item = Result<SubscriptionResponse, Error>> + Unpin,
+        ),
+        Error,
+    > {
+        let filter = SubscriptionFilter {
+            expressions: Vec::new(),
+            add_scripts: scripts
+                .iter()
+                .map(|address| address.to_p2tr_script_pubkey())
+                .collect(),
+            remove_scripts: Vec::new(),
+        };
+
+        let startup = async {
+            let stream = self.get_subscription(String::new(), Some(filter)).await?;
+            read_subscription_started(stream).await
+        };
+
+        match tokio::time::timeout(SUBSCRIPTION_START_TIMEOUT, startup).await {
+            Ok(result) => result,
+            Err(_) => Err(Error::conversion(
+                "timed out waiting for subscription_started",
+            )),
+        }
     }
 
     pub async fn estimate_fees(
@@ -1583,6 +1629,37 @@ impl From<GetVtxosRequest> for generated::ark::v1::GetVtxosRequest {
     }
 }
 
+/// Upper bound on waiting for the server's `subscription_started` frame, so a degraded server that
+/// streams only heartbeats can't hang [`Client::subscribe_to_scripts_stream`] indefinitely.
+const SUBSCRIPTION_START_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Consumes the leading frames of a freshly opened subscription stream up to the server's
+/// `subscription_started` frame, returning its id together with the remaining stream.
+async fn read_subscription_started<S>(mut stream: S) -> Result<(String, S), Error>
+where
+    S: Stream<Item = Result<SubscriptionResponse, Error>> + Unpin,
+{
+    loop {
+        match stream.next().await {
+            Some(Ok(SubscriptionResponse::SubscriptionStarted { subscription_id })) => {
+                return Ok((subscription_id, stream));
+            }
+            Some(Ok(SubscriptionResponse::Heartbeat)) => continue,
+            Some(Ok(SubscriptionResponse::Event(_))) => {
+                return Err(Error::conversion(
+                    "expected subscription_started as the first subscription event",
+                ))
+            }
+            Some(Err(e)) => return Err(e),
+            None => {
+                return Err(Error::conversion(
+                    "subscription stream closed before subscription_started",
+                ))
+            }
+        }
+    }
+}
+
 mod guarded {
     //! Guarded wrappers around the generated tonic clients.
     //!
@@ -1684,5 +1761,82 @@ mod guarded {
                 })
                 .await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_subscription_started;
+    use crate::Error;
+    use ark_core::server::SubscriptionEvent;
+    use ark_core::server::SubscriptionResponse;
+    use bitcoin::hashes::Hash;
+    use bitcoin::Txid;
+    use futures::executor::block_on;
+    use futures::stream;
+    use futures::StreamExt;
+
+    fn event() -> SubscriptionResponse {
+        SubscriptionResponse::Event(Box::new(SubscriptionEvent {
+            txid: Txid::all_zeros(),
+            scripts: Vec::new(),
+            new_vtxos: Vec::new(),
+            spent_vtxos: Vec::new(),
+            tx: None,
+            checkpoint_txs: Default::default(),
+        }))
+    }
+
+    fn started(id: &str) -> SubscriptionResponse {
+        SubscriptionResponse::SubscriptionStarted {
+            subscription_id: id.to_string(),
+        }
+    }
+
+    #[test]
+    fn reads_id_after_heartbeats_and_keeps_remaining_stream() {
+        let frames = vec![
+            Ok(SubscriptionResponse::Heartbeat),
+            Ok(SubscriptionResponse::Heartbeat),
+            Ok(started("sub-1")),
+            Ok(event()),
+        ];
+
+        let (id, mut rest) = block_on(read_subscription_started(stream::iter(frames))).unwrap();
+        assert_eq!(id, "sub-1");
+        assert!(matches!(
+            block_on(rest.next()),
+            Some(Ok(SubscriptionResponse::Event(_)))
+        ));
+        assert!(block_on(rest.next()).is_none());
+    }
+
+    #[test]
+    fn errors_on_event_before_started() {
+        let frames = vec![Ok(event())];
+        assert!(block_on(read_subscription_started(stream::iter(frames))).is_err());
+    }
+
+    #[test]
+    fn errors_on_close_before_started() {
+        let empty: Vec<Result<SubscriptionResponse, Error>> = Vec::new();
+        assert!(block_on(read_subscription_started(stream::iter(empty))).is_err());
+
+        let heartbeats_only = vec![
+            Ok(SubscriptionResponse::Heartbeat),
+            Ok(SubscriptionResponse::Heartbeat),
+        ];
+        assert!(block_on(read_subscription_started(stream::iter(heartbeats_only))).is_err());
+    }
+
+    // A transport error before `subscription_started` reaches the caller unchanged, rather than
+    // being swallowed and re-synthesized as a handshake error. The caller's reconnect logic keys
+    // off the original cause, so identity matters.
+    // Inject a non-conversion kind and assert it is what comes back.
+    #[test]
+    fn propagates_stream_error_before_started() {
+        let frames = vec![Err(Error::event_stream_disconnect())];
+        let err = block_on(read_subscription_started(stream::iter(frames))).unwrap_err();
+        assert!(err.to_string().contains("disconnected from event stream"));
     }
 }
