@@ -831,6 +831,7 @@ pub struct SubscriptionEvent {
     pub scripts: Vec<ScriptBuf>,
     pub new_vtxos: Vec<VirtualTxOutPoint>,
     pub spent_vtxos: Vec<VirtualTxOutPoint>,
+    pub swept_vtxos: Vec<VirtualTxOutPoint>,
     pub tx: Option<Transaction>,
     pub checkpoint_txs: HashMap<OutPoint, Txid>,
 }
