@@ -83,6 +83,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::RwLock;
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Clone, Default)]
 struct HeaderState {
     digest: Arc<RwLock<Option<String>>>,
@@ -350,6 +353,10 @@ impl Client {
         Ok(intent_id)
     }
 
+    /// Submit an Ark transaction and verify the returned transaction and its signatures
+    /// against the submitted PSBT before allowing the caller to proceed to finalization.
+    ///
+    /// See [`ark_core::send::verify_signed_ark_transaction`] for supported spend scripts.
     pub async fn submit_offchain_transaction_request(
         &self,
         ark_tx: Psbt,
@@ -360,7 +367,7 @@ impl Client {
             base64::engine::GeneralPurposeConfig::new(),
         );
 
-        let ark_tx = base64.encode(ark_tx.serialize());
+        let encoded_ark_tx = base64.encode(ark_tx.serialize());
 
         let checkpoint_txs = checkpoint_txs
             .into_iter()
@@ -372,18 +379,26 @@ impl Client {
             .request(move |mut client| async move {
                 client
                     .submit_tx(generated::ark::v1::SubmitTxRequest {
-                        signed_ark_tx: ark_tx,
+                        signed_ark_tx: encoded_ark_tx,
                         checkpoint_txs,
                     })
                     .await
             })
             .await?;
 
-        let res = res.into_inner();
+        Self::decode_submit_response(&ark_tx, res.into_inner())
+    }
 
+    fn decode_submit_response(
+        submitted: &Psbt,
+        res: generated::ark::v1::SubmitTxResponse,
+    ) -> Result<SubmitOffchainTxResponse, Error> {
+        let base64 = base64::engine::general_purpose::STANDARD;
         let signed_ark_tx = res.final_ark_tx;
         let signed_ark_tx = base64.decode(signed_ark_tx).map_err(Error::conversion)?;
         let signed_ark_tx = Psbt::deserialize(&signed_ark_tx).map_err(Error::conversion)?;
+        ark_core::send::verify_signed_ark_transaction(submitted, &signed_ark_tx)
+            .map_err(Error::request)?;
 
         let signed_checkpoint_txs = res
             .signed_checkpoint_txs
