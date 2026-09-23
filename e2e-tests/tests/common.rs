@@ -502,6 +502,14 @@ pub async fn set_up_client(
     regtest: Arc<Regtest>,
     secp: Secp256k1<All>,
 ) -> (Client<Regtest, Wallet, InMemorySwapStorage>, Arc<Wallet>) {
+    set_up_client_inner(regtest, secp, None).await
+}
+
+async fn set_up_client_inner(
+    regtest: Arc<Regtest>,
+    secp: Secp256k1<All>,
+    max_intent_proof_weight: Option<u64>,
+) -> (Client<Regtest, Wallet, InMemorySwapStorage>, Arc<Wallet>) {
     let mut rng = thread_rng();
 
     let sk = SecretKey::new(&mut rng);
@@ -519,6 +527,7 @@ pub async fn set_up_client(
         OfflineClientConfig {
             ark_server_url: "http://localhost:7070".to_string(),
             boltz_url: "http://localhost:9069".to_string(),
+            max_intent_proof_weight,
             ..Default::default()
         },
         xpriv,
@@ -532,6 +541,18 @@ pub async fn set_up_client(
     .unwrap();
 
     (client, wallet)
+}
+
+/// Set up a client with a cap on the intent proof weight, forcing settlements with many inputs
+/// to be split across multiple batches.
+#[allow(unused)]
+pub async fn set_up_client_with_max_proof_weight(
+    _name: String,
+    regtest: Arc<Regtest>,
+    secp: Secp256k1<All>,
+    max_intent_proof_weight: u64,
+) -> (Client<Regtest, Wallet, InMemorySwapStorage>, Arc<Wallet>) {
+    set_up_client_inner(regtest, secp, Some(max_intent_proof_weight)).await
 }
 
 #[allow(unused)]
