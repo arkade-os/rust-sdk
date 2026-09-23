@@ -2163,6 +2163,12 @@ where
     /// # Returns
     ///
     /// Returns the subscription ID if successful
+    #[deprecated(
+        note = "use `subscribe_to_scripts_stream` to open a subscription, or `update_subscription` to add scripts"
+    )]
+    // This deprecated wrapper intentionally forwards to the deprecated gRPC method; suppress the
+    // self-referential deprecation warning.
+    #[allow(deprecated)]
     pub async fn subscribe_to_scripts(
         &self,
         scripts: Vec<ArkAddress>,
@@ -2183,6 +2189,10 @@ where
     ///
     /// * `scripts` - Vector of ArkAddress to unsubscribe from
     /// * `subscription_id` - The subscription ID to update
+    #[deprecated(note = "use `update_subscription` with the filter's `remove_scripts`")]
+    // This deprecated wrapper intentionally forwards to the deprecated gRPC method; suppress the
+    // self-referential deprecation warning.
+    #[allow(deprecated)]
     pub async fn unsubscribe_from_scripts(
         &self,
         scripts: Vec<ArkAddress>,
@@ -2230,6 +2240,39 @@ where
     ) -> Result<(), Error> {
         self.network_client()
             .update_subscription(subscription_id, filter)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Subscribe to VTXO script notifications and open the event stream in a single call
+    ///
+    /// The server creates the subscription automatically and returns its ID alongside the
+    /// stream. Use the returned ID with [`Self::update_subscription`] to add or remove scripts.
+    ///
+    /// # Arguments
+    ///
+    /// * `scripts` - Vector of ArkAddress to subscribe to
+    ///
+    /// # Returns
+    ///
+    /// Returns the server-assigned subscription ID together with a stream of SubscriptionResponse
+    /// messages
+    ///
+    /// # Deadline
+    ///
+    /// The wait for the subscription to start is internally bounded
+    pub async fn subscribe_to_scripts_stream(
+        &self,
+        scripts: Vec<ArkAddress>,
+    ) -> Result<
+        (
+            String,
+            impl Stream<Item = Result<SubscriptionResponse, ark_grpc::Error>> + Unpin,
+        ),
+        Error,
+    > {
+        self.network_client()
+            .subscribe_to_scripts_stream(scripts)
             .await
             .map_err(Into::into)
     }
