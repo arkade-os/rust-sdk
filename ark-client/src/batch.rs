@@ -801,7 +801,9 @@ where
                         }
                     }
                     StreamEvent::TreeTx(e) => {
-                        if step != Step::BatchStarted && step != Step::BatchSigningStarted {
+                        if (step != Step::BatchStarted && step != Step::BatchSigningStarted)
+                            || is_other_batch(&batch_id, &e.id)
+                        {
                             continue;
                         }
 
@@ -837,7 +839,7 @@ where
                         }
                     }
                     StreamEvent::TreeSignature(e) => {
-                        if step != Step::BatchSigningStarted {
+                        if step != Step::BatchSigningStarted || is_other_batch(&batch_id, &e.id) {
                             continue;
                         }
 
@@ -870,7 +872,7 @@ where
                         }
                     }
                     StreamEvent::TreeSigningStarted(e) => {
-                        if step != Step::BatchStarted {
+                        if step != Step::BatchStarted || is_other_batch(&batch_id, &e.id) {
                             continue;
                         }
 
@@ -930,7 +932,7 @@ where
                         step = step.next();
                     }
                     StreamEvent::TreeNonces(e) => {
-                        if step != Step::BatchSigningStarted {
+                        if step != Step::BatchSigningStarted || is_other_batch(&batch_id, &e.id) {
                             continue;
                         }
 
@@ -1039,10 +1041,14 @@ where
                         }
                     }
                     StreamEvent::TreeNoncesAggregated(e) => {
+                        if is_other_batch(&batch_id, &e.id) {
+                            continue;
+                        }
+
                         tracing::debug!(batch_id = e.id, "Batch combined nonces generated");
                     }
                     StreamEvent::BatchFinalization(e) => {
-                        if step != Step::BatchSigningStarted {
+                        if step != Step::BatchSigningStarted || is_other_batch(&batch_id, &e.id) {
                             continue;
                         }
 
@@ -1082,7 +1088,7 @@ where
                         step = step.next();
                     }
                     StreamEvent::BatchFinalized(e) => {
-                        if step != Step::Finalized {
+                        if step != Step::Finalized || is_other_batch(&batch_id, &e.id) {
                             continue;
                         }
 
@@ -1497,8 +1503,10 @@ where
 
         let mut batch_id: Option<String> = None;
 
+        // arkd sends `BatchFailed` to the inputs of the failed batch, boarding inputs included.
         let topics = vtxo_input_outpoints
             .iter()
+            .chain(onchain_input_outpoints.iter())
             .map(ToString::to_string)
             .chain(
                 own_cosigner_pks
@@ -1569,7 +1577,9 @@ where
                         }
                     }
                     StreamEvent::TreeTx(e) => {
-                        if step != Step::BatchStarted && step != Step::BatchSigningStarted {
+                        if (step != Step::BatchStarted && step != Step::BatchSigningStarted)
+                            || is_other_batch(&batch_id, &e.id)
+                        {
                             continue;
                         }
 
@@ -1605,7 +1615,7 @@ where
                         }
                     }
                     StreamEvent::TreeSignature(e) => {
-                        if step != Step::BatchSigningStarted {
+                        if step != Step::BatchSigningStarted || is_other_batch(&batch_id, &e.id) {
                             continue;
                         }
 
@@ -1638,7 +1648,7 @@ where
                         }
                     }
                     StreamEvent::TreeSigningStarted(e) => {
-                        if step != Step::BatchStarted {
+                        if step != Step::BatchStarted || is_other_batch(&batch_id, &e.id) {
                             continue;
                         }
 
@@ -1699,7 +1709,7 @@ where
                         step = step.next();
                     }
                     StreamEvent::TreeNonces(e) => {
-                        if step != Step::BatchSigningStarted {
+                        if step != Step::BatchSigningStarted || is_other_batch(&batch_id, &e.id) {
                             continue;
                         }
 
@@ -1810,10 +1820,14 @@ where
                         }
                     }
                     StreamEvent::TreeNoncesAggregated(e) => {
+                        if is_other_batch(&batch_id, &e.id) {
+                            continue;
+                        }
+
                         tracing::debug!(batch_id = e.id, "Batch combined nonces generated");
                     }
                     StreamEvent::BatchFinalization(e) => {
-                        if step != Step::BatchSigningStarted {
+                        if step != Step::BatchSigningStarted || is_other_batch(&batch_id, &e.id) {
                             continue;
                         }
 
@@ -1907,7 +1921,7 @@ where
                         step = step.next();
                     }
                     StreamEvent::BatchFinalized(e) => {
-                        if step != Step::Finalized {
+                        if step != Step::Finalized || is_other_batch(&batch_id, &e.id) {
                             continue;
                         }
 
@@ -1962,6 +1976,14 @@ where
     }
 }
 
+/// Whether an event of batch `event_id` is not for the batch we joined, or we have not joined one.
+///
+/// The server sends some events, e.g. `BatchFinalization`, to every listener, so a client that
+/// missed its own batch failing would otherwise act on the next batch.
+fn is_other_batch(batch_id: &Option<String>, event_id: &str) -> bool {
+    batch_id.as_deref() != Some(event_id)
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum PrepareIntentKind {
     Register,
@@ -1996,4 +2018,20 @@ pub(crate) struct PreparedIntent {
     pub onchain_inputs: Vec<batch::OnChainInput>,
     /// The original VTXO inputs (needed for forfeit signing).
     pub vtxo_inputs: Vec<intent::Input>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn events_of_other_batches_are_ignored() {
+        // Before we join a batch, every batch is another batch.
+        assert!(is_other_batch(&None, "b16f6512"));
+
+        let joined = Some("e33952d6".to_string());
+
+        assert!(!is_other_batch(&joined, "e33952d6"));
+        assert!(is_other_batch(&joined, "b16f6512"));
+    }
 }
