@@ -212,6 +212,9 @@ impl Client {
     /// Submit an Ark transaction and verify the returned transaction and its signatures
     /// against the submitted PSBT before allowing the caller to proceed to finalization.
     ///
+    /// The returned checkpoint transactions are bound to the submitted ones, see
+    /// [`ark_core::send::bind_checkpoint_transactions`].
+    ///
     /// See [`ark_core::send::verify_signed_ark_transaction`] for supported spend scripts.
     pub async fn submit_offchain_transaction_request(
         &self,
@@ -225,8 +228,8 @@ impl Client {
 
         let encoded_ark_tx = base64.encode(ark_tx.serialize());
 
-        let checkpoint_txs = checkpoint_txs
-            .into_iter()
+        let encoded_checkpoint_txs = checkpoint_txs
+            .iter()
             .map(|tx| Some(base64.encode(tx.serialize())))
             .collect();
 
@@ -237,7 +240,7 @@ impl Client {
                     &configuration,
                     models::SubmitTxRequest {
                         signed_ark_tx: Some(encoded_ark_tx),
-                        checkpoint_txs,
+                        checkpoint_txs: encoded_checkpoint_txs,
                     },
                 )
                 .await
@@ -245,11 +248,12 @@ impl Client {
             })
             .await?;
 
-        Self::decode_submit_response(&ark_tx, res)
+        Self::decode_submit_response(&ark_tx, &checkpoint_txs, res)
     }
 
     fn decode_submit_response(
         submitted: &Psbt,
+        submitted_checkpoint_txs: &[Psbt],
         res: models::SubmitTxResponse,
     ) -> Result<SubmitOffchainTxResponse, Error> {
         let base64 = base64::engine::general_purpose::STANDARD;
@@ -272,6 +276,11 @@ impl Client {
                 Ok(tx)
             })
             .collect::<Result<Vec<_>, Error>>()?;
+        let signed_checkpoint_txs = ark_core::send::bind_checkpoint_transactions(
+            submitted_checkpoint_txs,
+            signed_checkpoint_txs,
+        )
+        .map_err(Error::request)?;
 
         Ok(SubmitOffchainTxResponse {
             signed_ark_tx,
