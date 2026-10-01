@@ -1,4 +1,6 @@
 use super::*;
+use crate::send::build_checkpoint_psbt;
+use crate::send::VtxoInput;
 use bitcoin::absolute::LockTime;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::schnorr;
@@ -147,6 +149,101 @@ fn rejects_duplicated_checkpoints() {
     fails(
         &[checkpoint(1), checkpoint(1)],
         vec![checkpoint(1), checkpoint(1)],
+        "duplicate expected checkpoint",
+    );
+}
+
+fn vtxo_input(n: u8) -> VtxoInput {
+    let secp = Secp256k1::new();
+    let script = crate::script::multisig_script(pk(1), pk(2));
+    let spend_info = bitcoin::taproot::TaprootBuilder::new()
+        .add_leaf(0, script.clone())
+        .unwrap()
+        .finalize(&secp, pk(9))
+        .unwrap();
+    let control_block = spend_info
+        .control_block(&(script.clone(), LeafVersion::TapScript))
+        .unwrap();
+    VtxoInput::new(
+        script.clone(),
+        None,
+        control_block,
+        vec![script],
+        ScriptBuf::new_p2tr_tweaked(spend_info.output_key()),
+        Amount::from_sat(1000),
+        OutPoint::new(Txid::from_byte_array([n; 32]), 0),
+        vec![],
+    )
+}
+
+fn exit_script(key: u8) -> ScriptBuf {
+    crate::script::csv_sig_script(bitcoin::Sequence::from_height(144), pk(key))
+}
+
+fn built_checkpoint(input: &VtxoInput, exit_key: u8) -> Psbt {
+    build_checkpoint_psbt(input, exit_script(exit_key))
+        .unwrap()
+        .0
+}
+
+fn fails_pending(inputs: &[VtxoInput], returned: Vec<Psbt>, message: &str) {
+    let error = bind_pending_checkpoint_transactions(inputs, &[exit_script(2)], returned)
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(error.contains(message), "{error}");
+}
+
+#[test]
+fn pending_checkpoints_are_rebuilt_from_own_vtxos() {
+    let inputs = [vtxo_input(1), vtxo_input(2), vtxo_input(3)];
+    // Built before a signer rotation, so it commits to the deprecated key.
+    let old = built_checkpoint(&inputs[2], 3);
+    let mut tampered = server_signed(old.clone());
+    tampered.inputs[0].witness_script = Some(ScriptBuf::from_bytes(vec![0xff]));
+
+    let bound = bind_pending_checkpoint_transactions(
+        &inputs,
+        &[exit_script(2), exit_script(3)],
+        vec![tampered, server_signed(built_checkpoint(&inputs[0], 2))],
+    )
+    .unwrap();
+
+    assert_eq!(
+        bound,
+        vec![
+            server_signed(old),
+            server_signed(built_checkpoint(&inputs[0], 2))
+        ]
+    );
+}
+
+#[test]
+fn pending_checkpoints_reject_foreign_or_changed_checkpoints() {
+    let inputs = [vtxo_input(1)];
+    fails_pending(
+        &inputs,
+        vec![built_checkpoint(&vtxo_input(2), 2)],
+        "which is not one of our VTXOs",
+    );
+    fails_pending(
+        &inputs,
+        vec![built_checkpoint(&inputs[0], 4)],
+        "differs from the checkpoint built",
+    );
+
+    let mut changed = built_checkpoint(&inputs[0], 2);
+    changed.unsigned_tx.output[0].value = Amount::from_sat(999);
+    fails_pending(&inputs, vec![changed], "differs from the checkpoint built");
+
+    let mut two_inputs = built_checkpoint(&inputs[0], 2);
+    two_inputs.unsigned_tx.input.push(TxIn::default());
+    fails_pending(&inputs, vec![two_inputs], "must spend exactly one input");
+
+    let checkpoint = built_checkpoint(&inputs[0], 2);
+    fails_pending(
+        &inputs,
+        vec![checkpoint.clone(), checkpoint],
         "duplicate expected checkpoint",
     );
 }
