@@ -6,6 +6,7 @@ use crate::ArkAddress;
 use crate::Error;
 use crate::ErrorContext;
 use bitcoin::hex::DisplayHex;
+use bitcoin::script::Instruction;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::taproot::Signature;
 use bitcoin::Amount;
@@ -598,6 +599,39 @@ impl ServerSignerStatus {
 }
 
 impl Info {
+    /// Returns the checkpoint exit scripts a checkpoint output may commit to: the current
+    /// [`Self::checkpoint_tapscript`], followed by one variant per deprecated signer with the
+    /// current signer key replaced.
+    ///
+    /// A checkpoint built before a signer rotation commits to the signer key of that time.
+    pub fn checkpoint_exit_scripts(&self) -> Vec<ScriptBuf> {
+        let current = &self.checkpoint_tapscript;
+        let signer = self.signer_pk.x_only_public_key().0.serialize();
+
+        let mut scripts = vec![current.clone()];
+        for deprecated in &self.deprecated_signers {
+            let key = deprecated.pk.x_only_public_key().0.serialize();
+            let mut bytes = current.to_bytes();
+            let mut replaced = false;
+            for (index, instruction) in current.instruction_indices().flatten() {
+                if let Instruction::PushBytes(push) = instruction {
+                    if push.as_bytes() == signer {
+                        // `index` points at the push opcode; the key follows it.
+                        bytes[index + 1..index + 1 + key.len()].copy_from_slice(&key);
+                        replaced = true;
+                    }
+                }
+            }
+
+            let script = ScriptBuf::from_bytes(bytes);
+            if replaced && !scripts.contains(&script) {
+                scripts.push(script);
+            }
+        }
+
+        scripts
+    }
+
     /// Returns all known server signing keys: the current signer followed by all deprecated ones.
     pub fn all_server_keys(&self) -> impl Iterator<Item = XOnlyPublicKey> + '_ {
         std::iter::once(self.signer_pk.x_only_public_key().0).chain(
@@ -1040,6 +1074,36 @@ mod tests {
             max_tx_weight: 0,
             max_op_return_outputs: 0,
         }
+    }
+
+    // ── checkpoint_exit_scripts ──────────────────────────────────────────────
+
+    #[test]
+    fn checkpoint_exit_scripts_add_one_variant_per_deprecated_signer() {
+        let delay = bitcoin::Sequence::from_height(144);
+        let mut info = make_info(PK_A, vec![(PK_B, 1000), (PK_C, 2000), (PK_B, 3000)]);
+        info.checkpoint_tapscript = crate::script::csv_sig_script(delay, xonly(PK_A));
+
+        assert_eq!(
+            info.checkpoint_exit_scripts(),
+            vec![
+                crate::script::csv_sig_script(delay, xonly(PK_A)),
+                crate::script::csv_sig_script(delay, xonly(PK_B)),
+                crate::script::csv_sig_script(delay, xonly(PK_C)),
+            ]
+        );
+    }
+
+    #[test]
+    fn checkpoint_exit_scripts_without_signer_key_only_return_current() {
+        let delay = bitcoin::Sequence::from_height(144);
+        let mut info = make_info(PK_A, vec![(PK_B, 1000)]);
+        info.checkpoint_tapscript = crate::script::csv_sig_script(delay, xonly(PK_UNRELATED));
+
+        assert_eq!(
+            info.checkpoint_exit_scripts(),
+            vec![info.checkpoint_tapscript]
+        );
     }
 
     // ── all_server_keys ──────────────────────────────────────────────────────

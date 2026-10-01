@@ -41,13 +41,18 @@ use std::collections::HashMap;
 use std::io;
 use std::io::Write;
 
+mod checkpoint;
 pub mod issue_asset;
 pub mod reissue_asset;
+mod verify;
 
+pub use checkpoint::bind_checkpoint_transactions;
+pub use checkpoint::bind_pending_checkpoint_transactions;
 pub use issue_asset::build_self_asset_issuance_transactions;
 pub use issue_asset::SelfAssetIssuanceTransactions;
 pub use reissue_asset::build_asset_reissuance_transactions;
 pub use reissue_asset::AssetReissuanceTransactions;
+pub use verify::verify_signed_ark_transaction;
 
 /// A VTXO to be spent into a pre-confirmed VTXO.
 #[derive(Debug, Clone)]

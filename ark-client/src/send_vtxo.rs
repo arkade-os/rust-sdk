@@ -13,6 +13,7 @@ use ark_core::coin_select::VirtualTxOutPoint;
 use ark_core::contract::SpendPathKind;
 use ark_core::intent;
 use ark_core::script::extract_checksig_pubkeys;
+use ark_core::send::bind_pending_checkpoint_transactions;
 use ark_core::send::build_asset_send_transactions;
 use ark_core::send::sign_ark_transaction;
 use ark_core::send::sign_checkpoint_transaction;
@@ -587,6 +588,9 @@ where
     }
 
     /// Sign checkpoint transactions from a [`PendingTx`] and finalize.
+    ///
+    /// The checkpoints must already be bound to the ones the client built, as done by
+    /// [`Self::submit_built_offchain_send`] and [`Self::fetch_pending_offchain_txs`].
     pub(crate) async fn sign_and_finalize_pending_tx(
         &self,
         pending_tx: PendingTx,
@@ -594,44 +598,9 @@ where
         let ark_txid = pending_tx.ark_txid;
         let mut signed_checkpoint_txs = pending_tx.signed_checkpoint_txs;
 
-        // Build a map from checkpoint txid -> ark tx input index so we can
-        // restore witness scripts that the server may have stripped.
-        let ark_input_idx_by_cp_txid: HashMap<_, _> = pending_tx
-            .signed_ark_tx
-            .unsigned_tx
-            .input
-            .iter()
-            .enumerate()
-            .map(|(i, inp)| (inp.previous_output.txid, i))
-            .collect();
-
+        // The checkpoints are bound to the ones we built, so they carry our own witness scripts
+        // and spend leaves.
         for checkpoint_psbt in signed_checkpoint_txs.iter_mut() {
-            if checkpoint_psbt.inputs[0].witness_script.is_none() {
-                let checkpoint_txid = checkpoint_psbt.unsigned_tx.compute_txid();
-                let idx = ark_input_idx_by_cp_txid
-                    .get(&checkpoint_txid)
-                    .ok_or_else(|| {
-                        Error::ad_hoc(format!(
-                            "checkpoint txid {checkpoint_txid} not found in ark tx inputs \
-                             for pending tx {ark_txid}"
-                        ))
-                    })?;
-
-                let ws = pending_tx
-                    .signed_ark_tx
-                    .inputs
-                    .get(*idx)
-                    .and_then(|input| input.witness_script.clone())
-                    .ok_or_else(|| {
-                        Error::ad_hoc(format!(
-                            "missing witness script on ark tx input {idx} \
-                             for pending tx {ark_txid}"
-                        ))
-                    })?;
-
-                checkpoint_psbt.inputs[0].witness_script = Some(ws);
-            }
-
             sign_checkpoint_transaction(self.make_sign_fn(), checkpoint_psbt)?;
         }
 
@@ -714,6 +683,12 @@ where
         if vtxos.is_empty() {
             return Ok(vec![]);
         }
+
+        // Our checkpoints for these VTXOs, used to bind the server's pending checkpoints. A pending
+        // transaction may spend VTXOs from several of the batches below, so this covers all of
+        // them.
+        let checkpoint_inputs = self.build_vtxo_inputs(vtxos.clone())?;
+        let checkpoint_exit_scripts = self.server_info().await?.checkpoint_exit_scripts();
 
         let secp = Secp256k1::new();
         let mut all_pending_txs = Vec::new();
@@ -809,13 +784,32 @@ where
                 "Server response for batch"
             );
 
-            for tx in pending_txs {
-                if seen_ark_txids.insert(tx.ark_txid) {
-                    tracing::info!(
-                        ark_txid = %tx.ark_txid,
-                        "Found pending transaction"
-                    );
-                    all_pending_txs.push(tx);
+            for mut tx in pending_txs {
+                if !seen_ark_txids.insert(tx.ark_txid) {
+                    continue;
+                }
+
+                // The transaction was submitted earlier, so its checkpoints are rebuilt from our
+                // VTXOs rather than recalled. One that does not match is left pending.
+                match bind_pending_checkpoint_transactions(
+                    &checkpoint_inputs,
+                    &checkpoint_exit_scripts,
+                    tx.signed_checkpoint_txs,
+                ) {
+                    Ok(signed_checkpoint_txs) => {
+                        tracing::info!(
+                            ark_txid = %tx.ark_txid,
+                            "Found pending transaction"
+                        );
+                        tx.signed_checkpoint_txs = signed_checkpoint_txs;
+                        all_pending_txs.push(tx);
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            ark_txid = %tx.ark_txid,
+                            "Ignoring pending transaction with unexpected checkpoints: {err}"
+                        );
+                    }
                 }
             }
         }
