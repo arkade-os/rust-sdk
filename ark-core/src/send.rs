@@ -47,6 +47,7 @@ pub mod reissue_asset;
 mod verify;
 
 pub use checkpoint::bind_checkpoint_transactions;
+pub use checkpoint::bind_pending_checkpoint_transactions;
 pub use issue_asset::build_self_asset_issuance_transactions;
 pub use issue_asset::SelfAssetIssuanceTransactions;
 pub use reissue_asset::build_asset_reissuance_transactions;
