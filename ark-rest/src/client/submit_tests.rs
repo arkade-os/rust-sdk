@@ -87,7 +87,9 @@ fn submit_response_returns_verified_transaction_and_checkpoint_payloads() {
     let (submitted, signed) = fixture();
     let mut response = response(&signed);
     response.signed_checkpoint_txs = Some(vec![encoded(&submitted)]);
-    let result = Client::decode_submit_response(&submitted, response).unwrap();
+    let result =
+        Client::decode_submit_response(&submitted, std::slice::from_ref(&submitted), response)
+            .unwrap();
     assert_eq!(result.signed_ark_tx, signed);
     assert_eq!(result.signed_checkpoint_txs, vec![submitted]);
 }
@@ -96,7 +98,7 @@ fn submit_response_returns_verified_transaction_and_checkpoint_payloads() {
 fn submit_response_rejects_changed_transaction() {
     let (submitted, mut signed) = fixture();
     signed.unsigned_tx.output[0].value = Amount::from_sat(999);
-    let error = Client::decode_submit_response(&submitted, response(&signed))
+    let error = Client::decode_submit_response(&submitted, &[], response(&signed))
         .err()
         .unwrap();
     assert!(error
@@ -109,7 +111,7 @@ fn submit_response_rejects_changed_transaction() {
 #[test]
 fn matching_txid_does_not_accept_missing_or_invalid_server_signature() {
     let (submitted, mut signed) = fixture();
-    let error = Client::decode_submit_response(&submitted, response(&submitted))
+    let error = Client::decode_submit_response(&submitted, &[], response(&submitted))
         .err()
         .unwrap();
     assert!(error
@@ -132,7 +134,7 @@ fn matching_txid_does_not_accept_missing_or_invalid_server_signature() {
         submitted.unsigned_tx.compute_txid(),
         signed.unsigned_tx.compute_txid()
     );
-    let error = Client::decode_submit_response(&submitted, response(&signed))
+    let error = Client::decode_submit_response(&submitted, &[], response(&signed))
         .err()
         .unwrap();
     assert!(error
@@ -152,7 +154,7 @@ fn submit_response_rejects_missing_or_malformed_ark_transaction() {
     ] {
         let mut response = response(&signed);
         response.final_ark_tx = final_ark_tx;
-        assert!(Client::decode_submit_response(&submitted, response).is_err());
+        assert!(Client::decode_submit_response(&submitted, &[], response).is_err());
     }
 }
 
@@ -161,7 +163,7 @@ fn submit_response_still_requires_decodable_checkpoints() {
     let (submitted, signed) = fixture();
     let mut response = response(&signed);
     response.signed_checkpoint_txs = None;
-    let error = Client::decode_submit_response(&submitted, response.clone())
+    let error = Client::decode_submit_response(&submitted, &[], response.clone())
         .err()
         .unwrap();
     assert!(error
@@ -170,5 +172,21 @@ fn submit_response_still_requires_decodable_checkpoints() {
         .to_string()
         .contains("Signed checkpoint tx not received"));
     response.signed_checkpoint_txs = Some(vec!["AA==".to_owned()]);
-    assert!(Client::decode_submit_response(&submitted, response).is_err());
+    assert!(Client::decode_submit_response(&submitted, &[], response).is_err());
+}
+
+#[test]
+fn submit_response_rejects_checkpoints_that_were_not_submitted() {
+    let (submitted, signed) = fixture();
+    let mut changed = submitted.clone();
+    changed.unsigned_tx.output[0].value = Amount::from_sat(999);
+    for checkpoints in [vec![], vec![encoded(&changed)]] {
+        let mut response = response(&signed);
+        response.signed_checkpoint_txs = Some(checkpoints);
+        let error =
+            Client::decode_submit_response(&submitted, std::slice::from_ref(&submitted), response)
+                .err()
+                .unwrap();
+        assert!(error.source().unwrap().to_string().contains("checkpoint"));
+    }
 }
