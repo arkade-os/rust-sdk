@@ -273,48 +273,37 @@ impl GetVtxosRequest {
         }
     }
 
-    pub fn spendable_only(self) -> Result<Self, Error> {
+    /// Restrict the request to the VTXOs matching `filter`. Only one filter can be set.
+    pub fn with_filter(self, filter: GetVtxosRequestFilter) -> Result<Self, Error> {
         if self.filter.is_some() {
             return Err(Error::ad_hoc("GetVtxosRequest filter already set"));
         }
 
         Ok(Self {
-            filter: Some(GetVtxosRequestFilter::Spendable),
+            filter: Some(filter),
             ..self
         })
+    }
+
+    pub fn spendable_only(self) -> Result<Self, Error> {
+        self.with_filter(GetVtxosRequestFilter::Spendable)
     }
 
     pub fn spent_only(self) -> Result<Self, Error> {
-        if self.filter.is_some() {
-            return Err(Error::ad_hoc("GetVtxosRequest filter already set"));
-        }
-
-        Ok(Self {
-            filter: Some(GetVtxosRequestFilter::Spent),
-            ..self
-        })
+        self.with_filter(GetVtxosRequestFilter::Spent)
     }
 
     pub fn recoverable_only(self) -> Result<Self, Error> {
-        if self.filter.is_some() {
-            return Err(Error::ad_hoc("GetVtxosRequest filter already set"));
-        }
-
-        Ok(Self {
-            filter: Some(GetVtxosRequestFilter::Recoverable),
-            ..self
-        })
+        self.with_filter(GetVtxosRequestFilter::Recoverable)
     }
 
     pub fn pending_only(self) -> Result<Self, Error> {
-        if self.filter.is_some() {
-            return Err(Error::ad_hoc("GetVtxosRequest filter already set"));
-        }
+        self.with_filter(GetVtxosRequestFilter::PendingOnly)
+    }
 
-        Ok(Self {
-            filter: Some(GetVtxosRequestFilter::PendingOnly),
-            ..self
-        })
+    /// Only VTXOs that are neither spent nor unrolled: the spendable and the recoverable ones.
+    pub fn renewable_only(self) -> Result<Self, Error> {
+        self.with_filter(GetVtxosRequestFilter::Renewable)
     }
 
     pub fn reference(&self) -> &GetVtxosRequestReference {
@@ -373,7 +362,7 @@ impl GetVtxosRequestReference {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GetVtxosRequestFilter {
     Spendable,
     Spent,
@@ -1153,5 +1142,28 @@ mod tests {
         let info = make_info(PK_A, vec![(PK_B, now + 100), (PK_C, now - 100)]);
         assert!(!info.is_signer_past_cutoff_at(xonly(PK_B), now));
         assert!(info.is_signer_past_cutoff_at(xonly(PK_C), now));
+    }
+
+    // ── GetVtxosRequest filters ──────────────────────────────────────────────
+
+    #[test]
+    fn renewable_only_sets_the_renewable_filter() {
+        let request = GetVtxosRequest::new_for_outpoints(&[])
+            .renewable_only()
+            .unwrap();
+
+        assert_eq!(request.filter(), Some(&GetVtxosRequestFilter::Renewable));
+    }
+
+    #[test]
+    fn a_second_filter_is_rejected() {
+        let request = GetVtxosRequest::new_for_outpoints(&[])
+            .renewable_only()
+            .unwrap();
+
+        assert!(request.clone().spendable_only().is_err());
+        assert!(request
+            .with_filter(GetVtxosRequestFilter::Renewable)
+            .is_err());
     }
 }
