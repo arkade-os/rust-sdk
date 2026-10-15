@@ -4,6 +4,7 @@ use crate::generated::ark::v1::get_subscription_response;
 use crate::generated::ark::v1::indexer_service_client::IndexerServiceClient;
 use crate::generated::ark::v1::indexer_tx_history_record::Key;
 use crate::generated::ark::v1::ConfirmRegistrationRequest;
+use crate::generated::ark::v1::DeleteIntentRequest;
 use crate::generated::ark::v1::EstimateIntentFeeRequest;
 use crate::generated::ark::v1::GetEventStreamRequest;
 use crate::generated::ark::v1::GetInfoRequest;
@@ -348,6 +349,21 @@ impl Client {
         let intent_id = response.into_inner().intent_id;
 
         Ok(intent_id)
+    }
+
+    /// Delete the queued intents that spend any input of `intent`, a proof of ownership of
+    /// those inputs signed over an [`ark_core::intent::IntentMessage::Delete`] message.
+    pub async fn delete_intent(&self, intent: ark_core::intent::Intent) -> Result<(), Error> {
+        let intent = intent.try_into()?;
+        let request = DeleteIntentRequest {
+            intent: Some(intent),
+        };
+
+        self.ark()?
+            .request(move |mut client| async move { client.delete_intent(request).await })
+            .await?;
+
+        Ok(())
     }
 
     pub async fn submit_offchain_transaction_request(
