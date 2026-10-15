@@ -7,6 +7,7 @@ use crate::AnnotatedVtxo;
 use crate::Blockchain;
 use crate::Client;
 use crate::Error;
+use crate::GetVtxosRequestFilter;
 use ark_core::asset::AssetId;
 use ark_core::asset::ControlAssetConfig;
 use ark_core::coin_select::select_vtxos;
@@ -278,7 +279,10 @@ where
     }
 
     async fn spendable_virtual_vtxos(&self) -> Result<Vec<AnnotatedVtxo>, Error> {
-        let vtxo_list = self.list_vtxos().await.context("failed to list VTXOs")?;
+        let vtxo_list = self
+            .list_vtxos_filtered(GetVtxosRequestFilter::Spendable)
+            .await
+            .context("failed to list VTXOs")?;
 
         let now = crate::utils::unix_now()?;
         let server_info = self.server_info().await?;

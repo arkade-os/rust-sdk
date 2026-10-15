@@ -7,6 +7,7 @@ use crate::utils::timeout_op;
 use crate::wallet::OnchainWallet;
 use crate::Blockchain;
 use crate::Client;
+use crate::GetVtxosRequestFilter;
 use ark_core::build_unilateral_exit_tree_txids;
 use ark_core::script::extract_checksig_pubkeys;
 use ark_core::unilateral_exit;
@@ -41,7 +42,7 @@ where
     /// requires fee bumping through a P2A output.
     pub async fn build_unilateral_exit_trees(&self) -> Result<Vec<Vec<Transaction>>, Error> {
         let vtxo_list = self
-            .list_vtxos()
+            .list_vtxos_filtered(GetVtxosRequestFilter::Spendable)
             .await
             .context("failed to get spendable VTXOs")?;
 

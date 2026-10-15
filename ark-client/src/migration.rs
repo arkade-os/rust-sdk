@@ -6,6 +6,7 @@ use crate::wallet::OnchainWallet;
 use crate::Blockchain;
 use crate::Client;
 use crate::Error;
+use crate::GetVtxosRequestFilter;
 use ark_core::server::DeprecatedSignerStatus;
 use ark_core::ExplorerUtxo;
 use bitcoin::Amount;
@@ -386,7 +387,9 @@ where
             .fetch_commitment_transaction_inputs(&server_info, now)
             .await?;
 
-        let contract_vtxos = self.list_vtxos_with_server_info(&server_info).await?;
+        let contract_vtxos = self
+            .list_vtxos_with_server_info(&server_info, Some(GetVtxosRequestFilter::Renewable))
+            .await?;
 
         // Build the candidate (outpoint, amount, signer, cutoff) list for the VTXO leg.
         let mut vtxo_candidates: Vec<MigrationVtxoRef> = Vec::new();
@@ -521,7 +524,7 @@ where
         }
 
         let vtxo_list = self
-            .list_vtxos_with_server_info(&server_info)
+            .list_vtxos_with_server_info(&server_info, Some(GetVtxosRequestFilter::Renewable))
             .await
             .context("failed to list VTXOs")?;
         let mut vtxo_aggs: HashMap<XOnlyPublicKey, VtxoAgg> = HashMap::new();

@@ -6,6 +6,7 @@ use crate::wallet::OnchainWallet;
 use crate::Blockchain;
 use crate::Client;
 use crate::Error;
+use crate::GetVtxosRequestFilter;
 use ark_core::batch;
 use ark_core::batch::aggregate_nonces;
 use ark_core::batch::complete_delegate_forfeit_txs;
@@ -143,7 +144,9 @@ where
     {
         let server_info = self.server_info().await?;
 
-        let vtxo_list = self.list_vtxos_with_server_info(&server_info).await?;
+        let vtxo_list = self
+            .list_vtxos_with_server_info(&server_info, Some(GetVtxosRequestFilter::Renewable))
+            .await?;
         let vtxo_outpoints: Vec<OutPoint> = vtxo_list
             .recoverable()
             .map(|entry| entry.vtxo().outpoint)
@@ -514,7 +517,7 @@ where
         let requested: HashSet<OutPoint> = input_vtxos.into_iter().collect();
 
         let vtxo_list = self
-            .list_vtxos_with_server_info(server_info)
+            .list_vtxos_with_server_info(server_info, Some(GetVtxosRequestFilter::Renewable))
             .await
             .context("failed to get VTXO list")?;
         let now = crate::utils::unix_now()?;
@@ -1196,7 +1199,9 @@ where
             }
         }
 
-        let vtxo_list = self.list_vtxos_with_server_info(server_info).await?;
+        let vtxo_list = self
+            .list_vtxos_with_server_info(server_info, Some(GetVtxosRequestFilter::Renewable))
+            .await?;
         // Reuse the caller-supplied timestamp (not a fresh wall-clock) so the VTXO cutoff filter
         // below is evaluated against the same instant as the boarding filter above, and so a
         // test-injected `now` deterministically controls both.
