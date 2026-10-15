@@ -41,6 +41,9 @@ where
     /// commitment transaction output to a spendable VTXO. Every transaction is finalized, but
     /// requires fee bumping through a P2A output.
     pub async fn build_unilateral_exit_trees(&self) -> Result<Vec<Vec<Transaction>>, Error> {
+        // The server's spendable VTXOs are those neither spent, swept nor unrolled. The server
+        // knows nothing of signer cutoffs, so VTXOs under a deprecated signer past its cutoff are
+        // included and can still be exited.
         let vtxo_list = self
             .list_vtxos_filtered(GetVtxosRequestFilter::Spendable)
             .await
