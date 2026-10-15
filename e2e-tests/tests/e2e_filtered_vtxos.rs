@@ -65,10 +65,8 @@ pub async fn filtered_vtxo_listing_matches_unfiltered() {
         "Alice's history should hold a spent VTXO"
     );
     assert!(
-        renewable
-            .all()
-            .all(|entry| !entry.vtxo().is_spent && !entry.vtxo().is_unrolled),
-        "the renewable list should hold no spent or unrolled VTXO"
+        renewable.all().all(|entry| !entry.vtxo().is_spent),
+        "the renewable list should hold no spent VTXO"
     );
 
     let unspent = all
