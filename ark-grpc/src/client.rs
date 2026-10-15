@@ -737,7 +737,7 @@ impl Client {
     ///
     /// Returns the subscription id if successful
     #[deprecated(
-        note = "use `subscribe_to_scripts_stream` to open a subscription, or `update_subscription` to add scripts"
+        note = "use `subscribe_to_scripts_stream` to open a subscription, or `update_subscription` to add scripts; note: `update_subscription` replaces the subscription's expressions, so pass the current ones to keep them"
     )]
     pub async fn subscribe_to_scripts(
         &self,
@@ -770,7 +770,9 @@ impl Client {
     }
 
     /// Allows to remove scripts from an existing subscription.
-    #[deprecated(note = "use `update_subscription` with the filter's `remove_scripts`")]
+    #[deprecated(
+        note = "use `update_subscription` with the filter's `remove_scripts`; note: `update_subscription` replaces the subscription's expressions, so pass the current ones to keep them"
+    )]
     pub async fn unsubscribe_from_scripts(
         &self,
         scripts: Vec<ArkAddress>,

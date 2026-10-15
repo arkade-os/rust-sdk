@@ -2164,7 +2164,7 @@ where
     ///
     /// Returns the subscription ID if successful
     #[deprecated(
-        note = "use `subscribe_to_scripts_stream` to open a subscription, or `update_subscription` to add scripts"
+        note = "use `subscribe_to_scripts_stream` to open a subscription, or `update_subscription` to add scripts; note: `update_subscription` replaces the subscription's expressions, so pass the current ones to keep them"
     )]
     // This deprecated wrapper intentionally forwards to the deprecated gRPC method; suppress the
     // self-referential deprecation warning.
@@ -2189,7 +2189,9 @@ where
     ///
     /// * `scripts` - Vector of ArkAddress to unsubscribe from
     /// * `subscription_id` - The subscription ID to update
-    #[deprecated(note = "use `update_subscription` with the filter's `remove_scripts`")]
+    #[deprecated(
+        note = "use `update_subscription` with the filter's `remove_scripts`; note: `update_subscription` replaces the subscription's expressions, so pass the current ones to keep them"
+    )]
     // This deprecated wrapper intentionally forwards to the deprecated gRPC method; suppress the
     // self-referential deprecation warning.
     #[allow(deprecated)]
