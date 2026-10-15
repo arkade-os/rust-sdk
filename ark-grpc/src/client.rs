@@ -907,9 +907,7 @@ impl Client {
 
         match tokio::time::timeout(SUBSCRIPTION_START_TIMEOUT, startup).await {
             Ok(result) => result,
-            Err(_) => Err(Error::conversion(
-                "timed out waiting for subscription_started",
-            )),
+            Err(_) => Err(Error::request("timed out waiting for subscription_started")),
         }
     }
 
@@ -1654,7 +1652,7 @@ where
             }
             Some(Err(e)) => return Err(e),
             None => {
-                return Err(Error::conversion(
+                return Err(Error::request(
                     "subscription stream closed before subscription_started",
                 ))
             }
@@ -1813,22 +1811,30 @@ mod tests {
         assert!(block_on(rest.next()).is_none());
     }
 
+    // An event before `subscription_started` is a protocol violation, so it is a conversion error.
     #[test]
     fn errors_on_event_before_started() {
         let frames = vec![Ok(event())];
-        assert!(block_on(read_subscription_started(stream::iter(frames))).is_err());
+        let err = block_on(read_subscription_started(stream::iter(frames))).unwrap_err();
+        assert!(err
+            .to_string()
+            .starts_with("failed to convert between types"));
     }
 
+    // The stream closing before `subscription_started` is a failed request, not a conversion
+    // error.
     #[test]
     fn errors_on_close_before_started() {
         let empty: Vec<Result<SubscriptionResponse, Error>> = Vec::new();
-        assert!(block_on(read_subscription_started(stream::iter(empty))).is_err());
+        let err = block_on(read_subscription_started(stream::iter(empty))).unwrap_err();
+        assert!(err.to_string().starts_with("request failed"));
 
         let heartbeats_only = vec![
             Ok(SubscriptionResponse::Heartbeat),
             Ok(SubscriptionResponse::Heartbeat),
         ];
-        assert!(block_on(read_subscription_started(stream::iter(heartbeats_only))).is_err());
+        let err = block_on(read_subscription_started(stream::iter(heartbeats_only))).unwrap_err();
+        assert!(err.to_string().starts_with("request failed"));
     }
 
     // A transport error before `subscription_started` reaches the caller unchanged, rather than
