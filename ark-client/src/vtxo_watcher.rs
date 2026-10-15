@@ -59,10 +59,6 @@ impl Drop for VtxoWatcherHandle {
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
-/// Upper bound on how long to wait for the server to send the `subscription_started` frame that
-/// opens a oneshot subscription.
-const SUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(30);
-
 /// Periodic key discovery settings for keeping script subscriptions fresh.
 const KEY_DISCOVERY_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -165,18 +161,17 @@ async fn run_watcher_loop<B, W, S>(
         };
 
         let handshake = client.subscribe_to_scripts_stream(addresses.clone());
-        let (subscription_id, mut stream) =
-            match subscribe_within_deadline(&mut stop_rx, SUBSCRIBE_TIMEOUT, handshake).await {
-                SubscribeOutcome::Ready(subscription) => subscription,
-                SubscribeOutcome::Stopped => return,
-                SubscribeOutcome::Retry => {
-                    if wait_or_stop(&mut stop_rx, backoff).await {
-                        return;
-                    }
-                    backoff = (backoff * 2).min(MAX_BACKOFF);
-                    continue;
+        let (subscription_id, mut stream) = match subscribe_or_stop(&mut stop_rx, handshake).await {
+            SubscribeOutcome::Ready(subscription) => subscription,
+            SubscribeOutcome::Stopped => return,
+            SubscribeOutcome::Retry => {
+                if wait_or_stop(&mut stop_rx, backoff).await {
+                    return;
                 }
-            };
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+                continue;
+            }
+        };
 
         tracing::info!("VTXO watcher connected");
         backoff = INITIAL_BACKOFF;
@@ -433,24 +428,24 @@ async fn wait_or_stop(stop_rx: &mut watch::Receiver<bool>, duration: Duration) -
     }
 }
 
-/// Outcome of awaiting a subscription handshake under the stop signal and handshake deadline.
+/// Outcome of awaiting a subscription handshake under the stop signal.
 enum SubscribeOutcome<T> {
     /// The subscription opened, carries `(subscription_id, stream)`.
     Ready(T),
     /// Stop was signalled while waiting. The watcher should shut down.
     Stopped,
-    /// The handshake failed or timed out. The watcher should back off and reconnect.
+    /// The handshake failed. The watcher should back off and reconnect.
     Retry,
 }
 
-/// Await a subscription handshake while honoring the stop signal and a handshake deadline.
+/// Await a subscription handshake while honoring the stop signal.
 ///
 /// A stop cancels the in-flight handshake immediately rather than blocking shutdown until it
-/// resolves. The deadline bounds a server that only sends heartbeats before `subscription_started`
-/// so the caller can fall back to reconnect backoff.
-async fn subscribe_within_deadline<F, T>(
+/// resolves. The handshake itself is bounded by the transport:
+/// [`Client::subscribe_to_scripts_stream`] times out if `subscription_started` never arrives, and
+/// that surfaces here as an error, so the caller falls back to reconnect backoff.
+async fn subscribe_or_stop<F, T>(
     stop_rx: &mut watch::Receiver<bool>,
-    deadline: Duration,
     handshake: F,
 ) -> SubscribeOutcome<T>
 where
@@ -458,16 +453,10 @@ where
 {
     tokio::select! {
         _ = stop_rx.changed() => SubscribeOutcome::Stopped,
-        result = tokio::time::timeout(deadline, handshake) => match result {
-            Ok(Ok(value)) => SubscribeOutcome::Ready(value),
-            Ok(Err(e)) => {
+        result = handshake => match result {
+            Ok(value) => SubscribeOutcome::Ready(value),
+            Err(e) => {
                 tracing::warn!("Failed to subscribe: {e}, reconnecting with backoff");
-                SubscribeOutcome::Retry
-            }
-            Err(_) => {
-                tracing::warn!(
-                    "Timed out waiting for subscription to start, reconnecting with backoff"
-                );
                 SubscribeOutcome::Retry
             }
         },
@@ -1307,47 +1296,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subscribe_within_deadline_returns_ready_subscription() {
+    async fn subscribe_or_stop_returns_ready_subscription() {
         let (_tx, mut rx) = watch::channel(false);
-        let outcome = subscribe_within_deadline(&mut rx, Duration::from_secs(30), async {
-            Ok::<_, Error>(7)
-        })
-        .await;
+        let outcome = subscribe_or_stop(&mut rx, async { Ok::<_, Error>(7) }).await;
         assert!(matches!(outcome, SubscribeOutcome::Ready(7)));
     }
 
     #[tokio::test]
-    async fn subscribe_within_deadline_stops_on_signal() {
+    async fn subscribe_or_stop_stops_on_signal() {
         let (tx, mut rx) = watch::channel(false);
         tx.send(true).unwrap();
-        let outcome = subscribe_within_deadline(
-            &mut rx,
-            Duration::from_secs(30),
-            std::future::pending::<Result<i32, Error>>(),
-        )
-        .await;
+        let outcome =
+            subscribe_or_stop(&mut rx, std::future::pending::<Result<i32, Error>>()).await;
         assert!(matches!(outcome, SubscribeOutcome::Stopped));
     }
 
     #[tokio::test]
-    async fn subscribe_within_deadline_retries_on_timeout() {
+    async fn subscribe_or_stop_retries_on_error() {
         let (_tx, mut rx) = watch::channel(false);
-        let outcome = subscribe_within_deadline(
-            &mut rx,
-            Duration::from_millis(10),
-            std::future::pending::<Result<i32, Error>>(),
-        )
-        .await;
-        assert!(matches!(outcome, SubscribeOutcome::Retry));
-    }
-
-    #[tokio::test]
-    async fn subscribe_within_deadline_retries_on_error() {
-        let (_tx, mut rx) = watch::channel(false);
-        let outcome = subscribe_within_deadline(&mut rx, Duration::from_secs(30), async {
-            Err::<i32, _>(Error::ad_hoc("boom"))
-        })
-        .await;
+        let outcome =
+            subscribe_or_stop(&mut rx, async { Err::<i32, _>(Error::ad_hoc("boom")) }).await;
         assert!(matches!(outcome, SubscribeOutcome::Retry));
     }
 }
