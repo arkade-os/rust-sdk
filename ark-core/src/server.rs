@@ -408,8 +408,11 @@ impl VirtualTxOutPoint {
     /// Recoverable VTXOs can be settled, but they cannot be sent in an offchain transaction. To
     /// settle them, the original VTXO does not need to be forfeited, as the Arkade server already
     /// controls it.
+    ///
+    /// An unrolled VTXO is never recoverable: it is onchain, and the Arkade server does not take it
+    /// into a batch.
     pub fn is_recoverable(&self, dust: Amount) -> bool {
-        if self.is_spent {
+        if self.is_spent || self.is_unrolled {
             return false;
         }
 
@@ -1165,5 +1168,56 @@ mod tests {
         assert!(request
             .with_filter(GetVtxosRequestFilter::Renewable)
             .is_err());
+    }
+
+    // ── VirtualTxOutPoint status ─────────────────────────────────────────────
+
+    fn vtxo(amount: u64, is_swept: bool, is_unrolled: bool, expires_at: i64) -> VirtualTxOutPoint {
+        VirtualTxOutPoint {
+            outpoint: OutPoint::null(),
+            created_at: 0,
+            expires_at,
+            amount: Amount::from_sat(amount),
+            script: ScriptBuf::new(),
+            is_preconfirmed: false,
+            is_swept,
+            is_unrolled,
+            is_spent: false,
+            spent_by: None,
+            commitment_txids: Vec::new(),
+            settled_by: None,
+            ark_txid: None,
+            assets: Vec::new(),
+            depth: 0,
+        }
+    }
+
+    const DUST: Amount = Amount::from_sat(330);
+    const FAR_FUTURE: i64 = i64::MAX;
+
+    #[test]
+    fn unrolled_vtxo_is_never_recoverable() {
+        let sub_dust = vtxo(100, false, true, FAR_FUTURE);
+        let swept = vtxo(10_000, true, true, FAR_FUTURE);
+        let expired = vtxo(10_000, false, true, 0);
+
+        for vtxo in [sub_dust, swept, expired] {
+            assert!(!vtxo.is_recoverable(DUST));
+            assert!(!vtxo.is_unspent(DUST));
+            assert!(vtxo.is_spent_status(DUST));
+        }
+    }
+
+    #[test]
+    fn recoverable_vtxos_that_are_not_unrolled_stay_recoverable() {
+        let sub_dust = vtxo(100, false, false, FAR_FUTURE);
+        let swept = vtxo(10_000, true, false, FAR_FUTURE);
+        let expired = vtxo(10_000, false, false, 0);
+
+        for vtxo in [sub_dust, swept, expired] {
+            assert!(vtxo.is_recoverable(DUST));
+            assert!(vtxo.is_unspent(DUST));
+            assert!(!vtxo.is_spent_status(DUST));
+        }
     }
 }
