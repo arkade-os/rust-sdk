@@ -1,6 +1,6 @@
 # ark-grpc
 
-gRPC transport client for Arkade servers.
+gRPC transport client for the Arkade operator.
 
 This crate contains the generated Arkade gRPC types plus a Rust client wrapper used by the higher-level `ark-client` crate.
 
@@ -8,7 +8,7 @@ This crate contains the generated Arkade gRPC types plus a Rust client wrapper u
 
 ```toml
 [dependencies]
-ark-grpc = "0.10.1"
+ark-grpc = "0.11.0"
 ```
 
 TLS root options are available through the `tls-native-roots` and `tls-webpki-roots` features.

@@ -1,21 +1,21 @@
 [package]
 name = "ark-client"
-version = "0.10.1"
+version = "0.11.0"
 categories = { workspace = true }
 edition = { workspace = true }
 keywords = { workspace = true }
 license = { workspace = true }
 repository = { workspace = true }
 rust-version = "1.86"
-description = "Main client library for interacting with Ark servers"
+description = "High-level client library for building Arkade wallets in Rust"
 
 [lints]
 workspace = true
 
 [dependencies]
-ark-core = { path = "../ark-core", version = "0.10.1" }
-ark-delegator = { path = "../ark-delegator", version = "0.10.1" }
-ark-fees = { path = "../ark-fees", version = "0.10.1" }
+ark-core = { path = "../ark-core", version = "0.11.0" }
+ark-delegator = { path = "../ark-delegator", version = "0.11.0" }
+ark-fees = { path = "../ark-fees", version = "0.11.0" }
 async-stream = "0.3"
 async-trait = "0.1"
 base64 = "0.22.1"
@@ -24,7 +24,7 @@ bitcoin = { version = "0.32.7", features = ["rand", "serde"] }
 futures = "0.3.31"
 jiff = "0.2.1"
 lightning-invoice = { version = "0.33.2", features = ["serde"] }
-musig = { package = "secp256k1", version = "0.32.0-beta.2", features = ["serde"] }
+musig = { package = "secp256k1", version = "0.33", features = ["serde"] }
 prost = "0.13.3"
 prost-types = "0.13.3"
 rand = "0.8"
@@ -38,7 +38,7 @@ tokio = { version = "1.41.0", features = ["sync", "rt-multi-thread"] }
 tracing = "0.1.37"
 
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
-ark-grpc = { path = "../ark-grpc", version = "0.10.1", default-features = false }
+ark-grpc = { path = "../ark-grpc", version = "0.11.0", default-features = false }
 backon = { version = "1", features = ["tokio-sleep"] }
 tonic = "0.14"
 
@@ -59,7 +59,7 @@ wasm-bindgen-futures = { version = "0.4" }
 tonic-build = { version = "0.14" }
 
 [dev-dependencies]
-ark-grpc = { path = "../ark-grpc", version = "0.10.1", default-features = false, features = ["test-utils"] }
+ark-grpc = { path = "../ark-grpc", version = "0.11.0", default-features = false, features = ["test-utils"] }
 rustls = { version = "0.23", features = ["ring"] }
 tempfile = "3.8"
 tokio = { version = "1.41.0", features = ["macros", "net", "rt-multi-thread", "sync"] }
