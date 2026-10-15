@@ -18,8 +18,12 @@ mod common;
 
 type TestClient = Client<Regtest, Wallet, InMemorySwapStorage>;
 
-/// Long enough for a settlement to register its intent, well short of the next batch.
-const REGISTRATION_GRACE: Duration = Duration::from_millis(500);
+/// The admin API of the regtest arkd.
+const ARKD_ADMIN_URL: &str = "http://localhost:7071";
+
+/// How long to wait for an intent to show up at the server: longer than a batch, which takes an
+/// intent out of the queue while it runs.
+const INTENT_WAIT: Duration = Duration::from_secs(90);
 
 /// A client holding one VTXO: its boarding output settled into a batch.
 async fn client_with_vtxo(name: &str) -> (Arc<TestClient>, OutPoint) {
@@ -53,9 +57,58 @@ async fn abandon_settlement(client: Arc<TestClient>, vtxo: OutPoint) {
         let mut rng = StdRng::from_entropy();
         let _ = client.settle_vtxos(&mut rng, &[vtxo], &[]).await;
     });
-    tokio::time::sleep(REGISTRATION_GRACE).await;
+    wait_for_queued_intent(vtxo).await;
     handle.abort();
     let _ = handle.await;
+}
+
+/// Wait until an intent queued at the server spends `vtxo`.
+async fn wait_for_queued_intent(vtxo: OutPoint) {
+    tokio::time::timeout(INTENT_WAIT, async {
+        while !intent_is_queued(vtxo).await {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("no intent spending {vtxo} was queued"));
+}
+
+/// Whether an intent queued at the server spends `vtxo`, as reported by arkd's admin API.
+async fn intent_is_queued(vtxo: OutPoint) -> bool {
+    #[derive(serde::Deserialize)]
+    struct ListIntentsResponse {
+        #[serde(default)]
+        intents: Vec<IntentInfo>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct IntentInfo {
+        #[serde(default)]
+        inputs: Vec<IntentInput>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct IntentInput {
+        txid: String,
+        #[serde(default)]
+        vout: u32,
+    }
+
+    let response: ListIntentsResponse = reqwest::get(format!("{ARKD_ADMIN_URL}/v1/admin/intents"))
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    response.intents.iter().any(|intent| {
+        intent
+            .inputs
+            .iter()
+            .any(|input| input.txid == vtxo.txid.to_string() && input.vout == vtxo.vout)
+    })
 }
 
 #[tokio::test]
@@ -82,6 +135,7 @@ pub async fn settle_replaces_its_own_abandoned_intent() {
     abandon_settlement(alice.clone(), vtxo).await;
 
     // The abandoned intent still holds the VTXO; settling deletes it and retries.
+    wait_for_queued_intent(vtxo).await;
     let mut rng = StdRng::from_entropy();
     let txid = alice.settle_vtxos(&mut rng, &[vtxo], &[]).await.unwrap();
     assert!(txid.is_some(), "the VTXO should settle");
@@ -97,6 +151,7 @@ pub async fn settle_replaces_an_abandoned_intent_that_batches_keep_requeuing() {
     // Every batch takes the abandoned intent, gets no confirmation for it and queues it again,
     // whatever its expiry: it never clears by itself.
     tokio::time::sleep(Duration::from_secs(75)).await;
+    wait_for_queued_intent(vtxo).await;
 
     let mut rng = StdRng::from_entropy();
     let txid = alice.settle_vtxos(&mut rng, &[vtxo], &[]).await.unwrap();

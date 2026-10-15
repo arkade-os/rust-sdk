@@ -1475,15 +1475,25 @@ where
             .filter(|input| outpoints.contains(&input.outpoint()))
             .collect();
 
-        self.delete_intents_for(&onchain_inputs, vtxo_inputs).await
+        self.delete_intents_for(&onchain_inputs, vtxo_inputs, DELETE_INTENT_ATTEMPTS)
+            .await
     }
 
-    /// Delete the intents queued at the Ark server that spend any of these inputs.
+    /// Delete the intents queued at the Ark server that spend any of these inputs, trying up to
+    /// `max_attempts` times while no queued intent matches.
     async fn delete_intents_for(
         &self,
         onchain_inputs: &[batch::OnChainInput],
         vtxo_inputs: Vec<intent::Input>,
+        max_attempts: u32,
     ) -> Result<(), Error> {
+        // The server matches queued intents by their VTXO inputs only.
+        if vtxo_inputs.is_empty() {
+            return Err(Error::ad_hoc(
+                "no VTXO inputs of this wallet to delete intents for",
+            ));
+        }
+
         let inputs = onchain_inputs
             .iter()
             .map(|o| {
@@ -1504,11 +1514,6 @@ where
             })
             .chain(vtxo_inputs)
             .collect::<Vec<_>>();
-        if inputs.is_empty() {
-            return Err(Error::ad_hoc(
-                "no inputs of this wallet to delete intents for",
-            ));
-        }
 
         let now = crate::utils::unix_now()?;
         let now = u64::try_from(now).map_err(|_| Error::ad_hoc("negative timestamp"))?;
@@ -1531,7 +1536,7 @@ where
                 // Taken into a running batch; it is queued again once that batch fails.
                 Err(e)
                     if e.to_string().contains(NO_MATCHING_INTENT_ERROR)
-                        && attempt < DELETE_INTENT_ATTEMPTS =>
+                        && attempt < max_attempts =>
                 {
                     tracing::debug!(attempt, "No queued intent to delete yet; retrying");
                     attempt += 1;
@@ -1607,9 +1612,13 @@ where
                     error = %e,
                     "An input of this intent is held by a stale intent; deleting it and retrying"
                 );
-                self.delete_intents_for(&cleanup_onchain_inputs, cleanup_vtxo_inputs.clone())
-                    .await
-                    .context("failed to delete the stale intent holding our inputs")?;
+                self.delete_intents_for(
+                    &cleanup_onchain_inputs,
+                    cleanup_vtxo_inputs.clone(),
+                    DELETE_INTENT_ATTEMPTS,
+                )
+                .await
+                .context("failed to delete the stale intent holding our inputs")?;
                 timeout_op(
                     self.inner.timeout,
                     self.network_client().register_intent(intent),
@@ -2081,19 +2090,25 @@ where
         .await;
 
         // A registered intent that did not complete would stay queued at the server and lock
-        // its inputs for every later batch. Best effort: an intent already taken into a batch
-        // is no longer queued, and there is nothing to delete.
+        // its inputs for every later batch. Best effort, in a single attempt so the batch error
+        // is not delayed: an intent still held by a running batch is not queued and cannot be
+        // deleted now; the next registration spending its inputs deletes it then. The server
+        // cannot find an intent by boarding inputs, so there is nothing to try without VTXOs.
         if let Err(e) = &outcome {
-            if let Err(delete_error) = self
-                .delete_intents_for(&cleanup_onchain_inputs, cleanup_vtxo_inputs)
-                .await
-            {
-                tracing::debug!(
-                    intent_id,
-                    error = %e,
-                    %delete_error,
-                    "Did not delete the intent of a failed batch"
-                );
+            if !cleanup_vtxo_inputs.is_empty() {
+                if let Err(delete_error) = self
+                    .delete_intents_for(&cleanup_onchain_inputs, cleanup_vtxo_inputs, 1)
+                    .await
+                {
+                    tracing::warn!(
+                        intent_id,
+                        ?onchain_input_outpoints,
+                        ?vtxo_input_outpoints,
+                        error = %e,
+                        %delete_error,
+                        "Did not delete the intent of a failed batch"
+                    );
+                }
             }
         }
 
@@ -2127,9 +2142,15 @@ pub(crate) enum PrepareIntentKind {
 }
 
 /// The Ark server's rejection of an intent whose input another queued intent already holds.
+///
+/// arkd returns no error code for it, so this matches the text of the error raised by its intent
+/// live store (`internal/infrastructure/live-store/{inmemory,redis}/intents.go`).
 const DUPLICATED_INPUT_ERROR: &str = "already registered by another intent";
 
 /// The Ark server's answer to a deletion when no queued intent spends the given inputs.
+///
+/// Matched against the error text of arkd's `DeleteIntentsByProof`
+/// (`internal/core/application/service.go`).
 const NO_MATCHING_INTENT_ERROR: &str = "no matching intents found";
 
 /// How often to retry a deletion that found no queued intent, and how long to wait between
