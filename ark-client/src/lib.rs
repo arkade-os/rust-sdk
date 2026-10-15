@@ -75,6 +75,7 @@ mod unilateral_exit;
 mod utils;
 
 pub use ark_core::server::DeprecatedSignerStatus;
+pub use ark_core::server::GetVtxosRequestFilter;
 pub use ark_core::server::ServerSignerStatus;
 pub use asset::IssueAssetResult;
 pub use boltz::BoltzVhtlcWatcherConfig;
@@ -1726,17 +1727,41 @@ where
         self.fetch_all_vtxos(request).await
     }
 
+    /// List every VTXO the wallet ever held, spent ones included.
+    ///
+    /// The list grows with the wallet's history. Callers that only need unspent VTXOs should
+    /// use [`Self::list_vtxos_filtered`].
     pub async fn list_vtxos(&self) -> Result<AnnotatedVtxoList, Error> {
         let server_info = self.server_info().await?;
-        self.list_vtxos_with_server_info(&server_info).await
+        self.list_vtxos_with_server_info(&server_info, None).await
+    }
+
+    /// Like [`Self::list_vtxos`], restricted by the Ark server to the VTXOs matching `filter`.
+    ///
+    /// The unfiltered list includes every VTXO the wallet ever held and is fetched 100 at a
+    /// time, so a long-lived wallet pays for its whole history on every call. Use
+    /// [`GetVtxosRequestFilter::Renewable`] (spendable plus recoverable) for balances and
+    /// settlement, and [`GetVtxosRequestFilter::Spendable`] for offchain coin selection.
+    pub async fn list_vtxos_filtered(
+        &self,
+        filter: GetVtxosRequestFilter,
+    ) -> Result<AnnotatedVtxoList, Error> {
+        let server_info = self.server_info().await?;
+        self.list_vtxos_with_server_info(&server_info, Some(filter))
+            .await
     }
 
     pub(crate) async fn list_vtxos_with_server_info(
         &self,
         server_info: &server::Info,
+        filter: Option<GetVtxosRequestFilter>,
     ) -> Result<AnnotatedVtxoList, Error> {
         let addresses = self.active_offchain_contract_addresses()?;
-        let virtual_tx_outpoints = self.get_virtual_tx_outpoints(addresses.into_iter()).await?;
+        let mut request = GetVtxosRequest::new_for_addresses(addresses.into_iter());
+        if let Some(filter) = filter {
+            request = request.with_filter(filter)?;
+        }
+        let virtual_tx_outpoints = self.fetch_all_vtxos(request).await?;
         let contract_vtxos = self.annotate_vtxos(virtual_tx_outpoints)?;
 
         Ok(AnnotatedVtxoList::new(server_info.dust, contract_vtxos))
@@ -1797,7 +1822,11 @@ where
     }
 
     pub async fn offchain_balance(&self) -> Result<OffChainBalance, Error> {
-        let vtxo_list = self.list_vtxos().await.context("failed to list VTXOs")?;
+        // Every amount below is over unspent VTXOs.
+        let vtxo_list = self
+            .list_vtxos_filtered(GetVtxosRequestFilter::Renewable)
+            .await
+            .context("failed to list VTXOs")?;
         let now = unix_now()?;
         let server_info = self.server_info().await?;
 
@@ -1997,6 +2026,8 @@ where
         if request.reference().is_empty() {
             return Ok(Vec::new());
         }
+
+        tracing::debug!(filter = ?request.filter(), "Fetching VTXOs");
 
         let mut all_vtxos = Vec::new();
         let mut cursor = 0;
