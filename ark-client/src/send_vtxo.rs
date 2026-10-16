@@ -5,6 +5,7 @@ use crate::AnnotatedVtxo;
 use crate::Blockchain;
 use crate::Client;
 use crate::Error;
+use crate::GetVtxosRequestFilter;
 use ark_core::asset::AssetId;
 use ark_core::coin_select::select_vtxos;
 use ark_core::coin_select::select_vtxos_for_asset;
@@ -261,7 +262,7 @@ where
         receivers: &[SendReceiver],
     ) -> Result<Vec<VtxoInput>, Error> {
         let vtxo_list = self
-            .list_vtxos()
+            .list_vtxos_filtered(GetVtxosRequestFilter::Spendable)
             .await
             .context("failed to get spendable VTXOs")?;
 

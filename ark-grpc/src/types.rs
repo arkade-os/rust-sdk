@@ -146,7 +146,10 @@ impl TryFrom<&generated::ark::v1::IndexerVtxo> for server::VirtualTxOutPoint {
     type Error = Error;
 
     fn try_from(value: &generated::ark::v1::IndexerVtxo) -> Result<Self, Self::Error> {
-        let outpoint = value.outpoint.as_ref().expect("outpoint");
+        let outpoint = value
+            .outpoint
+            .as_ref()
+            .ok_or_else(|| Error::conversion("missing VTXO outpoint"))?;
         let outpoint = OutPoint {
             txid: outpoint.txid.parse().map_err(Error::conversion)?,
             vout: outpoint.vout,
@@ -211,7 +214,10 @@ impl TryFrom<&generated::ark::v1::Vtxo> for server::VirtualTxOutPoint {
     type Error = Error;
 
     fn try_from(value: &generated::ark::v1::Vtxo) -> Result<Self, Self::Error> {
-        let outpoint = value.outpoint.as_ref().expect("outpoint");
+        let outpoint = value
+            .outpoint
+            .as_ref()
+            .ok_or_else(|| Error::conversion("missing VTXO outpoint"))?;
         let outpoint = OutPoint {
             txid: outpoint.txid.parse().map_err(Error::conversion)?,
             vout: outpoint.vout,
@@ -269,5 +275,70 @@ impl TryFrom<&generated::ark::v1::Vtxo> for server::VirtualTxOutPoint {
             assets,
             depth: value.depth,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use generated::ark::v1::IndexerOutpoint;
+    use generated::ark::v1::IndexerVtxo;
+    use generated::ark::v1::Outpoint;
+    use generated::ark::v1::Vtxo;
+
+    const TXID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn indexer_vtxo_without_outpoint_returns_error() {
+        let response = IndexerVtxo::default();
+        let error = server::VirtualTxOutPoint::try_from(&response)
+            .expect_err("missing outpoint must be rejected without panicking");
+        assert!(error.to_string().contains("missing VTXO outpoint"));
+    }
+
+    #[test]
+    fn vtxo_without_outpoint_returns_error() {
+        let response = Vtxo::default();
+        let error = server::VirtualTxOutPoint::try_from(&response)
+            .expect_err("missing outpoint must be rejected without panicking");
+        assert!(error.to_string().contains("missing VTXO outpoint"));
+    }
+
+    #[test]
+    fn indexer_vtxo_with_outpoint_preserves_values() {
+        let response = IndexerVtxo {
+            outpoint: Some(IndexerOutpoint {
+                txid: TXID.to_owned(),
+                vout: 7,
+            }),
+            amount: 1234,
+            script: "51".to_owned(),
+            ..Default::default()
+        };
+        let vtxo = server::VirtualTxOutPoint::try_from(&response)
+            .expect("valid indexer VTXO must still convert");
+        assert_eq!(vtxo.outpoint.txid.to_string(), TXID);
+        assert_eq!(vtxo.outpoint.vout, 7);
+        assert_eq!(vtxo.amount.to_sat(), 1234);
+        assert_eq!(vtxo.script.as_bytes(), &[0x51]);
+    }
+
+    #[test]
+    fn vtxo_with_outpoint_preserves_values() {
+        let response = Vtxo {
+            outpoint: Some(Outpoint {
+                txid: TXID.to_owned(),
+                vout: 7,
+            }),
+            amount: 1234,
+            script: "51".to_owned(),
+            ..Default::default()
+        };
+        let vtxo =
+            server::VirtualTxOutPoint::try_from(&response).expect("valid VTXO must still convert");
+        assert_eq!(vtxo.outpoint.txid.to_string(), TXID);
+        assert_eq!(vtxo.outpoint.vout, 7);
+        assert_eq!(vtxo.amount.to_sat(), 1234);
+        assert_eq!(vtxo.script.as_bytes(), &[0x51]);
     }
 }

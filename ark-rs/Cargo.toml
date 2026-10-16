@@ -1,21 +1,25 @@
 [package]
 name = "ark-rs"
-version = "0.10.1"
+version = "0.11.0"
 categories = { workspace = true }
 edition = { workspace = true }
 keywords = { workspace = true }
 license = { workspace = true }
 repository = { workspace = true }
 rust-version = "1.86"
-description = "Collection of Rust crates designed to simplify building Bitcoin wallets with seamless support for both on-chain and off-chain transactions via the Ark protocol"
+description = "Rust crates for building Bitcoin wallets and applications with Arkade"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [lints]
 workspace = true
 
 [dependencies]
-ark-client = { path = "../ark-client", version = "0.10.1", optional = true, default-features = false }
-ark-core = { path = "../ark-core", version = "0.10.1" }
-ark-grpc = { path = "../ark-grpc", version = "0.10.1", optional = true, default-features = false }
+ark-client = { path = "../ark-client", version = "0.11.0", optional = true, default-features = false }
+ark-core = { path = "../ark-core", version = "0.11.0" }
+ark-grpc = { path = "../ark-grpc", version = "0.11.0", optional = true, default-features = false }
 
 [features]
 default = ["tls-native-roots"]

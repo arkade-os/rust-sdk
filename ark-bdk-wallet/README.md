@@ -2,13 +2,13 @@
 
 BDK wallet integration for Arkade clients.
 
-This crate implements `ark-client` on-chain wallet traits using [`bdk_wallet`](https://crates.io/crates/bdk_wallet), with Esplora support on native and WebAssembly targets.
+This crate implements the onchain wallet traits of `ark-client` using [`bdk_wallet`](https://crates.io/crates/bdk_wallet), with Esplora support on native and WebAssembly targets.
 
 ## Install
 
 ```toml
 [dependencies]
-ark-bdk-wallet = "0.10.1"
+ark-bdk-wallet = "0.11.0"
 ```
 
 ## Documentation

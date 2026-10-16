@@ -273,48 +273,37 @@ impl GetVtxosRequest {
         }
     }
 
-    pub fn spendable_only(self) -> Result<Self, Error> {
+    /// Restrict the request to the VTXOs matching `filter`. Only one filter can be set.
+    pub fn with_filter(self, filter: GetVtxosRequestFilter) -> Result<Self, Error> {
         if self.filter.is_some() {
             return Err(Error::ad_hoc("GetVtxosRequest filter already set"));
         }
 
         Ok(Self {
-            filter: Some(GetVtxosRequestFilter::Spendable),
+            filter: Some(filter),
             ..self
         })
+    }
+
+    pub fn spendable_only(self) -> Result<Self, Error> {
+        self.with_filter(GetVtxosRequestFilter::Spendable)
     }
 
     pub fn spent_only(self) -> Result<Self, Error> {
-        if self.filter.is_some() {
-            return Err(Error::ad_hoc("GetVtxosRequest filter already set"));
-        }
-
-        Ok(Self {
-            filter: Some(GetVtxosRequestFilter::Spent),
-            ..self
-        })
+        self.with_filter(GetVtxosRequestFilter::Spent)
     }
 
     pub fn recoverable_only(self) -> Result<Self, Error> {
-        if self.filter.is_some() {
-            return Err(Error::ad_hoc("GetVtxosRequest filter already set"));
-        }
-
-        Ok(Self {
-            filter: Some(GetVtxosRequestFilter::Recoverable),
-            ..self
-        })
+        self.with_filter(GetVtxosRequestFilter::Recoverable)
     }
 
     pub fn pending_only(self) -> Result<Self, Error> {
-        if self.filter.is_some() {
-            return Err(Error::ad_hoc("GetVtxosRequest filter already set"));
-        }
+        self.with_filter(GetVtxosRequestFilter::PendingOnly)
+    }
 
-        Ok(Self {
-            filter: Some(GetVtxosRequestFilter::PendingOnly),
-            ..self
-        })
+    /// Only VTXOs that are neither spent nor unrolled: the spendable and the recoverable ones.
+    pub fn renewable_only(self) -> Result<Self, Error> {
+        self.with_filter(GetVtxosRequestFilter::Renewable)
     }
 
     pub fn reference(&self) -> &GetVtxosRequestReference {
@@ -373,7 +362,7 @@ impl GetVtxosRequestReference {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GetVtxosRequestFilter {
     Spendable,
     Spent,
@@ -419,8 +408,11 @@ impl VirtualTxOutPoint {
     /// Recoverable VTXOs can be settled, but they cannot be sent in an offchain transaction. To
     /// settle them, the original VTXO does not need to be forfeited, as the Arkade server already
     /// controls it.
+    ///
+    /// An unrolled VTXO is never recoverable: it is onchain, and the Arkade server does not take it
+    /// into a batch.
     pub fn is_recoverable(&self, dust: Amount) -> bool {
-        if self.is_spent {
+        if self.is_spent || self.is_unrolled {
             return false;
         }
 
@@ -1153,5 +1145,79 @@ mod tests {
         let info = make_info(PK_A, vec![(PK_B, now + 100), (PK_C, now - 100)]);
         assert!(!info.is_signer_past_cutoff_at(xonly(PK_B), now));
         assert!(info.is_signer_past_cutoff_at(xonly(PK_C), now));
+    }
+
+    // ── GetVtxosRequest filters ──────────────────────────────────────────────
+
+    #[test]
+    fn renewable_only_sets_the_renewable_filter() {
+        let request = GetVtxosRequest::new_for_outpoints(&[])
+            .renewable_only()
+            .unwrap();
+
+        assert_eq!(request.filter(), Some(&GetVtxosRequestFilter::Renewable));
+    }
+
+    #[test]
+    fn a_second_filter_is_rejected() {
+        let request = GetVtxosRequest::new_for_outpoints(&[])
+            .renewable_only()
+            .unwrap();
+
+        assert!(request.clone().spendable_only().is_err());
+        assert!(request
+            .with_filter(GetVtxosRequestFilter::Renewable)
+            .is_err());
+    }
+
+    // ── VirtualTxOutPoint status ─────────────────────────────────────────────
+
+    fn vtxo(amount: u64, is_swept: bool, is_unrolled: bool, expires_at: i64) -> VirtualTxOutPoint {
+        VirtualTxOutPoint {
+            outpoint: OutPoint::null(),
+            created_at: 0,
+            expires_at,
+            amount: Amount::from_sat(amount),
+            script: ScriptBuf::new(),
+            is_preconfirmed: false,
+            is_swept,
+            is_unrolled,
+            is_spent: false,
+            spent_by: None,
+            commitment_txids: Vec::new(),
+            settled_by: None,
+            ark_txid: None,
+            assets: Vec::new(),
+            depth: 0,
+        }
+    }
+
+    const DUST: Amount = Amount::from_sat(330);
+    const FAR_FUTURE: i64 = i64::MAX;
+
+    #[test]
+    fn unrolled_vtxo_is_never_recoverable() {
+        let sub_dust = vtxo(100, false, true, FAR_FUTURE);
+        let swept = vtxo(10_000, true, true, FAR_FUTURE);
+        let expired = vtxo(10_000, false, true, 0);
+
+        for vtxo in [sub_dust, swept, expired] {
+            assert!(!vtxo.is_recoverable(DUST));
+            assert!(!vtxo.is_unspent(DUST));
+            assert!(vtxo.is_spent_status(DUST));
+        }
+    }
+
+    #[test]
+    fn recoverable_vtxos_that_are_not_unrolled_stay_recoverable() {
+        let sub_dust = vtxo(100, false, false, FAR_FUTURE);
+        let swept = vtxo(10_000, true, false, FAR_FUTURE);
+        let expired = vtxo(10_000, false, false, 0);
+
+        for vtxo in [sub_dust, swept, expired] {
+            assert!(vtxo.is_recoverable(DUST));
+            assert!(vtxo.is_unspent(DUST));
+            assert!(!vtxo.is_spent_status(DUST));
+        }
     }
 }

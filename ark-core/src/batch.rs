@@ -189,7 +189,10 @@ where
                 )));
             }
 
-            let session_id = musig::SessionSecretRand::assume_unique_per_nonce_gen(rng.r#gen());
+            // We derive nonces from uniform randomness rather than from the counter-based
+            // `nonce_gen`, because we have no non-repeating counter that survives a restart, and a
+            // repeated MuSig2 nonce leaks the secret key.
+            let session_id = musig::SessionSecretRand::assume_uniformly_random(rng.r#gen());
             let extra_rand = rng.r#gen();
 
             let msg = tree_tx_sighash(tx, &batch_tree_tx_map, commitment_tx)?;
@@ -202,8 +205,12 @@ where
                 musig::KeyAggCache::new(&cosigner_pks.iter().collect::<Vec<_>>())
             };
 
-            let (nonce, pub_nonce) =
-                key_agg_cache.nonce_gen(session_id, to_musig_pk(own_cosigner_pk), &msg, extra_rand);
+            let (nonce, pub_nonce) = key_agg_cache.nonce_gen_with_uniform_randomness(
+                session_id,
+                to_musig_pk(own_cosigner_pk),
+                &msg,
+                extra_rand,
+            );
 
             Ok((*txid, (Some(nonce), pub_nonce)))
         })
@@ -293,7 +300,7 @@ pub fn sign_batch_tree_tx(
 
     let secp = Secp256k1::new();
 
-    let own_cosigner_kp = ::musig::Keypair::from_seckey_byte_array(own_cosigner_kp.secret_bytes())
+    let own_cosigner_kp = ::musig::Keypair::from_secret_bytes(own_cosigner_kp.secret_bytes())
         .map_err(|e| Error::ad_hoc(format!("invalid keypair: {e}")))?;
 
     let batch_tree_tx_map = batch_tree_tx_graph.as_map();
@@ -1127,4 +1134,104 @@ where
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::TxGraphChunk;
+    use bitcoin::ScriptBuf;
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+
+    fn cosigner_kp(n: u8) -> Keypair {
+        let secp = Secp256k1::new();
+        let sk = secp256k1::SecretKey::from_slice(&[n; 32]).unwrap();
+
+        Keypair::from_secret_key(&secp, &sk)
+    }
+
+    fn commitment_tx() -> Psbt {
+        let tx = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn::default()],
+            output: vec![TxOut {
+                value: Amount::from_sat(10_000),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        };
+
+        Psbt::from_unsigned_tx(tx).unwrap()
+    }
+
+    /// A single-node batch tree spending the first output of `commitment_tx`, listing
+    /// `cosigner_pk` as its only cosigner.
+    fn batch_tree(commitment_tx: &Psbt, cosigner_pk: PublicKey) -> TxGraph {
+        let tx = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: commitment_tx.unsigned_tx.compute_txid(),
+                    vout: 0,
+                },
+                ..Default::default()
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(9_000),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        };
+
+        let mut psbt = Psbt::from_unsigned_tx(tx).unwrap();
+
+        let mut key = VTXO_COSIGNER_PSBT_KEY.to_vec();
+        key.push(0);
+
+        psbt.inputs[VTXO_INPUT_INDEX].unknown.insert(
+            psbt::raw::Key { type_value: 0, key },
+            bitcoin::PublicKey::new(cosigner_pk).to_bytes(),
+        );
+
+        TxGraph::new(vec![TxGraphChunk {
+            txid: None,
+            tx: psbt,
+            children: HashMap::new(),
+        }])
+        .unwrap()
+    }
+
+    fn pub_nonces(seed: [u8; 32]) -> Vec<[u8; 66]> {
+        let own_cosigner_pk = cosigner_kp(1).public_key();
+        let commitment_tx = commitment_tx();
+        let batch_tree = batch_tree(&commitment_tx, own_cosigner_pk);
+
+        let mut rng = StdRng::from_seed(seed);
+        let nonce_kps =
+            generate_nonce_tree(&mut rng, &batch_tree, own_cosigner_pk, &commitment_tx).unwrap();
+
+        let mut nonces = nonce_kps
+            .0
+            .values()
+            .map(|(_, pub_nonce)| pub_nonce.serialize())
+            .collect::<Vec<_>>();
+        nonces.sort();
+
+        nonces
+    }
+
+    /// The public nonces must be a pure function of the RNG stream. A nonce derived from anything
+    /// else (a counter, the clock) would vary here even though the RNG does not.
+    #[test]
+    fn nonce_tree_is_determined_by_the_rng() {
+        assert_eq!(pub_nonces([7; 32]), pub_nonces([7; 32]));
+    }
+
+    /// The public nonces must actually vary with the RNG stream. A nonce keyed off a fixed counter
+    /// would repeat here, and repeating a MuSig2 nonce leaks the secret key.
+    #[test]
+    fn nonce_tree_varies_with_the_rng() {
+        assert_ne!(pub_nonces([7; 32]), pub_nonces([8; 32]));
+    }
 }

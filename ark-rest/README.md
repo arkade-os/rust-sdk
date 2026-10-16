@@ -1,19 +1,19 @@
 # ark-rest
 
-REST transport client for Arkade servers.
+REST transport client for the Arkade operator.
 
-This crate contains generated REST API bindings plus a Rust client wrapper for Arkade service, indexer, admin, signer manager, and wallet endpoints.
+This crate contains generated REST API bindings plus a Rust client wrapper for the service, indexer, admin, signer manager, and wallet endpoints.
 
 ## Install
 
 ```toml
 [dependencies]
-ark-rest = "0.10.1"
+ark-rest = "0.11.0"
 ```
 
 ## Notes
 
-The low-level API modules are generated from the Ark OpenAPI specification and are exposed for advanced use. Most applications should prefer the higher-level `Client` wrapper exported by this crate, or `ark-client` for full wallet/client functionality.
+The low-level API modules are generated from the arkd OpenAPI specification and are exposed for advanced use. Most applications should prefer the higher-level `Client` wrapper exported by this crate, or `ark-client` for full wallet functionality.
 
 ## Documentation
 

@@ -74,6 +74,7 @@ mod unilateral_exit;
 mod utils;
 
 pub use ark_core::server::DeprecatedSignerStatus;
+pub use ark_core::server::GetVtxosRequestFilter;
 pub use ark_core::server::ServerSignerStatus;
 pub use asset::IssueAssetResult;
 pub use boltz::BoltzVhtlcWatcherConfig;
@@ -1690,17 +1691,41 @@ where
         self.fetch_all_vtxos(request).await
     }
 
+    /// List every VTXO the wallet ever held, spent ones included.
+    ///
+    /// The list grows with the wallet's history. Callers that only need unspent VTXOs should
+    /// use [`Self::list_vtxos_filtered`].
     pub async fn list_vtxos(&self) -> Result<AnnotatedVtxoList, Error> {
         let server_info = self.server_info().await?;
-        self.list_vtxos_with_server_info(&server_info).await
+        self.list_vtxos_with_server_info(&server_info, None).await
+    }
+
+    /// Like [`Self::list_vtxos`], restricted by the Ark server to the VTXOs matching `filter`.
+    ///
+    /// The unfiltered list includes every VTXO the wallet ever held and is fetched 100 at a
+    /// time, so a long-lived wallet pays for its whole history on every call. Use
+    /// [`GetVtxosRequestFilter::Renewable`] (spendable plus recoverable) for balances and
+    /// settlement, and [`GetVtxosRequestFilter::Spendable`] for offchain coin selection.
+    pub async fn list_vtxos_filtered(
+        &self,
+        filter: GetVtxosRequestFilter,
+    ) -> Result<AnnotatedVtxoList, Error> {
+        let server_info = self.server_info().await?;
+        self.list_vtxos_with_server_info(&server_info, Some(filter))
+            .await
     }
 
     pub(crate) async fn list_vtxos_with_server_info(
         &self,
         server_info: &server::Info,
+        filter: Option<GetVtxosRequestFilter>,
     ) -> Result<AnnotatedVtxoList, Error> {
         let addresses = self.active_offchain_contract_addresses()?;
-        let virtual_tx_outpoints = self.get_virtual_tx_outpoints(addresses.into_iter()).await?;
+        let mut request = GetVtxosRequest::new_for_addresses(addresses.into_iter());
+        if let Some(filter) = filter {
+            request = request.with_filter(filter)?;
+        }
+        let virtual_tx_outpoints = self.fetch_all_vtxos(request).await?;
         let contract_vtxos = self.annotate_vtxos(virtual_tx_outpoints)?;
 
         Ok(AnnotatedVtxoList::new(server_info.dust, contract_vtxos))
@@ -1761,7 +1786,11 @@ where
     }
 
     pub async fn offchain_balance(&self) -> Result<OffChainBalance, Error> {
-        let vtxo_list = self.list_vtxos().await.context("failed to list VTXOs")?;
+        // Every amount below is over unspent VTXOs.
+        let vtxo_list = self
+            .list_vtxos_filtered(GetVtxosRequestFilter::Renewable)
+            .await
+            .context("failed to list VTXOs")?;
         let now = unix_now()?;
         let server_info = self.server_info().await?;
 
@@ -1962,6 +1991,8 @@ where
             return Ok(Vec::new());
         }
 
+        tracing::debug!(filter = ?request.filter(), "Fetching VTXOs");
+
         let mut all_vtxos = Vec::new();
         let mut cursor = 0;
         const PAGE_SIZE: i32 = 100;
@@ -1977,12 +2008,9 @@ where
 
             all_vtxos.extend(response.vtxos);
 
-            // Use server-provided cursor for next page; next == total means end
-            match response.page {
-                Some(page) if page.next < page.total => {
-                    cursor = page.next;
-                }
-                _ => break,
+            match next_vtxo_page(response.page.as_ref()) {
+                Some(next) => cursor = next,
+                None => break,
             }
         }
 
@@ -2204,6 +2232,56 @@ where
             .update_subscription(subscription_id, filter)
             .await
             .map_err(Into::into)
+    }
+}
+
+/// The cursor for the page after `page`, or `None` once the last page has been read.
+///
+/// The server numbers pages from 1 and clamps `next` to `total`, so `next` equals `total` both
+/// on the second-to-last page and on the last one. Only `current` tells them apart: stopping on
+/// `next == total` would drop the last page whenever there is more than one.
+fn next_vtxo_page(page: Option<&server::IndexerPage>) -> Option<i32> {
+    let page = page?;
+    (page.current < page.total).then_some(page.next)
+}
+
+#[cfg(test)]
+mod next_vtxo_page_tests {
+    use super::*;
+
+    fn page(current: i32, next: i32, total: i32) -> server::IndexerPage {
+        server::IndexerPage {
+            current,
+            next,
+            total,
+        }
+    }
+
+    #[test]
+    fn no_page_info_stops() {
+        assert_eq!(next_vtxo_page(None), None);
+    }
+
+    #[test]
+    fn empty_result_stops() {
+        assert_eq!(next_vtxo_page(Some(&page(1, 0, 0))), None);
+    }
+
+    #[test]
+    fn single_page_stops() {
+        assert_eq!(next_vtxo_page(Some(&page(1, 1, 1))), None);
+    }
+
+    #[test]
+    fn second_to_last_page_continues_to_the_last_one() {
+        assert_eq!(next_vtxo_page(Some(&page(1, 2, 2))), Some(2));
+        assert_eq!(next_vtxo_page(Some(&page(2, 3, 3))), Some(3));
+    }
+
+    #[test]
+    fn last_page_stops() {
+        assert_eq!(next_vtxo_page(Some(&page(2, 2, 2))), None);
+        assert_eq!(next_vtxo_page(Some(&page(3, 3, 3))), None);
     }
 }
 

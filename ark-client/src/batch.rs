@@ -5,6 +5,7 @@ use crate::utils::timeout_op;
 use crate::Blockchain;
 use crate::Client;
 use crate::Error;
+use crate::GetVtxosRequestFilter;
 use ark_core::batch;
 use ark_core::batch::aggregate_nonces;
 use ark_core::batch::complete_delegate_forfeit_txs;
@@ -141,7 +142,9 @@ where
     {
         let server_info = self.server_info().await?;
 
-        let vtxo_list = self.list_vtxos_with_server_info(&server_info).await?;
+        let vtxo_list = self
+            .list_vtxos_with_server_info(&server_info, Some(GetVtxosRequestFilter::Renewable))
+            .await?;
         let vtxo_outpoints: Vec<OutPoint> = vtxo_list
             .recoverable()
             .map(|entry| entry.vtxo().outpoint)
@@ -512,7 +515,7 @@ where
         let requested: HashSet<OutPoint> = input_vtxos.into_iter().collect();
 
         let vtxo_list = self
-            .list_vtxos_with_server_info(server_info)
+            .list_vtxos_with_server_info(server_info, Some(GetVtxosRequestFilter::Renewable))
             .await
             .context("failed to get VTXO list")?;
         let now = crate::utils::unix_now()?;
@@ -1194,7 +1197,9 @@ where
             }
         }
 
-        let vtxo_list = self.list_vtxos_with_server_info(server_info).await?;
+        let vtxo_list = self
+            .list_vtxos_with_server_info(server_info, Some(GetVtxosRequestFilter::Renewable))
+            .await?;
         // Reuse the caller-supplied timestamp (not a fresh wall-clock) so the VTXO cutoff filter
         // below is evaluated against the same instant as the boarding filter above, and so a
         // test-injected `now` deterministically controls both.
@@ -1333,6 +1338,60 @@ where
 
         let cosigner_pk = cosigner_keypair.public_key();
 
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| Error::ad_hoc(e.to_string()))
+            .context("failed to compute now timestamp")?;
+        let now = now.as_secs();
+        let expire_at = now + (2 * 60);
+
+        if let Some(packet) = create_asset_preservation_packet(&inputs, &outputs)? {
+            outputs.push(intent::Output::AssetPacket(packet.to_txout()));
+        }
+
+        let mut onchain_output_indexes = Vec::new();
+        for (i, output) in outputs.iter().enumerate() {
+            if matches!(output, intent::Output::Onchain(_)) {
+                onchain_output_indexes.push(i);
+            }
+        }
+
+        let message = match intent_kind {
+            PrepareIntentKind::EstimateFee => intent::IntentMessage::EstimateIntentFee {
+                onchain_output_indexes,
+                valid_at: now,
+                expire_at,
+                own_cosigner_pks: vec![cosigner_pk],
+            },
+            PrepareIntentKind::Register => intent::IntentMessage::Register {
+                onchain_output_indexes,
+                valid_at: now,
+                expire_at,
+                own_cosigner_pks: vec![cosigner_pk],
+            },
+        };
+
+        let intent = self.sign_intent(&onchain_inputs, inputs, outputs.clone(), message)?;
+
+        Ok(PreparedIntent {
+            intent,
+            cosigner_keypair,
+            vtxo_input_outpoints,
+            outputs,
+            onchain_inputs,
+            vtxo_inputs,
+        })
+    }
+
+    /// Build and sign the proof of an intent over `inputs`: every VTXO input is signed by the
+    /// keys this client holds for it, every boarding input (`onchain_inputs`) by its owner key.
+    fn sign_intent(
+        &self,
+        onchain_inputs: &[batch::OnChainInput],
+        inputs: Vec<intent::Input>,
+        outputs: Vec<intent::Output>,
+        message: intent::IntentMessage,
+    ) -> Result<intent::Intent, Error> {
         let secp = Secp256k1::new();
 
         let sign_for_vtxo_fn =
@@ -1381,55 +1440,116 @@ where
                 Ok((sig, owner_pk))
             };
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| Error::ad_hoc(e.to_string()))
-            .context("failed to compute now timestamp")?;
-        let now = now.as_secs();
-        let expire_at = now + (2 * 60);
-
-        if let Some(packet) = create_asset_preservation_packet(&inputs, &outputs)? {
-            outputs.push(intent::Output::AssetPacket(packet.to_txout()));
-        }
-
-        let mut onchain_output_indexes = Vec::new();
-        for (i, output) in outputs.iter().enumerate() {
-            if matches!(output, intent::Output::Onchain(_)) {
-                onchain_output_indexes.push(i);
-            }
-        }
-
-        let message = match intent_kind {
-            PrepareIntentKind::EstimateFee => intent::IntentMessage::EstimateIntentFee {
-                onchain_output_indexes,
-                valid_at: now,
-                expire_at,
-                own_cosigner_pks: vec![cosigner_pk],
-            },
-            PrepareIntentKind::Register => intent::IntentMessage::Register {
-                onchain_output_indexes,
-                valid_at: now,
-                expire_at,
-                own_cosigner_pks: vec![cosigner_pk],
-            },
-        };
-
         let intent = intent::make_intent(
             sign_for_vtxo_fn,
             sign_for_onchain_fn,
             inputs,
-            outputs.clone(),
+            outputs,
             message,
         )?;
 
-        Ok(PreparedIntent {
-            intent,
-            cosigner_keypair,
-            vtxo_input_outpoints,
-            outputs,
-            onchain_inputs,
-            vtxo_inputs,
-        })
+        Ok(intent)
+    }
+
+    /// Delete the intents queued at the Ark server that spend any of `outpoints`, VTXOs of this
+    /// wallet.
+    ///
+    /// An intent that is registered but never joins a batch (the client gave up waiting, or
+    /// crashed) stays queued at the server and keeps its inputs locked: every later intent
+    /// spending one of them is rejected as a duplicate. Only the owner of an input can register
+    /// an intent for it, so any intent holding these inputs is this wallet's own.
+    ///
+    /// The server matches queued intents by their VTXO inputs only, so an intent holding just
+    /// boarding outputs is not found. An abandoned intent is not dropped either: every batch takes
+    /// it, gets no confirmation and queues it again. While a batch holds it, it is not queued and
+    /// cannot be deleted, so this retries for about one batch period before giving up.
+    pub async fn delete_intents(&self, outpoints: &[OutPoint]) -> Result<(), Error> {
+        let server_info = self.server_info().await?;
+        let (boarding_inputs, vtxo_inputs, _) = self
+            .fetch_commitment_transaction_inputs(&server_info, crate::utils::unix_now()?)
+            .await?;
+
+        let onchain_inputs: Vec<_> = boarding_inputs
+            .into_iter()
+            .filter(|input| outpoints.contains(&input.outpoint()))
+            .collect();
+        let vtxo_inputs: Vec<_> = vtxo_inputs
+            .into_iter()
+            .filter(|input| outpoints.contains(&input.outpoint()))
+            .collect();
+
+        self.delete_intents_for(&onchain_inputs, vtxo_inputs, DELETE_INTENT_ATTEMPTS)
+            .await
+    }
+
+    /// Delete the intents queued at the Ark server that spend any of these inputs, trying up to
+    /// `max_attempts` times while no queued intent matches.
+    async fn delete_intents_for(
+        &self,
+        onchain_inputs: &[batch::OnChainInput],
+        vtxo_inputs: Vec<intent::Input>,
+        max_attempts: u32,
+    ) -> Result<(), Error> {
+        // The server matches queued intents by their VTXO inputs only.
+        if vtxo_inputs.is_empty() {
+            return Err(Error::ad_hoc(
+                "no VTXO inputs of this wallet to delete intents for",
+            ));
+        }
+
+        let inputs = onchain_inputs
+            .iter()
+            .map(|o| {
+                intent::Input::new(
+                    o.outpoint(),
+                    o.sequence(),
+                    None,
+                    TxOut {
+                        value: o.amount(),
+                        script_pubkey: o.script_pubkey().clone(),
+                    },
+                    o.tapscripts().to_vec(),
+                    o.spend_info().clone(),
+                    true,
+                    false,
+                    Vec::new(),
+                )
+            })
+            .chain(vtxo_inputs)
+            .collect::<Vec<_>>();
+
+        let now = crate::utils::unix_now()?;
+        let now = u64::try_from(now).map_err(|_| Error::ad_hoc("negative timestamp"))?;
+        let message = intent::IntentMessage::Delete {
+            expire_at: now + (2 * 60),
+        };
+
+        let proof = self.sign_intent(onchain_inputs, inputs, Vec::new(), message)?;
+
+        let mut attempt = 1;
+        loop {
+            let result = timeout_op(
+                self.inner.timeout,
+                self.network_client().delete_intent(proof.clone()),
+            )
+            .await
+            .context("failed to delete intent")?;
+            match result {
+                Ok(()) => break,
+                // Taken into a running batch; it is queued again once that batch fails.
+                Err(e)
+                    if e.to_string().contains(NO_MATCHING_INTENT_ERROR)
+                        && attempt < max_attempts =>
+                {
+                    tracing::debug!(attempt, "No queued intent to delete yet; retrying");
+                    attempt += 1;
+                    sleep(DELETE_INTENT_RETRY_DELAY).await;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        Ok(())
     }
 
     pub(crate) async fn join_next_batch<R>(
@@ -1476,13 +1596,43 @@ where
 
         let mut step = Step::Start;
 
-        let intent_id = timeout_op(
+        // Kept to delete this intent again if the batch does not complete.
+        let cleanup_onchain_inputs = onchain_inputs.clone();
+        let cleanup_vtxo_inputs = vtxo_inputs.clone();
+
+        let intent_id = match timeout_op(
             self.inner.timeout,
-            self.network_client().register_intent(intent),
+            self.network_client().register_intent(intent.clone()),
         )
         .await
-        .context("failed to register intent")??;
+        .context("failed to register intent")?
+        {
+            Ok(intent_id) => intent_id,
+            // An input is held by an intent still queued from an earlier attempt that never
+            // joined a batch; only this wallet can have registered it. Delete it and retry once.
+            Err(e) if e.to_string().contains(DUPLICATED_INPUT_ERROR) => {
+                tracing::warn!(
+                    error = %e,
+                    "An input of this intent is held by a stale intent; deleting it and retrying"
+                );
+                self.delete_intents_for(
+                    &cleanup_onchain_inputs,
+                    cleanup_vtxo_inputs.clone(),
+                    DELETE_INTENT_ATTEMPTS,
+                )
+                .await
+                .context("failed to delete the stale intent holding our inputs")?;
+                timeout_op(
+                    self.inner.timeout,
+                    self.network_client().register_intent(intent),
+                )
+                .await
+                .context("failed to register intent")??
+            }
+            Err(e) => return Err(e.into()),
+        };
 
+        let outcome: Result<Txid, Error> = async {
         tracing::debug!(
             intent_id,
             ?onchain_input_outpoints,
@@ -1939,6 +2089,34 @@ where
             }
         }
 
+        }
+        .await;
+
+        // A registered intent that did not complete would stay queued at the server and lock
+        // its inputs for every later batch. Best effort, in a single attempt so the batch error
+        // is not delayed: an intent still held by a running batch is not queued and cannot be
+        // deleted now; the next registration spending its inputs deletes it then. The server
+        // cannot find an intent by boarding inputs, so there is nothing to try without VTXOs.
+        if let Err(e) = &outcome {
+            if !cleanup_vtxo_inputs.is_empty() {
+                if let Err(delete_error) = self
+                    .delete_intents_for(&cleanup_onchain_inputs, cleanup_vtxo_inputs, 1)
+                    .await
+                {
+                    tracing::warn!(
+                        intent_id,
+                        ?onchain_input_outpoints,
+                        ?vtxo_input_outpoints,
+                        error = %e,
+                        %delete_error,
+                        "Did not delete the intent of a failed batch"
+                    );
+                }
+            }
+        }
+
+        return outcome;
+
         #[derive(Debug, PartialEq, Eq)]
         enum Step {
             Start,
@@ -1965,6 +2143,23 @@ pub(crate) enum PrepareIntentKind {
     Register,
     EstimateFee,
 }
+
+/// The Ark server's rejection of an intent whose input another queued intent already holds.
+///
+/// arkd returns no error code for it, so this matches the text of the error raised by its intent
+/// live store (`internal/infrastructure/live-store/{inmemory,redis}/intents.go`).
+const DUPLICATED_INPUT_ERROR: &str = "already registered by another intent";
+
+/// The Ark server's answer to a deletion when no queued intent spends the given inputs.
+///
+/// Matched against the error text of arkd's `DeleteIntentsByProof`
+/// (`internal/core/application/service.go`).
+const NO_MATCHING_INTENT_ERROR: &str = "no matching intents found";
+
+/// How often to retry a deletion that found no queued intent, and how long to wait between
+/// attempts: together a little over one batch period, the longest an intent is out of the queue.
+const DELETE_INTENT_ATTEMPTS: u32 = 15;
+const DELETE_INTENT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub(crate) enum BatchOutputType {

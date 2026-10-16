@@ -11,6 +11,7 @@ use crate::AnnotatedVtxo;
 use crate::Blockchain;
 use crate::Client;
 use crate::Error;
+use crate::GetVtxosRequestFilter;
 use ark_core::intent;
 use ark_core::server::SubscriptionResponse;
 use ark_core::server::VirtualTxOutPoint;
@@ -478,7 +479,9 @@ where
     B: Blockchain + Send + Sync + 'static,
     S: SwapStorage + 'static,
 {
-    let vtxo_list = client.list_vtxos().await?;
+    let vtxo_list = client
+        .list_vtxos_filtered(GetVtxosRequestFilter::Renewable)
+        .await?;
 
     let mut current_outpoints = HashSet::new();
     let mut newly_seen = Vec::new();
@@ -627,7 +630,10 @@ async fn delegate_vtxos<B, S>(
     B: Blockchain + Send + Sync + 'static,
     S: SwapStorage + 'static,
 {
-    let vtxo_list = match client.list_vtxos().await {
+    let vtxo_list = match client
+        .list_vtxos_filtered(GetVtxosRequestFilter::Renewable)
+        .await
+    {
         Ok(v) => v,
         Err(e) => {
             tracing::error!("Failed to list VTXOs for delegation: {e}");
@@ -870,7 +876,10 @@ where
     B: Blockchain + Send + Sync + 'static,
     S: SwapStorage + 'static,
 {
-    let vtxo_list = match client.list_vtxos().await {
+    let vtxo_list = match client
+        .list_vtxos_filtered(GetVtxosRequestFilter::Renewable)
+        .await
+    {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!("Failed to list VTXOs for renewal check: {e}");
