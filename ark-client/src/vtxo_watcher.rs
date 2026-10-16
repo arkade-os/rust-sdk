@@ -14,6 +14,7 @@ use crate::Client;
 use crate::Error;
 use crate::GetVtxosRequestFilter;
 use ark_core::intent;
+use ark_core::server::SubscriptionFilter;
 use ark_core::server::SubscriptionResponse;
 use ark_core::server::VirtualTxOutPoint;
 use ark_core::ArkAddress;
@@ -29,6 +30,7 @@ use futures::StreamExt;
 use rand::rngs::OsRng;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -159,22 +161,11 @@ async fn run_watcher_loop<B, W, S>(
             }
         };
 
-        let subscription_id = match client.subscribe_to_scripts(addresses.clone(), None).await {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::warn!("Failed to subscribe: {e}, retrying in {backoff:?}");
-                if wait_or_stop(&mut stop_rx, backoff).await {
-                    return;
-                }
-                backoff = (backoff * 2).min(MAX_BACKOFF);
-                continue;
-            }
-        };
-
-        let mut stream = match client.get_subscription(subscription_id.clone(), None).await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("Failed to get subscription stream: {e}, retrying in {backoff:?}");
+        let handshake = client.subscribe_to_scripts_stream(addresses.clone());
+        let (subscription_id, mut stream) = match subscribe_or_stop(&mut stop_rx, handshake).await {
+            SubscribeOutcome::Ready(subscription) => subscription,
+            SubscribeOutcome::Stopped => return,
+            SubscribeOutcome::Retry => {
                 if wait_or_stop(&mut stop_rx, backoff).await {
                     return;
                 }
@@ -438,6 +429,41 @@ async fn wait_or_stop(stop_rx: &mut watch::Receiver<bool>, duration: Duration) -
     }
 }
 
+/// Outcome of awaiting a subscription handshake under the stop signal.
+enum SubscribeOutcome<T> {
+    /// The subscription opened, carries `(subscription_id, stream)`.
+    Ready(T),
+    /// Stop was signalled while waiting. The watcher should shut down.
+    Stopped,
+    /// The handshake failed. The watcher should back off and reconnect.
+    Retry,
+}
+
+/// Await a subscription handshake while honoring the stop signal.
+///
+/// A stop cancels the in-flight handshake immediately rather than blocking shutdown until it
+/// resolves. The handshake itself is bounded by the transport:
+/// [`Client::subscribe_to_scripts_stream`] times out if `subscription_started` never arrives, and
+/// that surfaces here as an error, so the caller falls back to reconnect backoff.
+async fn subscribe_or_stop<F, T>(
+    stop_rx: &mut watch::Receiver<bool>,
+    handshake: F,
+) -> SubscribeOutcome<T>
+where
+    F: Future<Output = Result<T, Error>>,
+{
+    tokio::select! {
+        _ = stop_rx.changed() => SubscribeOutcome::Stopped,
+        result = handshake => match result {
+            Ok(value) => SubscribeOutcome::Ready(value),
+            Err(e) => {
+                tracing::warn!("Failed to subscribe: {e}, reconnecting with backoff");
+                SubscribeOutcome::Retry
+            }
+        },
+    }
+}
+
 /// Add newly persisted active contract scripts to an existing subscription.
 async fn refresh_subscription_scripts<B, W, S>(
     client: &Client<B, W, S>,
@@ -450,17 +476,12 @@ where
     S: SwapStorage + 'static,
 {
     let addrs = client.active_offchain_contract_addresses()?;
-    let new_addrs: Vec<_> = addrs
-        .into_iter()
-        .filter(|addr| !subscribed_addrs.contains(addr))
-        .collect();
-
-    if new_addrs.is_empty() {
+    let Some((filter, new_addrs)) = additional_scripts_filter(addrs, subscribed_addrs) else {
         return Ok(());
-    }
+    };
 
     client
-        .subscribe_to_scripts(new_addrs.clone(), Some(subscription_id.to_string()))
+        .update_subscription(subscription_id.to_string(), filter)
         .await?;
 
     let added = new_addrs.len();
@@ -471,6 +492,36 @@ where
     );
 
     Ok(())
+}
+
+/// Build the `update_subscription` filter that adds the active addresses not already subscribed.
+fn additional_scripts_filter(
+    active: Vec<ArkAddress>,
+    subscribed: &HashSet<ArkAddress>,
+) -> Option<(SubscriptionFilter, Vec<ArkAddress>)> {
+    let new_addrs: Vec<ArkAddress> = active
+        .into_iter()
+        .filter(|addr| !subscribed.contains(addr))
+        .collect();
+
+    if new_addrs.is_empty() {
+        return None;
+    }
+
+    // `update_subscription` overwrites expressions as a whole but treats scripts as additive. This
+    // flow adds scripts and never sets expressions, so the empty list has nothing to clear. A
+    // future caller that opens the stream with expressions must carry them here instead of wiping
+    // them on the first discovery tick.
+    let filter = SubscriptionFilter {
+        expressions: Vec::new(),
+        add_scripts: new_addrs
+            .iter()
+            .map(|addr| addr.to_p2tr_script_pubkey())
+            .collect(),
+        remove_scripts: Vec::new(),
+    };
+
+    Some((filter, new_addrs))
 }
 
 /// Enumerate newly seen unspent delegate-eligible VTXOs from wallet state.
@@ -1209,5 +1260,71 @@ mod tests {
 
         assert!(valid_at >= start + 60);
         assert!(valid_at <= end + 61);
+    }
+
+    /// Distinct valid Arkade address derived from a seed byte, for exercising the script-diff
+    /// logic.
+    fn ark_address(seed: u8) -> ArkAddress {
+        let secp = Secp256k1::new();
+        let (server, _owner, delegator) = test_keys();
+        let sk = bitcoin::secp256k1::SecretKey::from_slice(&[seed; 32]).unwrap();
+        let owner = sk.public_key(&secp).x_only_public_key().0;
+        Vtxo::new_with_delegator(
+            &secp,
+            server,
+            owner,
+            delegator,
+            Sequence::from_seconds_ceil(86400).unwrap(),
+            Network::Regtest,
+        )
+        .unwrap()
+        .to_ark_address()
+    }
+
+    #[test]
+    fn additional_scripts_filter_selects_only_unsubscribed_addresses() {
+        let a = ark_address(1);
+        let b = ark_address(2);
+        let mut subscribed = HashSet::new();
+        subscribed.insert(a);
+
+        let (filter, new_addrs) =
+            additional_scripts_filter(vec![a, b], &subscribed).expect("b is not yet subscribed");
+
+        assert_eq!(new_addrs, vec![b]);
+        assert_eq!(filter.add_scripts, vec![b.to_p2tr_script_pubkey()]);
+        assert!(filter.expressions.is_empty());
+        assert!(filter.remove_scripts.is_empty());
+    }
+
+    #[test]
+    fn additional_scripts_filter_none_when_all_already_subscribed() {
+        let a = ark_address(1);
+        let subscribed: HashSet<_> = [a].into_iter().collect();
+        assert!(additional_scripts_filter(vec![a], &subscribed).is_none());
+    }
+
+    #[tokio::test]
+    async fn subscribe_or_stop_returns_ready_subscription() {
+        let (_tx, mut rx) = watch::channel(false);
+        let outcome = subscribe_or_stop(&mut rx, async { Ok::<_, Error>(7) }).await;
+        assert!(matches!(outcome, SubscribeOutcome::Ready(7)));
+    }
+
+    #[tokio::test]
+    async fn subscribe_or_stop_stops_on_signal() {
+        let (tx, mut rx) = watch::channel(false);
+        tx.send(true).unwrap();
+        let outcome =
+            subscribe_or_stop(&mut rx, std::future::pending::<Result<i32, Error>>()).await;
+        assert!(matches!(outcome, SubscribeOutcome::Stopped));
+    }
+
+    #[tokio::test]
+    async fn subscribe_or_stop_retries_on_error() {
+        let (_tx, mut rx) = watch::channel(false);
+        let outcome =
+            subscribe_or_stop(&mut rx, async { Err::<i32, _>(Error::ad_hoc("boom")) }).await;
+        assert!(matches!(outcome, SubscribeOutcome::Retry));
     }
 }
