@@ -441,7 +441,7 @@ mod tests {
         let inner = OfflineClient::<DummyBlockchain, InMemorySwapStorage>::with_keypair(
             OfflineClientConfig {
                 // No test in this module is allowed to reach the network: every assertion must be
-                // made before the client would call out to the Ark server.
+                // made before the client would call out to the Arkade server.
                 ark_server_url: "http://127.0.0.1:1".to_string(),
                 boltz_url: "http://127.0.0.1:1".to_string(),
                 timeout: Duration::from_millis(50),
