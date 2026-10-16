@@ -2044,7 +2044,7 @@ where
 
             all_vtxos.extend(response.vtxos);
 
-            match next_vtxo_page(response.page.as_ref()) {
+            match next_vtxo_page(response.page.as_ref())? {
                 Some(next) => cursor = next,
                 None => break,
             }
@@ -2268,9 +2268,26 @@ where
 /// The server numbers pages from 1 and clamps `next` to `total`, so `next` equals `total` both
 /// on the second-to-last page and on the last one. Only `current` tells them apart: stopping on
 /// `next == total` would drop the last page whenever there is more than one.
-fn next_vtxo_page(page: Option<&server::IndexerPage>) -> Option<i32> {
-    let page = page?;
-    (page.current < page.total).then_some(page.next)
+///
+/// A `next` that does not move past `current` is an error rather than a stop: following it would
+/// loop forever, and stopping early would silently return a partial list.
+fn next_vtxo_page(page: Option<&server::IndexerPage>) -> Result<Option<i32>, Error> {
+    let Some(page) = page else {
+        return Ok(None);
+    };
+
+    if page.current >= page.total {
+        return Ok(None);
+    }
+
+    if page.next <= page.current {
+        return Err(Error::ad_hoc(format!(
+            "server returned a VTXO page that does not advance: current {}, next {}, total {}",
+            page.current, page.next, page.total
+        )));
+    }
+
+    Ok(Some(page.next))
 }
 
 #[cfg(test)]
@@ -2285,31 +2302,41 @@ mod next_vtxo_page_tests {
         }
     }
 
+    fn next(page: Option<&server::IndexerPage>) -> Option<i32> {
+        next_vtxo_page(page).unwrap()
+    }
+
     #[test]
     fn no_page_info_stops() {
-        assert_eq!(next_vtxo_page(None), None);
+        assert_eq!(next(None), None);
     }
 
     #[test]
     fn empty_result_stops() {
-        assert_eq!(next_vtxo_page(Some(&page(1, 0, 0))), None);
+        assert_eq!(next(Some(&page(1, 0, 0))), None);
     }
 
     #[test]
     fn single_page_stops() {
-        assert_eq!(next_vtxo_page(Some(&page(1, 1, 1))), None);
+        assert_eq!(next(Some(&page(1, 1, 1))), None);
     }
 
     #[test]
     fn second_to_last_page_continues_to_the_last_one() {
-        assert_eq!(next_vtxo_page(Some(&page(1, 2, 2))), Some(2));
-        assert_eq!(next_vtxo_page(Some(&page(2, 3, 3))), Some(3));
+        assert_eq!(next(Some(&page(1, 2, 2))), Some(2));
+        assert_eq!(next(Some(&page(2, 3, 3))), Some(3));
     }
 
     #[test]
     fn last_page_stops() {
-        assert_eq!(next_vtxo_page(Some(&page(2, 2, 2))), None);
-        assert_eq!(next_vtxo_page(Some(&page(3, 3, 3))), None);
+        assert_eq!(next(Some(&page(2, 2, 2))), None);
+        assert_eq!(next(Some(&page(3, 3, 3))), None);
+    }
+
+    #[test]
+    fn page_that_does_not_advance_is_an_error() {
+        assert!(next_vtxo_page(Some(&page(2, 2, 3))).is_err());
+        assert!(next_vtxo_page(Some(&page(2, 1, 3))).is_err());
     }
 }
 
