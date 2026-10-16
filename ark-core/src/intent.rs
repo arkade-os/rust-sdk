@@ -428,6 +428,16 @@ pub(crate) fn build_proof_psbt(
             psbt.inputs[i + 1].witness_script = Some(input.spend_info.0.clone());
         }
 
+        // BIP-322: PSBT_GLOBAL_GENERIC_SIGNED_MESSAGE lets a co-signer recompute the `to_spend`
+        // commitment from PSBT-internal data alone.
+        psbt.unknown.insert(
+            psbt::raw::Key {
+                type_value: PSBT_GLOBAL_GENERIC_SIGNED_MESSAGE,
+                key: Vec::new(),
+            },
+            message.into_bytes(),
+        );
+
         psbt
     };
 
@@ -436,6 +446,9 @@ pub(crate) fn build_proof_psbt(
 
     Ok((to_sign_psbt, first_input_modified))
 }
+
+/// BIP-322 global PSBT field carrying the encoded message being signed.
+const PSBT_GLOBAL_GENERIC_SIGNED_MESSAGE: u8 = 0x09;
 
 fn message_hash(message: &[u8]) -> sha256::Hash {
     const TAG: &[u8] = b"ark-intent-proof-message";
@@ -695,6 +708,59 @@ mod tests {
         };
         let encoded = msg.encode().unwrap();
         assert_eq!(encoded, r#"{"type":"delete","expire_at":1762862054}"#);
+    }
+
+    #[test]
+    fn proof_psbt_carries_the_signed_message() {
+        use bitcoin::opcodes::OP_TRUE;
+        use bitcoin::taproot::LeafVersion;
+        use bitcoin::taproot::TaprootBuilder;
+
+        let secp = secp256k1::Secp256k1::new();
+        let internal_key = XOnlyPublicKey::from_str(
+            "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
+        )
+        .unwrap();
+        let leaf = ScriptBuf::builder().push_opcode(OP_TRUE).into_script();
+        let spend_info = TaprootBuilder::new()
+            .add_leaf(0, leaf.clone())
+            .unwrap()
+            .finalize(&secp, internal_key)
+            .unwrap();
+        let control_block = spend_info
+            .control_block(&(leaf.clone(), LeafVersion::TapScript))
+            .unwrap();
+
+        let input = Input::new(
+            OutPoint::null(),
+            Sequence::MAX,
+            None,
+            TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: ScriptBuf::new_p2tr_tweaked(spend_info.output_key()),
+            },
+            vec![leaf.clone()],
+            (leaf, control_block),
+            false,
+            false,
+            Vec::new(),
+        );
+        let message = IntentMessage::Delete {
+            expire_at: 1762862054,
+        };
+
+        let (psbt, _) = build_proof_psbt(&message, &[input], &[]).unwrap();
+
+        // The field survives serialization, which is what the server and co-signers receive.
+        let psbt = Psbt::deserialize(&psbt.serialize()).unwrap();
+        let key = psbt::raw::Key {
+            type_value: 0x09,
+            key: Vec::new(),
+        };
+        assert_eq!(
+            psbt.unknown.get(&key),
+            Some(&message.encode().unwrap().into_bytes())
+        );
     }
 
     #[test]
