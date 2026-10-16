@@ -6,7 +6,6 @@ use crate::batch::BatchOutputType;
 use crate::error::ErrorContext as _;
 use crate::swap_storage::SwapStorage;
 use crate::timeout_op;
-use crate::wallet::OnchainWallet;
 use crate::Blockchain;
 use crate::Client;
 use crate::Error;
@@ -401,10 +400,9 @@ fn validated_boltz_tap_script_sigs(
     Ok(sigs)
 }
 
-impl<B, W, S> Client<B, W, S>
+impl<B, S> Client<B, S>
 where
     B: Blockchain,
-    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     // Submarine swap.
@@ -3006,7 +3004,6 @@ where
     pub fn start_boltz_vhtlc_watcher(self: &Arc<Self>) -> BoltzVhtlcWatcherHandle
     where
         B: Send + Sync + 'static,
-        W: Send + Sync + 'static,
     {
         self.start_boltz_vhtlc_watcher_with_config(BoltzVhtlcWatcherConfig::default())
     }
@@ -3022,7 +3019,6 @@ where
     ) -> BoltzVhtlcWatcherHandle
     where
         B: Send + Sync + 'static,
-        W: Send + Sync + 'static,
     {
         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
         let client = Arc::clone(self);
@@ -4378,13 +4374,12 @@ where
     }
 }
 
-async fn run_boltz_vhtlc_watcher_loop<B, W, S>(
-    client: Arc<Client<B, W, S>>,
+async fn run_boltz_vhtlc_watcher_loop<B, S>(
+    client: Arc<Client<B, S>>,
     mut stop_rx: tokio::sync::watch::Receiver<bool>,
     config: BoltzVhtlcWatcherConfig,
 ) where
     B: Blockchain + Send + Sync + 'static,
-    W: OnchainWallet + Send + Sync + 'static,
     S: SwapStorage + 'static,
 {
     let refresh_interval = if config.refresh_interval.is_zero() {
@@ -4504,12 +4499,9 @@ async fn run_boltz_vhtlc_watcher_loop<B, W, S>(
     }
 }
 
-async fn drive_boltz_vhtlc_swaps<B, W, S>(
-    client: &Client<B, W, S>,
-    action_log: &mut BoltzVhtlcActionLog,
-) where
+async fn drive_boltz_vhtlc_swaps<B, S>(client: &Client<B, S>, action_log: &mut BoltzVhtlcActionLog)
+where
     B: Blockchain,
-    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     if let Err(error) = drive_claimable_vhtlc_swaps(client, action_log).await {
@@ -4520,24 +4512,22 @@ async fn drive_boltz_vhtlc_swaps<B, W, S>(
     }
 }
 
-async fn active_vhtlc_addresses<B, W, S>(client: &Client<B, W, S>) -> Result<Vec<ArkAddress>, Error>
+async fn active_vhtlc_addresses<B, S>(client: &Client<B, S>) -> Result<Vec<ArkAddress>, Error>
 where
     B: Blockchain,
-    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     let infos = collect_active_vhtlc_lifecycle_infos(client).await?;
     Ok(infos.into_iter().map(|info| info.address).collect())
 }
 
-async fn refresh_boltz_vhtlc_subscription<B, W, S>(
-    client: &Client<B, W, S>,
+async fn refresh_boltz_vhtlc_subscription<B, S>(
+    client: &Client<B, S>,
     subscription_id: &str,
     subscribed_addrs: &mut HashSet<ArkAddress>,
 ) -> Result<(), Error>
 where
     B: Blockchain,
-    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     let new_addrs: Vec<_> = active_vhtlc_addresses(client)
@@ -4560,14 +4550,13 @@ where
     Ok(())
 }
 
-async fn handle_boltz_vhtlc_subscription_event<B, W, S>(
-    client: &Client<B, W, S>,
+async fn handle_boltz_vhtlc_subscription_event<B, S>(
+    client: &Client<B, S>,
     event: &SubscriptionEvent,
     action_log: &mut BoltzVhtlcActionLog,
 ) -> Result<(), Error>
 where
     B: Blockchain,
-    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     if event.new_vtxos.is_empty() && event.spent_vtxos.is_empty() {
@@ -4612,12 +4601,11 @@ where
     Ok(())
 }
 
-async fn collect_active_vhtlc_lifecycle_infos<B, W, S>(
-    client: &Client<B, W, S>,
+async fn collect_active_vhtlc_lifecycle_infos<B, S>(
+    client: &Client<B, S>,
 ) -> Result<Vec<VhtlcLifecycleInfo>, Error>
 where
     B: Blockchain,
-    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     let submarine_swaps = client
@@ -4755,13 +4743,12 @@ where
     Ok(infos)
 }
 
-async fn drive_claimable_vhtlc_swaps<B, W, S>(
-    client: &Client<B, W, S>,
+async fn drive_claimable_vhtlc_swaps<B, S>(
+    client: &Client<B, S>,
     action_log: &mut BoltzVhtlcActionLog,
 ) -> Result<(), Error>
 where
     B: Blockchain,
-    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     let infos = collect_active_vhtlc_lifecycle_infos(client).await?;
@@ -4798,13 +4785,12 @@ where
     Ok(())
 }
 
-async fn drive_funded_vhtlc_swap<B, W, S>(
-    client: &Client<B, W, S>,
+async fn drive_funded_vhtlc_swap<B, S>(
+    client: &Client<B, S>,
     info: &VhtlcLifecycleInfo,
     action_log: &mut BoltzVhtlcActionLog,
 ) where
     B: Blockchain,
-    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     match info.swap_type {
@@ -4814,13 +4800,12 @@ async fn drive_funded_vhtlc_swap<B, W, S>(
     }
 }
 
-async fn drive_reverse_vhtlc_claim<B, W, S>(
-    client: &Client<B, W, S>,
+async fn drive_reverse_vhtlc_claim<B, S>(
+    client: &Client<B, S>,
     swap_id: &str,
     action_log: &mut BoltzVhtlcActionLog,
 ) where
     B: Blockchain,
-    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     let swap = match client.swap_storage().get_reverse(swap_id).await {
@@ -4869,13 +4854,12 @@ async fn drive_reverse_vhtlc_claim<B, W, S>(
     }
 }
 
-async fn drive_chain_vhtlc_claim<B, W, S>(
-    client: &Client<B, W, S>,
+async fn drive_chain_vhtlc_claim<B, S>(
+    client: &Client<B, S>,
     swap_id: &str,
     action_log: &mut BoltzVhtlcActionLog,
 ) where
     B: Blockchain,
-    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     let swap = match client.swap_storage().get_chain(swap_id).await {
@@ -4913,13 +4897,12 @@ async fn drive_chain_vhtlc_claim<B, W, S>(
     }
 }
 
-async fn drive_spent_vhtlc_swap<B, W, S>(
-    client: &Client<B, W, S>,
+async fn drive_spent_vhtlc_swap<B, S>(
+    client: &Client<B, S>,
     info: &VhtlcLifecycleInfo,
 ) -> SpentVhtlcAction
 where
     B: Blockchain,
-    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     if info.swap_type != SwapType::Submarine {
@@ -4955,13 +4938,12 @@ where
     }
 }
 
-async fn drive_refundable_vhtlc_swaps<B, W, S>(
-    client: &Client<B, W, S>,
+async fn drive_refundable_vhtlc_swaps<B, S>(
+    client: &Client<B, S>,
     action_log: &mut BoltzVhtlcActionLog,
 ) -> Result<(), Error>
 where
     B: Blockchain,
-    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     let server_info = client.server_info().await?;
@@ -5132,14 +5114,13 @@ fn is_chain_refundable_status(status: &SwapStatus) -> bool {
     matches!(status, SwapStatus::SwapExpired)
 }
 
-async fn update_submarine_swap_status<B, W, S>(
-    client: &Client<B, W, S>,
+async fn update_submarine_swap_status<B, S>(
+    client: &Client<B, S>,
     swap_id: &str,
     status: SwapStatus,
 ) -> Result<(), Error>
 where
     B: Blockchain,
-    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     if client
@@ -5156,14 +5137,13 @@ where
     Ok(())
 }
 
-async fn update_reverse_swap_status<B, W, S>(
-    client: &Client<B, W, S>,
+async fn update_reverse_swap_status<B, S>(
+    client: &Client<B, S>,
     swap_id: &str,
     status: SwapStatus,
 ) -> Result<(), Error>
 where
     B: Blockchain,
-    W: OnchainWallet,
     S: SwapStorage + 'static,
 {
     if client.swap_storage().get_reverse(swap_id).await?.is_some() {
@@ -6074,7 +6054,6 @@ mod tests {
     use crate::ServerState;
     use crate::SpendStatus;
     use crate::TxStatus;
-    use ark_core::UtxoCoinSelection;
     use bitcoin::secp256k1::Keypair;
     use bitcoin::secp256k1::SecretKey;
     use bitcoin::Transaction;
@@ -6121,62 +6100,7 @@ mod tests {
         }
     }
 
-    struct DummyWallet {
-        keypair: Keypair,
-        secp: Secp256k1<secp256k1::All>,
-    }
-
-    impl DummyWallet {
-        fn new() -> Self {
-            let secp = Secp256k1::new();
-            let keypair =
-                Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[2; 32]).unwrap());
-            Self { keypair, secp }
-        }
-    }
-
-    impl OnchainWallet for DummyWallet {
-        fn get_onchain_address(&self) -> Result<bitcoin::Address, Error> {
-            Ok(bitcoin::Address::p2tr(
-                &self.secp,
-                self.keypair.x_only_public_key().0,
-                None,
-                bitcoin::Network::Regtest,
-            ))
-        }
-
-        async fn sync(&self) -> Result<(), Error> {
-            Ok(())
-        }
-
-        fn balance(&self) -> Result<crate::wallet::Balance, Error> {
-            Ok(crate::wallet::Balance {
-                immature: Amount::ZERO,
-                trusted_pending: Amount::ZERO,
-                untrusted_pending: Amount::ZERO,
-                confirmed: Amount::ZERO,
-            })
-        }
-
-        fn prepare_send_to_address(
-            &self,
-            _address: bitcoin::Address,
-            _amount: Amount,
-            _fee_rate: bitcoin::FeeRate,
-        ) -> Result<Psbt, Error> {
-            Err(Error::wallet("not implemented"))
-        }
-
-        fn sign(&self, _psbt: &mut Psbt) -> Result<bool, Error> {
-            Ok(true)
-        }
-
-        fn select_coins(&self, _target_amount: Amount) -> Result<UtxoCoinSelection, Error> {
-            Err(Error::wallet("not implemented"))
-        }
-    }
-
-    type TestClient = Client<DummyBlockchain, DummyWallet, InMemorySwapStorage>;
+    type TestClient = Client<DummyBlockchain, InMemorySwapStorage>;
 
     fn test_server_info() -> Info {
         let secp = Secp256k1::new();
@@ -6223,19 +6147,17 @@ mod tests {
     fn test_client(server_info: Info) -> TestClient {
         let secp = Secp256k1::new();
         let keypair = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[3; 32]).unwrap());
-        let inner =
-            OfflineClient::<DummyBlockchain, DummyWallet, InMemorySwapStorage>::with_keypair(
-                OfflineClientConfig {
-                    ark_server_url: "http://127.0.0.1:1".to_string(),
-                    boltz_url: "http://127.0.0.1:1".to_string(),
-                    timeout: Duration::from_millis(50),
-                    ..Default::default()
-                },
-                keypair,
-                Arc::new(DummyBlockchain),
-                Arc::new(DummyWallet::new()),
-                Arc::new(InMemorySwapStorage::default()),
-            );
+        let inner = OfflineClient::<DummyBlockchain, InMemorySwapStorage>::with_keypair(
+            OfflineClientConfig {
+                ark_server_url: "http://127.0.0.1:1".to_string(),
+                boltz_url: "http://127.0.0.1:1".to_string(),
+                timeout: Duration::from_millis(50),
+                ..Default::default()
+            },
+            keypair,
+            Arc::new(DummyBlockchain),
+            Arc::new(InMemorySwapStorage::default()),
+        );
         let mut contract_manager = ContractManager::in_memory(server_info.network);
         contract_manager.register_builtins().unwrap();
         Client {
