@@ -30,6 +30,9 @@ enum Kind {
     ServerInfoChanged(ServerInfoChangedError),
     /// An error thrown by a user of this library
     Consumer(ConsumerError),
+    /// The intent proof for a batch registration would exceed the server's maximum transaction
+    /// weight.
+    IntentProofTooLarge(IntentProofTooLargeError),
 }
 
 #[derive(Debug)]
@@ -63,6 +66,12 @@ struct ServerInfoChangedError;
 #[derive(Debug)]
 struct ConsumerError {
     source: Source,
+}
+
+#[derive(Debug)]
+struct IntentProofTooLargeError {
+    weight: u64,
+    max_weight: u64,
 }
 
 impl Error {
@@ -102,6 +111,13 @@ impl Error {
         }))
     }
 
+    pub(crate) fn intent_proof_too_large(weight: u64, max_weight: u64) -> Self {
+        Error::new(Kind::IntentProofTooLarge(IntentProofTooLargeError {
+            weight,
+            max_weight,
+        }))
+    }
+
     pub(crate) fn server_info_changed(source: impl Into<Error>) -> Self {
         source
             .into()
@@ -112,6 +128,22 @@ impl Error {
         let mut err = self;
         loop {
             if matches!(err.inner.kind, Kind::ServerInfoChanged(_)) {
+                return true;
+            }
+            err = match err.inner.cause.as_ref() {
+                Some(err) => err,
+                None => return false,
+            };
+        }
+    }
+
+    /// Returns `true` if this error chain contains an intent proof that exceeds the server's
+    /// maximum transaction weight. Retrying with the same inputs can never succeed; the
+    /// settlement must be split across fewer inputs.
+    pub fn is_intent_proof_too_large(&self) -> bool {
+        let mut err = self;
+        loop {
+            if matches!(err.inner.kind, Kind::IntentProofTooLarge(_)) {
                 return true;
             }
             err = match err.inner.cause.as_ref() {
@@ -151,7 +183,8 @@ impl Kind {
             | Kind::CoinSelect(_)
             | Kind::Wallet(_)
             | Kind::ServerInfoChanged(_)
-            | Kind::Consumer(_) => false,
+            | Kind::Consumer(_)
+            | Kind::IntentProofTooLarge(_) => false,
         }
     }
 }
@@ -181,7 +214,18 @@ impl fmt::Display for Kind {
             Kind::Wallet(ref err) => err.fmt(f),
             Kind::ServerInfoChanged(ref err) => err.fmt(f),
             Kind::Consumer(ref err) => err.fmt(f),
+            Kind::IntentProofTooLarge(ref err) => err.fmt(f),
         }
+    }
+}
+
+impl fmt::Display for IntentProofTooLargeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "intent proof weight {} WU exceeds the server's maximum transaction weight {} WU. Settle fewer inputs per batch",
+            self.weight, self.max_weight
+        )
     }
 }
 
