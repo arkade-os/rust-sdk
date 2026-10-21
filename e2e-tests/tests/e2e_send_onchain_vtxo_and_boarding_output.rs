@@ -1,7 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
 use crate::common::wait_until_balance;
-use ark_client::wallet::OnchainWallet;
 use ark_core::send::SendReceiver;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::key::Secp256k1;
@@ -44,7 +43,7 @@ pub async fn send_onchain_vtxo_and_boarding_output() {
 
     // We give Alice two extra UTXOs to be able to bump the two transactions she needs to broadcast
     // to commit her VTXO (and the change VTXO too!) to the blockchain.
-    let alice_onchain_address = alice.get_onchain_address().unwrap();
+    let alice_onchain_address = alice_wallet.get_onchain_address().unwrap();
     regtest
         .faucet_fund(&alice_onchain_address, Amount::from_sat(100_000))
         .await;
@@ -92,9 +91,11 @@ pub async fn send_onchain_vtxo_and_boarding_output() {
         }
     });
 
+    let bump_deps = alice_wallet.anchor_spend_deps();
+
     for (i, unilateral_exit_tree) in unilateral_exit_trees.iter().enumerate() {
         while let Some(txid) = alice
-            .broadcast_next_unilateral_exit_node(unilateral_exit_tree)
+            .broadcast_next_unilateral_exit_node(unilateral_exit_tree, &bump_deps)
             .await
             .expect("to broadcast unilateral exit node")
         {
@@ -165,6 +166,7 @@ pub async fn send_onchain_vtxo_and_boarding_output() {
             .unwrap()
             .assume_checked(),
             Amount::from_btc(1.4).unwrap(),
+            alice_wallet.get_onchain_address().unwrap(),
         )
         .await
         .unwrap();
