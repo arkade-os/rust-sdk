@@ -9,7 +9,6 @@ use crate::UNSPENDABLE_KEY;
 use bitcoin::hashes::ripemd160;
 use bitcoin::hashes::Hash;
 use bitcoin::opcodes::all::*;
-use bitcoin::taproot::TaprootBuilder;
 use bitcoin::taproot::TaprootSpendInfo;
 use bitcoin::Network;
 use bitcoin::PublicKey;
@@ -34,27 +33,183 @@ pub enum VhtlcError {
     InvalidDelay(String),
     #[error("Taproot construction failed: {0}")]
     TaprootError(String),
+    #[error("Invalid P2TR script for {0}: expected `OP_1 <32 bytes>`")]
+    InvalidP2trScript(&'static str),
+    #[error("Covenant key derivation failed: {0}")]
+    Covenant(#[from] ark_script::TweakError),
 }
 
-/// Represents a script with its weight for taproot tree construction
-#[derive(Debug, Clone)]
-struct TaprootScriptItem {
-    script: ScriptBuf,
-    weight: u32,
+/// Which preimage condition the preimage-gated leaves (`claim`, `unilateral_claim` and
+/// `non_interactive_claim`) are built from.
+///
+/// The two versions produce different leaf bytes, and so different addresses, for the same
+/// keys. Mirrors `VHTLC.Script` and `VHTLC.ScriptV2` in the TS SDK.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VhtlcVersion {
+    /// `OP_HASH160 <hash> OP_EQUAL`.
+    V1,
+    /// `OP_SIZE 32 OP_EQUALVERIFY OP_HASH160 <hash> OP_EQUAL`: like BOLT3 HTLCs, the preimage
+    /// must be exactly 32 bytes.
+    V2,
 }
 
-/// Internal tree node for building the taproot tree structure
-#[derive(Debug, Clone)]
-enum TaprootTreeNode {
-    Leaf {
-        script: ScriptBuf,
-        weight: u32,
-    },
-    Branch {
-        left: Box<TaprootTreeNode>,
-        right: Box<TaprootTreeNode>,
-        weight: u32,
-    },
+/// The emulator covenant leaves, all or nothing.
+///
+/// Adds three leaves the emulator co-signs under a covenant pinning the payout to a
+/// pre-committed destination:
+///
+/// - `non_interactive_claim`: `server` + covenant-tweaked emulator, paying `receiver_pk_script`;
+///   the claim can be pushed without the receiver online.
+/// - `non_interactive_refund`: `server` + `receiver` + covenant-tweaked emulator, paying
+///   `sender_pk_script`, no timelock.
+/// - `non_interactive_refund_without_receiver`: `server` + the SAME co-signer as
+///   `non_interactive_refund`, paying `sender_pk_script` after `refund_locktime`; the only refund
+///   tier needing no participant signature. Omitted when `legacy_pre_timelocked_refund` is set.
+///
+/// The suite is appended after the six signature leaves, so a script with it never collides
+/// with one without. Mirrors `VHTLC.Options.nonInteractiveParameters` in the TS SDK.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NonInteractiveParameters {
+    /// Emulator public key. One key, tweaked per covenant destination.
+    pub emulator_pubkey: XOnlyPublicKey,
+    /// Where the claim covenant pays: the receiver's P2TR `script_pubkey`, 34 bytes.
+    pub receiver_pk_script: ScriptBuf,
+    /// Where BOTH refund covenants pay: the sender's P2TR `script_pubkey`, 34 bytes.
+    pub sender_pk_script: ScriptBuf,
+    /// Legacy rebuild only, never for a new lockup: build the suite WITHOUT the timelocked
+    /// refund leaf (eight leaves), the shape of lockups funded before that leaf shipped.
+    #[serde(default)]
+    pub legacy_pre_timelocked_refund: bool,
+}
+
+impl NonInteractiveParameters {
+    fn validate(&self) -> Result<(), VhtlcError> {
+        if !is_p2tr_pk_script(&self.receiver_pk_script) {
+            return Err(VhtlcError::InvalidP2trScript("receiver_pk_script"));
+        }
+        if !is_p2tr_pk_script(&self.sender_pk_script) {
+            return Err(VhtlcError::InvalidP2trScript("sender_pk_script"));
+        }
+        Ok(())
+    }
+}
+
+/// A v1 P2TR `script_pubkey` is exactly `OP_1 <32-byte-program>`, 34 bytes.
+fn is_p2tr_pk_script(script: &ScriptBuf) -> bool {
+    let bytes = script.as_bytes();
+    bytes.len() == 34 && bytes[0] == 0x51 && bytes[1] == 0x20
+}
+
+/// The covenant: "the output at this input's index pays the given P2TR script, value >= input".
+///
+/// Byte-identical to `enforcePayTo` in the TS SDK. The introspection opcodes are executed by the
+/// emulator, not by Bitcoin Script; see `ark-script`'s opcode table.
+fn enforce_pay_to(destination_pk_script: &ScriptBuf) -> ScriptBuf {
+    use bitcoin::opcodes::Opcode;
+
+    let op_pushcurrentinputindex = Opcode::from(0xcd);
+    let op_inspectoutputscriptpubkey = Opcode::from(0xd1);
+    let op_inspectoutputvalue = Opcode::from(0xcf);
+    let op_inspectinputvalue = Opcode::from(0xc9);
+
+    let program: &[u8; 32] = destination_pk_script.as_bytes()[2..]
+        .try_into()
+        .expect("validated 34-byte P2TR script");
+
+    ScriptBuf::builder()
+        .push_opcode(op_pushcurrentinputindex)
+        .push_opcode(OP_DUP)
+        .push_opcode(op_inspectoutputscriptpubkey)
+        .push_int(1)
+        .push_opcode(OP_EQUALVERIFY)
+        .push_slice(program)
+        .push_opcode(OP_EQUALVERIFY)
+        .push_opcode(op_inspectoutputvalue)
+        .push_opcode(op_pushcurrentinputindex)
+        .push_opcode(op_inspectinputvalue)
+        .push_opcode(OP_GREATERTHANOREQUAL)
+        .into_script()
+}
+
+/// The covenant leaves and their arkade scripts, derived once per [`VhtlcScript`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CovenantLeaves {
+    non_interactive_claim: ScriptBuf,
+    non_interactive_claim_arkade_script: ScriptBuf,
+    non_interactive_refund: ScriptBuf,
+    non_interactive_refund_arkade_script: ScriptBuf,
+    /// `None` on a legacy (eight-leaf) rebuild.
+    non_interactive_refund_without_receiver: Option<ScriptBuf>,
+}
+
+impl CovenantLeaves {
+    fn new(
+        options: &VhtlcOptions,
+        version: VhtlcVersion,
+        params: &NonInteractiveParameters,
+    ) -> Result<Self, VhtlcError> {
+        params.validate()?;
+
+        let claim_arkade_script = enforce_pay_to(&params.receiver_pk_script);
+        let claim_cosigner = ark_script::compute_arkade_script_public_key(
+            &params.emulator_pubkey,
+            &claim_arkade_script,
+        )?;
+        let non_interactive_claim = options
+            .preimage_condition(version)
+            .push_opcode(OP_VERIFY)
+            .push_x_only_key(&options.server)
+            .push_opcode(OP_CHECKSIGVERIFY)
+            .push_x_only_key(&claim_cosigner)
+            .push_opcode(OP_CHECKSIG)
+            .into_script();
+
+        // Derived ONCE for both refund covenant leaves: same destination, same key.
+        let refund_arkade_script = enforce_pay_to(&params.sender_pk_script);
+        let refund_cosigner = ark_script::compute_arkade_script_public_key(
+            &params.emulator_pubkey,
+            &refund_arkade_script,
+        )?;
+        let non_interactive_refund = ScriptBuf::builder()
+            .push_x_only_key(&options.server)
+            .push_opcode(OP_CHECKSIGVERIFY)
+            .push_x_only_key(&options.receiver)
+            .push_opcode(OP_CHECKSIGVERIFY)
+            .push_x_only_key(&refund_cosigner)
+            .push_opcode(OP_CHECKSIG)
+            .into_script();
+
+        let non_interactive_refund_without_receiver =
+            (!params.legacy_pre_timelocked_refund).then(|| {
+                ScriptBuf::builder()
+                    .push_int(options.refund_locktime as i64)
+                    .push_opcode(OP_CLTV)
+                    .push_opcode(OP_DROP)
+                    .push_x_only_key(&options.server)
+                    .push_opcode(OP_CHECKSIGVERIFY)
+                    .push_x_only_key(&refund_cosigner)
+                    .push_opcode(OP_CHECKSIG)
+                    .into_script()
+            });
+
+        Ok(Self {
+            non_interactive_claim,
+            non_interactive_claim_arkade_script: claim_arkade_script,
+            non_interactive_refund,
+            non_interactive_refund_arkade_script: refund_arkade_script,
+            non_interactive_refund_without_receiver,
+        })
+    }
+
+    fn scripts(&self) -> Vec<ScriptBuf> {
+        let mut scripts = vec![
+            self.non_interactive_claim.clone(),
+            self.non_interactive_refund.clone(),
+        ];
+        scripts.extend(self.non_interactive_refund_without_receiver.clone());
+        scripts
+    }
 }
 
 /// Options for creating a VHTLC (Virtual Hash Time Lock Contract)
@@ -116,65 +271,73 @@ impl VhtlcOptions {
         Ok(())
     }
 
-    fn build_taproot(&self) -> Result<TaprootSpendInfo, VhtlcError> {
+    /// The six signature leaves, in the order the merkle root depends on.
+    fn base_scripts(&self, version: VhtlcVersion) -> Vec<ScriptBuf> {
+        vec![
+            self.claim_script_for(version),
+            self.refund_script(),
+            self.refund_without_receiver_script(),
+            self.unilateral_claim_script_for(version),
+            self.unilateral_refund_script(),
+            self.unilateral_refund_without_receiver_script(),
+        ]
+    }
+
+    fn build_taproot(
+        &self,
+        version: VhtlcVersion,
+        covenant: Option<&CovenantLeaves>,
+    ) -> Result<TaprootSpendInfo, VhtlcError> {
         let internal_pubkey = PublicKey::from_str(UNSPENDABLE_KEY)
             .map_err(|e| VhtlcError::TaprootError(format!("Failed to parse internal key: {e}")))?;
         let internal_key = XOnlyPublicKey::from(internal_pubkey);
 
-        // Create script list with weights
-        // Lower weight = more likely to be used = shallower in tree
-        let scripts = vec![
-            TaprootScriptItem {
-                script: self.claim_script(),
-                weight: 1, // Most likely - collaborative claim
-            },
-            TaprootScriptItem {
-                script: self.refund_script(),
-                weight: 1, // Most likely - collaborative refund
-            },
-            TaprootScriptItem {
-                script: self.refund_without_receiver_script(),
-                weight: 1, // Less common
-            },
-            TaprootScriptItem {
-                script: self.unilateral_claim_script(),
-                weight: 1, // Less common
-            },
-            TaprootScriptItem {
-                script: self.unilateral_refund_script(),
-                weight: 1, // Least common
-            },
-            TaprootScriptItem {
-                script: self.unilateral_refund_without_receiver_script(),
-                weight: 1, // Least common
-            },
-        ];
+        // Leaf order fixes the merkle root: the covenant suite is appended after the six
+        // signature leaves, so a script with it never collides with one without.
+        let mut scripts = self.base_scripts(version);
+        if let Some(covenant) = covenant {
+            scripts.extend(covenant.scripts());
+        }
 
-        // Build the tree using the weight-based algorithm
-        let tree = Self::taproot_list_to_tree(scripts)?;
-
-        // Create TaprootBuilder and add the tree
-        let builder = TaprootBuilder::new();
-        let builder = Self::add_tree_to_builder(builder, &tree, 0)?;
+        // btcd's tree assembly, as arkd and the TS SDK use it. A Huffman tree (what
+        // `TaprootBuilder::with_huffman_tree` and the previous implementation here build) only
+        // agrees with it for some leaf counts: six does, nine does not.
+        let tree = crate::vtxo::assemble_taproot_tree(&scripts)
+            .map_err(|e| VhtlcError::TaprootError(format!("Failed to assemble taproot: {e}")))?;
 
         let secp = bitcoin::secp256k1::Secp256k1::new();
-        let taproot_spend_info = builder
-            .finalize(&secp, internal_key)
-            .map_err(|e| VhtlcError::TaprootError(format!("Failed to finalize taproot: {e:?}")))?;
+        Ok(TaprootSpendInfo::from_node_info(&secp, internal_key, tree))
+    }
 
-        Ok(taproot_spend_info)
+    /// The preimage condition every preimage-gated leaf is built from, leaving the result of
+    /// `OP_EQUAL` on the stack.
+    fn preimage_condition(&self, version: VhtlcVersion) -> bitcoin::script::Builder {
+        let builder = ScriptBuf::builder();
+        let builder = match version {
+            VhtlcVersion::V1 => builder,
+            VhtlcVersion::V2 => builder
+                .push_opcode(OP_SIZE)
+                .push_int(32)
+                .push_opcode(OP_EQUALVERIFY),
+        };
+        builder
+            .push_opcode(OP_HASH160)
+            .push_slice(self.preimage_hash.as_byte_array())
+            .push_opcode(OP_EQUAL)
     }
 
     /// Creates the claim script where receiver reveals the preimage
     ///
     /// Requires: preimage hash verification + receiver signature + server signature
+    ///
+    /// This is the [`VhtlcVersion::V1`] encoding; see [`VhtlcScript::claim_script`] for the
+    /// version-aware one.
     pub fn claim_script(&self) -> ScriptBuf {
-        let preimage_hash = self.preimage_hash;
+        self.claim_script_for(VhtlcVersion::V1)
+    }
 
-        ScriptBuf::builder()
-            .push_opcode(OP_HASH160)
-            .push_slice(preimage_hash.as_byte_array())
-            .push_opcode(OP_EQUAL)
+    fn claim_script_for(&self, version: VhtlcVersion) -> ScriptBuf {
+        self.preimage_condition(version)
             .push_opcode(OP_VERIFY)
             .push_x_only_key(&self.receiver)
             .push_opcode(OP_CHECKSIGVERIFY)
@@ -215,14 +378,17 @@ impl VhtlcOptions {
     /// Creates the unilateral claim script (no server cooperation needed)
     ///
     /// Requires: preimage hash verification + CSV delay + receiver signature
+    ///
+    /// This is the [`VhtlcVersion::V1`] encoding; see [`VhtlcScript::unilateral_claim_script`]
+    /// for the version-aware one.
     pub fn unilateral_claim_script(&self) -> ScriptBuf {
-        let preimage_hash = self.preimage_hash;
+        self.unilateral_claim_script_for(VhtlcVersion::V1)
+    }
+
+    fn unilateral_claim_script_for(&self, version: VhtlcVersion) -> ScriptBuf {
         let sequence = self.unilateral_claim_delay;
 
-        ScriptBuf::builder()
-            .push_opcode(OP_HASH160)
-            .push_slice(preimage_hash.as_byte_array())
-            .push_opcode(OP_EQUAL)
+        self.preimage_condition(version)
             .push_opcode(OP_VERIFY)
             .push_int(sequence.to_consensus_u32() as i64)
             .push_opcode(OP_CSV)
@@ -261,112 +427,72 @@ impl VhtlcOptions {
             .push_opcode(OP_CHECKSIG)
             .into_script()
     }
-
-    /// Build a balanced taproot tree from a list of scripts with weights
-    /// Following the TypeScript algorithm from scure-btc-signer
-    fn taproot_list_to_tree(
-        scripts: Vec<TaprootScriptItem>,
-    ) -> Result<TaprootTreeNode, VhtlcError> {
-        if scripts.is_empty() {
-            return Err(VhtlcError::TaprootError("Empty script list".to_string()));
-        }
-
-        // Clone input and convert to nodes
-        let mut lst: Vec<TaprootTreeNode> = scripts
-            .into_iter()
-            .map(|item| TaprootTreeNode::Leaf {
-                script: item.script,
-                weight: item.weight,
-            })
-            .collect();
-
-        // Build tree by combining nodes with smallest weights
-        while lst.len() >= 2 {
-            // Sort: elements with smallest weight are at the end of queue
-            lst.sort_by(|a, b| {
-                let weight_a = match a {
-                    TaprootTreeNode::Leaf { weight, .. } => *weight,
-                    TaprootTreeNode::Branch { weight, .. } => *weight,
-                };
-                let weight_b = match b {
-                    TaprootTreeNode::Leaf { weight, .. } => *weight,
-                    TaprootTreeNode::Branch { weight, .. } => *weight,
-                };
-                // Reverse comparison to put smallest at end
-                weight_b.cmp(&weight_a)
-            });
-
-            // Pop the two smallest weight nodes
-            let b = lst.pop().expect("an element");
-            let a = lst.pop().expect("an element");
-
-            // Calculate combined weight
-            let weight_a = match &a {
-                TaprootTreeNode::Leaf { weight, .. } => *weight,
-                TaprootTreeNode::Branch { weight, .. } => *weight,
-            };
-            let weight_b = match &b {
-                TaprootTreeNode::Leaf { weight, .. } => *weight,
-                TaprootTreeNode::Branch { weight, .. } => *weight,
-            };
-
-            // Create branch with combined weight
-            lst.push(TaprootTreeNode::Branch {
-                weight: weight_a + weight_b,
-                left: Box::new(a),
-                right: Box::new(b),
-            });
-        }
-
-        // Return the root node
-        Ok(lst.into_iter().next().expect("root node"))
-    }
-
-    /// Recursively add tree nodes to TaprootBuilder
-    fn add_tree_to_builder(
-        builder: TaprootBuilder,
-        node: &TaprootTreeNode,
-        depth: u8,
-    ) -> Result<TaprootBuilder, VhtlcError> {
-        match node {
-            TaprootTreeNode::Leaf { script, .. } => builder
-                .add_leaf(depth, script.clone())
-                .map_err(|e| VhtlcError::TaprootError(format!("Failed to add leaf: {e}"))),
-            TaprootTreeNode::Branch { left, right, .. } => {
-                let builder = Self::add_tree_to_builder(builder, left, depth + 1)?;
-                Self::add_tree_to_builder(builder, right, depth + 1)
-            }
-        }
-    }
 }
 
 /// VHTLC Script builder and manager
 ///
-/// This struct creates and manages VHTLC scripts with six different spending paths:
+/// This struct creates and manages VHTLC scripts with six signature spending paths:
 /// 1. **Claim**: Receiver reveals preimage (collaborative with server)
 /// 2. **Refund**: Collaborative refund (all three parties)
 /// 3. **Refund without Receiver**: Sender refunds after locktime (with server)
 /// 4. **Unilateral Claim**: Receiver claims after delay (no server needed)
 /// 5. **Unilateral Refund**: Collaborative unilateral refund after delay
 /// 6. **Unilateral Refund without Receiver**: Sender unilateral refund after both timeouts
+///
+/// and, when built with [`NonInteractiveParameters`], up to three emulator covenant paths:
+/// 7. **Non-interactive Claim**: Server + emulator, payout pinned to the receiver
+/// 8. **Non-interactive Refund**: Server + receiver + emulator, payout pinned to the sender
+/// 9. **Non-interactive Refund without Receiver**: Server + emulator after locktime, payout pinned
+///    to the sender
 pub struct VhtlcScript {
     options: VhtlcOptions,
+    version: VhtlcVersion,
+    non_interactive: Option<NonInteractiveParameters>,
+    covenant: Option<CovenantLeaves>,
     taproot_spend_info: TaprootSpendInfo,
     network: Network,
 }
 
 impl VhtlcScript {
-    /// Creates a new VHTLC script with the given options
+    /// Creates a new [`VhtlcVersion::V1`] VHTLC script with the six signature paths.
     ///
     /// This will validate the options and build the complete taproot tree
     /// with all spending paths.
     pub fn new(options: VhtlcOptions, network: Network) -> Result<Self, VhtlcError> {
+        Self::build(options, VhtlcVersion::V1, None, network)
+    }
+
+    /// Creates a new [`VhtlcVersion::V2`] VHTLC script, optionally with the emulator covenant
+    /// paths. Mirrors `VHTLC.ScriptV2` in the TS SDK.
+    pub fn new_v2(
+        options: VhtlcOptions,
+        non_interactive: Option<NonInteractiveParameters>,
+        network: Network,
+    ) -> Result<Self, VhtlcError> {
+        Self::build(options, VhtlcVersion::V2, non_interactive, network)
+    }
+
+    /// Creates a VHTLC script of any version, optionally with the emulator covenant paths.
+    pub fn build(
+        options: VhtlcOptions,
+        version: VhtlcVersion,
+        non_interactive: Option<NonInteractiveParameters>,
+        network: Network,
+    ) -> Result<Self, VhtlcError> {
         options.validate()?;
 
-        let taproot_spend_info = options.build_taproot()?;
+        let covenant = non_interactive
+            .as_ref()
+            .map(|params| CovenantLeaves::new(&options, version, params))
+            .transpose()?;
+
+        let taproot_spend_info = options.build_taproot(version, covenant.as_ref())?;
 
         Ok(Self {
             options,
+            version,
+            non_interactive,
+            covenant,
             taproot_spend_info,
             network,
         })
@@ -378,6 +504,14 @@ impl VhtlcScript {
 
     pub fn options(&self) -> &VhtlcOptions {
         &self.options
+    }
+
+    pub fn version(&self) -> VhtlcVersion {
+        self.version
+    }
+
+    pub fn non_interactive_parameters(&self) -> Option<&NonInteractiveParameters> {
+        self.non_interactive.as_ref()
     }
 
     pub fn script_pubkey(&self) -> ScriptBuf {
@@ -399,7 +533,7 @@ impl VhtlcScript {
     ///
     /// Requires: preimage hash verification + receiver signature + server signature
     pub fn claim_script(&self) -> ScriptBuf {
-        self.options.claim_script()
+        self.options.claim_script_for(self.version)
     }
 
     /// Creates the collaborative refund script
@@ -420,7 +554,7 @@ impl VhtlcScript {
     ///
     /// Requires: preimage hash verification + CSV delay + receiver signature
     pub fn unilateral_claim_script(&self) -> ScriptBuf {
-        self.options.unilateral_claim_script()
+        self.options.unilateral_claim_script_for(self.version)
     }
 
     /// Creates the unilateral refund script
@@ -435,6 +569,51 @@ impl VhtlcScript {
     /// Requires: CSV delay + sender signature
     pub fn unilateral_refund_without_receiver_script(&self) -> ScriptBuf {
         self.options.unilateral_refund_without_receiver_script()
+    }
+
+    /// The non-interactive claim leaf: preimage + server + covenant-tweaked emulator key.
+    ///
+    /// `None` unless built with [`NonInteractiveParameters`].
+    pub fn non_interactive_claim_script(&self) -> Option<ScriptBuf> {
+        self.covenant
+            .as_ref()
+            .map(|c| c.non_interactive_claim.clone())
+    }
+
+    /// The arkade script the emulator evaluates before co-signing
+    /// [`Self::non_interactive_claim_script`]: pins the payout to the receiver's script.
+    pub fn non_interactive_claim_arkade_script(&self) -> Option<ScriptBuf> {
+        self.covenant
+            .as_ref()
+            .map(|c| c.non_interactive_claim_arkade_script.clone())
+    }
+
+    /// The non-interactive refund leaf: server + receiver + covenant-tweaked emulator key, no
+    /// timelock.
+    ///
+    /// `None` unless built with [`NonInteractiveParameters`].
+    pub fn non_interactive_refund_script(&self) -> Option<ScriptBuf> {
+        self.covenant
+            .as_ref()
+            .map(|c| c.non_interactive_refund.clone())
+    }
+
+    /// The arkade script the emulator evaluates before co-signing either non-interactive refund
+    /// leaf: pins the payout to the sender's script.
+    pub fn non_interactive_refund_arkade_script(&self) -> Option<ScriptBuf> {
+        self.covenant
+            .as_ref()
+            .map(|c| c.non_interactive_refund_arkade_script.clone())
+    }
+
+    /// The timelocked non-interactive refund leaf: server + covenant-tweaked emulator key after
+    /// `refund_locktime`. Shares its arkade script with [`Self::non_interactive_refund_script`].
+    ///
+    /// `None` unless built with [`NonInteractiveParameters`] without the legacy flag.
+    pub fn non_interactive_refund_without_receiver_script(&self) -> Option<ScriptBuf> {
+        self.covenant
+            .as_ref()
+            .and_then(|c| c.non_interactive_refund_without_receiver.clone())
     }
 
     pub fn get_script_map(&self) -> BTreeMap<String, ScriptBuf> {
@@ -457,18 +636,28 @@ impl VhtlcScript {
             "unilateral_refund_without_receiver".to_string(),
             self.unilateral_refund_without_receiver_script(),
         );
+        if let Some(script) = self.non_interactive_claim_script() {
+            map.insert("non_interactive_claim".to_string(), script);
+        }
+        if let Some(script) = self.non_interactive_refund_script() {
+            map.insert("non_interactive_refund".to_string(), script);
+        }
+        if let Some(script) = self.non_interactive_refund_without_receiver_script() {
+            map.insert(
+                "non_interactive_refund_without_receiver".to_string(),
+                script,
+            );
+        }
         map
     }
 
-    pub fn tapscripts(self) -> Vec<ScriptBuf> {
-        vec![
-            self.claim_script(),
-            self.refund_script(),
-            self.refund_without_receiver_script(),
-            self.unilateral_claim_script(),
-            self.unilateral_refund_script(),
-            self.unilateral_refund_without_receiver_script(),
-        ]
+    /// Every leaf script, in the order the merkle root depends on.
+    pub fn tapscripts(&self) -> Vec<ScriptBuf> {
+        let mut scripts = self.options.base_scripts(self.version);
+        if let Some(covenant) = &self.covenant {
+            scripts.extend(covenant.scripts());
+        }
+        scripts
     }
 }
 
@@ -817,6 +1006,257 @@ mod tests {
                 "Invalid test case '{}' didn't fail as expected",
                 test_case.description
             );
+        }
+    }
+
+    /// Cross-SDK conformance vectors for the nine-leaf `VHTLC.ScriptV2` tree (the full
+    /// covenant suite, no legacy marker). The TS, C# and Go implementations are checked against
+    /// the same fixture; a byte diverging anywhere means a different taproot address and
+    /// unspendable funds.
+    mod nine_leaf {
+        use super::*;
+
+        #[derive(Debug, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Fixture {
+            options: Options,
+            pk_script: String,
+            leaves: Leaves,
+            arkade_scripts: ArkadeScripts,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Options {
+            sender: String,
+            receiver: String,
+            server: String,
+            preimage_hash: String,
+            refund_locktime: String,
+            unilateral_claim_delay: Delay,
+            unilateral_refund_delay: Delay,
+            unilateral_refund_without_receiver_delay: Delay,
+            non_interactive_claim: NonInteractiveClaim,
+            non_interactive_refund: NonInteractiveRefund,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Delay {
+            #[serde(rename = "type")]
+            delay_type: String,
+            value: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct NonInteractiveClaim {
+            receiver_pk_script: String,
+            emulator_pubkey: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct NonInteractiveRefund {
+            sender_pk_script: String,
+            emulator_pubkey: String,
+            without_receiver: bool,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Leaves {
+            claim: String,
+            refund: String,
+            refund_without_receiver: String,
+            unilateral_claim: String,
+            unilateral_refund: String,
+            unilateral_refund_without_receiver: String,
+            non_interactive_claim: String,
+            non_interactive_refund: String,
+            non_interactive_refund_without_receiver: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct ArkadeScripts {
+            non_interactive_claim: String,
+            non_interactive_refund: String,
+        }
+
+        fn delay(d: &Delay) -> Sequence {
+            let value: u32 = d.value.parse().unwrap();
+            match d.delay_type.as_str() {
+                "blocks" => Sequence::from_height(value as u16),
+                "seconds" => Sequence::from_seconds_ceil(value).unwrap(),
+                other => panic!("unknown delay type {other}"),
+            }
+        }
+
+        fn script(hex: &str) -> ScriptBuf {
+            ScriptBuf::from_bytes(Vec::from_hex(hex).unwrap())
+        }
+
+        fn load() -> (VhtlcOptions, NonInteractiveParameters, Fixture) {
+            let path = concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/vhtlc_fixtures/vhtlc-v2-nine-leaf.json"
+            );
+            let fixture: Fixture =
+                serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+            let o = &fixture.options;
+
+            assert_eq!(
+                o.non_interactive_claim.emulator_pubkey, o.non_interactive_refund.emulator_pubkey,
+                "the fixture predates the grouped parameters; both leaves carry the same key"
+            );
+
+            let options = VhtlcOptions {
+                sender: pubkey_to_xonly(&o.sender),
+                receiver: pubkey_to_xonly(&o.receiver),
+                server: pubkey_to_xonly(&o.server),
+                preimage_hash: ripemd160::Hash::from_str(&o.preimage_hash).unwrap(),
+                refund_locktime: o.refund_locktime.parse().unwrap(),
+                unilateral_claim_delay: delay(&o.unilateral_claim_delay),
+                unilateral_refund_delay: delay(&o.unilateral_refund_delay),
+                unilateral_refund_without_receiver_delay: delay(
+                    &o.unilateral_refund_without_receiver_delay,
+                ),
+            };
+            let non_interactive = NonInteractiveParameters {
+                emulator_pubkey: XOnlyPublicKey::from_str(&o.non_interactive_claim.emulator_pubkey)
+                    .unwrap(),
+                receiver_pk_script: script(&o.non_interactive_claim.receiver_pk_script),
+                sender_pk_script: script(&o.non_interactive_refund.sender_pk_script),
+                legacy_pre_timelocked_refund: !o.non_interactive_refund.without_receiver,
+            };
+
+            (options, non_interactive, fixture)
+        }
+
+        fn hex(script: ScriptBuf) -> String {
+            script.as_bytes().to_lower_hex_string()
+        }
+
+        #[test]
+        fn matches_the_cross_sdk_vectors() {
+            let (options, non_interactive, fixture) = load();
+            let vhtlc =
+                VhtlcScript::new_v2(options, Some(non_interactive), Network::Regtest).unwrap();
+
+            assert_eq!(hex(vhtlc.script_pubkey()), fixture.pk_script);
+
+            let leaves = &fixture.leaves;
+            assert_eq!(hex(vhtlc.claim_script()), leaves.claim);
+            assert_eq!(hex(vhtlc.refund_script()), leaves.refund);
+            assert_eq!(
+                hex(vhtlc.refund_without_receiver_script()),
+                leaves.refund_without_receiver
+            );
+            assert_eq!(
+                hex(vhtlc.unilateral_claim_script()),
+                leaves.unilateral_claim
+            );
+            assert_eq!(
+                hex(vhtlc.unilateral_refund_script()),
+                leaves.unilateral_refund
+            );
+            assert_eq!(
+                hex(vhtlc.unilateral_refund_without_receiver_script()),
+                leaves.unilateral_refund_without_receiver
+            );
+            assert_eq!(
+                hex(vhtlc.non_interactive_claim_script().unwrap()),
+                leaves.non_interactive_claim
+            );
+            assert_eq!(
+                hex(vhtlc.non_interactive_refund_script().unwrap()),
+                leaves.non_interactive_refund
+            );
+            assert_eq!(
+                hex(vhtlc
+                    .non_interactive_refund_without_receiver_script()
+                    .unwrap()),
+                leaves.non_interactive_refund_without_receiver
+            );
+
+            // Both covenant arkade scripts: a divergence in either compiles into a different
+            // emulator co-signer key and so a different leaf.
+            assert_eq!(
+                hex(vhtlc.non_interactive_claim_arkade_script().unwrap()),
+                fixture.arkade_scripts.non_interactive_claim
+            );
+            assert_eq!(
+                hex(vhtlc.non_interactive_refund_arkade_script().unwrap()),
+                fixture.arkade_scripts.non_interactive_refund
+            );
+        }
+
+        #[test]
+        fn has_nine_leaves_in_merkle_order() {
+            let (options, non_interactive, fixture) = load();
+            let vhtlc =
+                VhtlcScript::new_v2(options, Some(non_interactive), Network::Regtest).unwrap();
+
+            let l = &fixture.leaves;
+            let expected = [
+                &l.claim,
+                &l.refund,
+                &l.refund_without_receiver,
+                &l.unilateral_claim,
+                &l.unilateral_refund,
+                &l.unilateral_refund_without_receiver,
+                &l.non_interactive_claim,
+                &l.non_interactive_refund,
+                &l.non_interactive_refund_without_receiver,
+            ];
+
+            assert_eq!(vhtlc.get_script_map().len(), 9);
+
+            let tapscripts: Vec<String> = vhtlc.tapscripts().into_iter().map(hex).collect();
+            assert_eq!(tapscripts, expected.map(|s| s.to_string()));
+        }
+
+        #[test]
+        fn legacy_shape_drops_the_timelocked_refund_leaf() {
+            let (options, mut non_interactive, fixture) = load();
+            non_interactive.legacy_pre_timelocked_refund = true;
+            let vhtlc =
+                VhtlcScript::new_v2(options, Some(non_interactive), Network::Regtest).unwrap();
+
+            assert!(vhtlc
+                .non_interactive_refund_without_receiver_script()
+                .is_none());
+            assert_eq!(vhtlc.get_script_map().len(), 8);
+            assert_ne!(hex(vhtlc.script_pubkey()), fixture.pk_script);
+        }
+
+        #[test]
+        fn v2_without_covenants_has_six_leaves_and_a_different_address() {
+            let (options, _, fixture) = load();
+            let v2 = VhtlcScript::new_v2(options.clone(), None, Network::Regtest).unwrap();
+            let v1 = VhtlcScript::new(options, Network::Regtest).unwrap();
+
+            assert_eq!(v2.get_script_map().len(), 6);
+            assert_eq!(hex(v2.claim_script()), fixture.leaves.claim);
+            assert_ne!(hex(v2.script_pubkey()), fixture.pk_script);
+            assert_ne!(v1.claim_script(), v2.claim_script());
+            assert_ne!(v1.script_pubkey(), v2.script_pubkey());
+        }
+
+        #[test]
+        fn rejects_non_p2tr_destinations() {
+            let (options, mut non_interactive, _) = load();
+            non_interactive.sender_pk_script =
+                script("0014aabbccddeeff00112233445566778899aabbccdd");
+
+            let err = VhtlcScript::new_v2(options, Some(non_interactive), Network::Regtest)
+                .err()
+                .unwrap();
+            assert!(matches!(
+                err,
+                VhtlcError::InvalidP2trScript("sender_pk_script")
+            ));
         }
     }
 
