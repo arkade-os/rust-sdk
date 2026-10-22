@@ -1,4 +1,5 @@
 use crate::boarding_output::BoardingOutput;
+use crate::vhtlc::NonInteractiveParameters;
 use crate::vhtlc::VhtlcOptions;
 use crate::vtxo::Vtxo;
 use crate::Error;
@@ -44,6 +45,10 @@ impl ContractType {
 
     pub fn vhtlc() -> Self {
         Self("vhtlc".to_string())
+    }
+
+    pub fn vhtlc_v2() -> Self {
+        Self("vhtlc-v2".to_string())
     }
 }
 
@@ -92,6 +97,12 @@ pub enum SpendPathKind {
     VhtlcUnilateralClaim,
     VhtlcUnilateralRefund,
     VhtlcUnilateralRefundWithoutReceiver,
+    /// Emulator covenant leaf; needs the emulator's co-signature on top of the server's.
+    VhtlcNonInteractiveClaim,
+    /// Emulator covenant leaf; needs the emulator's co-signature on top of the server's.
+    VhtlcNonInteractiveRefund,
+    /// Emulator covenant leaf; needs the emulator's co-signature on top of the server's.
+    VhtlcNonInteractiveRefundWithoutReceiver,
     Custom(String),
 }
 
@@ -104,6 +115,11 @@ impl SpendPathKind {
             "unilateral_claim" => Self::VhtlcUnilateralClaim,
             "unilateral_refund" => Self::VhtlcUnilateralRefund,
             "unilateral_refund_without_receiver" => Self::VhtlcUnilateralRefundWithoutReceiver,
+            "non_interactive_claim" => Self::VhtlcNonInteractiveClaim,
+            "non_interactive_refund" => Self::VhtlcNonInteractiveRefund,
+            "non_interactive_refund_without_receiver" => {
+                Self::VhtlcNonInteractiveRefundWithoutReceiver
+            }
             _ => Self::Custom(name),
         }
     }
@@ -426,48 +442,113 @@ impl ContractSpec for VhtlcContract {
     fn spendable_paths(&self, ctx: &ContractContext) -> Result<Vec<SpendPath>, Error> {
         let script = crate::vhtlc::VhtlcScript::new(self.options.clone(), ctx.network())
             .map_err(|e| Error::ad_hoc(format!("failed to build vhtlc: {e}")))?;
-        script
-            .get_script_map()
-            .into_iter()
-            .map(|(name, tapscript)| {
-                let control_block = script
-                    .taproot_spend_info()
-                    .control_block(&(tapscript.clone(), bitcoin::taproot::LeafVersion::TapScript))
-                    .ok_or_else(|| Error::ad_hoc("missing vhtlc control block"))?;
-                Ok(SpendPath {
-                    kind: SpendPathKind::from_vhtlc_name(name),
-                    script: tapscript,
-                    control_block,
-                })
-            })
-            .collect()
+        vhtlc_spend_paths(&script)
     }
 
     fn spendable_selections(&self, ctx: &ContractContext) -> Result<Vec<SpendSelection>, Error> {
-        Ok(self
-            .spendable_paths(ctx)?
-            .into_iter()
-            .filter_map(|path| match path.kind {
-                SpendPathKind::VhtlcClaim | SpendPathKind::VhtlcUnilateralClaim => None,
-                SpendPathKind::VhtlcRefundWithoutReceiver => Some(path.select().with_locktime(
-                    absolute::LockTime::from_consensus(self.options.refund_locktime),
-                )),
-                SpendPathKind::VhtlcUnilateralRefund => Some(
-                    path.select()
-                        .with_sequence(self.options.unilateral_refund_delay),
-                ),
-                SpendPathKind::VhtlcUnilateralRefundWithoutReceiver => Some(
-                    path.select()
-                        .with_sequence(self.options.unilateral_refund_without_receiver_delay),
-                ),
-                SpendPathKind::Forfeit
-                | SpendPathKind::Exit
-                | SpendPathKind::Delegate
-                | SpendPathKind::VhtlcRefund
-                | SpendPathKind::Custom(_) => Some(path.select()),
-            })
-            .collect())
+        Ok(vhtlc_spendable_selections(
+            self.spendable_paths(ctx)?,
+            &self.options,
+        ))
     }
+}
+
+/// A [`crate::vhtlc::VhtlcVersion::V2`] VHTLC, optionally carrying the emulator covenant leaves.
+///
+/// A separate type rather than a flag on [`VhtlcContract`]: V1 and V2 derive different
+/// `script_pubkey`s for the same keys, so one type cannot serve both. Mirrors the TS SDK's
+/// `vhtlc-v2` contract handler.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VhtlcV2Contract {
+    pub options: VhtlcOptions,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub non_interactive: Option<NonInteractiveParameters>,
+}
+
+impl VhtlcV2Contract {
+    fn script(&self, ctx: &ContractContext) -> Result<crate::vhtlc::VhtlcScript, Error> {
+        crate::vhtlc::VhtlcScript::new_v2(
+            self.options.clone(),
+            self.non_interactive.clone(),
+            ctx.network(),
+        )
+        .map_err(|e| Error::ad_hoc(format!("failed to build vhtlc-v2: {e}")))
+    }
+}
+
+impl ContractSpec for VhtlcV2Contract {
+    const VERSION: u32 = 1;
+
+    fn contract_type() -> ContractType {
+        ContractType::vhtlc_v2()
+    }
+
+    fn script_pubkey(&self, ctx: &ContractContext) -> Result<ScriptBuf, Error> {
+        Ok(self.script(ctx)?.script_pubkey())
+    }
+
+    fn spendable_paths(&self, ctx: &ContractContext) -> Result<Vec<SpendPath>, Error> {
+        vhtlc_spend_paths(&self.script(ctx)?)
+    }
+
+    fn spendable_selections(&self, ctx: &ContractContext) -> Result<Vec<SpendSelection>, Error> {
+        Ok(vhtlc_spendable_selections(
+            self.spendable_paths(ctx)?,
+            &self.options,
+        ))
+    }
+}
+
+fn vhtlc_spend_paths(script: &crate::vhtlc::VhtlcScript) -> Result<Vec<SpendPath>, Error> {
+    script
+        .get_script_map()
+        .into_iter()
+        .map(|(name, tapscript)| {
+            let control_block = script
+                .taproot_spend_info()
+                .control_block(&(tapscript.clone(), bitcoin::taproot::LeafVersion::TapScript))
+                .ok_or_else(|| Error::ad_hoc("missing vhtlc control block"))?;
+            Ok(SpendPath {
+                kind: SpendPathKind::from_vhtlc_name(name),
+                script: tapscript,
+                control_block,
+            })
+        })
+        .collect()
+}
+
+/// The paths a wallet can complete on its own: the preimage-gated leaves need the preimage, and
+/// the covenant leaves need the emulator's co-signature, so neither is offered here.
+fn vhtlc_spendable_selections(
+    paths: Vec<SpendPath>,
+    options: &VhtlcOptions,
+) -> Vec<SpendSelection> {
+    paths
+        .into_iter()
+        .filter_map(|path| match path.kind {
+            SpendPathKind::VhtlcClaim
+            | SpendPathKind::VhtlcUnilateralClaim
+            | SpendPathKind::VhtlcNonInteractiveClaim
+            | SpendPathKind::VhtlcNonInteractiveRefund
+            | SpendPathKind::VhtlcNonInteractiveRefundWithoutReceiver => None,
+            SpendPathKind::VhtlcRefundWithoutReceiver => Some(
+                path.select()
+                    .with_locktime(absolute::LockTime::from_consensus(options.refund_locktime)),
+            ),
+            SpendPathKind::VhtlcUnilateralRefund => {
+                Some(path.select().with_sequence(options.unilateral_refund_delay))
+            }
+            SpendPathKind::VhtlcUnilateralRefundWithoutReceiver => Some(
+                path.select()
+                    .with_sequence(options.unilateral_refund_without_receiver_delay),
+            ),
+            SpendPathKind::Forfeit
+            | SpendPathKind::Exit
+            | SpendPathKind::Delegate
+            | SpendPathKind::VhtlcRefund
+            | SpendPathKind::Custom(_) => Some(path.select()),
+        })
+        .collect()
 }
 
 #[cfg(test)]

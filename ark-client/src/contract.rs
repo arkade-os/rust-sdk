@@ -9,6 +9,7 @@ use ark_core::contract::DelegateVtxoContract;
 use ark_core::contract::SpendSelection;
 use ark_core::contract::StoredContract;
 use ark_core::contract::VhtlcContract;
+use ark_core::contract::VhtlcV2Contract;
 use ark_core::server;
 use ark_core::server::VirtualTxOutPoint;
 use ark_core::ArkAddress;
@@ -730,7 +731,8 @@ impl ContractManager {
         self.register::<DefaultVtxoContract>()?;
         self.register::<DelegateVtxoContract>()?;
         self.register::<BoardingContract>()?;
-        self.register::<VhtlcContract>()
+        self.register::<VhtlcContract>()?;
+        self.register::<VhtlcV2Contract>()
     }
 
     pub fn insert<T: ContractSpec>(
