@@ -52,6 +52,9 @@ use std::error::Error as StdError;
 use std::sync::Arc;
 use std::sync::RwLock;
 
+#[cfg(test)]
+mod submit_tests;
+
 type InfoRefreshHook = Arc<
     dyn Fn(ark_core::server::Info) -> Result<(), Box<dyn StdError + Send + Sync + 'static>>
         + Send
@@ -206,6 +209,13 @@ impl Client {
         Ok(info)
     }
 
+    /// Submit an Ark transaction and verify the returned transaction and its signatures
+    /// against the submitted PSBT before allowing the caller to proceed to finalization.
+    ///
+    /// The returned checkpoint transactions are bound to the submitted ones, see
+    /// [`ark_core::send::bind_checkpoint_transactions`].
+    ///
+    /// See [`ark_core::send::verify_signed_ark_transaction`] for supported spend scripts.
     pub async fn submit_offchain_transaction_request(
         &self,
         ark_tx: Psbt,
@@ -216,10 +226,10 @@ impl Client {
             base64::engine::GeneralPurposeConfig::new(),
         );
 
-        let ark_tx = base64.encode(ark_tx.serialize());
+        let encoded_ark_tx = base64.encode(ark_tx.serialize());
 
-        let checkpoint_txs = checkpoint_txs
-            .into_iter()
+        let encoded_checkpoint_txs = checkpoint_txs
+            .iter()
             .map(|tx| Some(base64.encode(tx.serialize())))
             .collect();
 
@@ -229,8 +239,8 @@ impl Client {
                 ark_service_submit_tx(
                     &configuration,
                     models::SubmitTxRequest {
-                        signed_ark_tx: Some(ark_tx),
-                        checkpoint_txs,
+                        signed_ark_tx: Some(encoded_ark_tx),
+                        checkpoint_txs: encoded_checkpoint_txs,
                     },
                 )
                 .await
@@ -238,11 +248,22 @@ impl Client {
             })
             .await?;
 
+        Self::decode_submit_response(&ark_tx, &checkpoint_txs, res)
+    }
+
+    fn decode_submit_response(
+        submitted: &Psbt,
+        submitted_checkpoint_txs: &[Psbt],
+        res: models::SubmitTxResponse,
+    ) -> Result<SubmitOffchainTxResponse, Error> {
+        let base64 = base64::engine::general_purpose::STANDARD;
         let signed_ark_tx = res.final_ark_tx;
         let signed_ark_tx = signed_ark_tx.ok_or(Error::request("Signed ark tx not received"))?;
 
         let signed_ark_tx = base64.decode(signed_ark_tx).map_err(Error::conversion)?;
         let signed_ark_tx = Psbt::deserialize(&signed_ark_tx).map_err(Error::conversion)?;
+        ark_core::send::verify_signed_ark_transaction(submitted, &signed_ark_tx)
+            .map_err(Error::request)?;
 
         let signed_checkpoint_txs = res
             .signed_checkpoint_txs
@@ -255,6 +276,11 @@ impl Client {
                 Ok(tx)
             })
             .collect::<Result<Vec<_>, Error>>()?;
+        let signed_checkpoint_txs = ark_core::send::bind_checkpoint_transactions(
+            submitted_checkpoint_txs,
+            signed_checkpoint_txs,
+        )
+        .map_err(Error::request)?;
 
         Ok(SubmitOffchainTxResponse {
             signed_ark_tx,
