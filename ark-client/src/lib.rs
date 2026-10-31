@@ -893,6 +893,13 @@ where
     }
 }
 
+/// The Arkade address of a stored VTXO row, rebuilt in the forfeit key order that matched its
+/// script.
+fn vtxo_at_script(vtxo: Option<Vtxo>) -> Result<String, Error> {
+    vtxo.map(|vtxo| vtxo.to_ark_address().to_string())
+        .ok_or_else(|| Error::ad_hoc("contract script mismatch"))
+}
+
 fn contract_info_from_stored(
     contract: StoredContract,
     server_info: &server::Info,
@@ -906,7 +913,9 @@ fn contract_info_from_stored(
                     Error::ad_hoc(format!("failed to decode default vtxo contract: {e}"))
                 })?;
             (
-                Some(data.vtxo(&ctx)?.to_ark_address().to_string()),
+                Some(vtxo_at_script(
+                    data.vtxo_for_script(&ctx, &contract.script_pubkey)?,
+                )?),
                 Some(ContractAddressKind::Ark),
                 Some(data.server),
             )
@@ -917,7 +926,9 @@ fn contract_info_from_stored(
                     Error::ad_hoc(format!("failed to decode delegate vtxo contract: {e}"))
                 })?;
             (
-                Some(data.vtxo(&ctx)?.to_ark_address().to_string()),
+                Some(vtxo_at_script(
+                    data.vtxo_for_script(&ctx, &contract.script_pubkey)?,
+                )?),
                 Some(ContractAddressKind::Ark),
                 Some(data.server),
             )
@@ -926,7 +937,12 @@ fn contract_info_from_stored(
             let data: BoardingContract = serde_json::from_value(contract.data.clone())
                 .map_err(|e| Error::ad_hoc(format!("failed to decode boarding contract: {e}")))?;
             (
-                Some(data.boarding_output(&ctx)?.address().to_string()),
+                Some(
+                    data.boarding_output_for_script(&ctx, &contract.script_pubkey)?
+                        .ok_or_else(|| Error::ad_hoc("contract script mismatch"))?
+                        .address()
+                        .to_string(),
+                ),
                 Some(ContractAddressKind::Bitcoin),
                 Some(data.server),
             )

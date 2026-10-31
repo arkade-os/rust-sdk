@@ -58,6 +58,14 @@ impl<T: ContractSpec> DynContractHandler for ContractHandler<T> {
     }
 
     fn validate(&self, stored: &StoredContract, ctx: &ContractContext) -> Result<(), Error> {
+        self.spendable_selections(stored, ctx).map(|_| ())
+    }
+
+    fn spendable_selections(
+        &self,
+        stored: &StoredContract,
+        ctx: &ContractContext,
+    ) -> Result<Vec<SpendSelection>, Error> {
         if stored.contract_type != T::contract_type() {
             return Err(Error::ad_hoc("unexpected contract type"));
         }
@@ -70,23 +78,8 @@ impl<T: ContractSpec> DynContractHandler for ContractHandler<T> {
 
         let data: T = serde_json::from_value(stored.data.clone())
             .map_err(|e| Error::ad_hoc(format!("failed to decode contract data: {e}")))?;
-        let derived_script = data.script_pubkey(ctx)?;
-        if derived_script != stored.script_pubkey {
-            return Err(Error::ad_hoc("contract script mismatch"));
-        }
-
-        Ok(())
-    }
-
-    fn spendable_selections(
-        &self,
-        stored: &StoredContract,
-        ctx: &ContractContext,
-    ) -> Result<Vec<SpendSelection>, Error> {
-        self.validate(stored, ctx)?;
-        let data: T = serde_json::from_value(stored.data.clone())
-            .map_err(|e| Error::ad_hoc(format!("failed to decode contract data: {e}")))?;
-        data.spendable_selections(ctx).map_err(Into::into)
+        data.spendable_selections_for_script(ctx, &stored.script_pubkey)?
+            .ok_or_else(|| Error::ad_hoc("contract script mismatch"))
     }
 }
 
@@ -921,7 +914,9 @@ impl ContractManager {
                     .map(|contract| (stored, contract))
             })
             .map(|(stored, contract)| {
-                let output = contract.boarding_output(&ctx)?;
+                let output = contract
+                    .boarding_output_for_script(&ctx, &stored.script_pubkey)?
+                    .ok_or_else(|| Error::ad_hoc("contract script mismatch"))?;
                 let spend_selections = self.spendable_selections(&stored)?;
                 Ok(AnnotatedBoardingOutput::new(
                     stored,
@@ -971,11 +966,10 @@ fn active_offchain_contract_from_stored(
     if stored.contract_type == ContractType::delegate_vtxo() {
         let contract: DelegateVtxoContract = serde_json::from_value(stored.data.clone())
             .map_err(|e| Error::ad_hoc(format!("failed to decode delegate vtxo contract: {e}")))?;
-        return Ok(Some(active_offchain_contract(
-            manager,
-            &stored,
-            contract.vtxo(ctx)?,
-        )?));
+        let vtxo = contract
+            .vtxo_for_script(ctx, &stored.script_pubkey)?
+            .ok_or_else(|| Error::ad_hoc("contract script mismatch"))?;
+        return Ok(Some(active_offchain_contract(manager, &stored, vtxo)?));
     }
 
     if stored.contract_type != ContractType::default_vtxo()
@@ -1000,11 +994,10 @@ fn active_offchain_contract_from_stored(
         owner: data.owner,
         exit_delay: data.exit_delay,
     };
-    Ok(Some(active_offchain_contract(
-        manager,
-        &stored,
-        contract.vtxo(ctx)?,
-    )?))
+    let vtxo = contract
+        .vtxo_for_script(ctx, &stored.script_pubkey)?
+        .ok_or_else(|| Error::ad_hoc("contract script mismatch"))?;
+    Ok(Some(active_offchain_contract(manager, &stored, vtxo)?))
 }
 
 fn active_offchain_contract(
@@ -1451,5 +1444,165 @@ mod tests {
         };
 
         assert!(manager.insert_stored(stored).is_err());
+    }
+
+    /// Rows that an earlier ark-core stored for its server-first scripts (the addresses it shipped
+    /// for these keys) still validate, list their Arkade and boarding addresses, and spend through
+    /// the server-first leaf, next to a new owner-first row.
+    #[test]
+    fn server_first_rows_from_earlier_versions_still_work() {
+        let (server, owner, delegator) = test_keys();
+        let exit_delay = Sequence::from_seconds_ceil(86400).unwrap();
+        let default_address = "tark1qqvgg4up7ccufrcujuy7yvyjqe7sdqmlxz4qe5z5ftyg0l53mhgkd8dqfrd6d4grdtn3cu3sxxj577jxd3d357p36g6j4yhgkms3v2q686hzxz";
+        let delegate_address = "tark1qqvgg4up7ccufrcujuy7yvyjqe7sdqmlxz4qe5z5ftyg0l53mhgkvndxst8wtlqtka8n44fcpyp8hz2mztd450f96x5vlqpgehcz6u8xv7zfpk";
+        let boarding_address = "bcrt1pnksy3kax65pk4ecuwgcrrf200frxckc60qcaydf2jt5tdcgk9qdqqxvlln";
+        let default_script = ArkAddress::decode(default_address)
+            .unwrap()
+            .to_p2tr_script_pubkey();
+        let delegate_script = ArkAddress::decode(delegate_address)
+            .unwrap()
+            .to_p2tr_script_pubkey();
+        let boarding_script = Address::from_str(boarding_address)
+            .unwrap()
+            .assume_checked()
+            .script_pubkey();
+        let earlier_row = |contract_type, script_pubkey, data| StoredContract {
+            contract_type,
+            contract_version: 1,
+            script_pubkey,
+            state: ContractState::Active,
+            created_at: 0,
+            key_index: Some(0),
+            data,
+        };
+        let two_leaf_data = serde_json::json!({
+            "server": server,
+            "owner": owner,
+            "exit_delay": exit_delay,
+        });
+
+        let mut manager = ContractManager::in_memory(Network::Regtest);
+        manager.register_builtins().unwrap();
+        manager
+            .insert_stored(earlier_row(
+                ContractType::default_vtxo(),
+                default_script.clone(),
+                two_leaf_data.clone(),
+            ))
+            .unwrap();
+        manager
+            .insert_stored(earlier_row(
+                ContractType::delegate_vtxo(),
+                delegate_script.clone(),
+                serde_json::json!({
+                    "server": server,
+                    "owner": owner,
+                    "delegator": delegator,
+                    "exit_delay": exit_delay,
+                }),
+            ))
+            .unwrap();
+        let new_row = manager
+            .insert(
+                DefaultVtxoContract {
+                    server,
+                    owner,
+                    exit_delay,
+                },
+                ContractState::Active,
+                Some(0),
+            )
+            .unwrap();
+        assert_ne!(new_row.script_pubkey, default_script);
+
+        let mut addresses = manager
+            .active_offchain_contracts(&[])
+            .unwrap()
+            .into_iter()
+            .map(|contract| contract.address.encode())
+            .collect::<Vec<_>>();
+        addresses.sort();
+        let new_address = DefaultVtxoContract {
+            server,
+            owner,
+            exit_delay,
+        }
+        .vtxo(&ContractContext::new(Network::Regtest))
+        .unwrap()
+        .to_ark_address()
+        .encode();
+        let mut expected = vec![
+            default_address.to_string(),
+            delegate_address.to_string(),
+            new_address,
+        ];
+        expected.sort();
+        assert_eq!(addresses, expected);
+
+        let server_first_forfeit = ark_core::script::multisig_script(server, owner);
+        let vtxo = |script: ScriptBuf| VirtualTxOutPoint {
+            outpoint: OutPoint::null(),
+            created_at: 0,
+            expires_at: 0,
+            amount: Amount::from_sat(42_000),
+            script,
+            is_preconfirmed: false,
+            is_swept: false,
+            is_unrolled: false,
+            is_spent: false,
+            spent_by: None,
+            commitment_txids: Vec::new(),
+            settled_by: None,
+            ark_txid: None,
+            assets: Vec::new(),
+            depth: 0,
+        };
+        let annotated = manager
+            .annotate_vtxos(vec![vtxo(default_script), vtxo(delegate_script)])
+            .unwrap();
+        for entry in &annotated {
+            let forfeit = entry.spend_selection(SpendPathKind::Forfeit).unwrap();
+            assert_eq!(forfeit.path.script, server_first_forfeit);
+        }
+        assert!(annotated[1]
+            .spend_selection(SpendPathKind::Delegate)
+            .is_ok());
+
+        // With these keys and delay a boarding output has the default VTXO's script, so it gets its
+        // own store.
+        let mut boarding_manager = ContractManager::in_memory(Network::Regtest);
+        boarding_manager.register_builtins().unwrap();
+        boarding_manager
+            .insert_stored(earlier_row(
+                ContractType::boarding(),
+                boarding_script.clone(),
+                two_leaf_data,
+            ))
+            .unwrap();
+        let boarding = boarding_manager.annotated_boarding_outputs().unwrap();
+        assert_eq!(boarding.len(), 1);
+        assert_eq!(boarding[0].address().to_string(), boarding_address);
+        assert_eq!(
+            boarding[0]
+                .spend_selection(SpendPathKind::Forfeit)
+                .unwrap()
+                .path
+                .script,
+            server_first_forfeit
+        );
+
+        // A row whose script neither key order builds is still rejected.
+        let err = manager
+            .insert_stored(earlier_row(
+                ContractType::default_vtxo(),
+                boarding_script,
+                serde_json::json!({
+                    "server": owner,
+                    "owner": server,
+                    "exit_delay": exit_delay,
+                }),
+            ))
+            .unwrap_err();
+        assert!(err.to_string().contains("script mismatch"));
     }
 }
