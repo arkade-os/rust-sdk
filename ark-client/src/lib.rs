@@ -25,6 +25,7 @@ use ark_core::server::SubscriptionFilter;
 use ark_core::server::SubscriptionResponse;
 use ark_core::server::VirtualTxOutPoint;
 use ark_core::ArkAddress;
+use ark_core::BoardingOutput;
 use ark_core::ExplorerUtxo;
 use ark_core::UtxoCoinSelection;
 use ark_core::Vtxo;
@@ -477,10 +478,18 @@ struct ServerState {
 }
 
 #[derive(Clone, Debug)]
-enum RestoreCandidate {
+enum RestoreContract {
     DefaultVtxo(DefaultVtxoContract),
     DelegateVtxo(DelegateVtxoContract),
     Boarding(BoardingContract),
+}
+
+/// A contract to look for during restore, in one forfeit key order.
+#[derive(Clone, Debug)]
+struct RestoreCandidate {
+    contract: RestoreContract,
+    /// Whether to look for the server-first forfeit leaf that earlier versions built.
+    server_first: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -490,71 +499,68 @@ enum RestoreDiscoveryTarget {
 }
 
 impl RestoreCandidate {
-    fn discovery_target(
-        &self,
-        secp: &Secp256k1<All>,
-        ctx: &ContractContext,
-    ) -> Result<RestoreDiscoveryTarget, Error> {
-        match self {
-            Self::DefaultVtxo(contract) => Ok(RestoreDiscoveryTarget::Offchain(
-                Vtxo::new_default(
-                    secp,
-                    contract.server,
-                    contract.owner,
-                    contract.exit_delay,
-                    ctx.network(),
-                )?
-                .to_ark_address(),
-            )),
-            Self::DelegateVtxo(contract) => Ok(RestoreDiscoveryTarget::Offchain(
-                Vtxo::new_with_delegator(
-                    secp,
-                    contract.server,
-                    contract.owner,
-                    contract.delegator,
-                    contract.exit_delay,
-                    ctx.network(),
-                )?
-                .to_ark_address(),
-            )),
-            Self::Boarding(contract) => Ok(RestoreDiscoveryTarget::Boarding(
-                contract.boarding_output(ctx)?.address().clone(),
-            )),
-        }
+    /// Both key orders of `contract`.
+    fn both_orders(contract: RestoreContract) -> [Self; 2] {
+        [
+            Self {
+                contract: contract.clone(),
+                server_first: false,
+            },
+            Self {
+                contract,
+                server_first: true,
+            },
+        ]
     }
 
-    fn script_pubkey(
-        &self,
-        secp: &Secp256k1<All>,
-        ctx: &ContractContext,
-    ) -> Result<ScriptBuf, Error> {
-        match self {
-            Self::DefaultVtxo(contract) => Ok(Vtxo::new_default(
-                secp,
-                contract.server,
-                contract.owner,
-                contract.exit_delay,
-                ctx.network(),
-            )?
-            .script_pubkey()),
-            Self::DelegateVtxo(contract) => Ok(Vtxo::new_with_delegator(
-                secp,
-                contract.server,
-                contract.owner,
-                contract.delegator,
-                contract.exit_delay,
-                ctx.network(),
-            )?
-            .script_pubkey()),
-            Self::Boarding(contract) => Ok(contract.boarding_output(ctx)?.script_pubkey()),
+    fn offchain_vtxo(&self, ctx: &ContractContext) -> Result<Option<Vtxo>, Error> {
+        let vtxo = match (&self.contract, self.server_first) {
+            (RestoreContract::DefaultVtxo(contract), false) => contract.vtxo(ctx)?,
+            (RestoreContract::DefaultVtxo(contract), true) => contract.server_first_vtxo(ctx)?,
+            (RestoreContract::DelegateVtxo(contract), false) => contract.vtxo(ctx)?,
+            (RestoreContract::DelegateVtxo(contract), true) => contract.server_first_vtxo(ctx)?,
+            (RestoreContract::Boarding(_), _) => return Ok(None),
+        };
+        Ok(Some(vtxo))
+    }
+
+    fn boarding_output(&self, ctx: &ContractContext) -> Result<Option<BoardingOutput>, Error> {
+        let RestoreContract::Boarding(contract) = &self.contract else {
+            return Ok(None);
+        };
+        let output = if self.server_first {
+            contract.server_first_boarding_output(ctx)?
+        } else {
+            contract.boarding_output(ctx)?
+        };
+        Ok(Some(output))
+    }
+
+    fn discovery_target(&self, ctx: &ContractContext) -> Result<RestoreDiscoveryTarget, Error> {
+        if let Some(vtxo) = self.offchain_vtxo(ctx)? {
+            return Ok(RestoreDiscoveryTarget::Offchain(vtxo.to_ark_address()));
         }
+        let output = self
+            .boarding_output(ctx)?
+            .ok_or_else(|| Error::ad_hoc("restore candidate has no output"))?;
+        Ok(RestoreDiscoveryTarget::Boarding(output.address().clone()))
+    }
+
+    fn script_pubkey(&self, ctx: &ContractContext) -> Result<ScriptBuf, Error> {
+        if let Some(vtxo) = self.offchain_vtxo(ctx)? {
+            return Ok(vtxo.script_pubkey());
+        }
+        let output = self
+            .boarding_output(ctx)?
+            .ok_or_else(|| Error::ad_hoc("restore candidate has no output"))?;
+        Ok(output.script_pubkey())
     }
 
     fn contract_type(&self) -> ContractType {
-        match self {
-            Self::DefaultVtxo(_) => ContractType::default_vtxo(),
-            Self::DelegateVtxo(_) => ContractType::delegate_vtxo(),
-            Self::Boarding(_) => ContractType::boarding(),
+        match self.contract {
+            RestoreContract::DefaultVtxo(_) => ContractType::default_vtxo(),
+            RestoreContract::DelegateVtxo(_) => ContractType::delegate_vtxo(),
+            RestoreContract::Boarding(_) => ContractType::boarding(),
         }
     }
 }
@@ -1433,7 +1439,7 @@ where
             for (_, _, candidates) in &batch {
                 for candidate in candidates {
                     if let RestoreDiscoveryTarget::Offchain(address) =
-                        candidate.discovery_target(self.secp(), &ctx)?
+                        candidate.discovery_target(&ctx)?
                     {
                         offchain_addresses.push(address);
                     }
@@ -1462,9 +1468,9 @@ where
                 let mut found_for_key = false;
 
                 for candidate in candidates {
-                    let script = candidate.script_pubkey(self.secp(), &ctx)?;
+                    let script = candidate.script_pubkey(&ctx)?;
                     let contract_type = candidate.contract_type();
-                    let target = candidate.discovery_target(self.secp(), &ctx)?;
+                    let target = candidate.discovery_target(&ctx)?;
                     let discovery = match target {
                         RestoreDiscoveryTarget::Offchain(_) => offchain_vtxos_by_script
                             .get(&script)
@@ -1570,32 +1576,38 @@ where
 
             for server in server_keys {
                 for exit_delay in offchain_exit_delays {
-                    candidates.push(RestoreCandidate::DefaultVtxo(DefaultVtxoContract {
-                        server: *server,
-                        owner,
-                        exit_delay: *exit_delay,
-                    }));
+                    candidates.extend(RestoreCandidate::both_orders(RestoreContract::DefaultVtxo(
+                        DefaultVtxoContract {
+                            server: *server,
+                            owner,
+                            exit_delay: *exit_delay,
+                        },
+                    )));
 
                     let mut seen_delegators = HashSet::new();
                     for delegator in &self.inner.historical_delegator_pks {
                         if !seen_delegators.insert(delegator) {
                             continue;
                         }
-                        candidates.push(RestoreCandidate::DelegateVtxo(DelegateVtxoContract {
-                            server: *server,
-                            owner,
-                            delegator: *delegator,
-                            exit_delay: *exit_delay,
-                        }));
+                        candidates.extend(RestoreCandidate::both_orders(
+                            RestoreContract::DelegateVtxo(DelegateVtxoContract {
+                                server: *server,
+                                owner,
+                                delegator: *delegator,
+                                exit_delay: *exit_delay,
+                            }),
+                        ));
                     }
                 }
 
                 for exit_delay in boarding_exit_delays {
-                    candidates.push(RestoreCandidate::Boarding(BoardingContract {
-                        server: *server,
-                        owner,
-                        exit_delay: *exit_delay,
-                    }));
+                    candidates.extend(RestoreCandidate::both_orders(RestoreContract::Boarding(
+                        BoardingContract {
+                            server: *server,
+                            owner,
+                            exit_delay: *exit_delay,
+                        },
+                    )));
                 }
             }
 
@@ -1619,18 +1631,22 @@ where
             .lock()
             .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?;
         let ctx = ContractContext::new(state.server_info.network);
-        let script = candidate.script_pubkey(self.secp(), &ctx)?;
+        let script = candidate.script_pubkey(&ctx)?;
         let existed = manager.get(&script)?.is_some();
 
-        match candidate {
-            RestoreCandidate::DefaultVtxo(contract) => {
-                manager.insert_or_get(contract, ContractState::Active, Some(key_index))?;
+        // Store the row at the script that was found, which is server-first for outputs that
+        // earlier versions built.
+        let state = ContractState::Active;
+        let key_index = Some(key_index);
+        match candidate.contract {
+            RestoreContract::DefaultVtxo(contract) => {
+                manager.insert_or_get_at_script(contract, script, state, key_index)?;
             }
-            RestoreCandidate::DelegateVtxo(contract) => {
-                manager.insert_or_get(contract, ContractState::Active, Some(key_index))?;
+            RestoreContract::DelegateVtxo(contract) => {
+                manager.insert_or_get_at_script(contract, script, state, key_index)?;
             }
-            RestoreCandidate::Boarding(contract) => {
-                manager.insert_or_get(contract, ContractState::Active, Some(key_index))?;
+            RestoreContract::Boarding(contract) => {
+                manager.insert_or_get_at_script(contract, script, state, key_index)?;
             }
         }
 
@@ -2800,5 +2816,89 @@ mod digest_guard_tests {
         let refreshed_state = cached_state.read().unwrap();
         assert_eq!(refreshed_state.server_info.digest, "fresh-digest");
         assert!(refreshed_state.server_info_refreshed_at.elapsed() < DEFAULT_SERVER_INFO_TTL);
+    }
+}
+
+#[cfg(test)]
+mod restore_candidate_tests {
+    use super::*;
+    use crate::contract::ContractManager;
+    use std::str::FromStr;
+
+    /// Restore looks for each contract in both forfeit key orders, finds the addresses an earlier
+    /// ark-core shipped for these keys, and stores a hit at the script it was found at.
+    #[test]
+    fn restore_looks_for_server_first_outputs() {
+        let ctx = ContractContext::new(Network::Regtest);
+        let server = XOnlyPublicKey::from_str(
+            "18845781f631c48f1c9709e23092067d06837f30aa0cd0544ac887fe91ddd166",
+        )
+        .unwrap();
+        let owner = XOnlyPublicKey::from_str(
+            "28845781f631c48f1c9709e23092067d06837f30aa0cd0544ac887fe91ddd166",
+        )
+        .unwrap();
+        let exit_delay = bitcoin::Sequence::from_seconds_ceil(86400).unwrap();
+        let contract = DefaultVtxoContract {
+            server,
+            owner,
+            exit_delay,
+        };
+
+        let [owner_first, server_first] =
+            RestoreCandidate::both_orders(RestoreContract::DefaultVtxo(contract.clone()));
+        let RestoreDiscoveryTarget::Offchain(owner_first_address) =
+            owner_first.discovery_target(&ctx).unwrap()
+        else {
+            panic!("default vtxo is offchain");
+        };
+        let RestoreDiscoveryTarget::Offchain(server_first_address) =
+            server_first.discovery_target(&ctx).unwrap()
+        else {
+            panic!("default vtxo is offchain");
+        };
+        assert_eq!(
+            owner_first_address,
+            contract.vtxo(&ctx).unwrap().to_ark_address()
+        );
+        assert_eq!(
+            server_first_address.encode(),
+            "tark1qqvgg4up7ccufrcujuy7yvyjqe7sdqmlxz4qe5z5ftyg0l53mhgkd8dqfrd6d4grdtn3cu3sxxj577jxd3d357p36g6j4yhgkms3v2q686hzxz"
+        );
+
+        let [_, server_first_boarding] =
+            RestoreCandidate::both_orders(RestoreContract::Boarding(BoardingContract {
+                server,
+                owner,
+                exit_delay,
+            }));
+        let RestoreDiscoveryTarget::Boarding(boarding_address) =
+            server_first_boarding.discovery_target(&ctx).unwrap()
+        else {
+            panic!("boarding output is onchain");
+        };
+        assert_eq!(
+            boarding_address.to_string(),
+            "bcrt1pnksy3kax65pk4ecuwgcrrf200frxckc60qcaydf2jt5tdcgk9qdqqxvlln"
+        );
+
+        let mut manager = ContractManager::in_memory(Network::Regtest);
+        manager.register_builtins().unwrap();
+        let script = server_first.script_pubkey(&ctx).unwrap();
+        let stored = manager
+            .insert_or_get_at_script(
+                contract.clone(),
+                script.clone(),
+                ContractState::Active,
+                Some(0),
+            )
+            .unwrap();
+        assert_eq!(stored.script_pubkey, script);
+        assert_eq!(
+            manager
+                .insert_or_get_at_script(contract, script, ContractState::Active, Some(0))
+                .unwrap(),
+            stored
+        );
     }
 }

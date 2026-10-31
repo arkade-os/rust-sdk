@@ -732,7 +732,8 @@ impl ContractManager {
         state: ContractState,
         key_index: Option<u32>,
     ) -> Result<StoredContract, Error> {
-        let stored = self.stored_contract(contract, state, key_index)?;
+        let script_pubkey = contract.script_pubkey(&ContractContext::new(self.network))?;
+        let stored = self.stored_contract(contract, script_pubkey, state, key_index)?;
         self.store.insert(stored.clone())?;
         Ok(stored)
     }
@@ -743,7 +744,20 @@ impl ContractManager {
         state: ContractState,
         key_index: Option<u32>,
     ) -> Result<StoredContract, Error> {
-        let stored = self.stored_contract(contract, state, key_index)?;
+        let script_pubkey = contract.script_pubkey(&ContractContext::new(self.network))?;
+        self.insert_or_get_at_script(contract, script_pubkey, state, key_index)
+    }
+
+    /// [`Self::insert_or_get`] for the output of `contract` at `script_pubkey`, such as one built
+    /// with the server-first forfeit leaf of earlier versions.
+    pub fn insert_or_get_at_script<T: ContractSpec>(
+        &mut self,
+        contract: T,
+        script_pubkey: ScriptBuf,
+        state: ContractState,
+        key_index: Option<u32>,
+    ) -> Result<StoredContract, Error> {
+        let stored = self.stored_contract(contract, script_pubkey, state, key_index)?;
 
         match self.store.get_by_script(&stored.script_pubkey)? {
             None => {
@@ -761,6 +775,7 @@ impl ContractManager {
     fn stored_contract<T: ContractSpec>(
         &self,
         contract: T,
+        script_pubkey: ScriptBuf,
         state: ContractState,
         key_index: Option<u32>,
     ) -> Result<StoredContract, Error> {
@@ -768,7 +783,7 @@ impl ContractManager {
         let stored = StoredContract {
             contract_type: T::contract_type(),
             contract_version: T::VERSION,
-            script_pubkey: contract.script_pubkey(&ctx)?,
+            script_pubkey,
             state,
             created_at: now_secs()?,
             key_index,
