@@ -1333,7 +1333,7 @@ mod tests {
 
         let server_xonly = server_pk.inner.x_only_public_key().0;
         let owner_xonly = owner_pk.inner.x_only_public_key().0;
-        let spend_script = multisig_script(server_xonly, owner_xonly);
+        let spend_script = multisig_script(owner_xonly, server_xonly);
         let spend_info = TaprootBuilder::new()
             .add_leaf(0, spend_script.clone())
             .unwrap()
