@@ -2823,6 +2823,7 @@ mod digest_guard_tests {
 mod restore_candidate_tests {
     use super::*;
     use crate::contract::ContractManager;
+    use ark_core::contract::ContractSpec;
     use std::str::FromStr;
 
     /// Restore looks for each contract in both forfeit key orders, finds the addresses an earlier
@@ -2896,9 +2897,28 @@ mod restore_candidate_tests {
         assert_eq!(stored.script_pubkey, script);
         assert_eq!(
             manager
-                .insert_or_get_at_script(contract, script, ContractState::Active, Some(0))
+                .insert_or_get_at_script(contract.clone(), script, ContractState::Active, Some(0))
                 .unwrap(),
             stored
         );
+
+        // A script that the contract builds in neither key order is rejected before it is stored.
+        let other_script = DefaultVtxoContract {
+            server: owner,
+            owner: server,
+            exit_delay,
+        }
+        .script_pubkey(&ctx)
+        .unwrap();
+        let err = manager
+            .insert_or_get_at_script(
+                contract,
+                other_script.clone(),
+                ContractState::Active,
+                Some(0),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("script mismatch"));
+        assert!(manager.get(&other_script).unwrap().is_none());
     }
 }
