@@ -333,9 +333,12 @@ impl DefaultVtxoContract {
         ctx: &ContractContext,
         script_pubkey: &Script,
     ) -> Result<Option<Vtxo>, Error> {
-        Ok([self.vtxo(ctx)?, self.server_first_vtxo(ctx)?]
-            .into_iter()
-            .find(|vtxo| vtxo.script_pubkey() == *script_pubkey))
+        let vtxo = self.vtxo(ctx)?;
+        if vtxo.script_pubkey() == *script_pubkey {
+            return Ok(Some(vtxo));
+        }
+        let vtxo = self.server_first_vtxo(ctx)?;
+        Ok((vtxo.script_pubkey() == *script_pubkey).then_some(vtxo))
     }
 }
 
@@ -423,9 +426,12 @@ impl DelegateVtxoContract {
         ctx: &ContractContext,
         script_pubkey: &Script,
     ) -> Result<Option<Vtxo>, Error> {
-        Ok([self.vtxo(ctx)?, self.server_first_vtxo(ctx)?]
-            .into_iter()
-            .find(|vtxo| vtxo.script_pubkey() == *script_pubkey))
+        let vtxo = self.vtxo(ctx)?;
+        if vtxo.script_pubkey() == *script_pubkey {
+            return Ok(Some(vtxo));
+        }
+        let vtxo = self.server_first_vtxo(ctx)?;
+        Ok((vtxo.script_pubkey() == *script_pubkey).then_some(vtxo))
     }
 }
 
@@ -515,12 +521,12 @@ impl BoardingContract {
         ctx: &ContractContext,
         script_pubkey: &Script,
     ) -> Result<Option<BoardingOutput>, Error> {
-        Ok([
-            self.boarding_output(ctx)?,
-            self.server_first_boarding_output(ctx)?,
-        ]
-        .into_iter()
-        .find(|output| output.script_pubkey() == *script_pubkey))
+        let output = self.boarding_output(ctx)?;
+        if output.script_pubkey() == *script_pubkey {
+            return Ok(Some(output));
+        }
+        let output = self.server_first_boarding_output(ctx)?;
+        Ok((output.script_pubkey() == *script_pubkey).then_some(output))
     }
 }
 
