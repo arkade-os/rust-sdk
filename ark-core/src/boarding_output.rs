@@ -46,7 +46,7 @@ impl BoardingOutput {
             .map_err(|e| Error::ad_hoc(format!("invalid unspendable key: {e}")))?;
         let (unspendable_key, _) = unspendable_key.inner.x_only_public_key();
 
-        let multisig_script = multisig_script(server, owner);
+        let multisig_script = multisig_script(owner, server);
         let exit_script = csv_sig_script(exit_delay, owner);
 
         let spend_info = TaprootBuilder::new()
@@ -155,7 +155,7 @@ impl BoardingOutput {
     }
 
     fn forfeit_script(&self) -> ScriptBuf {
-        multisig_script(self.server, self.owner)
+        multisig_script(self.owner, self.server)
     }
 
     fn exit_script(&self) -> ScriptBuf {

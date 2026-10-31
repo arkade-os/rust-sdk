@@ -121,7 +121,7 @@ impl Vtxo {
     where
         C: Verification,
     {
-        let forfeit_script = multisig_script(server_signer, owner);
+        let forfeit_script = multisig_script(owner, server_signer);
         let redeem_script = csv_sig_script(exit_delay, owner);
 
         Self::new_with_custom_scripts(
@@ -154,7 +154,7 @@ impl Vtxo {
     where
         C: Verification,
     {
-        let forfeit_script = multisig_script(server_signer, owner);
+        let forfeit_script = multisig_script(owner, server_signer);
         let redeem_script = csv_sig_script(exit_delay, owner);
         let delegate_script = multisig_3_of_3_script(owner, delegator, server_signer);
 
@@ -216,7 +216,7 @@ impl Vtxo {
     /// This method can fail because [`Vtxo`]s constructed with the method
     /// [`Vtxo::new_with_custom_scripts`] may not contain this script exactly.
     pub fn forfeit_spend_info(&self) -> Result<(ScriptBuf, taproot::ControlBlock), Error> {
-        let forfeit_script = multisig_script(self.server_forfeit, self.owner);
+        let forfeit_script = multisig_script(self.owner, self.server_forfeit);
 
         let control_block = self
             .get_spend_info(forfeit_script.clone())
