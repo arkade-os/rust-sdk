@@ -122,6 +122,53 @@ impl Vtxo {
         C: Verification,
     {
         let forfeit_script = multisig_script(owner, server_signer);
+        Self::default_with_forfeit(
+            secp,
+            server_signer,
+            owner,
+            forfeit_script,
+            exit_delay,
+            network,
+        )
+    }
+
+    /// Build a default VTXO with the forfeit leaf that ark-core used before it matched the
+    /// TypeScript SDK: `<server> CHECKSIGVERIFY <owner> CHECKSIG`.
+    ///
+    /// Use it only to find and spend outputs made with that leaf; new outputs use
+    /// [`Vtxo::new_default`].
+    pub fn new_default_server_first<C>(
+        secp: &Secp256k1<C>,
+        server_signer: XOnlyPublicKey,
+        owner: XOnlyPublicKey,
+        exit_delay: bitcoin::Sequence,
+        network: Network,
+    ) -> Result<Self, Error>
+    where
+        C: Verification,
+    {
+        let forfeit_script = multisig_script(server_signer, owner);
+        Self::default_with_forfeit(
+            secp,
+            server_signer,
+            owner,
+            forfeit_script,
+            exit_delay,
+            network,
+        )
+    }
+
+    fn default_with_forfeit<C>(
+        secp: &Secp256k1<C>,
+        server_signer: XOnlyPublicKey,
+        owner: XOnlyPublicKey,
+        forfeit_script: ScriptBuf,
+        exit_delay: bitcoin::Sequence,
+        network: Network,
+    ) -> Result<Self, Error>
+    where
+        C: Verification,
+    {
         let redeem_script = csv_sig_script(exit_delay, owner);
 
         Self::new_with_custom_scripts(
@@ -155,6 +202,58 @@ impl Vtxo {
         C: Verification,
     {
         let forfeit_script = multisig_script(owner, server_signer);
+        Self::delegator_with_forfeit(
+            secp,
+            server_signer,
+            owner,
+            delegator,
+            forfeit_script,
+            exit_delay,
+            network,
+        )
+    }
+
+    /// Build a VTXO with a delegate spending path and the forfeit leaf that ark-core used before
+    /// it matched the TypeScript SDK: `<server> CHECKSIGVERIFY <owner> CHECKSIG`. The delegate leaf
+    /// is the same as in [`Vtxo::new_with_delegator`].
+    ///
+    /// Use it only to find and spend outputs made with that leaf; new outputs use
+    /// [`Vtxo::new_with_delegator`].
+    pub fn new_with_delegator_server_first<C>(
+        secp: &Secp256k1<C>,
+        server_signer: XOnlyPublicKey,
+        owner: XOnlyPublicKey,
+        delegator: XOnlyPublicKey,
+        exit_delay: bitcoin::Sequence,
+        network: Network,
+    ) -> Result<Self, Error>
+    where
+        C: Verification,
+    {
+        let forfeit_script = multisig_script(server_signer, owner);
+        Self::delegator_with_forfeit(
+            secp,
+            server_signer,
+            owner,
+            delegator,
+            forfeit_script,
+            exit_delay,
+            network,
+        )
+    }
+
+    fn delegator_with_forfeit<C>(
+        secp: &Secp256k1<C>,
+        server_signer: XOnlyPublicKey,
+        owner: XOnlyPublicKey,
+        delegator: XOnlyPublicKey,
+        forfeit_script: ScriptBuf,
+        exit_delay: bitcoin::Sequence,
+        network: Network,
+    ) -> Result<Self, Error>
+    where
+        C: Verification,
+    {
         let redeem_script = csv_sig_script(exit_delay, owner);
         let delegate_script = multisig_3_of_3_script(owner, delegator, server_signer);
 
@@ -216,13 +315,18 @@ impl Vtxo {
     /// This method can fail because [`Vtxo`]s constructed with the method
     /// [`Vtxo::new_with_custom_scripts`] may not contain this script exactly.
     pub fn forfeit_spend_info(&self) -> Result<(ScriptBuf, taproot::ControlBlock), Error> {
-        let forfeit_script = multisig_script(self.owner, self.server_forfeit);
-
-        let control_block = self
-            .get_spend_info(forfeit_script.clone())
-            .context("missing default forfeit script")?;
-
-        Ok((forfeit_script, control_block))
+        // VTXOs built with `new_default_server_first` or `new_with_delegator_server_first` put the
+        // server first.
+        [
+            multisig_script(self.owner, self.server_forfeit),
+            multisig_script(self.server_forfeit, self.owner),
+        ]
+        .into_iter()
+        .find_map(|script| {
+            let control_block = self.get_spend_info(script.clone()).ok()?;
+            Some((script, control_block))
+        })
+        .ok_or_else(|| Error::ad_hoc("missing default forfeit script"))
     }
 
     /// The spend info for the unilateral exit branch of a _default_ VTXO.
@@ -490,6 +594,60 @@ mod tests {
             vtxo.to_ark_address().encode(),
             "tark1qqvgg4up7ccufrcujuy7yvyjqe7sdqmlxz4qe5z5ftyg0l53mhgkvlnvl40j7sg7clj32jd72fyzap9gh3ltcyzxptt4g067z59lzxwr5vl7nj"
         );
+    }
+
+    /// The server-first constructors rebuild the addresses that ark-core shipped before it matched
+    /// the TypeScript SDK (taken from 4dd9038 for the same keys), and spend through that leaf.
+    #[test]
+    fn server_first_vtxos_match_earlier_ark_core() {
+        let secp = Secp256k1::new();
+        let (server, owner, delegator) = test_keys();
+        let exit_delay = bitcoin::Sequence::from_seconds_ceil(86400).unwrap();
+
+        let vtxo =
+            Vtxo::new_default_server_first(&secp, server, owner, exit_delay, Network::Regtest)
+                .unwrap();
+        let with_delegator = Vtxo::new_with_delegator_server_first(
+            &secp,
+            server,
+            owner,
+            delegator,
+            exit_delay,
+            Network::Regtest,
+        )
+        .unwrap();
+        let boarding = crate::BoardingOutput::new_server_first(
+            &secp,
+            server,
+            owner,
+            exit_delay,
+            Network::Regtest,
+        )
+        .unwrap();
+
+        let expected_forfeit_script =
+            "2018845781f631c48f1c9709e23092067d06837f30aa0cd0544ac887fe91ddd166ad\
+             2028845781f631c48f1c9709e23092067d06837f30aa0cd0544ac887fe91ddd166ac";
+        assert_eq!(
+            vtxo.to_ark_address().encode(),
+            "tark1qqvgg4up7ccufrcujuy7yvyjqe7sdqmlxz4qe5z5ftyg0l53mhgkd8dqfrd6d4grdtn3cu3sxxj577jxd3d357p36g6j4yhgkms3v2q686hzxz"
+        );
+        assert_eq!(
+            with_delegator.to_ark_address().encode(),
+            "tark1qqvgg4up7ccufrcujuy7yvyjqe7sdqmlxz4qe5z5ftyg0l53mhgkvndxst8wtlqtka8n44fcpyp8hz2mztd450f96x5vlqpgehcz6u8xv7zfpk"
+        );
+        assert_eq!(
+            boarding.address().to_string(),
+            "bcrt1pnksy3kax65pk4ecuwgcrrf200frxckc60qcaydf2jt5tdcgk9qdqqxvlln"
+        );
+        for forfeit_script in [
+            vtxo.forfeit_spend_info().unwrap().0,
+            with_delegator.forfeit_spend_info().unwrap().0,
+            boarding.forfeit_spend_info().0,
+        ] {
+            assert_eq!(forfeit_script.to_hex_string(), expected_forfeit_script);
+        }
+        assert!(with_delegator.delegate_spend_info().is_ok());
     }
 
     #[test]

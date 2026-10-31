@@ -7,6 +7,7 @@ use bitcoin::key::Secp256k1;
 use bitcoin::secp256k1::All;
 use bitcoin::taproot::ControlBlock;
 use bitcoin::Network;
+use bitcoin::Script;
 use bitcoin::ScriptBuf;
 use bitcoin::Sequence;
 use bitcoin::XOnlyPublicKey;
@@ -218,6 +219,36 @@ pub trait ContractSpec:
             .map(SpendPath::select)
             .collect())
     }
+
+    /// The spend selections for the output at `script_pubkey`, or `None` if this contract does not
+    /// build that output.
+    ///
+    /// The built-in VTXO and boarding contracts also match outputs built with the server-first
+    /// forfeit leaf that ark-core used before it matched the TypeScript SDK.
+    fn spendable_selections_for_script(
+        &self,
+        ctx: &ContractContext,
+        script_pubkey: &Script,
+    ) -> Result<Option<Vec<SpendSelection>>, Error> {
+        if self.script_pubkey(ctx)? != *script_pubkey {
+            return Ok(None);
+        }
+        self.spendable_selections(ctx).map(Some)
+    }
+}
+
+/// Selections for the paths of a default or delegate VTXO, with the exit delay on the exit path.
+fn vtxo_selections(paths: Vec<SpendPath>, exit_delay: Sequence) -> Vec<SpendSelection> {
+    paths
+        .into_iter()
+        .map(|path| {
+            if path.kind == SpendPathKind::Exit {
+                path.select().with_sequence(exit_delay)
+            } else {
+                path.select()
+            }
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -239,32 +270,39 @@ impl ContractSpec for DefaultVtxoContract {
     }
 
     fn spendable_paths(&self, ctx: &ContractContext) -> Result<Vec<SpendPath>, Error> {
-        let vtxo = self.vtxo(ctx)?;
-        let (forfeit_script, forfeit_control_block) = vtxo.forfeit_spend_info()?;
-        let (exit_script, exit_control_block) = vtxo.exit_spend_info()?;
-        Ok(vec![
-            SpendPath::new(
-                SpendPathKind::Forfeit,
-                forfeit_script,
-                forfeit_control_block,
-            ),
-            SpendPath::new(SpendPathKind::Exit, exit_script, exit_control_block),
-        ])
+        default_vtxo_paths(&self.vtxo(ctx)?)
     }
 
     fn spendable_selections(&self, ctx: &ContractContext) -> Result<Vec<SpendSelection>, Error> {
-        Ok(self
-            .spendable_paths(ctx)?
-            .into_iter()
-            .map(|path| {
-                if path.kind == SpendPathKind::Exit {
-                    path.select().with_sequence(self.exit_delay)
-                } else {
-                    path.select()
-                }
-            })
-            .collect())
+        Ok(vtxo_selections(self.spendable_paths(ctx)?, self.exit_delay))
     }
+
+    fn spendable_selections_for_script(
+        &self,
+        ctx: &ContractContext,
+        script_pubkey: &Script,
+    ) -> Result<Option<Vec<SpendSelection>>, Error> {
+        let Some(vtxo) = self.vtxo_for_script(ctx, script_pubkey)? else {
+            return Ok(None);
+        };
+        Ok(Some(vtxo_selections(
+            default_vtxo_paths(&vtxo)?,
+            self.exit_delay,
+        )))
+    }
+}
+
+fn default_vtxo_paths(vtxo: &Vtxo) -> Result<Vec<SpendPath>, Error> {
+    let (forfeit_script, forfeit_control_block) = vtxo.forfeit_spend_info()?;
+    let (exit_script, exit_control_block) = vtxo.exit_spend_info()?;
+    Ok(vec![
+        SpendPath::new(
+            SpendPathKind::Forfeit,
+            forfeit_script,
+            forfeit_control_block,
+        ),
+        SpendPath::new(SpendPathKind::Exit, exit_script, exit_control_block),
+    ])
 }
 
 impl DefaultVtxoContract {
@@ -276,6 +314,28 @@ impl DefaultVtxoContract {
             self.exit_delay,
             ctx.network(),
         )
+    }
+
+    /// The VTXO with the server-first forfeit leaf, see [`Vtxo::new_default_server_first`].
+    pub fn server_first_vtxo(&self, ctx: &ContractContext) -> Result<Vtxo, Error> {
+        Vtxo::new_default_server_first(
+            ctx.secp(),
+            self.server,
+            self.owner,
+            self.exit_delay,
+            ctx.network(),
+        )
+    }
+
+    /// The VTXO at `script_pubkey`, in either forfeit key order.
+    pub fn vtxo_for_script(
+        &self,
+        ctx: &ContractContext,
+        script_pubkey: &Script,
+    ) -> Result<Option<Vtxo>, Error> {
+        Ok([self.vtxo(ctx)?, self.server_first_vtxo(ctx)?]
+            .into_iter()
+            .find(|vtxo| vtxo.script_pubkey() == *script_pubkey))
     }
 }
 
@@ -299,38 +359,37 @@ impl ContractSpec for DelegateVtxoContract {
     }
 
     fn spendable_paths(&self, ctx: &ContractContext) -> Result<Vec<SpendPath>, Error> {
-        let vtxo = self.vtxo(ctx)?;
-        let (forfeit_script, forfeit_control_block) = vtxo.forfeit_spend_info()?;
-        let (exit_script, exit_control_block) = vtxo.exit_spend_info()?;
-        let (delegate_script, delegate_control_block) = vtxo.delegate_spend_info()?;
-        Ok(vec![
-            SpendPath::new(
-                SpendPathKind::Forfeit,
-                forfeit_script,
-                forfeit_control_block,
-            ),
-            SpendPath::new(SpendPathKind::Exit, exit_script, exit_control_block),
-            SpendPath::new(
-                SpendPathKind::Delegate,
-                delegate_script,
-                delegate_control_block,
-            ),
-        ])
+        delegate_vtxo_paths(&self.vtxo(ctx)?)
     }
 
     fn spendable_selections(&self, ctx: &ContractContext) -> Result<Vec<SpendSelection>, Error> {
-        Ok(self
-            .spendable_paths(ctx)?
-            .into_iter()
-            .map(|path| {
-                if path.kind == SpendPathKind::Exit {
-                    path.select().with_sequence(self.exit_delay)
-                } else {
-                    path.select()
-                }
-            })
-            .collect())
+        Ok(vtxo_selections(self.spendable_paths(ctx)?, self.exit_delay))
     }
+
+    fn spendable_selections_for_script(
+        &self,
+        ctx: &ContractContext,
+        script_pubkey: &Script,
+    ) -> Result<Option<Vec<SpendSelection>>, Error> {
+        let Some(vtxo) = self.vtxo_for_script(ctx, script_pubkey)? else {
+            return Ok(None);
+        };
+        Ok(Some(vtxo_selections(
+            delegate_vtxo_paths(&vtxo)?,
+            self.exit_delay,
+        )))
+    }
+}
+
+fn delegate_vtxo_paths(vtxo: &Vtxo) -> Result<Vec<SpendPath>, Error> {
+    let mut paths = default_vtxo_paths(vtxo)?;
+    let (delegate_script, delegate_control_block) = vtxo.delegate_spend_info()?;
+    paths.push(SpendPath::new(
+        SpendPathKind::Delegate,
+        delegate_script,
+        delegate_control_block,
+    ));
+    Ok(paths)
 }
 
 impl DelegateVtxoContract {
@@ -343,6 +402,30 @@ impl DelegateVtxoContract {
             self.exit_delay,
             ctx.network(),
         )
+    }
+
+    /// The VTXO with the server-first forfeit leaf, see
+    /// [`Vtxo::new_with_delegator_server_first`].
+    pub fn server_first_vtxo(&self, ctx: &ContractContext) -> Result<Vtxo, Error> {
+        Vtxo::new_with_delegator_server_first(
+            ctx.secp(),
+            self.server,
+            self.owner,
+            self.delegator,
+            self.exit_delay,
+            ctx.network(),
+        )
+    }
+
+    /// The VTXO at `script_pubkey`, in either forfeit key order.
+    pub fn vtxo_for_script(
+        &self,
+        ctx: &ContractContext,
+        script_pubkey: &Script,
+    ) -> Result<Option<Vtxo>, Error> {
+        Ok([self.vtxo(ctx)?, self.server_first_vtxo(ctx)?]
+            .into_iter()
+            .find(|vtxo| vtxo.script_pubkey() == *script_pubkey))
     }
 }
 
@@ -365,32 +448,39 @@ impl ContractSpec for BoardingContract {
     }
 
     fn spendable_paths(&self, ctx: &ContractContext) -> Result<Vec<SpendPath>, Error> {
-        let boarding_output = self.boarding_output(ctx)?;
-        let (forfeit_script, forfeit_control_block) = boarding_output.forfeit_spend_info();
-        let (exit_script, exit_control_block) = boarding_output.exit_spend_info();
-        Ok(vec![
-            SpendPath::new(
-                SpendPathKind::Forfeit,
-                forfeit_script,
-                forfeit_control_block,
-            ),
-            SpendPath::new(SpendPathKind::Exit, exit_script, exit_control_block),
-        ])
+        Ok(boarding_paths(&self.boarding_output(ctx)?))
     }
 
     fn spendable_selections(&self, ctx: &ContractContext) -> Result<Vec<SpendSelection>, Error> {
-        Ok(self
-            .spendable_paths(ctx)?
-            .into_iter()
-            .map(|path| {
-                if path.kind == SpendPathKind::Exit {
-                    path.select().with_sequence(self.exit_delay)
-                } else {
-                    path.select()
-                }
-            })
-            .collect())
+        Ok(vtxo_selections(self.spendable_paths(ctx)?, self.exit_delay))
     }
+
+    fn spendable_selections_for_script(
+        &self,
+        ctx: &ContractContext,
+        script_pubkey: &Script,
+    ) -> Result<Option<Vec<SpendSelection>>, Error> {
+        let Some(boarding_output) = self.boarding_output_for_script(ctx, script_pubkey)? else {
+            return Ok(None);
+        };
+        Ok(Some(vtxo_selections(
+            boarding_paths(&boarding_output),
+            self.exit_delay,
+        )))
+    }
+}
+
+fn boarding_paths(boarding_output: &BoardingOutput) -> Vec<SpendPath> {
+    let (forfeit_script, forfeit_control_block) = boarding_output.forfeit_spend_info();
+    let (exit_script, exit_control_block) = boarding_output.exit_spend_info();
+    vec![
+        SpendPath::new(
+            SpendPathKind::Forfeit,
+            forfeit_script,
+            forfeit_control_block,
+        ),
+        SpendPath::new(SpendPathKind::Exit, exit_script, exit_control_block),
+    ]
 }
 
 impl BoardingContract {
@@ -402,6 +492,35 @@ impl BoardingContract {
             self.exit_delay,
             ctx.network(),
         )
+    }
+
+    /// The boarding output with the server-first forfeit leaf, see
+    /// [`BoardingOutput::new_server_first`].
+    pub fn server_first_boarding_output(
+        &self,
+        ctx: &ContractContext,
+    ) -> Result<BoardingOutput, Error> {
+        BoardingOutput::new_server_first(
+            ctx.secp(),
+            self.server,
+            self.owner,
+            self.exit_delay,
+            ctx.network(),
+        )
+    }
+
+    /// The boarding output at `script_pubkey`, in either forfeit key order.
+    pub fn boarding_output_for_script(
+        &self,
+        ctx: &ContractContext,
+        script_pubkey: &Script,
+    ) -> Result<Option<BoardingOutput>, Error> {
+        Ok([
+            self.boarding_output(ctx)?,
+            self.server_first_boarding_output(ctx)?,
+        ]
+        .into_iter()
+        .find(|output| output.script_pubkey() == *script_pubkey))
     }
 }
 
@@ -539,5 +658,78 @@ mod tests {
             unilateral_refund_without_receiver.sequence,
             Some(Sequence::from_height(30))
         );
+    }
+
+    #[test]
+    fn vtxo_contracts_match_server_first_scripts() {
+        let ctx = ContractContext::new(Network::Regtest);
+        let server = test_key("18845781f631c48f1c9709e23092067d06837f30aa0cd0544ac887fe91ddd166");
+        let owner = test_key("28845781f631c48f1c9709e23092067d06837f30aa0cd0544ac887fe91ddd166");
+        let delegator =
+            test_key("38845781f631c48f1c9709e23092067d06837f30aa0cd0544ac887fe91ddd166");
+        let exit_delay = Sequence::from_seconds_ceil(86400).unwrap();
+        let server_first_forfeit = crate::script::multisig_script(server, owner);
+
+        let default = DefaultVtxoContract {
+            server,
+            owner,
+            exit_delay,
+        };
+        let delegate = DelegateVtxoContract {
+            server,
+            owner,
+            delegator,
+            exit_delay,
+        };
+        let boarding = BoardingContract {
+            server,
+            owner,
+            exit_delay,
+        };
+        let default_script = default.server_first_vtxo(&ctx).unwrap().script_pubkey();
+        let delegate_script = delegate.server_first_vtxo(&ctx).unwrap().script_pubkey();
+        let boarding_script = boarding
+            .server_first_boarding_output(&ctx)
+            .unwrap()
+            .script_pubkey();
+        let cases = [
+            (
+                default_script.clone(),
+                default.spendable_selections_for_script(&ctx, &default_script),
+            ),
+            (
+                delegate_script.clone(),
+                delegate.spendable_selections_for_script(&ctx, &delegate_script),
+            ),
+            (
+                boarding_script.clone(),
+                boarding.spendable_selections_for_script(&ctx, &boarding_script),
+            ),
+        ];
+        for (script_pubkey, selections) in cases {
+            assert_ne!(script_pubkey, default.script_pubkey(&ctx).unwrap());
+            let selections = selections.unwrap().unwrap();
+            let forfeit = selections
+                .iter()
+                .find(|selection| selection.path.kind == SpendPathKind::Forfeit)
+                .unwrap();
+            assert_eq!(forfeit.path.script, server_first_forfeit);
+            let exit = selections
+                .iter()
+                .find(|selection| selection.path.kind == SpendPathKind::Exit)
+                .unwrap();
+            assert_eq!(exit.sequence, Some(exit_delay));
+        }
+
+        // The owner-first script still matches, and an unrelated one matches neither order.
+        let owner_first = default
+            .spendable_selections_for_script(&ctx, &default.script_pubkey(&ctx).unwrap())
+            .unwrap()
+            .unwrap();
+        assert_ne!(owner_first[0].path.script, server_first_forfeit);
+        assert!(default
+            .spendable_selections_for_script(&ctx, &delegate.script_pubkey(&ctx).unwrap())
+            .unwrap()
+            .is_none());
     }
 }

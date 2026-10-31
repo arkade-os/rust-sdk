@@ -41,12 +41,45 @@ impl BoardingOutput {
     where
         C: Verification,
     {
+        let multisig_script = multisig_script(owner, server);
+        Self::with_forfeit(secp, server, owner, multisig_script, exit_delay, network)
+    }
+
+    /// Build a boarding output with the forfeit leaf that ark-core used before it matched the
+    /// TypeScript SDK: `<server> CHECKSIGVERIFY <owner> CHECKSIG`.
+    ///
+    /// Use it only to find and spend outputs made with that leaf; new outputs use
+    /// [`BoardingOutput::new`].
+    pub fn new_server_first<C>(
+        secp: &Secp256k1<C>,
+        server: XOnlyPublicKey,
+        owner: XOnlyPublicKey,
+        exit_delay: bitcoin::Sequence,
+        network: Network,
+    ) -> Result<Self, Error>
+    where
+        C: Verification,
+    {
+        let multisig_script = multisig_script(server, owner);
+        Self::with_forfeit(secp, server, owner, multisig_script, exit_delay, network)
+    }
+
+    fn with_forfeit<C>(
+        secp: &Secp256k1<C>,
+        server: XOnlyPublicKey,
+        owner: XOnlyPublicKey,
+        multisig_script: ScriptBuf,
+        exit_delay: bitcoin::Sequence,
+        network: Network,
+    ) -> Result<Self, Error>
+    where
+        C: Verification,
+    {
         let unspendable_key: PublicKey = UNSPENDABLE_KEY
             .parse()
             .map_err(|e| Error::ad_hoc(format!("invalid unspendable key: {e}")))?;
         let (unspendable_key, _) = unspendable_key.inner.x_only_public_key();
 
-        let multisig_script = multisig_script(owner, server);
         let exit_script = csv_sig_script(exit_delay, owner);
 
         let spend_info = TaprootBuilder::new()
@@ -94,14 +127,19 @@ impl BoardingOutput {
         // `ControlBlock`. It would be nicer to just get the `ControlBlock` for the left leaf and
         // the right leaf, knowing which one is which.
 
-        let forfeit_script = self.forfeit_script();
-
-        let control_block = self
-            .spend_info
-            .control_block(&(forfeit_script.clone(), LeafVersion::TapScript))
-            .expect("forfeit script");
-
-        (forfeit_script, control_block)
+        // Boarding outputs built with `new_server_first` put the server first.
+        [
+            multisig_script(self.owner, self.server),
+            multisig_script(self.server, self.owner),
+        ]
+        .into_iter()
+        .find_map(|forfeit_script| {
+            let control_block = self
+                .spend_info
+                .control_block(&(forfeit_script.clone(), LeafVersion::TapScript))?;
+            Some((forfeit_script, control_block))
+        })
+        .expect("forfeit script")
     }
 
     pub fn exit_spend_info(&self) -> (ScriptBuf, taproot::ControlBlock) {
@@ -152,10 +190,6 @@ impl BoardingOutput {
                 confirmations >= confirmations_required
             }
         }
-    }
-
-    fn forfeit_script(&self) -> ScriptBuf {
-        multisig_script(self.owner, self.server)
     }
 
     fn exit_script(&self) -> ScriptBuf {
