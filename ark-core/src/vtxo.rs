@@ -461,6 +461,37 @@ mod tests {
         );
     }
 
+    /// The delegate leaf and the address match the TypeScript SDK's `DelegateVtxo.Script` for the
+    /// same keys.
+    #[test]
+    fn delegator_vtxo_matches_ts_sdk() {
+        let secp = Secp256k1::new();
+        let (server, owner, delegator) = test_keys();
+        let exit_delay = bitcoin::Sequence::from_seconds_ceil(86400).unwrap();
+
+        let vtxo = Vtxo::new_with_delegator(
+            &secp,
+            server,
+            owner,
+            delegator,
+            exit_delay,
+            Network::Regtest,
+        )
+        .unwrap();
+        let (delegate_script, _) = vtxo.delegate_spend_info().unwrap();
+
+        assert_eq!(
+            delegate_script.to_hex_string(),
+            "2028845781f631c48f1c9709e23092067d06837f30aa0cd0544ac887fe91ddd166ad\
+             2038845781f631c48f1c9709e23092067d06837f30aa0cd0544ac887fe91ddd166ad\
+             2018845781f631c48f1c9709e23092067d06837f30aa0cd0544ac887fe91ddd166ac"
+        );
+        assert_eq!(
+            vtxo.to_ark_address().encode(),
+            "tark1qqvgg4up7ccufrcujuy7yvyjqe7sdqmlxz4qe5z5ftyg0l53mhgkvlnvl40j7sg7clj32jd72fyzap9gh3ltcyzxptt4g067z59lzxwr5vl7nj"
+        );
+    }
+
     #[test]
     fn delegator_vtxo_address_differs_from_default() {
         let secp = Secp256k1::new();
