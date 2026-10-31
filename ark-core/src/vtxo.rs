@@ -432,6 +432,35 @@ mod tests {
         assert!(vtxo.delegate_spend_info().is_err());
     }
 
+    /// The forfeit leaves and the address match the TypeScript SDK's `DefaultVtxo.Script` for the
+    /// same keys and exit delay, which put the owner first: `<owner> CHECKSIGVERIFY <server>
+    /// CHECKSIG`.
+    #[test]
+    fn default_vtxo_matches_ts_sdk() {
+        let secp = Secp256k1::new();
+        let (server, owner, _) = test_keys();
+        let exit_delay = bitcoin::Sequence::from_seconds_ceil(86400).unwrap();
+
+        let vtxo = Vtxo::new_default(&secp, server, owner, exit_delay, Network::Regtest).unwrap();
+        let (forfeit_script, _) = vtxo.forfeit_spend_info().unwrap();
+        let boarding =
+            crate::BoardingOutput::new(&secp, server, owner, exit_delay, Network::Regtest).unwrap();
+        let (boarding_forfeit_script, _) = boarding.forfeit_spend_info();
+
+        let expected_forfeit_script =
+            "2028845781f631c48f1c9709e23092067d06837f30aa0cd0544ac887fe91ddd166ad\
+             2018845781f631c48f1c9709e23092067d06837f30aa0cd0544ac887fe91ddd166ac";
+        assert_eq!(forfeit_script.to_hex_string(), expected_forfeit_script);
+        assert_eq!(
+            boarding_forfeit_script.to_hex_string(),
+            expected_forfeit_script
+        );
+        assert_eq!(
+            vtxo.to_ark_address().encode(),
+            "tark1qqvgg4up7ccufrcujuy7yvyjqe7sdqmlxz4qe5z5ftyg0l53mhgkv582vaygnevqy2vadeg9v5cjws8gs6gs5sz58qa9sfn3r3w0cxx52jsp2x"
+        );
+    }
+
     #[test]
     fn delegator_vtxo_address_differs_from_default() {
         let secp = Secp256k1::new();
