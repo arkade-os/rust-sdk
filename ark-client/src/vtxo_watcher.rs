@@ -6,6 +6,8 @@
 //! - On stream error: reconnect with exponential backoff
 
 use crate::error::ErrorContext;
+use crate::intent_fee::offchain_input_fee_params;
+use crate::intent_fee::UneconomicInputs;
 use crate::swap_storage::SwapStorage;
 use crate::wallet::OnchainWallet;
 use crate::AnnotatedVtxo;
@@ -694,7 +696,6 @@ async fn delegate_vtxos<B, W, S>(
         let valid_at = calculate_valid_at(&group_vtxos, server_info.dust);
 
         let mut vtxo_inputs = Vec::new();
-        let mut total_amount = Amount::ZERO;
 
         for entry in &group_vtxos {
             let spend_selection = match entry
@@ -715,7 +716,7 @@ async fn delegate_vtxos<B, W, S>(
                 }
             };
 
-            vtxo_inputs.push(intent::Input::new_with_spend_selection(
+            let input = intent::Input::new_with_spend_selection(
                 entry.vtxo().outpoint,
                 exit_delay,
                 TxOut {
@@ -727,29 +728,29 @@ async fn delegate_vtxos<B, W, S>(
                 entry.vtxo().is_spent,
                 entry.vtxo().is_swept,
                 entry.vtxo().assets.clone(),
-            ));
-
-            total_amount += entry.vtxo().amount;
+            );
+            vtxo_inputs.push((input, offchain_input_fee_params(entry.vtxo())));
         }
 
         if vtxo_inputs.is_empty() {
             continue;
         }
 
-        let fee = delegator_state.fee;
-        if fee >= total_amount {
-            tracing::warn!(
-                %total_amount, %fee,
-                "Delegator fee exceeds VTXO group value, skipping"
-            );
-            continue;
-        }
-        let net_amount = total_amount - fee;
-
-        if net_amount < server_info.dust {
-            tracing::warn!(%net_amount, "Net amount after fee is below dust, skipping");
-            continue;
-        }
+        let (vtxo_inputs, fee, net_amount) = match price_delegation(
+            client,
+            vtxo_inputs,
+            &delegator_state,
+            &to_address,
+            server_info.dust,
+            valid_at,
+        ) {
+            Ok(Some(priced)) => priced,
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::warn!("Cannot price delegation group, skipping: {e}");
+                continue;
+            }
+        };
 
         let mut outputs = Vec::new();
         if fee > Amount::ZERO {
@@ -787,6 +788,73 @@ async fn delegate_vtxos<B, W, S>(
     for handle in handles {
         let _ = handle.await;
     }
+}
+
+/// Price a delegation group's intent at `valid_at`, when the delegator registers it.
+///
+/// The intent must leave the operator's intent fee unclaimed: the inputs' offchain input fees,
+/// plus the offchain output fee on the delegator's fee output and on the renewed VTXO. Both come
+/// out of the renewed VTXO.
+///
+/// Returns the economic inputs, the delegator fee and the renewed VTXO amount, or `None` if the
+/// group is not worth delegating.
+fn price_delegation<B, W, S>(
+    client: &Client<B, W, S>,
+    vtxo_inputs: Vec<(intent::Input, ark_fees::OffchainInput)>,
+    delegator_state: &DelegatorState,
+    to_address: &ArkAddress,
+    dust: Amount,
+    valid_at: u64,
+) -> Result<Option<(Vec<intent::Input>, Amount, Amount)>, Error>
+where
+    B: Blockchain,
+    W: OnchainWallet,
+    S: SwapStorage + 'static,
+{
+    let at = i64::try_from(valid_at).map_err(|_| Error::ad_hoc("valid_at out of range"))?;
+
+    let mut inputs = client.price_inputs(Vec::new(), vtxo_inputs, Some(at))?;
+    inputs.retain_economic(UneconomicInputs::Skip)?;
+    if inputs.is_empty() {
+        return Ok(None);
+    }
+    let total_amount = inputs.net_total();
+
+    let fee = delegator_state.fee;
+    let fee_output_fee = if fee > Amount::ZERO {
+        client.eval_offchain_output_fee(
+            ark_fees::Output {
+                amount: fee.to_sat(),
+                script: delegator_state.fee_address_script.to_hex_string(),
+            },
+            Some(at),
+        )?
+    } else {
+        Amount::ZERO
+    };
+
+    let Some(subtotal) = total_amount
+        .checked_sub(fee)
+        .and_then(|a| a.checked_sub(fee_output_fee))
+        .filter(|a| *a > Amount::ZERO)
+    else {
+        tracing::warn!(
+            %total_amount, %fee, %fee_output_fee,
+            "Delegator fee exceeds VTXO group value, skipping"
+        );
+        return Ok(None);
+    };
+
+    let net_amount = match client.settled_output_amount(subtotal, to_address, dust, Some(at)) {
+        Ok(net_amount) => net_amount,
+        Err(e) => {
+            tracing::warn!(%subtotal, "Net amount after fees is below dust, skipping: {e}");
+            return Ok(None);
+        }
+    };
+
+    let (_, vtxo_inputs) = inputs.into_inputs();
+    Ok(Some((vtxo_inputs, fee, net_amount)))
 }
 
 /// Prepare, sign, and submit a single delegation group.
@@ -922,8 +990,16 @@ where
     );
 
     let mut rng = OsRng;
+    // The watcher picked these VTXOs, so skip any that cost more in intent fees than they are
+    // worth rather than failing the whole renewal.
     match client
-        .settle_vtxos(&mut rng, &expiring_outpoints, &[])
+        .settle_vtxos_with_server_info(
+            &mut rng,
+            &server_info,
+            &expiring_outpoints,
+            &[],
+            UneconomicInputs::Skip,
+        )
         .await
     {
         Ok(Some(txid)) => {

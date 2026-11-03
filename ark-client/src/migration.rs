@@ -687,13 +687,22 @@ where
         }
 
         let selected_outpoints: Vec<OutPoint> = selected.iter().map(|c| c.outpoint).collect();
-        let settle_result = if is_vtxo_leg {
-            self.settle_vtxos_with_server_info(rng, server_info, &selected_outpoints, &[])
-                .await
+        // The SDK picked these inputs, so skip any that cost more in intent fees than they are
+        // worth instead of failing the whole leg over them.
+        let (vtxo_outpoints, boarding_outpoints): (&[OutPoint], &[OutPoint]) = if is_vtxo_leg {
+            (&selected_outpoints, &[])
         } else {
-            self.settle_vtxos_with_server_info(rng, server_info, &[], &selected_outpoints)
-                .await
+            (&[], &selected_outpoints)
         };
+        let settle_result = self
+            .settle_vtxos_with_server_info(
+                rng,
+                server_info,
+                vtxo_outpoints,
+                boarding_outpoints,
+                crate::intent_fee::UneconomicInputs::Skip,
+            )
+            .await;
 
         // Capture (rather than propagate) the settle error so the caller can still run the other
         // leg — a failure in one leg must not suppress the other.
