@@ -244,8 +244,19 @@ fn create_validation_context(program_type: ProgramType) -> Context<'static> {
     context
 }
 
+/// Registers `now()` on `context`: the wall clock, or `at` (Unix seconds) when pinned.
+fn add_now_function(context: &mut Context<'static>, at: Option<i64>) {
+    match at {
+        Some(at) => {
+            let at = at as f64;
+            context.add_function("now", move || at);
+        }
+        None => context.add_function("now", now),
+    }
+}
+
 /// Creates a CEL context for offchain input evaluation.
-fn create_offchain_input_context(input: &OffchainInput) -> Context<'static> {
+fn create_offchain_input_context(input: &OffchainInput, at: Option<i64>) -> Context<'static> {
     let mut context = Context::default();
     let _ = context.add_variable("amount", input.amount as f64);
     let _ = context.add_variable("inputType", input.input_type.as_str());
@@ -256,7 +267,7 @@ fn create_offchain_input_context(input: &OffchainInput) -> Context<'static> {
     let _ = context.add_variable("expiry", input.expiry.unwrap_or(0) as f64);
     let _ = context.add_variable("birth", input.birth.unwrap_or(0) as f64);
 
-    context.add_function("now", now);
+    add_now_function(&mut context, at);
     context
 }
 
@@ -264,17 +275,51 @@ fn create_offchain_input_context(input: &OffchainInput) -> Context<'static> {
 fn create_onchain_input_context(input: &OnchainInput) -> Context<'static> {
     let mut context = Context::default();
     let _ = context.add_variable("amount", input.amount as f64);
-    context.add_function("now", now);
+    add_now_function(&mut context, None);
     context
 }
 
 /// Creates a CEL context for output evaluation.
-fn create_output_context(output: &Output) -> Context<'static> {
+fn create_output_context(output: &Output, at: Option<i64>) -> Context<'static> {
     let mut context = Context::default();
     let _ = context.add_variable("amount", output.amount as f64);
     let _ = context.add_variable("script", output.script.clone());
-    context.add_function("now", now);
+    add_now_function(&mut context, at);
     context
+}
+
+/// Runs `program` (if any) in `context`, coercing the numeric result to a [`FeeAmount`].
+fn eval_program(
+    program: &Option<CompiledProgram>,
+    context: impl FnOnce() -> Context<'static>,
+) -> Result<FeeAmount, Error> {
+    let Some(compiled) = program else {
+        return Ok(FeeAmount(0.0));
+    };
+
+    let result = compiled
+        .program
+        .execute(&context())
+        .map_err(|e| Error::Eval(format!("{}", e)))?;
+
+    match result {
+        cel::Value::Float(f) => Ok(FeeAmount(f)),
+        cel::Value::Int(i) => Ok(FeeAmount(i as f64)),
+        cel::Value::UInt(u) => Ok(FeeAmount(u as f64)),
+        cel::Value::String(_)
+        | cel::Value::Bytes(_)
+        | cel::Value::Bool(_)
+        | cel::Value::List(_)
+        | cel::Value::Map(_)
+        | cel::Value::Null
+        | cel::Value::Duration(_)
+        | cel::Value::Timestamp(_)
+        | cel::Value::Function(_, _)
+        | cel::Value::Opaque(_) => Err(Error::ReturnType(format!(
+            "expected return type double, got {:?}",
+            result
+        ))),
+    }
 }
 
 impl Estimator {
@@ -328,134 +373,51 @@ impl Estimator {
 
     /// Evaluates the fee for a given offchain input (VTXO).
     pub fn eval_offchain_input(&self, input: OffchainInput) -> Result<FeeAmount, Error> {
-        match &self.intent_offchain_input {
-            Some(compiled) => {
-                let context = create_offchain_input_context(&input);
-                let result = compiled
-                    .program
-                    .execute(&context)
-                    .map_err(|e| Error::Eval(format!("{}", e)))?;
+        eval_program(&self.intent_offchain_input, || {
+            create_offchain_input_context(&input, None)
+        })
+    }
 
-                match result {
-                    cel::Value::Float(f) => Ok(FeeAmount(f)),
-                    cel::Value::Int(i) => Ok(FeeAmount(i as f64)),
-                    cel::Value::UInt(u) => Ok(FeeAmount(u as f64)),
-                    cel::Value::String(_)
-                    | cel::Value::Bytes(_)
-                    | cel::Value::Bool(_)
-                    | cel::Value::List(_)
-                    | cel::Value::Map(_)
-                    | cel::Value::Null
-                    | cel::Value::Duration(_)
-                    | cel::Value::Timestamp(_)
-                    | cel::Value::Function(_, _)
-                    | cel::Value::Opaque(_) => Err(Error::ReturnType(format!(
-                        "expected return type double, got {:?}",
-                        result
-                    ))),
-                }
-            }
-            None => Ok(FeeAmount(0.0)),
-        }
+    /// Like [`Self::eval_offchain_input`], with `now()` pinned to `at` (Unix seconds).
+    ///
+    /// Use this to price an intent that will be registered at a known later time, e.g. a
+    /// delegated intent with a future `valid_at`.
+    pub fn eval_offchain_input_at(
+        &self,
+        input: OffchainInput,
+        at: i64,
+    ) -> Result<FeeAmount, Error> {
+        eval_program(&self.intent_offchain_input, || {
+            create_offchain_input_context(&input, Some(at))
+        })
     }
 
     /// Evaluates the fee for a given onchain input (boarding).
     pub fn eval_onchain_input(&self, input: OnchainInput) -> Result<FeeAmount, Error> {
-        match &self.intent_onchain_input {
-            Some(compiled) => {
-                let context = create_onchain_input_context(&input);
-                let result = compiled
-                    .program
-                    .execute(&context)
-                    .map_err(|e| Error::Eval(format!("{}", e)))?;
-
-                match result {
-                    cel::Value::Float(f) => Ok(FeeAmount(f)),
-                    cel::Value::Int(i) => Ok(FeeAmount(i as f64)),
-                    cel::Value::UInt(u) => Ok(FeeAmount(u as f64)),
-                    cel::Value::String(_)
-                    | cel::Value::Bytes(_)
-                    | cel::Value::Bool(_)
-                    | cel::Value::List(_)
-                    | cel::Value::Map(_)
-                    | cel::Value::Null
-                    | cel::Value::Duration(_)
-                    | cel::Value::Timestamp(_)
-                    | cel::Value::Function(_, _)
-                    | cel::Value::Opaque(_) => Err(Error::ReturnType(format!(
-                        "expected return type double, got {:?}",
-                        result
-                    ))),
-                }
-            }
-            None => Ok(FeeAmount(0.0)),
-        }
+        eval_program(&self.intent_onchain_input, || {
+            create_onchain_input_context(&input)
+        })
     }
 
     /// Evaluates the fee for a given offchain output (VTXO).
     pub fn eval_offchain_output(&self, output: Output) -> Result<FeeAmount, Error> {
-        match &self.intent_offchain_output {
-            Some(compiled) => {
-                let context = create_output_context(&output);
-                let result = compiled
-                    .program
-                    .execute(&context)
-                    .map_err(|e| Error::Eval(format!("{}", e)))?;
+        eval_program(&self.intent_offchain_output, || {
+            create_output_context(&output, None)
+        })
+    }
 
-                match result {
-                    cel::Value::Float(f) => Ok(FeeAmount(f)),
-                    cel::Value::Int(i) => Ok(FeeAmount(i as f64)),
-                    cel::Value::UInt(u) => Ok(FeeAmount(u as f64)),
-                    cel::Value::String(_)
-                    | cel::Value::Bytes(_)
-                    | cel::Value::Bool(_)
-                    | cel::Value::List(_)
-                    | cel::Value::Map(_)
-                    | cel::Value::Null
-                    | cel::Value::Duration(_)
-                    | cel::Value::Timestamp(_)
-                    | cel::Value::Function(_, _)
-                    | cel::Value::Opaque(_) => Err(Error::ReturnType(format!(
-                        "expected return type double, got {:?}",
-                        result
-                    ))),
-                }
-            }
-            None => Ok(FeeAmount(0.0)),
-        }
+    /// Like [`Self::eval_offchain_output`], with `now()` pinned to `at` (Unix seconds).
+    pub fn eval_offchain_output_at(&self, output: Output, at: i64) -> Result<FeeAmount, Error> {
+        eval_program(&self.intent_offchain_output, || {
+            create_output_context(&output, Some(at))
+        })
     }
 
     /// Evaluates the fee for a given onchain output (collaborative exit).
     pub fn eval_onchain_output(&self, output: Output) -> Result<FeeAmount, Error> {
-        match &self.intent_onchain_output {
-            Some(compiled) => {
-                let context = create_output_context(&output);
-                let result = compiled
-                    .program
-                    .execute(&context)
-                    .map_err(|e| Error::Eval(format!("{}", e)))?;
-
-                match result {
-                    cel::Value::Float(f) => Ok(FeeAmount(f)),
-                    cel::Value::Int(i) => Ok(FeeAmount(i as f64)),
-                    cel::Value::UInt(u) => Ok(FeeAmount(u as f64)),
-                    cel::Value::String(_)
-                    | cel::Value::Bytes(_)
-                    | cel::Value::Bool(_)
-                    | cel::Value::List(_)
-                    | cel::Value::Map(_)
-                    | cel::Value::Null
-                    | cel::Value::Duration(_)
-                    | cel::Value::Timestamp(_)
-                    | cel::Value::Function(_, _)
-                    | cel::Value::Opaque(_) => Err(Error::ReturnType(format!(
-                        "expected return type double, got {:?}",
-                        result
-                    ))),
-                }
-            }
-            None => Ok(FeeAmount(0.0)),
-        }
+        eval_program(&self.intent_onchain_output, || {
+            create_output_context(&output, None)
+        })
     }
 
     /// Evaluates the total fee for a given set of inputs and outputs.

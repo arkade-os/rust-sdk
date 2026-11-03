@@ -592,3 +592,46 @@ fn test_birth_variable_defaults_to_zero() {
     // 2000.0 + 500.0 = 2500.0
     assert!((result.0 - 2500.0).abs() < 0.001);
 }
+
+#[test]
+fn test_eval_at_pins_now() {
+    // Charge 100 sats for coins younger than an hour, nothing otherwise.
+    let estimator = Estimator::new(Config {
+        intent_offchain_input_program: "now() - birth < 3600.0 ? 100.0 : 0.0".to_string(),
+        intent_offchain_output_program: "now() > 5000.0 ? 7.0 : 3.0".to_string(),
+        ..Default::default()
+    })
+    .expect("Program should compile");
+
+    let input = OffchainInput {
+        amount: 10_000,
+        birth: Some(1_000),
+        ..Default::default()
+    };
+
+    // Young at t=2000, old at t=10000.
+    let young = estimator
+        .eval_offchain_input_at(input.clone(), 2_000)
+        .unwrap();
+    assert_eq!(young.to_satoshis(), 100);
+    let old = estimator
+        .eval_offchain_input_at(input.clone(), 10_000)
+        .unwrap();
+    assert_eq!(old.to_satoshis(), 0);
+    // Wall clock: birth is decades ago.
+    assert_eq!(
+        estimator.eval_offchain_input(input).unwrap().to_satoshis(),
+        0
+    );
+
+    let output = Output {
+        amount: 1_000,
+        script: String::new(),
+    };
+    let early = estimator
+        .eval_offchain_output_at(output.clone(), 1_000)
+        .unwrap();
+    assert_eq!(early.to_satoshis(), 3);
+    let late = estimator.eval_offchain_output_at(output, 6_000).unwrap();
+    assert_eq!(late.to_satoshis(), 7);
+}
