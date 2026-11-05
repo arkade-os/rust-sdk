@@ -773,20 +773,12 @@ async fn run_command(
         }
         Commands::Subscribe { address } => {
             tracing::info!("Subscribing to address: {}", address.0);
-            // First subscribe to the address to get a subscription ID
-            let subscription_id = client
-                .subscribe_to_scripts(vec![address.0], None)
+            let (subscription_id, mut subscription_stream) = client
+                .subscribe_to_scripts_stream(vec![address.0])
                 .await
                 .map_err(|e| anyhow!(e))?;
 
-            tracing::info!("Subscription ID: {subscription_id}",);
-
-            // Now get the subscription stream
-            let mut subscription_stream = client
-                .get_subscription(subscription_id, None)
-                .await
-                .map_err(|e| anyhow!(e))?;
-
+            tracing::info!("Subscription ID: {subscription_id}");
             tracing::info!("Listening for notifications... Press Ctrl+C to stop");
 
             // Process subscription responses as they come in
