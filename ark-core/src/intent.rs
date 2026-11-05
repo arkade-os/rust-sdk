@@ -1,4 +1,5 @@
 use crate::contract::SpendSelection;
+use crate::script::extract_checksig_pubkeys;
 use crate::Asset;
 use crate::Error;
 use crate::ErrorContext;
@@ -30,6 +31,7 @@ use bitcoin::Transaction;
 use bitcoin::TxIn;
 use bitcoin::TxOut;
 use bitcoin::Txid;
+use bitcoin::Weight;
 use bitcoin::Witness;
 use bitcoin::XOnlyPublicKey;
 use serde::Deserialize;
@@ -316,6 +318,58 @@ where
         proof: proof_psbt,
         message,
     })
+}
+
+/// Estimate the weight of the finalized BIP322 proof transaction for an intent with the given
+/// inputs and outputs.
+///
+/// The Ark server rejects intents whose finalized proof exceeds its `max_tx_weight` setting
+/// (`TX_TOO_LARGE`). It measures the weight by finalizing the proof PSBT after inserting a fake
+/// 64-byte signature for every one of its own signer keys, producing a witness per input of one
+/// signature per `CHECKSIG`/`CHECKSIGVERIFY` pubkey in the selected leaf script, any condition
+/// witness elements, the leaf script, and the control block. We mirror that construction here
+/// with dummy signatures, so the estimate matches the weight the server computes.
+pub fn estimate_proof_weight(inputs: &[Input], outputs: &[Output]) -> Result<Weight, Error> {
+    // The message contents do not affect the weight of the proof transaction: the message is
+    // only committed to via the `to_spend` transaction referenced by the fake first input.
+    let message = IntentMessage::Register {
+        onchain_output_indexes: Vec::new(),
+        valid_at: 0,
+        expire_at: 0,
+        own_cosigner_pks: Vec::new(),
+    };
+
+    let (proof_psbt, _) = build_proof_psbt(&message, inputs, outputs)?;
+
+    let mut tx = proof_psbt.unsigned_tx;
+
+    for (i, tx_in) in tx.input.iter_mut().enumerate() {
+        // The fake first input spends an output locked by the same script as the first real
+        // input, and the server copies the first real input's condition witness onto it before
+        // finalizing.
+        let input = if i == 0 { &inputs[0] } else { &inputs[i - 1] };
+
+        let (script, control_block) = &input.spend_info;
+
+        let mut witness = Witness::new();
+
+        for _ in extract_checksig_pubkeys(script) {
+            witness.push([0u8; 64]);
+        }
+
+        if let Some(extra_witness) = input.extra_witness() {
+            for element in extra_witness {
+                witness.push(element);
+            }
+        }
+
+        witness.push(script.as_bytes());
+        witness.push(control_block.serialize());
+
+        tx_in.witness = witness;
+    }
+
+    Ok(tx.weight())
 }
 
 pub(crate) fn build_proof_psbt(
