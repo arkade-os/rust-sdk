@@ -1514,6 +1514,12 @@ impl TryFrom<generated::ark::v1::GetSubscriptionResponse> for SubscriptionRespon
             .map(VirtualTxOutPoint::try_from)
             .collect::<Result<Vec<_>, _>>()?;
 
+        let swept_vtxos = value
+            .swept_vtxos
+            .iter()
+            .map(VirtualTxOutPoint::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+
         let tx = if value.tx.is_empty() {
             None
         } else {
@@ -1569,6 +1575,7 @@ impl TryFrom<generated::ark::v1::GetSubscriptionResponse> for SubscriptionRespon
             scripts,
             new_vtxos,
             spent_vtxos,
+            swept_vtxos,
             tx,
             checkpoint_txs,
         })))
