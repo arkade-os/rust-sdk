@@ -373,7 +373,7 @@ pub async fn e2e_signer_rotation_status_due_now() {
     tracing::info!(?row, "DueNow status test passed");
 }
 
-type TestClient = Client<Regtest, Wallet, InMemorySwapStorage>;
+type TestClient = Client<Regtest, InMemorySwapStorage>;
 
 async fn wait_for_deprecated_signer(client: &TestClient) -> server::Info {
     let mut last_error = None;
