@@ -116,3 +116,137 @@ pub fn bind_pending_checkpoint_transactions(
 
 #[cfg(test)]
 mod tests;
+
+/// Whether every submitted checkpoint signature was retained by the server.
+/// Checkpoints must match one-to-one; duplicate transactions in either set are rejected.
+/// Call on the raw response, before binding (which restores local signatures).
+pub fn checkpoint_signatures_retained(expected: &[Psbt], returned: &[Psbt]) -> bool {
+    if expected.is_empty() || expected.len() != returned.len() {
+        return false;
+    }
+
+    let mut returned_by_txid = returned
+        .iter()
+        .map(|psbt| (psbt.unsigned_tx.compute_txid(), psbt))
+        .collect::<HashMap<_, _>>();
+    if returned_by_txid.len() != returned.len() {
+        return false;
+    }
+
+    expected.iter().all(|tx| {
+        // Consume each match so duplicate expected entries cannot reuse it.
+        returned_by_txid
+            .remove(&tx.unsigned_tx.compute_txid())
+            .is_some_and(|other| {
+                tx.unsigned_tx == other.unsigned_tx
+                    && !tx.inputs.is_empty()
+                    && tx.inputs.len() == other.inputs.len()
+                    && tx
+                        .inputs
+                        .iter()
+                        .zip(&other.inputs)
+                        .all(|(input, returned)| {
+                            !input.tap_script_sigs.is_empty()
+                                && input.tap_script_sigs.iter().all(|(key, sig)| {
+                                    returned.tap_script_sigs.get(key) == Some(sig)
+                                })
+                        })
+            })
+    })
+}
+
+#[cfg(test)]
+mod oneshot_tests {
+    use super::*;
+
+    fn signed_checkpoint() -> Psbt {
+        use bitcoin::absolute;
+        use bitcoin::hashes::Hash;
+        use bitcoin::secp256k1::Keypair;
+        use bitcoin::secp256k1::Message;
+        use bitcoin::secp256k1::Secp256k1;
+        use bitcoin::secp256k1::SecretKey;
+        use bitcoin::transaction;
+        use bitcoin::Transaction;
+        use bitcoin::TxIn;
+        let mut signed = Psbt::from_unsigned_tx(Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn::default()],
+            output: vec![],
+        })
+        .unwrap();
+        let secp = Secp256k1::new();
+        let key = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[1; 32]).unwrap());
+        let signature = bitcoin::taproot::Signature {
+            signature: secp.sign_schnorr_no_aux_rand(&Message::from_digest([2; 32]), &key),
+            sighash_type: bitcoin::TapSighashType::Default,
+        };
+        signed.inputs[0].tap_script_sigs.insert(
+            (key.x_only_public_key().0, bitcoin::TapLeafHash::all_zeros()),
+            signature,
+        );
+        signed
+    }
+
+    #[test]
+    fn detects_retention_before_binding_restores_local_signatures() {
+        let signed = signed_checkpoint();
+        assert!(checkpoint_signatures_retained(
+            std::slice::from_ref(&signed),
+            std::slice::from_ref(&signed)
+        ));
+        let mut dropped = signed.clone();
+        dropped.inputs[0].tap_script_sigs.clear();
+        assert!(!checkpoint_signatures_retained(
+            std::slice::from_ref(&signed),
+            std::slice::from_ref(&dropped)
+        ));
+        let bound =
+            bind_checkpoint_transactions(std::slice::from_ref(&signed), vec![dropped]).unwrap();
+        assert_eq!(
+            bound[0].inputs[0].tap_script_sigs,
+            signed.inputs[0].tap_script_sigs
+        );
+        let mut second = signed.clone();
+        second.unsigned_tx.input[0].previous_output.vout = 1;
+        let expected = vec![signed.clone(), second.clone()];
+        assert!(checkpoint_signatures_retained(
+            &expected,
+            &[second.clone(), signed.clone()]
+        ));
+        second.inputs[0].tap_script_sigs.clear();
+        assert!(!checkpoint_signatures_retained(
+            &expected,
+            &[second, signed.clone()]
+        ));
+        let mut altered = signed.clone();
+        altered.inputs[0]
+            .tap_script_sigs
+            .values_mut()
+            .next()
+            .unwrap()
+            .sighash_type = bitcoin::TapSighashType::All;
+        assert!(!checkpoint_signatures_retained(
+            std::slice::from_ref(&signed),
+            &[altered]
+        ));
+        assert!(!checkpoint_signatures_retained(&[], &[]));
+        assert!(!checkpoint_signatures_retained(&[signed], &[]));
+    }
+    #[test]
+    fn rejects_duplicate_checkpoint_matches() {
+        let first = signed_checkpoint();
+        let mut second = first.clone();
+        second.unsigned_tx.input[0].previous_output.vout = 1;
+        let distinct = [first.clone(), second];
+        let duplicates = [first.clone(), first];
+
+        // One returned checkpoint must not satisfy two expected entries.
+        assert!(!checkpoint_signatures_retained(&duplicates, &distinct));
+        // Duplicate returned checkpoints must not hide a missing checkpoint.
+        assert!(!checkpoint_signatures_retained(&distinct, &duplicates));
+        // Even matching duplicate sets are invalid.
+        assert!(!checkpoint_signatures_retained(&duplicates, &duplicates));
+    }
+}

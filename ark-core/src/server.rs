@@ -882,6 +882,8 @@ pub enum ChainedTxType {
 }
 
 pub struct SubmitOffchainTxResponse {
+    /// Server retained all submitted owner signatures, indicating one-shot finalization.
+    pub finalized: bool,
     pub signed_ark_tx: Psbt,
     pub signed_checkpoint_txs: Vec<Psbt>,
 }

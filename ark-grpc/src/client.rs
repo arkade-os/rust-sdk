@@ -430,6 +430,10 @@ impl Client {
                 Ok(tx)
             })
             .collect::<Result<Vec<_>, Error>>()?;
+        let finalized = ark_core::send::checkpoint_signatures_retained(
+            submitted_checkpoint_txs,
+            &signed_checkpoint_txs,
+        );
         let signed_checkpoint_txs = ark_core::send::bind_checkpoint_transactions(
             submitted_checkpoint_txs,
             signed_checkpoint_txs,
@@ -437,6 +441,7 @@ impl Client {
         .map_err(Error::request)?;
 
         Ok(SubmitOffchainTxResponse {
+            finalized,
             signed_ark_tx,
             signed_checkpoint_txs,
         })
