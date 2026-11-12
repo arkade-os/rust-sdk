@@ -434,7 +434,7 @@ where
                     ..Default::default()
                 },
             ],
-            output: vec![forfeit_output.clone(), anchor_output()],
+            output: vec![forfeit_output, anchor_output()],
         })
         .map_err(Error::transaction)?;
 
