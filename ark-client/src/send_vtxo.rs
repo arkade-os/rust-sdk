@@ -232,6 +232,51 @@ where
         Ok(pending_tx.ark_txid)
     }
 
+    /// Submit and finalize a payment in one request on compatible servers.
+    ///
+    /// Signs locally built checkpoints before submission. Older servers fall back to
+    /// a separate finalize request without signing again. Unlike the two-step flow,
+    /// the server receives owner checkpoint signatures before returning its Ark signature.
+    pub async fn submit_offchain_tx_oneshot(
+        &self,
+        vtxo_inputs: Vec<VtxoInput>,
+        address: ark_core::ArkAddress,
+        amount: Amount,
+    ) -> Result<Txid, Error> {
+        let server_info = self.server_info().await?;
+        let (change_address, change_vtxo) = self.get_offchain_address().await?;
+        let receivers = vec![SendReceiver {
+            address,
+            amount,
+            assets: Vec::new(),
+        }];
+        let OffchainTransactions {
+            mut ark_tx,
+            mut checkpoint_txs,
+        } = build_asset_send_transactions(&receivers, &change_address, &vtxo_inputs, &server_info)
+            .map_err(Error::from)?;
+        for (i, checkpoint) in checkpoint_txs.iter_mut().enumerate() {
+            sign_ark_transaction(self.make_sign_fn(), &mut ark_tx, i)?;
+            sign_checkpoint_transaction(self.make_sign_fn(), checkpoint)?;
+        }
+        let res = self
+            .network_client()
+            .submit_offchain_transaction_request(ark_tx, checkpoint_txs)
+            .await
+            .map_err(Error::ark_server)?;
+        let txid = res.signed_ark_tx.unsigned_tx.compute_txid();
+        if let Some(provider) = self.inner.discoverable_key_provider.as_ref() {
+            if let Err(err) = provider.mark_as_used(&change_vtxo.owner_pk()) {
+                tracing::warn!(?err, "Failed marking change address as used");
+            }
+        }
+        if !res.finalized {
+            self.finalize_offchain_tx(txid, res.signed_checkpoint_txs)
+                .await?;
+        }
+        Ok(txid)
+    }
+
     // Private helpers
 
     /// Create a signing closure that signs with any known keypair.

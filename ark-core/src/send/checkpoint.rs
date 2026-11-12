@@ -116,3 +116,105 @@ pub fn bind_pending_checkpoint_transactions(
 
 #[cfg(test)]
 mod tests;
+
+/// Whether every submitted checkpoint signature was retained by the server.
+/// Call on the raw response, before binding (which restores local signatures).
+pub fn checkpoint_signatures_retained(expected: &[Psbt], returned: &[Psbt]) -> bool {
+    !expected.is_empty()
+        && expected.len() == returned.len()
+        && expected.iter().all(|tx| {
+            returned
+                .iter()
+                .find(|other| other.unsigned_tx == tx.unsigned_tx)
+                .is_some_and(|other| {
+                    !tx.inputs.is_empty()
+                        && tx.inputs.len() == other.inputs.len()
+                        && tx
+                            .inputs
+                            .iter()
+                            .zip(&other.inputs)
+                            .all(|(input, returned)| {
+                                !input.tap_script_sigs.is_empty()
+                                    && input.tap_script_sigs.iter().all(|(key, sig)| {
+                                        returned.tap_script_sigs.get(key) == Some(sig)
+                                    })
+                            })
+                })
+        })
+}
+
+#[cfg(test)]
+mod oneshot_tests {
+    use super::*;
+
+    #[test]
+    fn detects_retention_before_binding_restores_local_signatures() {
+        use bitcoin::absolute;
+        use bitcoin::hashes::Hash;
+        use bitcoin::secp256k1::Keypair;
+        use bitcoin::secp256k1::Message;
+        use bitcoin::secp256k1::Secp256k1;
+        use bitcoin::secp256k1::SecretKey;
+        use bitcoin::transaction;
+        use bitcoin::Transaction;
+        use bitcoin::TxIn;
+        let mut signed = Psbt::from_unsigned_tx(Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn::default()],
+            output: vec![],
+        })
+        .unwrap();
+        let secp = Secp256k1::new();
+        let key = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[1; 32]).unwrap());
+        let signature = bitcoin::taproot::Signature {
+            signature: secp.sign_schnorr_no_aux_rand(&Message::from_digest([2; 32]), &key),
+            sighash_type: bitcoin::TapSighashType::Default,
+        };
+        signed.inputs[0].tap_script_sigs.insert(
+            (key.x_only_public_key().0, bitcoin::TapLeafHash::all_zeros()),
+            signature,
+        );
+        assert!(checkpoint_signatures_retained(
+            std::slice::from_ref(&signed),
+            std::slice::from_ref(&signed)
+        ));
+        let mut dropped = signed.clone();
+        dropped.inputs[0].tap_script_sigs.clear();
+        assert!(!checkpoint_signatures_retained(
+            std::slice::from_ref(&signed),
+            std::slice::from_ref(&dropped)
+        ));
+        let bound =
+            bind_checkpoint_transactions(std::slice::from_ref(&signed), vec![dropped]).unwrap();
+        assert_eq!(
+            bound[0].inputs[0].tap_script_sigs,
+            signed.inputs[0].tap_script_sigs
+        );
+        let mut second = signed.clone();
+        second.unsigned_tx.input[0].previous_output.vout = 1;
+        let expected = vec![signed.clone(), second.clone()];
+        assert!(checkpoint_signatures_retained(
+            &expected,
+            &[second.clone(), signed.clone()]
+        ));
+        second.inputs[0].tap_script_sigs.clear();
+        assert!(!checkpoint_signatures_retained(
+            &expected,
+            &[second, signed.clone()]
+        ));
+        let mut altered = signed.clone();
+        altered.inputs[0]
+            .tap_script_sigs
+            .values_mut()
+            .next()
+            .unwrap()
+            .sighash_type = bitcoin::TapSighashType::All;
+        assert!(!checkpoint_signatures_retained(
+            std::slice::from_ref(&signed),
+            &[altered]
+        ));
+        assert!(!checkpoint_signatures_retained(&[], &[]));
+        assert!(!checkpoint_signatures_retained(&[signed], &[]));
+    }
+}
