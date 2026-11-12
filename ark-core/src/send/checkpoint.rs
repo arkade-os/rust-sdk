@@ -118,37 +118,48 @@ pub fn bind_pending_checkpoint_transactions(
 mod tests;
 
 /// Whether every submitted checkpoint signature was retained by the server.
+/// Checkpoints must match one-to-one; duplicate transactions in either set are rejected.
 /// Call on the raw response, before binding (which restores local signatures).
 pub fn checkpoint_signatures_retained(expected: &[Psbt], returned: &[Psbt]) -> bool {
-    !expected.is_empty()
-        && expected.len() == returned.len()
-        && expected.iter().all(|tx| {
-            returned
-                .iter()
-                .find(|other| other.unsigned_tx == tx.unsigned_tx)
-                .is_some_and(|other| {
-                    !tx.inputs.is_empty()
-                        && tx.inputs.len() == other.inputs.len()
-                        && tx
-                            .inputs
-                            .iter()
-                            .zip(&other.inputs)
-                            .all(|(input, returned)| {
-                                !input.tap_script_sigs.is_empty()
-                                    && input.tap_script_sigs.iter().all(|(key, sig)| {
-                                        returned.tap_script_sigs.get(key) == Some(sig)
-                                    })
-                            })
-                })
-        })
+    if expected.is_empty() || expected.len() != returned.len() {
+        return false;
+    }
+
+    let mut returned_by_txid = returned
+        .iter()
+        .map(|psbt| (psbt.unsigned_tx.compute_txid(), psbt))
+        .collect::<HashMap<_, _>>();
+    if returned_by_txid.len() != returned.len() {
+        return false;
+    }
+
+    expected.iter().all(|tx| {
+        // Consume each match so duplicate expected entries cannot reuse it.
+        returned_by_txid
+            .remove(&tx.unsigned_tx.compute_txid())
+            .is_some_and(|other| {
+                tx.unsigned_tx == other.unsigned_tx
+                    && !tx.inputs.is_empty()
+                    && tx.inputs.len() == other.inputs.len()
+                    && tx
+                        .inputs
+                        .iter()
+                        .zip(&other.inputs)
+                        .all(|(input, returned)| {
+                            !input.tap_script_sigs.is_empty()
+                                && input.tap_script_sigs.iter().all(|(key, sig)| {
+                                    returned.tap_script_sigs.get(key) == Some(sig)
+                                })
+                        })
+            })
+    })
 }
 
 #[cfg(test)]
 mod oneshot_tests {
     use super::*;
 
-    #[test]
-    fn detects_retention_before_binding_restores_local_signatures() {
+    fn signed_checkpoint() -> Psbt {
         use bitcoin::absolute;
         use bitcoin::hashes::Hash;
         use bitcoin::secp256k1::Keypair;
@@ -175,6 +186,12 @@ mod oneshot_tests {
             (key.x_only_public_key().0, bitcoin::TapLeafHash::all_zeros()),
             signature,
         );
+        signed
+    }
+
+    #[test]
+    fn detects_retention_before_binding_restores_local_signatures() {
+        let signed = signed_checkpoint();
         assert!(checkpoint_signatures_retained(
             std::slice::from_ref(&signed),
             std::slice::from_ref(&signed)
@@ -216,5 +233,20 @@ mod oneshot_tests {
         ));
         assert!(!checkpoint_signatures_retained(&[], &[]));
         assert!(!checkpoint_signatures_retained(&[signed], &[]));
+    }
+    #[test]
+    fn rejects_duplicate_checkpoint_matches() {
+        let first = signed_checkpoint();
+        let mut second = first.clone();
+        second.unsigned_tx.input[0].previous_output.vout = 1;
+        let distinct = [first.clone(), second];
+        let duplicates = [first.clone(), first];
+
+        // One returned checkpoint must not satisfy two expected entries.
+        assert!(!checkpoint_signatures_retained(&duplicates, &distinct));
+        // Duplicate returned checkpoints must not hide a missing checkpoint.
+        assert!(!checkpoint_signatures_retained(&distinct, &duplicates));
+        // Even matching duplicate sets are invalid.
+        assert!(!checkpoint_signatures_retained(&duplicates, &duplicates));
     }
 }
