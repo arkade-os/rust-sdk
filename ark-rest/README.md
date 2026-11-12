@@ -8,7 +8,7 @@ This crate contains generated REST API bindings plus a Rust client wrapper for t
 
 ```toml
 [dependencies]
-ark-rest = "0.12.0"
+ark-rest = "0.12.1"
 ```
 
 ## Notes
