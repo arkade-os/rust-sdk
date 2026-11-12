@@ -143,15 +143,20 @@ pub async fn settle_replaces_its_own_abandoned_intent() {
 
 #[tokio::test]
 #[ignore]
-pub async fn settle_replaces_an_abandoned_intent_that_batches_keep_requeuing() {
+pub async fn settle_after_a_batch_drops_an_abandoned_intent() {
     init_tracing();
     let (alice, vtxo) = client_with_vtxo("alice").await;
 
     abandon_settlement(alice.clone(), vtxo).await;
-    // Every batch takes the abandoned intent, gets no confirmation for it and queues it again,
-    // whatever its expiry: it never clears by itself.
-    tokio::time::sleep(Duration::from_secs(75)).await;
-    wait_for_queued_intent(vtxo).await;
+    // The next batch selects the abandoned intent and gets no confirmation for it. Since arkd
+    // v0.9.25 (#184) a selected intent is not queued again, so it clears by itself.
+    tokio::time::timeout(INTENT_WAIT, async {
+        while intent_is_queued(vtxo).await {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the abandoned intent spending {vtxo} stayed queued"));
 
     let mut rng = StdRng::from_entropy();
     let txid = alice.settle_vtxos(&mut rng, &[vtxo], &[]).await.unwrap();
