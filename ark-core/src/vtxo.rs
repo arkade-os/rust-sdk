@@ -300,7 +300,7 @@ impl Vtxo {
 /// Branch hashing is BIP341 (lexicographically sorted children), handled by
 /// [`NodeInfo::combine`], so the resulting Merkle root is independent of the
 /// left/right order within each branch.
-fn assemble_taproot_tree(scripts: &[ScriptBuf]) -> Result<NodeInfo, Error> {
+pub(crate) fn assemble_taproot_tree(scripts: &[ScriptBuf]) -> Result<NodeInfo, Error> {
     if scripts.is_empty() {
         return Err(Error::ad_hoc(
             "cannot build a Taproot tree from zero scripts",
