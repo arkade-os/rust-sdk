@@ -1,0 +1,111 @@
+#![allow(clippy::unwrap_used)]
+
+use ark_core::coin_select::select_vtxos;
+use ark_core::contract::SpendPathKind;
+use ark_core::send::VtxoInput;
+use bitcoin::key::Secp256k1;
+use bitcoin::Amount;
+use common::init_tracing;
+use common::set_up_client;
+use common::wait_until_balance;
+use common::Regtest;
+use rand::thread_rng;
+use std::sync::Arc;
+
+mod common;
+
+/// Exercise the one-shot submit API and verify the payment is finalized and spendable.
+/// On older arkd versions this also exercises the API's two-step fallback.
+#[tokio::test]
+#[ignore]
+pub async fn e2e_oneshot_offchain_submit() {
+    init_tracing();
+    let regtest = Arc::new(Regtest::new());
+    let secp = Secp256k1::new();
+    let mut rng = thread_rng();
+
+    let (alice, _) = set_up_client("alice".to_string(), regtest.clone(), secp.clone()).await;
+    let (bob, _) = set_up_client("bob".to_string(), regtest.clone(), secp).await;
+
+    // Fund Alice via boarding.
+    let alice_fund_amount = Amount::ONE_BTC;
+    let alice_boarding_address = alice.get_boarding_address().await.unwrap();
+    regtest
+        .faucet_fund(&alice_boarding_address, alice_fund_amount)
+        .await;
+
+    alice.settle(&mut rng).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    wait_until_balance!(&alice, confirmed: alice_fund_amount);
+    tracing::info!("Alice has confirmed VTXO");
+
+    // Build VTXO inputs for the offchain tx.
+    let send_amount = Amount::from_sat(100_000);
+    let (bob_address, _) = bob.get_offchain_address().await.unwrap();
+
+    let vtxo_list = alice.list_vtxos().await.unwrap();
+
+    let spendable = vtxo_list
+        .spendable_offchain()
+        .map(|entry| ark_core::coin_select::VirtualTxOutPoint {
+            outpoint: entry.vtxo().outpoint,
+            script_pubkey: entry.vtxo().script.clone(),
+            expire_at: entry.vtxo().expires_at,
+            amount: entry.vtxo().amount,
+            assets: entry.vtxo().assets.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    let selected = select_vtxos(
+        spendable,
+        send_amount,
+        alice.server_info().await.unwrap().dust,
+        true,
+    )
+    .unwrap();
+
+    let vtxo_inputs: Vec<VtxoInput> = selected
+        .into_iter()
+        .map(|coin| {
+            let entry = vtxo_list
+                .all()
+                .find(|entry| entry.vtxo().outpoint == coin.outpoint)
+                .unwrap();
+            let spend_selection = entry.spend_selection(SpendPathKind::Forfeit).unwrap();
+            VtxoInput::new_with_spend_selection(
+                spend_selection,
+                entry.tapscripts(),
+                entry.script_pubkey(),
+                coin.amount,
+                coin.outpoint,
+                coin.assets,
+            )
+        })
+        .collect();
+
+    let ark_txid = alice
+        .submit_offchain_tx_oneshot(vtxo_inputs, bob_address, send_amount)
+        .await
+        .unwrap();
+
+    let pending = alice.list_pending_offchain_txs().await.unwrap();
+    assert!(
+        pending.iter().all(|tx| tx.ark_txid != ark_txid),
+        "one-shot submit must return with transaction {ark_txid} finalized"
+    );
+
+    wait_until_balance!(&alice, pre_confirmed: alice_fund_amount - send_amount);
+    wait_until_balance!(&bob, pre_confirmed: send_amount);
+
+    // Spend the received output to prove it is usable without any recovery/finalize call.
+    let (alice_address, _) = alice.get_offchain_address().await.unwrap();
+    bob.send(vec![ark_core::send::SendReceiver {
+        address: alice_address,
+        amount: send_amount,
+        assets: Vec::new(),
+    }])
+    .await
+    .unwrap();
+    wait_until_balance!(&alice, pre_confirmed: alice_fund_amount);
+    wait_until_balance!(&bob, pre_confirmed: Amount::ZERO);
+}
