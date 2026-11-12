@@ -32,20 +32,28 @@ jobs:
           prefix-key: "e2e_tests"
 
       - name: Build test binaries
-        run: cargo test -p e2e-tests --no-run
+        run: cargo test -p e2e-tests --no-run --message-format=json > test-artifacts.json
 
       - name: Find test binaries
         id: find-binaries
         run: |
-          BINARIES=$(find target/debug/deps -type f -executable -name "e2e_*" | jq -R -s -c 'split("\n")[:-1]')
-          echo "binaries=$BINARIES" >> $GITHUB_OUTPUT
+          rm -rf target/e2e-binaries
+          mkdir -p target/e2e-binaries
+          jq -r 'select(.reason == "compiler-artifact" and .profile.test == true and .executable != null and (.target.name | startswith("e2e_"))) | .executable' test-artifacts.json |
+            while IFS= read -r executable; do
+              cp "$executable" target/e2e-binaries/
+            done
+          BINARIES=$(find target/e2e-binaries -type f -name "e2e_*" | sort | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "$BINARIES" | jq -e 'length > 0' > /dev/null
+          echo "binaries=$BINARIES" >> "$GITHUB_OUTPUT"
           echo "Found test binaries: $BINARIES"
 
       - name: Upload test binaries
         uses: actions/upload-artifact@v4
         with:
           name: test-binaries
-          path: target/debug/deps/e2e_*
+          path: target/e2e-binaries/e2e_*
+          if-no-files-found: error
           retention-days: 1
           overwrite: true
 
@@ -72,13 +80,13 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: test-binaries
-          path: target/debug/deps
+          path: target/e2e-binaries
 
       - name: Show downloaded binaries
-        run: ls -la target/debug/deps/
+        run: ls -la target/e2e-binaries/
 
       - name: Make binaries executable
-        run: chmod +x target/debug/deps/e2e_*
+        run: chmod +x target/e2e-binaries/e2e_*
 
       # Brings up base + ark (arkd) + emulator. The orchestrator waits for the
       # stack to be ready and self-funds arkd before returning.
