@@ -4,6 +4,7 @@ use crate::common::wait_until_balance;
 use ark_core::introspector::packet::add_packet_to_psbt;
 use ark_core::introspector::packet::IntrospectorEntry;
 use ark_core::introspector::packet::Packet;
+use ark_core::introspector::prev_tx::set_prev_ark_tx;
 use ark_core::script::csv_sig_script;
 use ark_core::send::build_offchain_transactions;
 use ark_core::send::sign_ark_transaction;
@@ -145,12 +146,24 @@ pub async fn e2e_arkade_script_submit_tx_to_bob() {
         custom_vtxo_outpoint.assets.clone(),
     );
 
+    // The emulator needs the Ark tx that created the coin each input spends.
+    let funding_tx = grpc_client
+        .get_virtual_txs(vec![funding_txid.to_string()], None, None)
+        .await
+        .unwrap()
+        .txs
+        .into_iter()
+        .map(|psbt| psbt.unsigned_tx)
+        .find(|tx| tx.compute_txid() == funding_txid)
+        .unwrap();
+
     let (invalid_ark_tx, invalid_checkpoint_txs) = build_signed_submit_txs(
         &secp,
         &custom_owner_kp,
         custom_owner_pk,
         &custom_vtxo,
         &custom_input,
+        &funding_tx,
         &server_info,
         alice_offchain_address,
         receiver_amount,
@@ -172,6 +185,7 @@ pub async fn e2e_arkade_script_submit_tx_to_bob() {
         custom_owner_pk,
         &custom_vtxo,
         &custom_input,
+        &funding_tx,
         &server_info,
         bob_address,
         receiver_amount,
@@ -203,6 +217,7 @@ fn build_signed_submit_txs(
     custom_owner_pk: bitcoin::XOnlyPublicKey,
     custom_vtxo: &Vtxo,
     custom_input: &VtxoInput,
+    funding_tx: &bitcoin::Transaction,
     server_info: &ark_core::server::Info,
     recipient: ark_core::ArkAddress,
     amount: Amount,
@@ -229,6 +244,8 @@ fn build_signed_submit_txs(
         .unwrap(),
     )
     .unwrap();
+
+    set_prev_ark_tx(&mut ark_tx, 0, funding_tx).unwrap();
 
     sign_ark_transaction(
         |_,

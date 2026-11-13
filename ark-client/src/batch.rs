@@ -1610,26 +1610,56 @@ where
         .context("failed to register intent")?
         {
             Ok(intent_id) => intent_id,
-            // An input is held by an intent still queued from an earlier attempt that never
-            // joined a batch; only this wallet can have registered it. Delete it and retry once.
+            // An input is held by an intent from an earlier attempt; only this wallet can have
+            // registered it. If that intent is still queued, delete it. If a running batch took
+            // it, no delete can reach it: arkd v0.9.25+ (#184) never queues it again, and frees
+            // its inputs once that batch fails. Either way, retry the registration until it
+            // goes through.
             Err(e) if e.to_string().contains(DUPLICATED_INPUT_ERROR) => {
                 tracing::warn!(
                     error = %e,
                     "An input of this intent is held by a stale intent; deleting it and retrying"
                 );
-                self.delete_intents_for(
-                    &cleanup_onchain_inputs,
-                    cleanup_vtxo_inputs.clone(),
-                    DELETE_INTENT_ATTEMPTS,
-                )
-                .await
-                .context("failed to delete the stale intent holding our inputs")?;
-                timeout_op(
-                    self.inner.timeout,
-                    self.network_client().register_intent(intent),
-                )
-                .await
-                .context("failed to register intent")??
+                let mut attempt = 1;
+                loop {
+                    match self
+                        .delete_intents_for(&cleanup_onchain_inputs, cleanup_vtxo_inputs.clone(), 1)
+                        .await
+                    {
+                        Ok(()) => {}
+                        Err(e) if e.to_string().contains(NO_MATCHING_INTENT_ERROR) => {
+                            tracing::debug!(
+                                attempt,
+                                "Stale intent is not queued; a batch holds it"
+                            );
+                        }
+                        Err(e) => {
+                            return Err(e)
+                                .context("failed to delete the stale intent holding our inputs");
+                        }
+                    }
+
+                    match timeout_op(
+                        self.inner.timeout,
+                        self.network_client().register_intent(intent.clone()),
+                    )
+                    .await
+                    .context("failed to register intent")?
+                    {
+                        Ok(intent_id) => break intent_id,
+                        Err(e)
+                            if e.to_string().contains(DUPLICATED_INPUT_ERROR)
+                                && attempt < DELETE_INTENT_ATTEMPTS =>
+                        {
+                            attempt += 1;
+                            sleep(DELETE_INTENT_RETRY_DELAY).await;
+                        }
+                        Err(e) => {
+                            return Err(Error::from(e))
+                                .context("inputs still held by a stale intent");
+                        }
+                    }
+                }
             }
             Err(e) => return Err(e.into()),
         };
