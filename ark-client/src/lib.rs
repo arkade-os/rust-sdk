@@ -14,6 +14,7 @@ use ark_core::contract::DefaultVtxoContract;
 use ark_core::contract::DelegateVtxoContract;
 use ark_core::contract::StoredContract;
 use ark_core::contract::VhtlcContract;
+use ark_core::contract::VhtlcV2Contract;
 use ark_core::history;
 use ark_core::history::generate_incoming_vtxo_transaction_history;
 use ark_core::history::generate_outgoing_vtxo_transaction_history;
@@ -939,6 +940,23 @@ fn contract_info_from_stored(
                     .map_err(|e| Error::ad_hoc(format!("failed to build vhtlc address: {e}")))?
                     .address()
                     .to_string();
+            (
+                Some(address),
+                Some(ContractAddressKind::Ark),
+                Some(data.options.server),
+            )
+        }
+        contract_type if *contract_type == ContractType::vhtlc_v2() => {
+            let data: VhtlcV2Contract = serde_json::from_value(contract.data.clone())
+                .map_err(|e| Error::ad_hoc(format!("failed to decode vhtlc-v2 contract: {e}")))?;
+            let address = ark_core::vhtlc::VhtlcScript::new_v2(
+                data.options.clone(),
+                data.non_interactive.clone(),
+                server_info.network,
+            )
+            .map_err(|e| Error::ad_hoc(format!("failed to build vhtlc-v2 address: {e}")))?
+            .address()
+            .to_string();
             (
                 Some(address),
                 Some(ContractAddressKind::Ark),
