@@ -524,6 +524,15 @@ impl TryFrom<crate::models::IndexerSubscriptionEvent> for ark_core::server::Subs
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| ConversionError(format!("Invalid spent_vtxos: {e}")))?;
 
+        // Parse swept_vtxos
+        let swept_vtxos = event
+            .swept_vtxos
+            .unwrap_or_default()
+            .into_iter()
+            .map(ark_core::server::VirtualTxOutPoint::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| ConversionError(format!("Invalid swept_vtxos: {e}")))?;
+
         // Parse tx (raw tx hex or base64 PSBT)
         let tx = if let Some(tx_str) = event.tx.filter(|s| !s.is_empty()) {
             match Vec::from_hex(&tx_str)
@@ -571,6 +580,7 @@ impl TryFrom<crate::models::IndexerSubscriptionEvent> for ark_core::server::Subs
             scripts,
             new_vtxos,
             spent_vtxos,
+            swept_vtxos,
             tx,
             checkpoint_txs,
         })
