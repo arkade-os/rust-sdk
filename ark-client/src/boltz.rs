@@ -24,6 +24,7 @@ use ark_core::server::parse_sequence_number;
 use ark_core::server::Info;
 use ark_core::server::PendingTx;
 use ark_core::server::SubscriptionEvent;
+use ark_core::server::SubscriptionFilter;
 use ark_core::server::SubscriptionResponse;
 use ark_core::vhtlc::VhtlcOptions;
 use ark_core::vhtlc::VhtlcScript;
@@ -4422,29 +4423,18 @@ async fn run_boltz_vhtlc_watcher_loop<B, W, S>(
             continue;
         }
 
-        let subscription_id = match client.subscribe_to_scripts(addresses.clone(), None).await {
-            Ok(subscription_id) => subscription_id,
-            Err(error) => {
-                tracing::warn!(?error, "Failed to subscribe to VHTLC scripts");
-                if wait_for_vhtlc_watcher_retry(&mut stop_rx, backoff).await {
-                    return;
+        let (subscription_id, mut stream) =
+            match client.subscribe_to_scripts_stream(addresses.clone()).await {
+                Ok(subscription) => subscription,
+                Err(error) => {
+                    tracing::warn!(?error, "Failed to subscribe to VHTLC scripts");
+                    if wait_for_vhtlc_watcher_retry(&mut stop_rx, backoff).await {
+                        return;
+                    }
+                    backoff = (backoff * 2).min(VHTLC_WATCHER_MAX_BACKOFF);
+                    continue;
                 }
-                backoff = (backoff * 2).min(VHTLC_WATCHER_MAX_BACKOFF);
-                continue;
-            }
-        };
-
-        let mut stream = match client.get_subscription(subscription_id.clone(), None).await {
-            Ok(stream) => stream,
-            Err(error) => {
-                tracing::warn!(?error, "Failed to open VHTLC subscription stream");
-                if wait_for_vhtlc_watcher_retry(&mut stop_rx, backoff).await {
-                    return;
-                }
-                backoff = (backoff * 2).min(VHTLC_WATCHER_MAX_BACKOFF);
-                continue;
-            }
-        };
+            };
 
         tracing::info!(
             watched_scripts = addresses.len(),
@@ -4550,8 +4540,16 @@ where
         return Ok(());
     }
 
+    let filter = SubscriptionFilter {
+        expressions: Vec::new(),
+        add_scripts: new_addrs
+            .iter()
+            .map(|address| address.to_p2tr_script_pubkey())
+            .collect(),
+        remove_scripts: Vec::new(),
+    };
     client
-        .subscribe_to_scripts(new_addrs.clone(), Some(subscription_id.to_string()))
+        .update_subscription(subscription_id.to_string(), filter)
         .await?;
 
     let added = new_addrs.len();
