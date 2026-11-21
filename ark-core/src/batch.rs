@@ -504,6 +504,9 @@ where
 }
 
 /// Sign every input of the `commitment_psbt` which is in the provided `onchain_inputs` list.
+///
+/// Fails if `onchain_inputs` is not empty but none of them is an input of the `commitment_psbt`,
+/// e.g. because the commitment transaction belongs to a different batch.
 pub fn sign_commitment_psbt<F>(
     sign_for_pk_fn: F,
     commitment_psbt: &mut Psbt,
@@ -519,6 +522,8 @@ where
         .iter()
         .filter_map(|i| i.witness_utxo.clone())
         .collect::<Vec<_>>();
+
+    let mut signed_any = false;
 
     // Sign commitment transaction inputs that belong to us. For every output we are settling, we
     // look through the commitment transaction inputs to find a matching input.
@@ -567,8 +572,17 @@ where
                 };
 
                 input.tap_script_sigs.insert((pk, leaf_hash), sig);
+
+                signed_any = true;
             }
         }
+    }
+
+    if !onchain_inputs.is_empty() && !signed_any {
+        return Err(Error::ad_hoc(format!(
+            "none of our on-chain inputs is in commitment TX {}",
+            commitment_psbt.unsigned_tx.compute_txid()
+        )));
     }
 
     Ok(())
@@ -1233,5 +1247,84 @@ mod tests {
     #[test]
     fn nonce_tree_varies_with_the_rng() {
         assert_ne!(pub_nonces([7; 32]), pub_nonces([8; 32]));
+    }
+
+    /// A boarding input owned by `owner_kp`, spent through a single-leaf tapscript.
+    fn onchain_input(owner_kp: &Keypair, outpoint: OutPoint) -> OnChainInput {
+        let secp = Secp256k1::new();
+        let (owner_pk, _) = owner_kp.x_only_public_key();
+
+        let script = bitcoin::script::Builder::new()
+            .push_x_only_key(&owner_pk)
+            .push_opcode(bitcoin::opcodes::all::OP_CHECKSIG)
+            .into_script();
+        let spend_info = taproot::TaprootBuilder::new()
+            .add_leaf(0, script.clone())
+            .unwrap()
+            .finalize(&secp, owner_pk)
+            .unwrap();
+        let control_block = spend_info
+            .control_block(&(script.clone(), taproot::LeafVersion::TapScript))
+            .unwrap();
+
+        OnChainInput::new(
+            bitcoin::Sequence::MAX,
+            ScriptBuf::new_p2tr_tweaked(spend_info.output_key()),
+            vec![script.clone()],
+            (script, control_block),
+            owner_pk,
+            Amount::from_sat(10_000),
+            outpoint,
+        )
+    }
+
+    /// A commitment TX spending `outpoint`, with the prevout set so that it can be signed.
+    fn commitment_tx_spending(outpoint: OutPoint) -> Psbt {
+        let mut psbt = commitment_tx();
+        psbt.unsigned_tx.input[0].previous_output = outpoint;
+        psbt.inputs[0].witness_utxo = Some(TxOut {
+            value: Amount::from_sat(10_000),
+            script_pubkey: ScriptBuf::new(),
+        });
+
+        psbt
+    }
+
+    fn sign_with(
+        kp: Keypair,
+    ) -> impl Fn(&XOnlyPublicKey, &secp256k1::Message) -> Result<schnorr::Signature, Error> {
+        move |_, msg| Ok(Secp256k1::new().sign_schnorr_no_aux_rand(msg, &kp))
+    }
+
+    fn outpoint(n: u8) -> OutPoint {
+        OutPoint {
+            txid: Txid::from_byte_array([n; 32]),
+            vout: 0,
+        }
+    }
+
+    #[test]
+    fn sign_commitment_psbt_signs_own_input() {
+        let owner_kp = cosigner_kp(2);
+        let input = onchain_input(&owner_kp, outpoint(1));
+        let mut psbt = commitment_tx_spending(outpoint(1));
+
+        sign_commitment_psbt(sign_with(owner_kp), &mut psbt, &[input]).unwrap();
+
+        assert_eq!(psbt.inputs[0].tap_script_sigs.len(), 1);
+    }
+
+    /// A commitment TX from another batch has none of our inputs. Signing it must fail rather
+    /// than hand back an unsigned PSBT for submission.
+    #[test]
+    fn sign_commitment_psbt_fails_without_own_input() {
+        let owner_kp = cosigner_kp(2);
+        let input = onchain_input(&owner_kp, outpoint(1));
+        let mut psbt = commitment_tx_spending(outpoint(9));
+
+        let res = sign_commitment_psbt(sign_with(owner_kp), &mut psbt, &[input]);
+
+        assert!(res.is_err());
+        assert!(psbt.inputs[0].tap_script_sigs.is_empty());
     }
 }
