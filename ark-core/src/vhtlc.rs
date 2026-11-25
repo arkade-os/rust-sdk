@@ -69,6 +69,14 @@ pub enum VhtlcVersion {
 ///
 /// The suite is appended after the six signature leaves, so a script with it never collides
 /// with one without. Mirrors `VHTLC.Options.nonInteractiveParameters` in the TS SDK.
+///
+/// **Use a seconds-typed (Unix timestamp) `refund_locktime` with these parameters.** arkd refuses
+/// a block-height `refund_locktime` on a forfeit-eligible leaf regardless of maturity, so with a
+/// block height the `non_interactive_refund_without_receiver` leaf can never be spent. The
+/// emulator does not check `refund_locktime` either: it co-signs an immature spend, which arkd's
+/// CLTV then refuses. This is documented rather than rejected, like in the TS SDK, so that a
+/// lockup already funded with a block height can still be rebuilt and spent via its other
+/// leaves.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NonInteractiveParameters {
     /// Emulator public key. One key, tweaked per covenant destination.
@@ -106,28 +114,26 @@ fn is_p2tr_pk_script(script: &ScriptBuf) -> bool {
 /// Byte-identical to `enforcePayTo` in the TS SDK. The introspection opcodes are executed by the
 /// emulator, not by Bitcoin Script; see `ark-script`'s opcode table.
 fn enforce_pay_to(destination_pk_script: &ScriptBuf) -> ScriptBuf {
-    use bitcoin::opcodes::Opcode;
-
-    let op_pushcurrentinputindex = Opcode::from(0xcd);
-    let op_inspectoutputscriptpubkey = Opcode::from(0xd1);
-    let op_inspectoutputvalue = Opcode::from(0xcf);
-    let op_inspectinputvalue = Opcode::from(0xc9);
+    use ark_script::op::INSPECTINPUTVALUE;
+    use ark_script::op::INSPECTOUTPUTSCRIPTPUBKEY;
+    use ark_script::op::INSPECTOUTPUTVALUE;
+    use ark_script::op::PUSHCURRENTINPUTINDEX;
 
     let program: &[u8; 32] = destination_pk_script.as_bytes()[2..]
         .try_into()
         .expect("validated 34-byte P2TR script");
 
     ScriptBuf::builder()
-        .push_opcode(op_pushcurrentinputindex)
+        .push_opcode(PUSHCURRENTINPUTINDEX)
         .push_opcode(OP_DUP)
-        .push_opcode(op_inspectoutputscriptpubkey)
+        .push_opcode(INSPECTOUTPUTSCRIPTPUBKEY)
         .push_int(1)
         .push_opcode(OP_EQUALVERIFY)
         .push_slice(program)
         .push_opcode(OP_EQUALVERIFY)
-        .push_opcode(op_inspectoutputvalue)
-        .push_opcode(op_pushcurrentinputindex)
-        .push_opcode(op_inspectinputvalue)
+        .push_opcode(INSPECTOUTPUTVALUE)
+        .push_opcode(PUSHCURRENTINPUTINDEX)
+        .push_opcode(INSPECTINPUTVALUE)
         .push_opcode(OP_GREATERTHANOREQUAL)
         .into_script()
 }
@@ -472,8 +478,11 @@ impl VhtlcScript {
         Self::build(options, VhtlcVersion::V2, non_interactive, network)
     }
 
-    /// Creates a VHTLC script of any version, optionally with the emulator covenant paths.
-    pub fn build(
+    /// Builds a VHTLC script of either version, optionally with the emulator covenant paths.
+    ///
+    /// Private on purpose: the covenant leaves only exist for [`VhtlcVersion::V2`], so public
+    /// callers go through [`Self::new`] (V1, no covenant) or [`Self::new_v2`].
+    fn build(
         options: VhtlcOptions,
         version: VhtlcVersion,
         non_interactive: Option<NonInteractiveParameters>,

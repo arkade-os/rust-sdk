@@ -583,6 +583,82 @@ mod tests {
         }
     }
 
+    fn vhtlc_v2_contract(with_covenant: bool) -> VhtlcV2Contract {
+        let p2tr = |byte: u8| {
+            let mut bytes = vec![0x51, 0x20];
+            bytes.extend([byte; 32]);
+            ScriptBuf::from_bytes(bytes)
+        };
+        VhtlcV2Contract {
+            options: vhtlc_contract().options,
+            non_interactive: with_covenant.then(|| NonInteractiveParameters {
+                emulator_pubkey: test_key(
+                    "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+                ),
+                receiver_pk_script: p2tr(1),
+                sender_pk_script: p2tr(2),
+                legacy_pre_timelocked_refund: false,
+            }),
+        }
+    }
+
+    #[test]
+    fn vhtlc_v2_spendable_selections_include_required_constraints() {
+        let ctx = ContractContext::new(Network::Regtest);
+
+        for with_covenant in [false, true] {
+            let contract = vhtlc_v2_contract(with_covenant);
+            let paths = contract.spendable_paths(&ctx).unwrap();
+            assert_eq!(paths.len(), if with_covenant { 9 } else { 6 });
+
+            let selections = contract.spendable_selections(&ctx).unwrap();
+            let kinds = selections
+                .iter()
+                .map(|selection| selection.path.kind.clone())
+                .collect::<Vec<_>>();
+
+            // Neither the preimage-gated leaves nor the covenant leaves can be completed by the
+            // wallet alone.
+            for excluded in [
+                SpendPathKind::VhtlcClaim,
+                SpendPathKind::VhtlcUnilateralClaim,
+                SpendPathKind::VhtlcNonInteractiveClaim,
+                SpendPathKind::VhtlcNonInteractiveRefund,
+                SpendPathKind::VhtlcNonInteractiveRefundWithoutReceiver,
+            ] {
+                assert!(
+                    !kinds.contains(&excluded),
+                    "{excluded:?} offered (covenant: {with_covenant})"
+                );
+            }
+            assert_eq!(kinds.len(), 4, "covenant: {with_covenant}");
+
+            let find = |kind: SpendPathKind| {
+                selections
+                    .iter()
+                    .find(|selection| selection.path.kind == kind)
+                    .unwrap()
+            };
+
+            let refund = find(SpendPathKind::VhtlcRefund);
+            assert_eq!(refund.locktime, None);
+            assert_eq!(refund.sequence, None);
+
+            assert_eq!(
+                find(SpendPathKind::VhtlcRefundWithoutReceiver).locktime,
+                Some(absolute::LockTime::from_consensus(500))
+            );
+            assert_eq!(
+                find(SpendPathKind::VhtlcUnilateralRefund).sequence,
+                Some(Sequence::from_height(20))
+            );
+            assert_eq!(
+                find(SpendPathKind::VhtlcUnilateralRefundWithoutReceiver).sequence,
+                Some(Sequence::from_height(30))
+            );
+        }
+    }
+
     #[test]
     fn vhtlc_spendable_selections_include_required_constraints() {
         let ctx = ContractContext::new(Network::Regtest);
