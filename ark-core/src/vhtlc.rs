@@ -70,13 +70,8 @@ pub enum VhtlcVersion {
 /// The suite is appended after the six signature leaves, so a script with it never collides
 /// with one without. Mirrors `VHTLC.Options.nonInteractiveParameters` in the TS SDK.
 ///
-/// **Use a seconds-typed (Unix timestamp) `refund_locktime` with these parameters.** arkd refuses
-/// a block-height `refund_locktime` on a forfeit-eligible leaf regardless of maturity, so with a
-/// block height the `non_interactive_refund_without_receiver` leaf can never be spent. The
-/// emulator does not check `refund_locktime` either: it co-signs an immature spend, which arkd's
-/// CLTV then refuses. This is documented rather than rejected, like in the TS SDK, so that a
-/// lockup already funded with a block height can still be rebuilt and spent via its other
-/// leaves.
+/// Use a seconds-typed `refund_locktime`; see [`VhtlcOptions::refund_locktime`]. The emulator does
+/// not check `refund_locktime`: it co-signs an immature spend, which arkd's CLTV then refuses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NonInteractiveParameters {
     /// Emulator public key. One key, tweaked per covenant destination.
@@ -228,6 +223,17 @@ pub struct VhtlcOptions {
     pub receiver: XOnlyPublicKey,
     pub server: XOnlyPublicKey,
     pub preimage_hash: ripemd160::Hash,
+    /// Absolute locktime (CLTV) of the refund-without-receiver leaves.
+    ///
+    /// **Use a seconds-typed value (a Unix timestamp, >= 500,000,000) unless the server's VTXO
+    /// expiry is counted in blocks.** arkd rejects any VTXO script that has a block-height CLTV on
+    /// a leaf it co-signs, whatever its maturity, unless the server's VTXO expiry is counted in
+    /// blocks (regtest setups). On a server whose expiry is in seconds, which is every production
+    /// server, a VHTLC funded with a block height can't be spent offchain or settled through
+    /// any leaf: its only way out is a unilateral exit. This holds for v1 and v2 alike.
+    ///
+    /// Not rejected here, like in the TS and Go SDKs: a lockup already funded with a block height
+    /// must still be rebuildable to exit it.
     pub refund_locktime: u32,
     pub unilateral_claim_delay: Sequence,
     pub unilateral_refund_delay: Sequence,
