@@ -1074,11 +1074,15 @@ where
     /// Callers must already hold `server_info_refresh_lock`, or otherwise guarantee that
     /// concurrent refreshes are serialized.
     async fn refresh_server_info_unlocked(&self) -> Result<server::Info, Error> {
-        let server_info = timeout_op(self.inner.timeout, self.network_client().get_info())
+        let network_client = self.network_client();
+        let server_info = timeout_op(self.inner.timeout, network_client.fetch_info())
             .await
             .context("Failed to refresh Ark server info")??;
 
+        // Commit the transport digest only once the info is accepted, so a rejected refresh
+        // keeps sending the digest of the cached info.
         update_server_state(&self.state, server_info.clone())?;
+        network_client.commit_info_digest(server_info.digest.clone());
 
         Ok(server_info)
     }
@@ -2392,6 +2396,10 @@ mod digest_guard_tests {
         list_vtxos_calls: AtomicUsize,
         /// Overrides the advertised checkpoint tapscript (hex) when set.
         checkpoint_tapscript: Mutex<Option<String>>,
+        /// Overrides the advertised digest when set.
+        digest: Mutex<Option<String>>,
+        /// The `x-digest` header of the last `GetVtxos` request.
+        last_list_vtxos_digest: Mutex<Option<String>>,
     }
 
     #[derive(Clone)]
@@ -2563,7 +2571,8 @@ mod digest_guard_tests {
 
         fn call(&mut self, _request: tonic::Request<test_utils::GetInfoRequest>) -> Self::Future {
             self.state.get_info_calls.fetch_add(1, Ordering::SeqCst);
-            let mut info = info_response("fresh-digest");
+            let digest = self.state.digest.lock().unwrap().clone();
+            let mut info = info_response(digest.as_deref().unwrap_or("fresh-digest"));
             if let Some(checkpoint_tapscript) =
                 self.state.checkpoint_tapscript.lock().unwrap().clone()
             {
@@ -2584,8 +2593,13 @@ mod digest_guard_tests {
             Box<dyn Future<Output = Result<tonic::Response<Self::Response>, tonic::Status>> + Send>,
         >;
 
-        fn call(&mut self, _request: tonic::Request<test_utils::GetVtxosRequest>) -> Self::Future {
+        fn call(&mut self, request: tonic::Request<test_utils::GetVtxosRequest>) -> Self::Future {
             self.state.list_vtxos_calls.fetch_add(1, Ordering::SeqCst);
+            *self.state.last_list_vtxos_digest.lock().unwrap() = request
+                .metadata()
+                .get("x-digest")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
             Box::pin(async {
                 Err(tonic::Status::failed_precondition(
                     "DIGEST_MISMATCH: invalid digest header",
@@ -2755,6 +2769,26 @@ mod digest_guard_tests {
 
         let info = client.server_info().await.unwrap();
         assert_eq!(info.checkpoint_tapscript, cached);
+    }
+
+    #[tokio::test]
+    async fn rejected_refresh_keeps_sending_the_cached_digest() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let mock = MockArkServer::default();
+        let state = mock.state.clone();
+        let client = connect_test_client(mock).await;
+
+        // The server moves to a new digest whose info fails validation.
+        *state.digest.lock().unwrap() = Some("rejected-digest".to_string());
+        *state.checkpoint_tapscript.lock().unwrap() = Some(String::new());
+        client.refresh_server_info().await.unwrap_err();
+
+        let _ = client.list_vtxos().await;
+        assert_eq!(
+            state.last_list_vtxos_digest.lock().unwrap().as_deref(),
+            Some("fresh-digest")
+        );
     }
 
     #[tokio::test]
