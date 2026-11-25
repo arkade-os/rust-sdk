@@ -4,6 +4,7 @@ use crate::vhtlc::VhtlcOptions;
 use crate::vtxo::Vtxo;
 use crate::Error;
 use bitcoin::absolute;
+use bitcoin::hashes::Hash;
 use bitcoin::key::Secp256k1;
 use bitcoin::secp256k1::All;
 use bitcoin::taproot::ControlBlock;
@@ -152,6 +153,9 @@ pub struct SpendSelection {
     pub sequence: Option<Sequence>,
     pub locktime: Option<absolute::LockTime>,
     pub extra_witness: Vec<Vec<u8>>,
+    /// The arkade script an emulator must evaluate before co-signing this leaf. `Some` only for
+    /// covenant leaves, which must be submitted through the emulator instead of arkd.
+    pub arkade_script: Option<ScriptBuf>,
 }
 
 impl SpendSelection {
@@ -161,6 +165,7 @@ impl SpendSelection {
             sequence: None,
             locktime: None,
             extra_witness: Vec::new(),
+            arkade_script: None,
         }
     }
 
@@ -176,6 +181,11 @@ impl SpendSelection {
 
     pub fn with_extra_witness(mut self, extra_witness: Vec<Vec<u8>>) -> Self {
         self.extra_witness = extra_witness;
+        self
+    }
+
+    pub fn with_arkade_script(mut self, arkade_script: ScriptBuf) -> Self {
+        self.arkade_script = Some(arkade_script);
         self
     }
 
@@ -218,6 +228,82 @@ impl ContractContext {
     }
 }
 
+/// What a wallet knows when it picks the leaf to spend a contract output through.
+///
+/// Mirrors the TS SDK's `PathContext`.
+#[derive(Clone, Debug, Default)]
+pub struct PathContext {
+    /// Whether the server co-signs the spend (an offchain or batch spend). `false` for a
+    /// unilateral spend.
+    pub collaborative: bool,
+    /// The current time, in Unix seconds. Seconds-typed CLTVs mature against it.
+    pub now_unix_secs: u64,
+    /// The chain tip height, when known. Height-typed CLTVs mature against it; without it their
+    /// maturity is unknown and the leaf is not refused locally.
+    pub block_height: Option<u32>,
+    /// The contract keys the spender can sign for: the wallet's own and any external co-signer's.
+    pub signers: Vec<XOnlyPublicKey>,
+    /// A preimage for preimage-gated leaves.
+    pub preimage: Option<[u8; 32]>,
+    /// The leaf to spend through. `None` lets the contract pick one.
+    pub path: Option<SpendPathKind>,
+}
+
+impl PathContext {
+    pub fn collaborative(now_unix_secs: u64) -> Self {
+        Self {
+            collaborative: true,
+            now_unix_secs,
+            ..Self::default()
+        }
+    }
+
+    pub fn unilateral(now_unix_secs: u64) -> Self {
+        Self {
+            collaborative: false,
+            now_unix_secs,
+            ..Self::default()
+        }
+    }
+
+    pub fn with_block_height(mut self, block_height: u32) -> Self {
+        self.block_height = Some(block_height);
+        self
+    }
+
+    pub fn with_signers(mut self, signers: Vec<XOnlyPublicKey>) -> Self {
+        self.signers = signers;
+        self
+    }
+
+    pub fn with_preimage(mut self, preimage: [u8; 32]) -> Self {
+        self.preimage = Some(preimage);
+        self
+    }
+
+    pub fn with_path(mut self, path: SpendPathKind) -> Self {
+        self.path = Some(path);
+        self
+    }
+
+    fn can_sign(&self, key: &XOnlyPublicKey) -> bool {
+        self.signers.contains(key)
+    }
+
+    /// Whether an absolute locktime has matured. `None` when it can't be told: a height-typed
+    /// locktime without [`Self::block_height`].
+    fn cltv_matured(&self, locktime: absolute::LockTime) -> Option<bool> {
+        match locktime {
+            absolute::LockTime::Blocks(height) => self
+                .block_height
+                .map(|tip| tip >= height.to_consensus_u32()),
+            absolute::LockTime::Seconds(time) => {
+                Some(self.now_unix_secs >= u64::from(time.to_consensus_u32()))
+            }
+        }
+    }
+}
+
 pub trait ContractSpec:
     Clone + Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static
 {
@@ -233,6 +319,46 @@ pub trait ContractSpec:
             .into_iter()
             .map(SpendPath::select)
             .collect())
+    }
+
+    /// Every leaf script, in the order the taproot tree is assembled from.
+    fn tapscripts(&self, ctx: &ContractContext) -> Result<Vec<ScriptBuf>, Error> {
+        Ok(self
+            .spendable_paths(ctx)?
+            .into_iter()
+            .map(|path| path.script)
+            .collect())
+    }
+
+    /// The participant keys in this contract's leaves, excluding the server's. The spender
+    /// reports which of them it can sign for in [`PathContext::signers`].
+    fn participant_keys(&self) -> Vec<XOnlyPublicKey> {
+        Vec::new()
+    }
+
+    /// Pick the leaf to spend an output of this contract through.
+    ///
+    /// The default spends through [`SpendPathKind::Forfeit`] when collaborative and
+    /// [`SpendPathKind::Exit`] otherwise, or through [`PathContext::path`] when set.
+    fn select_path(
+        &self,
+        ctx: &ContractContext,
+        path_ctx: &PathContext,
+    ) -> Result<SpendSelection, Error> {
+        let wanted = path_ctx.path.clone().unwrap_or(if path_ctx.collaborative {
+            SpendPathKind::Forfeit
+        } else {
+            SpendPathKind::Exit
+        });
+        self.spendable_selections(ctx)?
+            .into_iter()
+            .find(|selection| selection.path.kind == wanted)
+            .ok_or_else(|| {
+                Error::ad_hoc(format!(
+                    "{} contract has no {wanted:?} path",
+                    Self::contract_type()
+                ))
+            })
     }
 }
 
@@ -451,6 +577,26 @@ impl ContractSpec for VhtlcContract {
             &self.options,
         ))
     }
+
+    fn tapscripts(&self, ctx: &ContractContext) -> Result<Vec<ScriptBuf>, Error> {
+        let script = crate::vhtlc::VhtlcScript::new(self.options.clone(), ctx.network())
+            .map_err(|e| Error::ad_hoc(format!("failed to build vhtlc: {e}")))?;
+        Ok(script.tapscripts())
+    }
+
+    fn participant_keys(&self) -> Vec<XOnlyPublicKey> {
+        vec![self.options.sender, self.options.receiver]
+    }
+
+    fn select_path(
+        &self,
+        ctx: &ContractContext,
+        path_ctx: &PathContext,
+    ) -> Result<SpendSelection, Error> {
+        let script = crate::vhtlc::VhtlcScript::new(self.options.clone(), ctx.network())
+            .map_err(|e| Error::ad_hoc(format!("failed to build vhtlc: {e}")))?;
+        vhtlc_select_path(&script, &self.options, path_ctx)
+    }
 }
 
 /// A [`crate::vhtlc::VhtlcVersion::V2`] VHTLC, optionally carrying the emulator covenant leaves.
@@ -497,6 +643,214 @@ impl ContractSpec for VhtlcV2Contract {
             &self.options,
         ))
     }
+
+    fn tapscripts(&self, ctx: &ContractContext) -> Result<Vec<ScriptBuf>, Error> {
+        Ok(self.script(ctx)?.tapscripts())
+    }
+
+    fn participant_keys(&self) -> Vec<XOnlyPublicKey> {
+        vec![self.options.sender, self.options.receiver]
+    }
+
+    fn select_path(
+        &self,
+        ctx: &ContractContext,
+        path_ctx: &PathContext,
+    ) -> Result<SpendSelection, Error> {
+        vhtlc_select_path(&self.script(ctx)?, &self.options, path_ctx)
+    }
+}
+
+/// What a VHTLC leaf needs before it can be spent, besides the server's signature.
+struct VhtlcLeafNeeds {
+    /// Whether the server co-signs it. The unilateral leaves have no server key.
+    collaborative: bool,
+    /// Participant signatures.
+    keys: Vec<XOnlyPublicKey>,
+    preimage: bool,
+    cltv: Option<absolute::LockTime>,
+    csv: Option<Sequence>,
+    /// For covenant leaves, the arkade script the emulator evaluates.
+    arkade_script: Option<ScriptBuf>,
+}
+
+fn vhtlc_leaf_needs(
+    kind: &SpendPathKind,
+    script: &crate::vhtlc::VhtlcScript,
+    options: &VhtlcOptions,
+) -> Option<VhtlcLeafNeeds> {
+    let cltv = absolute::LockTime::from_consensus(options.refund_locktime);
+    let needs = |collaborative, keys, preimage, cltv, csv, arkade_script| VhtlcLeafNeeds {
+        collaborative,
+        keys,
+        preimage,
+        cltv,
+        csv,
+        arkade_script,
+    };
+    let (sender, receiver) = (options.sender, options.receiver);
+    Some(match kind {
+        SpendPathKind::VhtlcClaim => needs(true, vec![receiver], true, None, None, None),
+        SpendPathKind::VhtlcRefund => needs(true, vec![sender, receiver], false, None, None, None),
+        SpendPathKind::VhtlcRefundWithoutReceiver => {
+            needs(true, vec![sender], false, Some(cltv), None, None)
+        }
+        SpendPathKind::VhtlcUnilateralClaim => needs(
+            false,
+            vec![receiver],
+            true,
+            None,
+            Some(options.unilateral_claim_delay),
+            None,
+        ),
+        SpendPathKind::VhtlcUnilateralRefund => needs(
+            false,
+            vec![sender, receiver],
+            false,
+            None,
+            Some(options.unilateral_refund_delay),
+            None,
+        ),
+        SpendPathKind::VhtlcUnilateralRefundWithoutReceiver => needs(
+            false,
+            vec![sender],
+            false,
+            None,
+            Some(options.unilateral_refund_without_receiver_delay),
+            None,
+        ),
+        SpendPathKind::VhtlcNonInteractiveClaim => needs(
+            true,
+            Vec::new(),
+            true,
+            None,
+            None,
+            script.non_interactive_claim_arkade_script(),
+        ),
+        SpendPathKind::VhtlcNonInteractiveRefund => needs(
+            true,
+            vec![receiver],
+            false,
+            None,
+            None,
+            script.non_interactive_refund_arkade_script(),
+        ),
+        SpendPathKind::VhtlcNonInteractiveRefundWithoutReceiver => needs(
+            true,
+            Vec::new(),
+            false,
+            Some(cltv),
+            None,
+            script.non_interactive_refund_arkade_script(),
+        ),
+        SpendPathKind::Forfeit
+        | SpendPathKind::Exit
+        | SpendPathKind::Delegate
+        | SpendPathKind::Custom(_) => return None,
+    })
+}
+
+/// Pick a VHTLC leaf: [`PathContext::path`] if set, else the first of claim, refund and refund
+/// without receiver (or their unilateral counterparts) the spender can complete.
+///
+/// The covenant leaves are only used when named, since they must be submitted through the
+/// emulator. A leaf whose CLTV has not matured is refused here, before the server would.
+fn vhtlc_select_path(
+    script: &crate::vhtlc::VhtlcScript,
+    options: &VhtlcOptions,
+    path_ctx: &PathContext,
+) -> Result<SpendSelection, Error> {
+    let candidates = match &path_ctx.path {
+        Some(kind) => vec![kind.clone()],
+        None if path_ctx.collaborative => vec![
+            SpendPathKind::VhtlcClaim,
+            SpendPathKind::VhtlcRefund,
+            SpendPathKind::VhtlcRefundWithoutReceiver,
+        ],
+        None => vec![
+            SpendPathKind::VhtlcUnilateralClaim,
+            SpendPathKind::VhtlcUnilateralRefund,
+            SpendPathKind::VhtlcUnilateralRefundWithoutReceiver,
+        ],
+    };
+
+    let paths = vhtlc_spend_paths(script)?;
+    let mut refusals = Vec::new();
+    for kind in candidates {
+        let path = paths.iter().find(|path| path.kind == kind);
+        let needs = vhtlc_leaf_needs(&kind, script, options);
+        let (Some(path), Some(needs)) = (path, needs) else {
+            refusals.push(format!("{kind:?}: not a leaf of this VHTLC"));
+            continue;
+        };
+        match vhtlc_complete_selection(path.clone(), needs, options, path_ctx) {
+            Ok(selection) => return Ok(selection),
+            Err(reason) => refusals.push(format!("{kind:?}: {reason}")),
+        }
+    }
+
+    Err(Error::ad_hoc(format!(
+        "no spendable VHTLC path: {}",
+        refusals.join("; ")
+    )))
+}
+
+fn vhtlc_complete_selection(
+    path: SpendPath,
+    needs: VhtlcLeafNeeds,
+    options: &VhtlcOptions,
+    path_ctx: &PathContext,
+) -> Result<SpendSelection, String> {
+    if needs.collaborative != path_ctx.collaborative {
+        return Err(if needs.collaborative {
+            "needs the server's signature, so it can't be spent unilaterally".to_string()
+        } else {
+            "a unilateral leaf, so it can't be spent with the server".to_string()
+        });
+    }
+
+    let missing = needs
+        .keys
+        .iter()
+        .filter(|key| !path_ctx.can_sign(key))
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(format!("needs a signature from {}", missing.join(", ")));
+    }
+
+    let mut selection = path.select();
+
+    if needs.preimage {
+        let preimage = path_ctx.preimage.ok_or("needs the preimage")?;
+        let hash = bitcoin::hashes::ripemd160::Hash::from_byte_array(
+            bitcoin::hashes::hash160::Hash::hash(&preimage).to_byte_array(),
+        );
+        if hash != options.preimage_hash {
+            return Err("the preimage does not match the preimage hash".to_string());
+        }
+        selection = selection.with_extra_witness(vec![preimage.to_vec()]);
+    }
+
+    if let Some(cltv) = needs.cltv {
+        if path_ctx.cltv_matured(cltv) == Some(false) {
+            return Err(match cltv {
+                absolute::LockTime::Blocks(height) => format!("opens at block {height}"),
+                absolute::LockTime::Seconds(time) => format!("opens at Unix time {time}"),
+            });
+        }
+        selection = selection.with_locktime(cltv);
+    }
+
+    if let Some(csv) = needs.csv {
+        selection = selection.with_sequence(csv);
+    }
+
+    if let Some(arkade_script) = needs.arkade_script {
+        selection = selection.with_arkade_script(arkade_script);
+    }
+
+    Ok(selection)
 }
 
 fn vhtlc_spend_paths(script: &crate::vhtlc::VhtlcScript) -> Result<Vec<SpendPath>, Error> {
@@ -696,5 +1050,235 @@ mod tests {
             unilateral_refund_without_receiver.sequence,
             Some(Sequence::from_height(30))
         );
+    }
+
+    mod select_path {
+        use super::*;
+
+        const PREIMAGE: [u8; 32] = [7; 32];
+        /// A seconds-typed refund locktime: 2023-11-14.
+        const REFUND_LOCKTIME: u32 = 1_700_000_000;
+
+        fn contract() -> VhtlcV2Contract {
+            let mut contract = vhtlc_v2_contract(true);
+            contract.options.preimage_hash = ripemd160::Hash::from_byte_array(
+                bitcoin::hashes::hash160::Hash::hash(&PREIMAGE).to_byte_array(),
+            );
+            contract.options.refund_locktime = REFUND_LOCKTIME;
+            contract
+        }
+
+        fn sender() -> XOnlyPublicKey {
+            contract().options.sender
+        }
+
+        fn receiver() -> XOnlyPublicKey {
+            contract().options.receiver
+        }
+
+        fn select(path_ctx: PathContext) -> Result<SpendSelection, Error> {
+            contract().select_path(&ContractContext::new(Network::Regtest), &path_ctx)
+        }
+
+        fn before_refund() -> PathContext {
+            PathContext::collaborative(u64::from(REFUND_LOCKTIME) - 1)
+        }
+
+        fn after_refund() -> PathContext {
+            PathContext::collaborative(u64::from(REFUND_LOCKTIME))
+        }
+
+        #[test]
+        fn receiver_with_preimage_claims() {
+            let selection = select(
+                before_refund()
+                    .with_signers(vec![receiver()])
+                    .with_preimage(PREIMAGE),
+            )
+            .unwrap();
+
+            assert_eq!(selection.path.kind, SpendPathKind::VhtlcClaim);
+            assert_eq!(selection.extra_witness, vec![PREIMAGE.to_vec()]);
+            assert_eq!(selection.locktime, None);
+        }
+
+        #[test]
+        fn wrong_preimage_is_refused() {
+            let err = select(
+                before_refund()
+                    .with_signers(vec![receiver()])
+                    .with_preimage([8; 32]),
+            )
+            .unwrap_err();
+
+            assert!(err.to_string().contains("does not match"), "{err}");
+        }
+
+        #[test]
+        fn sender_alone_is_refused_before_the_refund_locktime() {
+            let err = select(before_refund().with_signers(vec![sender()])).unwrap_err();
+
+            let err = err.to_string();
+            assert!(err.contains("VhtlcRefund: needs a signature from"), "{err}");
+            assert!(
+                err.contains(&format!("opens at Unix time {REFUND_LOCKTIME}")),
+                "{err}"
+            );
+        }
+
+        #[test]
+        fn sender_alone_refunds_after_the_refund_locktime() {
+            let selection = select(after_refund().with_signers(vec![sender()])).unwrap();
+
+            assert_eq!(
+                selection.path.kind,
+                SpendPathKind::VhtlcRefundWithoutReceiver
+            );
+            assert_eq!(
+                selection.locktime,
+                Some(absolute::LockTime::from_consensus(REFUND_LOCKTIME))
+            );
+        }
+
+        #[test]
+        fn sender_and_receiver_refund_collaboratively_before_the_locktime() {
+            let selection =
+                select(before_refund().with_signers(vec![sender(), receiver()])).unwrap();
+
+            assert_eq!(selection.path.kind, SpendPathKind::VhtlcRefund);
+        }
+
+        #[test]
+        fn height_locktime_without_a_tip_is_not_refused() {
+            let mut contract = contract();
+            contract.options.refund_locktime = 800_000;
+            let path_ctx = PathContext::collaborative(0).with_signers(vec![sender()]);
+
+            let selection = contract
+                .select_path(&ContractContext::new(Network::Regtest), &path_ctx)
+                .unwrap();
+            assert_eq!(
+                selection.path.kind,
+                SpendPathKind::VhtlcRefundWithoutReceiver
+            );
+
+            let err = contract
+                .select_path(
+                    &ContractContext::new(Network::Regtest),
+                    &path_ctx.with_block_height(799_999),
+                )
+                .unwrap_err();
+            assert!(err.to_string().contains("opens at block 800000"), "{err}");
+        }
+
+        #[test]
+        fn covenant_leaves_are_only_used_when_named() {
+            // Nobody signs: no signature leaf is spendable, and the covenant leaves aren't
+            // picked on their own.
+            assert!(select(after_refund()).is_err());
+
+            let selection = select(
+                after_refund().with_path(SpendPathKind::VhtlcNonInteractiveRefundWithoutReceiver),
+            )
+            .unwrap();
+            assert_eq!(
+                selection.arkade_script,
+                contract()
+                    .script(&ContractContext::new(Network::Regtest))
+                    .unwrap()
+                    .non_interactive_refund_arkade_script()
+            );
+            assert_eq!(
+                selection.locktime,
+                Some(absolute::LockTime::from_consensus(REFUND_LOCKTIME))
+            );
+
+            let selection = select(
+                before_refund()
+                    .with_path(SpendPathKind::VhtlcNonInteractiveClaim)
+                    .with_preimage(PREIMAGE),
+            )
+            .unwrap();
+            assert!(selection.arkade_script.is_some());
+            assert_eq!(selection.extra_witness, vec![PREIMAGE.to_vec()]);
+        }
+
+        #[test]
+        fn covenant_leaves_are_absent_without_non_interactive_parameters() {
+            let mut contract = contract();
+            contract.non_interactive = None;
+
+            let err = contract
+                .select_path(
+                    &ContractContext::new(Network::Regtest),
+                    &before_refund()
+                        .with_path(SpendPathKind::VhtlcNonInteractiveRefund)
+                        .with_signers(vec![receiver()]),
+                )
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("not a leaf of this VHTLC"),
+                "{err}"
+            );
+        }
+
+        #[test]
+        fn unilateral_spends_use_the_unilateral_leaves() {
+            let selection = select(
+                PathContext::unilateral(0)
+                    .with_signers(vec![receiver()])
+                    .with_preimage(PREIMAGE),
+            )
+            .unwrap();
+            assert_eq!(selection.path.kind, SpendPathKind::VhtlcUnilateralClaim);
+            assert_eq!(selection.sequence, Some(Sequence::from_height(10)));
+
+            let selection =
+                select(PathContext::unilateral(0).with_signers(vec![sender()])).unwrap();
+            assert_eq!(
+                selection.path.kind,
+                SpendPathKind::VhtlcUnilateralRefundWithoutReceiver
+            );
+            assert_eq!(selection.sequence, Some(Sequence::from_height(30)));
+
+            let err = select(
+                PathContext::unilateral(0)
+                    .with_signers(vec![sender()])
+                    .with_path(SpendPathKind::VhtlcRefundWithoutReceiver),
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("can't be spent unilaterally"),
+                "{err}"
+            );
+        }
+
+        #[test]
+        fn v1_selects_like_v2() {
+            let mut contract = vhtlc_contract();
+            contract.options = self::contract().options;
+
+            let selection = contract
+                .select_path(
+                    &ContractContext::new(Network::Regtest),
+                    &after_refund().with_signers(vec![sender()]),
+                )
+                .unwrap();
+            assert_eq!(
+                selection.path.kind,
+                SpendPathKind::VhtlcRefundWithoutReceiver
+            );
+        }
+
+        #[test]
+        fn tapscripts_cover_every_leaf_in_tree_order() {
+            let ctx = ContractContext::new(Network::Regtest);
+            let contract = contract();
+            assert_eq!(
+                contract.tapscripts(&ctx).unwrap(),
+                contract.script(&ctx).unwrap().tapscripts()
+            );
+            assert_eq!(contract.tapscripts(&ctx).unwrap().len(), 9);
+        }
     }
 }
