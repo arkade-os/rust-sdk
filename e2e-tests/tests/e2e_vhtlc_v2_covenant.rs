@@ -13,6 +13,7 @@ use ark_client::InMemorySwapStorage;
 use ark_core::introspector::packet::add_packet_to_psbt;
 use ark_core::introspector::packet::IntrospectorEntry;
 use ark_core::introspector::packet::Packet;
+use ark_core::introspector::prev_tx::set_prev_ark_tx;
 use ark_core::send::build_offchain_transactions;
 use ark_core::send::sign_ark_transaction;
 use ark_core::send::sign_checkpoint_transaction;
@@ -40,6 +41,7 @@ use bitcoin::secp256k1::schnorr;
 use bitcoin::taproot::LeafVersion;
 use bitcoin::Amount;
 use bitcoin::ScriptBuf;
+use bitcoin::Transaction;
 use bitcoin::VarInt;
 use bitcoin::Witness;
 use bitcoin::XOnlyPublicKey;
@@ -150,7 +152,7 @@ pub async fn e2e_vhtlc_v2_non_interactive_refund_via_emulator() {
         .unwrap();
 
     let (mut ark_tx, mut checkpoint_txs) = fixture.build_spend(leaf, None, fixture.sender_payout);
-    attach_covenant(&mut ark_tx, &arkade_script);
+    attach_covenant(&mut ark_tx, &arkade_script, &fixture.funding_tx);
 
     let receiver_kp = fixture.receiver_kp;
     let sign_fn = |_: &mut psbt::Input,
@@ -200,7 +202,7 @@ pub async fn e2e_vhtlc_v2_timelocked_non_interactive_refund_via_emulator() {
         Some(absolute::LockTime::from_consensus(EXPIRED_REFUND_LOCKTIME)),
         fixture.sender_payout,
     );
-    attach_covenant(&mut ark_tx, &arkade_script);
+    attach_covenant(&mut ark_tx, &arkade_script, &fixture.funding_tx);
 
     // No participant signature: only arkd and the emulator sign this leaf.
     let response = fixture
@@ -228,6 +230,8 @@ struct FundedVhtlc {
     server_info: ark_core::server::Info,
     vhtlc: VhtlcScript,
     outpoint: VirtualTxOutPoint,
+    /// The Ark tx that created `outpoint`.
+    funding_tx: Transaction,
     receiver_kp: Keypair,
     preimage: [u8; 32],
     sender_payout: ArkAddress,
@@ -299,6 +303,17 @@ impl FundedVhtlc {
 
         let outpoint = wait_for_vtxo(&grpc_client, vhtlc.address(), server_info.dust).await;
 
+        // The emulator needs the Ark tx that created the coin each input spends.
+        let funding_tx = grpc_client
+            .get_virtual_txs(vec![funding_txid.to_string()], None, None)
+            .await
+            .unwrap()
+            .txs
+            .into_iter()
+            .map(|psbt| psbt.unsigned_tx)
+            .find(|tx| tx.compute_txid() == funding_txid)
+            .unwrap();
+
         Self {
             bob,
             carol,
@@ -307,6 +322,7 @@ impl FundedVhtlc {
             server_info,
             vhtlc,
             outpoint,
+            funding_tx,
             receiver_kp,
             preimage,
             sender_payout,
@@ -351,9 +367,15 @@ impl FundedVhtlc {
     }
 }
 
-/// Hand the emulator the arkade script it must evaluate for input 0. The script pushes its own
-/// input index, so the witness stays empty.
-fn attach_covenant(ark_tx: &mut bitcoin::Psbt, arkade_script: &ScriptBuf) {
+/// Hand the emulator the arkade script it must evaluate for input 0, and the Ark tx that created
+/// the coin input 0 spends. The script pushes its own input index, so the witness stays empty.
+fn attach_covenant(
+    ark_tx: &mut bitcoin::Psbt,
+    arkade_script: &ScriptBuf,
+    funding_tx: &Transaction,
+) {
+    set_prev_ark_tx(ark_tx, 0, funding_tx).unwrap();
+
     add_packet_to_psbt(
         ark_tx,
         &Packet::new(vec![IntrospectorEntry {
