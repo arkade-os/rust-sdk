@@ -593,12 +593,17 @@ impl ServerSignerStatus {
 impl Info {
     /// Returns the checkpoint exit scripts a checkpoint output may commit to: the current
     /// [`Self::checkpoint_tapscript`], followed by one variant per deprecated signer with the
-    /// current signer key replaced.
+    /// operator key in the script replaced by the deprecated one.
     ///
-    /// A checkpoint built before a signer rotation commits to the signer key of that time.
+    /// arkd commits the checkpoint script to its forfeit key, which can differ from the signer
+    /// key. Both are treated as the operator key here, matching the ts-sdk. A checkpoint built
+    /// before a signer rotation may commit to a deprecated signer key.
     pub fn checkpoint_exit_scripts(&self) -> Vec<ScriptBuf> {
         let current = &self.checkpoint_tapscript;
-        let signer = self.signer_pk.x_only_public_key().0.serialize();
+        let operator_keys = [
+            self.forfeit_pk.x_only_public_key().0.serialize(),
+            self.signer_pk.x_only_public_key().0.serialize(),
+        ];
 
         let mut scripts = vec![current.clone()];
         for deprecated in &self.deprecated_signers {
@@ -607,7 +612,7 @@ impl Info {
             let mut replaced = false;
             for (index, instruction) in current.instruction_indices().flatten() {
                 if let Instruction::PushBytes(push) = instruction {
-                    if push.as_bytes() == signer {
+                    if operator_keys.iter().any(|key| push.as_bytes() == key) {
                         // `index` points at the push opcode; the key follows it.
                         bytes[index + 1..index + 1 + key.len()].copy_from_slice(&key);
                         replaced = true;
@@ -1084,6 +1089,23 @@ mod tests {
                 crate::script::csv_sig_script(delay, xonly(PK_A)),
                 crate::script::csv_sig_script(delay, xonly(PK_B)),
                 crate::script::csv_sig_script(delay, xonly(PK_C)),
+            ]
+        );
+    }
+
+    #[test]
+    fn checkpoint_exit_scripts_replace_forfeit_key_when_it_differs_from_signer() {
+        let delay = bitcoin::Sequence::from_height(144);
+        let mut info = make_info(PK_A, vec![(PK_B, 1000)]);
+        // arkd commits the checkpoint script to its forfeit key, not its signer key.
+        info.forfeit_pk = pk(PK_C);
+        info.checkpoint_tapscript = crate::script::csv_sig_script(delay, xonly(PK_C));
+
+        assert_eq!(
+            info.checkpoint_exit_scripts(),
+            vec![
+                crate::script::csv_sig_script(delay, xonly(PK_C)),
+                crate::script::csv_sig_script(delay, xonly(PK_B)),
             ]
         );
     }
