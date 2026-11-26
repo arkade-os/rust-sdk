@@ -309,6 +309,170 @@ where
     Ok(tx)
 }
 
+/// An unrolled contract output, spent on-chain through the leaf its contract picked.
+#[derive(Debug, Clone)]
+pub struct ContractExitInput {
+    outpoint: OutPoint,
+    witness_utxo: TxOut,
+    selection: SpendSelection,
+}
+
+impl ContractExitInput {
+    pub fn new(outpoint: OutPoint, witness_utxo: TxOut, selection: SpendSelection) -> Self {
+        Self {
+            outpoint,
+            witness_utxo,
+            selection,
+        }
+    }
+
+    pub fn previous_output(&self) -> TxOut {
+        self.witness_utxo.clone()
+    }
+}
+
+/// Build and sign a transaction that drains unrolled contract outputs to `to_address`, paying
+/// `fee`.
+///
+/// Each input is spent through its [`SpendSelection`]: the leaf's CSV goes into the input's
+/// sequence and its CLTV into the transaction's locktime. The witness is laid out for leaves of
+/// the form `<condition> <pk_1> CHECKSIGVERIFY ... <pk_n> CHECKSIG`: the signatures go in reverse
+/// key order and the condition witness (such as a preimage) on top, where the script reads it
+/// first. `sign_fn` must return a signature for every key in the leaf.
+pub fn create_contract_exit_transaction<S>(
+    to_address: Address,
+    fee: Amount,
+    inputs: &[ContractExitInput],
+    sign_fn: S,
+) -> Result<Transaction, Error>
+where
+    S: Fn(
+        &mut psbt::Input,
+        secp256k1::Message,
+    ) -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, Error>,
+{
+    if inputs.is_empty() {
+        return Err(Error::transaction(
+            "cannot create transaction without inputs",
+        ));
+    }
+
+    let total: Amount = inputs.iter().map(|i| i.witness_utxo.value).sum();
+    let to_amount = total.checked_sub(fee).ok_or_else(|| {
+        Error::transaction(format!(
+            "fee ({fee}) exceeds the total input amount ({total})"
+        ))
+    })?;
+    let dust = to_address.script_pubkey().minimal_non_dust();
+    if to_amount < dust {
+        return Err(Error::transaction(format!(
+            "output amount {to_amount} after a fee of {fee} is below dust ({dust})"
+        )));
+    }
+
+    let mut lock_time = LockTime::ZERO;
+    for locktime in inputs.iter().filter_map(|i| i.selection.locktime) {
+        if locktime == LockTime::ZERO {
+            continue;
+        }
+        if lock_time != LockTime::ZERO && !lock_time.is_same_unit(locktime) {
+            return Err(Error::transaction("inputs mix height and time locktimes"));
+        }
+        if lock_time == LockTime::ZERO || locktime.to_consensus_u32() > lock_time.to_consensus_u32()
+        {
+            lock_time = locktime;
+        }
+    }
+
+    let input = inputs
+        .iter()
+        .map(|i| {
+            let default_sequence = if lock_time == LockTime::ZERO {
+                Sequence::MAX
+            } else {
+                Sequence::ENABLE_LOCKTIME_NO_RBF
+            };
+            TxIn {
+                previous_output: i.outpoint,
+                sequence: i.selection.resolved_sequence(default_sequence),
+                ..Default::default()
+            }
+        })
+        .collect();
+
+    let mut psbt = Psbt::from_unsigned_tx(Transaction {
+        version: transaction::Version::TWO,
+        lock_time,
+        input,
+        output: vec![TxOut {
+            value: to_amount,
+            script_pubkey: to_address.script_pubkey(),
+        }],
+    })
+    .map_err(Error::transaction)?;
+
+    let prevouts = inputs
+        .iter()
+        .map(|i| i.witness_utxo.clone())
+        .collect::<Vec<_>>();
+
+    let secp = Secp256k1::new();
+    for (i, (psbt_input, input)) in psbt.inputs.iter_mut().zip(inputs).enumerate() {
+        let (script, control_block) = input.selection.spend_info();
+
+        psbt_input.witness_utxo = Some(input.witness_utxo.clone());
+        psbt_input.witness_script = Some(script.clone());
+        psbt_input.tap_scripts.insert(
+            control_block.clone(),
+            (script.clone(), control_block.leaf_version),
+        );
+
+        let leaf_hash = TapLeafHash::from_script(&script, control_block.leaf_version);
+        let sighash = SighashCache::new(&psbt.unsigned_tx)
+            .taproot_script_spend_signature_hash(
+                i,
+                &Prevouts::All(&prevouts),
+                leaf_hash,
+                TapSighashType::Default,
+            )
+            .map_err(Error::crypto)?;
+        let msg = secp256k1::Message::from_digest(sighash.to_raw_hash().to_byte_array());
+
+        let sigs = sign_fn(psbt_input, msg)?;
+
+        let mut witness = Witness::new();
+        for pk in extract_checksig_pubkeys(&script).iter().rev() {
+            let (sig, _) = sigs
+                .iter()
+                .find(|(_, signer)| signer == pk)
+                .ok_or_else(|| {
+                    Error::ad_hoc(format!("missing signature from {pk} for input {i}"))
+                })?;
+            secp.verify_schnorr(sig, &msg, pk)
+                .map_err(Error::crypto)
+                .with_context(|| format!("invalid signature from {pk} for input {i}"))?;
+            witness.push(sig.serialize());
+        }
+        for item in &input.selection.extra_witness {
+            witness.push(item);
+        }
+        witness.push(script.as_bytes());
+        witness.push(control_block.serialize());
+
+        psbt_input.final_script_witness = Some(witness);
+    }
+
+    let tx = psbt.extract_tx().map_err(Error::transaction)?;
+
+    tracing::debug!(
+        ?inputs,
+        raw_tx = %bitcoin::consensus::serialize(&tx).as_hex(),
+        "Built transaction draining contract outputs on-chain"
+    );
+
+    Ok(tx)
+}
+
 /// Build a topologically sorted unilateral exit branch of TXIDs for a VTXO from a
 /// [`server::VtxoChains`].
 ///

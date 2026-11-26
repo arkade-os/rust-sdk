@@ -9,6 +9,7 @@
 
 use crate::common::wait_until_balance;
 use ark_bdk_wallet::Wallet;
+use ark_client::wallet::OnchainWallet;
 use ark_client::Client;
 use ark_client::ContractSpendOptions;
 use ark_client::ExternalSigner;
@@ -25,20 +26,25 @@ use ark_core::vhtlc::VhtlcScript;
 use ark_core::ArkAddress;
 use ark_core::VtxoList;
 use ark_introspector_client::IntrospectorClient;
+use bitcoin::address::NetworkUnchecked;
 use bitcoin::hashes::hash160;
 use bitcoin::hashes::ripemd160;
 use bitcoin::hashes::Hash;
 use bitcoin::key::Keypair;
 use bitcoin::key::Secp256k1;
+use bitcoin::relative;
 use bitcoin::secp256k1;
 use bitcoin::secp256k1::schnorr;
 use bitcoin::Amount;
+use bitcoin::Transaction;
+use bitcoin::TxOut;
 use bitcoin::XOnlyPublicKey;
 use common::init_tracing;
 use common::set_up_client;
 use common::Regtest;
 use rand::thread_rng;
 use rand::Rng;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -455,6 +461,130 @@ pub async fn e2e_contract_settle_swept_vhtlc() {
     f.wait_for_payout(f.sender_payout).await;
 }
 
+/// The receiver exits unilaterally and claims on-chain through `unilateral_claim`: preimage,
+/// receiver signature, CSV. This one also waits out the real CSV and broadcasts.
+///
+/// Slow: waits out `ARKD_UNILATERAL_EXIT_DELAY` (512 s on the regtest stack).
+#[tokio::test]
+#[ignore]
+pub async fn e2e_contract_exit_v2_unilateral_claim() {
+    init_tracing();
+
+    let f = Fixture::set_up(Setup::v2(unexpired_refund_locktime())).await;
+    f.unroll(&f.bob, &f.bob_wallet).await;
+
+    // Without the preimage, the receiver has no unilateral leaf.
+    let err = f
+        .bob
+        .create_contract_on_chain_transaction(
+            &[f.outpoint.outpoint],
+            onchain_address(),
+            EXIT_FEE,
+            ContractSpendOptions::default(),
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("needs the preimage"), "{err:#}");
+
+    let options = ContractSpendOptions {
+        preimage: Some(f.preimage),
+        ..Default::default()
+    };
+    let (tx, prevouts) = f.exit_tx(&f.bob, options).await;
+    verify_consensus(&tx, &prevouts);
+
+    // Consensus is happy with the witness; now prove the chain is too once the CSV matures. The
+    // client's maturity check reads the wall clock, while the chain measures CSV in median time
+    // past, which lags; so wait for the node itself to accept the spend.
+    f.regtest.set_outpoint_blocktime_offset(0);
+    tokio::time::timeout(Duration::from_secs(20 * 60), async {
+        loop {
+            let built = f
+                .bob
+                .create_contract_on_chain_transaction(
+                    &[f.outpoint.outpoint],
+                    onchain_address(),
+                    EXIT_FEE,
+                    options,
+                )
+                .await;
+            match built.map(|(tx, _)| f.regtest.test_mempool_accept(&tx)) {
+                Ok(Ok(())) => return,
+                Ok(Err(reason)) => tracing::debug!(%reason, "node refuses the exit spend yet"),
+                Err(err) => tracing::debug!("client refuses the exit spend yet: {err:#}"),
+            }
+            f.regtest.mine(1).await;
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        }
+    })
+    .await
+    .expect("the exit leaf never matured");
+
+    let txid = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            match f
+                .bob
+                .send_contract_on_chain(
+                    &[f.outpoint.outpoint],
+                    onchain_address(),
+                    EXIT_FEE,
+                    options,
+                )
+                .await
+            {
+                Ok(txid) => return txid,
+                Err(err) => {
+                    tracing::warn!("broadcast refused: {err:#}");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            }
+        }
+    })
+    .await
+    .expect("the exit spend was never broadcast");
+    tracing::info!(%txid, "claimed unrolled VHTLC on-chain");
+}
+
+/// The sender exits unilaterally with the receiver's co-signature through `unilateral_refund`.
+#[tokio::test]
+#[ignore]
+pub async fn e2e_contract_exit_v2_unilateral_refund() {
+    init_tracing();
+
+    let f = Fixture::set_up(Setup {
+        external_receiver: true,
+        ..Setup::v2(unexpired_refund_locktime())
+    })
+    .await;
+    f.unroll(&f.carol, &f.carol_wallet).await;
+
+    let receiver = KeypairSigner(f.receiver_kp.unwrap());
+    let (tx, prevouts) = f
+        .exit_tx(
+            &f.carol,
+            ContractSpendOptions {
+                cosigner: Some(&receiver),
+                path: Some(&SpendPathKind::VhtlcUnilateralRefund),
+                ..Default::default()
+            },
+        )
+        .await;
+    verify_consensus(&tx, &prevouts);
+}
+
+/// The sender exits alone through `unilateral_refund_without_receiver`.
+#[tokio::test]
+#[ignore]
+pub async fn e2e_contract_exit_v2_unilateral_refund_without_receiver() {
+    init_tracing();
+
+    let f = Fixture::set_up(Setup::v2(unexpired_refund_locktime())).await;
+    f.unroll(&f.carol, &f.carol_wallet).await;
+
+    let (tx, prevouts) = f.exit_tx(&f.carol, ContractSpendOptions::default()).await;
+    verify_consensus(&tx, &prevouts);
+}
+
 /// Signs with a keypair the spending wallet does not hold.
 struct KeypairSigner(Keypair);
 
@@ -497,7 +627,9 @@ impl Setup {
 struct Fixture {
     regtest: Arc<Regtest>,
     bob: Client<Regtest, Wallet, InMemorySwapStorage>,
+    bob_wallet: Arc<Wallet>,
     carol: Client<Regtest, Wallet, InMemorySwapStorage>,
+    carol_wallet: Arc<Wallet>,
     grpc_client: ark_grpc::Client,
     introspector: IntrospectorClient,
     dust: Amount,
@@ -515,8 +647,10 @@ impl Fixture {
         let mut rng = thread_rng();
 
         let (alice, _) = set_up_client("alice".to_string(), regtest.clone(), secp.clone()).await;
-        let (bob, _) = set_up_client("bob".to_string(), regtest.clone(), secp.clone()).await;
-        let (carol, _) = set_up_client("carol".to_string(), regtest.clone(), secp.clone()).await;
+        let (bob, bob_wallet) =
+            set_up_client("bob".to_string(), regtest.clone(), secp.clone()).await;
+        let (carol, carol_wallet) =
+            set_up_client("carol".to_string(), regtest.clone(), secp.clone()).await;
 
         let mut grpc_client = ark_grpc::Client::new("http://localhost:7070".to_string());
         grpc_client.connect().await.unwrap();
@@ -613,7 +747,9 @@ impl Fixture {
         Self {
             regtest,
             bob,
+            bob_wallet,
             carol,
+            carol_wallet,
             grpc_client,
             introspector,
             dust: server_info.dust,
@@ -623,6 +759,100 @@ impl Fixture {
             sender_payout,
             receiver_payout,
         }
+    }
+
+    /// Put the VHTLC on-chain, fee-bumping through `client`'s on-chain wallet.
+    async fn unroll(&self, client: &Client<Regtest, Wallet, InMemorySwapStorage>, wallet: &Wallet) {
+        let onchain = client.get_onchain_address().unwrap();
+        for _ in 0..3 {
+            self.regtest
+                .faucet_fund(&onchain, Amount::from_sat(100_000))
+                .await;
+        }
+        self.regtest.mine(1).await;
+        wallet.sync().await.unwrap();
+
+        let branches = client
+            .build_contract_exit_trees(&[self.outpoint.outpoint])
+            .await
+            .unwrap();
+        assert!(!branches.is_empty());
+
+        for branch in &branches {
+            while let Some(txid) = client
+                .broadcast_next_unilateral_exit_node(branch)
+                .await
+                .unwrap()
+            {
+                tracing::info!(%txid, "broadcast exit tree node");
+                // The next node spends this one's P2A output, so it needs a confirmation.
+                self.regtest.mine(1).await;
+                wallet.sync().await.unwrap();
+            }
+        }
+        self.regtest.mine(1).await;
+
+        // Once arkd sees it on-chain, an unrolled VHTLC can no longer be spent offchain.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !self.vhtlc_vtxo().await.is_unrolled {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        })
+        .await
+        .expect("arkd never marked the VHTLC as unrolled");
+        let err = client
+            .send_contract_vtxos(
+                &[self.outpoint.outpoint],
+                self.sender_payout,
+                ContractSpendOptions {
+                    preimage: Some(self.preimage),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("already spent"), "{err:#}");
+    }
+
+    /// Build the on-chain exit transaction as if the exit delay had passed.
+    async fn exit_tx(
+        &self,
+        client: &Client<Regtest, Wallet, InMemorySwapStorage>,
+        options: ContractSpendOptions<'_>,
+    ) -> (Transaction, Vec<TxOut>) {
+        let delay = client.server_info().await.unwrap().unilateral_exit_delay;
+        match delay.to_relative_lock_time().unwrap() {
+            relative::LockTime::Blocks(blocks) => {
+                self.regtest
+                    .set_outpoint_block_height_offset(u64::from(blocks.value()));
+            }
+            relative::LockTime::Time(time) => {
+                self.regtest
+                    .set_outpoint_blocktime_offset(u64::from(time.value()) * 512);
+            }
+        }
+
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match client
+                    .create_contract_on_chain_transaction(
+                        &[self.outpoint.outpoint],
+                        onchain_address(),
+                        EXIT_FEE,
+                        options,
+                    )
+                    .await
+                {
+                    Ok(result) => return result,
+                    Err(err) => {
+                        tracing::debug!("waiting for the unrolled VHTLC: {err:#}");
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("the unrolled VHTLC never became spendable")
     }
 
     async fn vhtlc_vtxo(&self) -> VirtualTxOutPoint {
@@ -668,4 +898,38 @@ async fn wait_for_vtxo(
     })
     .await
     .unwrap()
+}
+
+const EXIT_FEE: Amount = Amount::from_sat(1_000);
+
+fn onchain_address() -> bitcoin::Address {
+    bitcoin::Address::<NetworkUnchecked>::from_str("bcrt1q8df4sx3hz63tq44ve3q6tr4qz0q30usk5sntpt")
+        .unwrap()
+        .assume_checked()
+}
+
+/// Run every input through libbitcoinconsensus, which checks the witness against the leaf,
+/// including the CSV against the input's sequence.
+fn verify_consensus(tx: &Transaction, prevouts: &[TxOut]) {
+    assert_eq!(tx.input.len(), prevouts.len());
+    let spent_outputs = prevouts
+        .iter()
+        .map(|o| bitcoinconsensus::Utxo {
+            script_pubkey: o.script_pubkey.as_bytes().as_ptr(),
+            script_pubkey_len: o.script_pubkey.len() as u32,
+            value: o.value.to_sat() as i64,
+        })
+        .collect::<Vec<_>>();
+
+    for (i, prevout) in prevouts.iter().enumerate() {
+        bitcoinconsensus::verify(
+            prevout.script_pubkey.as_bytes(),
+            prevout.value.to_sat(),
+            bitcoin::consensus::serialize(tx).as_slice(),
+            Some(&spent_outputs),
+            i,
+        )
+        .expect("valid input");
+    }
+    assert_eq!(tx.output[0].value, VHTLC_AMOUNT - EXIT_FEE);
 }

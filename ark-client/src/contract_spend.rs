@@ -36,17 +36,22 @@ use ark_core::send::SendReceiver;
 use ark_core::send::VtxoInput;
 use ark_core::server::GetVtxosRequest;
 use ark_core::server::VirtualTxOutPoint;
+use ark_core::unilateral_exit::create_contract_exit_transaction;
+use ark_core::unilateral_exit::ContractExitInput;
 use ark_core::ArkAddress;
 use ark_core::VTXO_CONDITION_KEY;
 use ark_introspector_client::IntrospectorClient;
 use bitcoin::key::Secp256k1;
 use bitcoin::psbt;
+use bitcoin::relative;
 use bitcoin::secp256k1;
 use bitcoin::secp256k1::schnorr;
+use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
 use bitcoin::ScriptBuf;
 use bitcoin::Sequence;
+use bitcoin::Transaction;
 use bitcoin::TxOut;
 use bitcoin::Txid;
 use bitcoin::XOnlyPublicKey;
@@ -404,6 +409,7 @@ where
                 if vtxo.is_spent || vtxo.is_unrolled {
                     return Err(Error::ad_hoc(format!("VTXO {outpoint} is already spent")));
                 }
+                reject_assets(&vtxo)?;
 
                 let stored = manager.get_by_script(&vtxo.script)?.ok_or_else(|| {
                     Error::ad_hoc(format!(
@@ -423,6 +429,257 @@ where
                 Ok(ContractInput { vtxo, stored, plan })
             })
             .collect()
+    }
+
+    /// Build the unilateral exit branches that put the named outputs of tracked contracts
+    /// on-chain.
+    ///
+    /// Broadcast each branch with [`Self::broadcast_next_unilateral_exit_node`]. Once the outputs
+    /// are confirmed and their exit leaf has matured, drain them with
+    /// [`Self::send_contract_on_chain`].
+    pub async fn build_contract_exit_trees(
+        &self,
+        outpoints: &[OutPoint],
+    ) -> Result<Vec<Vec<Transaction>>, Error> {
+        if outpoints.is_empty() {
+            return Err(Error::ad_hoc("no outpoints to exit"));
+        }
+
+        let vtxos = self
+            .fetch_all_vtxos(GetVtxosRequest::new_for_outpoints(outpoints))
+            .await
+            .context("failed to fetch VTXOs")?;
+
+        let vtxos = outpoints
+            .iter()
+            .map(|outpoint| {
+                let vtxo = vtxos
+                    .iter()
+                    .find(|vtxo| vtxo.outpoint == *outpoint)
+                    .cloned()
+                    .ok_or_else(|| Error::ad_hoc(format!("VTXO {outpoint} not found")))?;
+                if vtxo.is_spent {
+                    return Err(Error::ad_hoc(format!("VTXO {outpoint} is already spent")));
+                }
+                reject_assets(&vtxo)?;
+                if self.tracked_contract(&vtxo.script)?.is_none() {
+                    return Err(Error::ad_hoc(format!(
+                        "VTXO {outpoint} does not belong to a tracked contract"
+                    )));
+                }
+                Ok(vtxo)
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+
+        self.build_exit_branches(&vtxos).await
+    }
+
+    /// Drain unrolled outputs of tracked contracts to `to_address` on-chain, paying `fee`.
+    ///
+    /// Each output is spent through the unilateral leaf its contract's handler picks, or through
+    /// [`ContractSpendOptions::path`]. The outputs must already be confirmed on-chain (see
+    /// [`Self::build_contract_exit_trees`]) and the leaf's CSV must have matured. Unlike a batch
+    /// spend, a co-signer can sign here, such as the receiver in a VHTLC's `unilateral_refund`.
+    ///
+    /// A time-based CSV is checked against the wall clock, but the chain measures it in median
+    /// time past, which lags behind; the node can still refuse the spend for a while after this
+    /// check passes.
+    pub async fn send_contract_on_chain(
+        &self,
+        outpoints: &[OutPoint],
+        to_address: Address,
+        fee: Amount,
+        options: ContractSpendOptions<'_>,
+    ) -> Result<Txid, Error> {
+        let (tx, _) = self
+            .create_contract_on_chain_transaction_inner(outpoints, to_address, fee, options)
+            .await?;
+
+        let txid = tx.compute_txid();
+        tracing::info!(%txid, "Broadcasting transaction draining contract outputs on-chain");
+
+        timeout_op(self.inner.timeout, self.blockchain().broadcast(&tx))
+            .await
+            .with_context(|| format!("failed to broadcast transaction {txid}"))??;
+
+        Ok(txid)
+    }
+
+    /// Build the transaction [`Self::send_contract_on_chain`] would broadcast, with its
+    /// prevouts.
+    #[cfg(feature = "test-utils")]
+    pub async fn create_contract_on_chain_transaction(
+        &self,
+        outpoints: &[OutPoint],
+        to_address: Address,
+        fee: Amount,
+        options: ContractSpendOptions<'_>,
+    ) -> Result<(Transaction, Vec<TxOut>), Error> {
+        self.create_contract_on_chain_transaction_inner(outpoints, to_address, fee, options)
+            .await
+    }
+
+    async fn create_contract_on_chain_transaction_inner(
+        &self,
+        outpoints: &[OutPoint],
+        to_address: Address,
+        fee: Amount,
+        options: ContractSpendOptions<'_>,
+    ) -> Result<(Transaction, Vec<TxOut>), Error> {
+        if outpoints.is_empty() {
+            return Err(Error::ad_hoc("no outpoints to spend"));
+        }
+        if options.introspector.is_some() {
+            return Err(Error::ad_hoc(
+                "an on-chain spend can't go through the emulator",
+            ));
+        }
+
+        let network = self.server_info().await?.network;
+        let now = u64::try_from(unix_now()?)
+            .map_err(|_| Error::ad_hoc("system time is before the Unix epoch"))?;
+
+        // The server still knows unrolled VTXOs; we only ask it whether they carry assets.
+        let vtxos = self
+            .fetch_all_vtxos(GetVtxosRequest::new_for_outpoints(outpoints))
+            .await
+            .context("failed to fetch VTXOs")?;
+        for vtxo in &vtxos {
+            reject_assets(vtxo)?;
+        }
+
+        let cosigner_keys = options
+            .cosigner
+            .map(ExternalSigner::public_keys)
+            .unwrap_or_default();
+        let can_sign =
+            |key: &XOnlyPublicKey| cosigner_keys.contains(key) || self.keypair_by_pk(key).is_ok();
+
+        let mut inputs = Vec::new();
+        for outpoint in outpoints {
+            let tx = timeout_op(
+                self.inner.timeout,
+                self.blockchain().find_tx(&outpoint.txid),
+            )
+            .await??
+            .ok_or_else(|| {
+                Error::ad_hoc(format!(
+                    "VTXO {outpoint} is not on-chain yet: broadcast its exit tree first"
+                ))
+            })?;
+            let witness_utxo = usize::try_from(outpoint.vout)
+                .ok()
+                .and_then(|vout| tx.output.get(vout))
+                .cloned()
+                .ok_or_else(|| Error::ad_hoc(format!("no output {outpoint}")))?;
+
+            let stored = self
+                .tracked_contract(&witness_utxo.script_pubkey)?
+                .ok_or_else(|| {
+                    Error::ad_hoc(format!(
+                        "VTXO {outpoint} does not belong to a tracked contract"
+                    ))
+                })?;
+
+            let mut path_ctx = PathContext::unilateral(now);
+            path_ctx.block_height = options.block_height;
+            path_ctx.preimage = options.preimage;
+            path_ctx.path = options.path.cloned();
+
+            let plan = {
+                let state = self
+                    .state
+                    .read()
+                    .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+                let manager = state
+                    .contract_manager
+                    .lock()
+                    .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?;
+                manager
+                    .contract_spend(&stored, &can_sign, path_ctx)
+                    .with_context(|| format!("cannot spend VTXO {outpoint}"))?
+            };
+            if plan.selection.arkade_script.is_some() {
+                return Err(Error::ad_hoc(format!(
+                    "VTXO {outpoint}: a covenant leaf can't be spent on-chain"
+                )));
+            }
+
+            let address = Address::from_script(&witness_utxo.script_pubkey, network)
+                .map_err(Error::ad_hoc)?;
+            let utxo = timeout_op(
+                self.inner.timeout,
+                self.blockchain().find_outpoints(&address),
+            )
+            .await??
+            .into_iter()
+            .find(|utxo| utxo.outpoint == *outpoint)
+            .ok_or_else(|| Error::ad_hoc(format!("VTXO {outpoint} is not on-chain yet")))?;
+            if utxo.is_spent {
+                return Err(Error::ad_hoc(format!("VTXO {outpoint} is already spent")));
+            }
+            let confirmed_at = utxo
+                .confirmation_blocktime
+                .ok_or_else(|| Error::ad_hoc(format!("VTXO {outpoint} is not confirmed yet")))?;
+
+            if let Some(csv) = plan
+                .selection
+                .sequence
+                .and_then(|sequence| sequence.to_relative_lock_time())
+            {
+                match csv {
+                    relative::LockTime::Blocks(blocks) => {
+                        if utxo.confirmations < u64::from(blocks.value()) {
+                            return Err(Error::ad_hoc(format!(
+                                "VTXO {outpoint}: the exit leaf opens after {} confirmations, \
+                                 it has {}",
+                                blocks.value(),
+                                utxo.confirmations
+                            )));
+                        }
+                    }
+                    relative::LockTime::Time(time) => {
+                        let opens_at = confirmed_at + u64::from(time.value()) * 512;
+                        if now <= opens_at {
+                            return Err(Error::ad_hoc(format!(
+                                "VTXO {outpoint}: the exit leaf opens at Unix time {opens_at}"
+                            )));
+                        }
+                    }
+                }
+            }
+
+            inputs.push(ContractExitInput::new(
+                *outpoint,
+                witness_utxo,
+                plan.selection,
+            ));
+        }
+
+        let no_extra_witness = HashMap::new();
+        let tx = create_contract_exit_transaction(to_address, fee, &inputs, |input, msg| {
+            self.sign_contract_input(input, msg, &no_extra_witness, options.cosigner)
+        })
+        .map_err(Error::from)?;
+
+        let prevouts = inputs
+            .iter()
+            .map(ContractExitInput::previous_output)
+            .collect();
+
+        Ok((tx, prevouts))
+    }
+
+    fn tracked_contract(&self, script: &ScriptBuf) -> Result<Option<StoredContract>, Error> {
+        let state = self
+            .state
+            .read()
+            .map_err(|_| Error::ad_hoc("client server state lock poisoned"))?;
+        let manager = state
+            .contract_manager
+            .lock()
+            .map_err(|_| Error::ad_hoc("contract manager lock poisoned"))?;
+        manager.get_by_script(script)
     }
 
     /// Sign a contract input with the wallet's keys and the co-signer's, after attaching the
@@ -464,5 +721,17 @@ where
         }
 
         Ok(sigs)
+    }
+}
+
+/// Contract spends pay out plain bitcoin, so an output carrying assets would lose them.
+fn reject_assets(vtxo: &VirtualTxOutPoint) -> Result<(), Error> {
+    if vtxo.assets.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::ad_hoc(format!(
+            "VTXO {} carries assets, which contract spends don't support yet",
+            vtxo.outpoint
+        )))
     }
 }
