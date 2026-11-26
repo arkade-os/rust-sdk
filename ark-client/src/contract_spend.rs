@@ -9,6 +9,8 @@
 
 use crate::batch::BatchOutputType;
 use crate::error::ErrorContext;
+use crate::intent_fee;
+use crate::intent_fee::UneconomicInputs;
 use crate::swap_storage::SwapStorage;
 use crate::utils::timeout_op;
 use crate::utils::unix_now;
@@ -337,14 +339,11 @@ where
             ));
         }
 
-        let amount = inputs
-            .iter()
-            .fold(Amount::ZERO, |acc, input| acc + input.vtxo.amount);
-
         let intent_inputs = inputs
             .into_iter()
             .map(|input| {
-                intent::Input::new_with_spend_selection(
+                let fee_params = intent_fee::offchain_input_fee_params(&input.vtxo);
+                let intent_input = intent::Input::new_with_spend_selection(
                     input.vtxo.outpoint,
                     // Not final, so that a CLTV leaf's locktime applies to the intent proof.
                     Sequence::ENABLE_LOCKTIME_NO_RBF,
@@ -357,9 +356,17 @@ where
                     false,
                     input.vtxo.is_swept,
                     input.vtxo.assets,
-                )
+                );
+                (intent_input, fee_params)
             })
             .collect::<Vec<_>>();
+
+        // The operator's intent fees come out of the settled output.
+        let mut priced = self.price_inputs(Vec::new(), intent_inputs, None)?;
+        priced.retain_economic(UneconomicInputs::Reject)?;
+        let to_amount =
+            self.settled_output_amount(priced.net_total(), &to_address, server_info.dust, None)?;
+        let (_, intent_inputs) = priced.into_inputs();
 
         let commitment_txid = self
             .join_next_batch(
@@ -369,7 +376,7 @@ where
                 intent_inputs,
                 BatchOutputType::Board {
                     to_address,
-                    to_amount: amount,
+                    to_amount,
                 },
             )
             .await

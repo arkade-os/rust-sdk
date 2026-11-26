@@ -1027,6 +1027,31 @@ mod tests {
     }
 
     #[test]
+    fn delegation_pays_the_fee_charged_at_valid_at() {
+        let valid_at = 1_800_000_000;
+        // 1_000 while the VTXO is under a day old, free after.
+        let estimator = estimator(ark_fees::Config {
+            intent_offchain_input_program: "now() - birth < 86400.0 ? 1000.0 : 0.0".to_string(),
+            ..Default::default()
+        });
+
+        let (inputs, renewed) = price_delegation(
+            &estimator,
+            vec![(intent_input(1, 50_000), young_vtxo_params(50_000, valid_at))],
+            Amount::ZERO,
+            "",
+            "",
+            Amount::from_sat(330),
+            valid_at,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(inputs.total_fee(), Amount::from_sat(1_000));
+        assert_eq!(renewed, Amount::from_sat(49_000));
+    }
+
+    #[test]
     fn delegation_with_inputs_economic_at_one_end_only_is_skipped() {
         let valid_at = 1_800_000_000;
         // A 2_000 VTXO costs 5_000 in its last day, so it drops out at the late end only.
