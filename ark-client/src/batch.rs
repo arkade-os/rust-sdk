@@ -469,6 +469,9 @@ where
     /// Unlike [`Self::collaborative_redeem`], the caller doesn't pick the amount: the client sends
     /// the most the inputs can pay for after the operator's intent fees, which also avoids
     /// leaving change too small to become a VTXO. Returns the commitment txid and the amount sent.
+    ///
+    /// Fails if a VTXO carries assets: they can't go on-chain, and there is no change VTXO to keep
+    /// them in.
     pub async fn offboard_all<R>(
         &self,
         rng: &mut R,
@@ -509,6 +512,15 @@ where
             })
         })?;
         let (boarding_inputs, vtxo_inputs) = inputs.into_inputs();
+
+        // Assets need an offchain output to land in, and this intent has none.
+        if let Some(input) = vtxo_inputs.iter().find(|input| !input.assets().is_empty()) {
+            return Err(Error::ad_hoc(format!(
+                "VTXO {} carries assets, which can't be offboarded: move them to another VTXO \
+                 first",
+                input.outpoint()
+            )));
+        }
 
         tracing::info!(
             %to_address,
