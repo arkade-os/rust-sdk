@@ -463,6 +463,94 @@ where
         Ok(commitment_txid)
     }
 
+    /// Send the whole offchain balance, boarding outputs included, to `to_address` in the next
+    /// batch, with no change output.
+    ///
+    /// Unlike [`Self::collaborative_redeem`], the caller doesn't pick the amount: the client sends
+    /// the most the inputs can pay for after the operator's intent fees, which also avoids
+    /// leaving change too small to become a VTXO. Returns the commitment txid and the amount sent.
+    pub async fn offboard_all<R>(
+        &self,
+        rng: &mut R,
+        to_address: Address,
+    ) -> Result<(Txid, Amount), Error>
+    where
+        R: Rng + CryptoRng + Clone,
+    {
+        let server_info = self.server_info().await?;
+
+        // Unused: the intent has no change output.
+        let (change_address, _) = self.get_offchain_address_with_server_info(&server_info)?;
+
+        let mut inputs = self
+            .fetch_priced_commitment_transaction_inputs(&server_info, crate::utils::unix_now()?)
+            .await?;
+        inputs.retain_economic(UneconomicInputs::Skip)?;
+
+        if inputs.is_empty() {
+            return Err(Error::coin_select("nothing to offboard"));
+        }
+
+        let input_fee = inputs.total_fee();
+        let subtotal = inputs.net_total();
+
+        let script = to_address.script_pubkey().to_hex_string();
+        let min_amount = server_info.utxo_min_amount.unwrap_or(server_info.dust);
+        // One read of the fee programs for the whole bisection.
+        let to_amount = self.with_fee_estimator(|estimator| {
+            intent_fee::offboard_all_amount(subtotal, min_amount, |amount| {
+                estimator
+                    .eval_onchain_output(ark_fees::Output {
+                        amount: amount.to_sat(),
+                        script: script.clone(),
+                    })
+                    .map(intent_fee::fee_to_amount)
+                    .map_err(Error::ad_hoc)
+            })
+        })?;
+        let (boarding_inputs, vtxo_inputs) = inputs.into_inputs();
+
+        tracing::info!(
+            %to_address,
+            send_amount = %to_amount,
+            %input_fee,
+            %subtotal,
+            ?boarding_inputs,
+            "Attempting to offboard all funds"
+        );
+
+        let join_next_batch = || async {
+            self.join_next_batch(
+                &mut rng.clone(),
+                &server_info,
+                boarding_inputs.clone(),
+                vtxo_inputs.clone(),
+                BatchOutputType::OffBoard {
+                    to_address: to_address.clone(),
+                    to_amount,
+                    change_address,
+                    change_amount: Amount::ZERO,
+                },
+            )
+            .await
+        };
+
+        // Joining a batch can fail depending on the timing, so we try a few times.
+        let commitment_txid = join_next_batch
+            .retry(ExponentialBuilder::default().with_max_times(3))
+            .sleep(sleep)
+            .when(|err| !err.is_server_info_changed())
+            .notify(|err: &Error, dur: std::time::Duration| {
+                tracing::warn!("Retrying joining next batch after {dur:?}. Error: {err}");
+            })
+            .await
+            .context("Failed to join batch")?;
+
+        tracing::info!(%commitment_txid, %to_amount, "Offboard of all funds success");
+
+        Ok((commitment_txid, to_amount))
+    }
+
     /// Settle a selection of VTXOs into the next batch, generating UTXOs as
     /// outputs to a new commitment transaction.
     ///

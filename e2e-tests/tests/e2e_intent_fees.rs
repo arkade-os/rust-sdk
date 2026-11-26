@@ -223,6 +223,26 @@ pub async fn batch_flows_pay_intent_fees() {
     let percentage_fee = Amount::from_sat((change.to_sat() as f64 * 0.001).ceil() as u64);
     let renewed = change - percentage_fee - OFFCHAIN_OUTPUT_FEE;
     wait_until_balance!(&alice, confirmed: renewed, pre_confirmed: Amount::ZERO);
+
+    // Offboard everything: the client picks the amount, so no change is left behind.
+    let offboard_address = Address::p2tr(
+        &secp,
+        Keypair::new(&secp, &mut rng).x_only_public_key().0,
+        None,
+        Network::Regtest,
+    );
+    let (_, sent) = alice
+        .offboard_all(&mut rng, offboard_address.clone())
+        .await
+        .unwrap();
+
+    let percentage_fee = Amount::from_sat((renewed.to_sat() as f64 * 0.001).ceil() as u64);
+    assert_eq!(sent, renewed - percentage_fee - ONCHAIN_OUTPUT_FEE);
+    wait_until_balance!(&alice, confirmed: Amount::ZERO, pre_confirmed: Amount::ZERO);
+
+    regtest.mine(1).await;
+    let received = wait_for_onchain_output(&regtest, &offboard_address).await;
+    assert_eq!(received, sent);
 }
 
 async fn wait_for_onchain_output(regtest: &Regtest, address: &Address) -> Amount {

@@ -297,21 +297,7 @@ pub(crate) fn change_after_output_fee(
         return Ok(Amount::ZERO);
     }
 
-    // Invariant: `lo` is affordable (zero trivially: no output), everything above `hi` is not.
-    let (mut lo, mut hi) = (0u64, left.to_sat());
-    while lo < hi {
-        let mid = lo + (hi - lo).div_ceil(2);
-        let fee = fee_on(Amount::from_sat(mid))?;
-        if mid
-            .checked_add(fee.to_sat())
-            .is_some_and(|total| total <= left.to_sat())
-        {
-            lo = mid;
-        } else {
-            hi = mid - 1;
-        }
-    }
-    let change = Amount::from_sat(lo);
+    let change = max_amount_after_fee(left, fee_on)?;
 
     if change == Amount::ZERO {
         tracing::warn!(
@@ -328,6 +314,56 @@ pub(crate) fn change_after_output_fee(
     }
 
     Ok(change)
+}
+
+/// The amount a collaborative exit of everything sends on-chain: the largest `a` with
+/// `a + fee(a) <= subtotal`, so no change output is needed.
+///
+/// `subtotal` is the inputs net of their own fees. Whatever the bisection can't place (at most the
+/// rounding of a proportional fee) is paid to the operator as fee.
+///
+/// Fails if the amount would be below `min_amount`, the operator's smallest on-chain output.
+pub(crate) fn offboard_all_amount(
+    subtotal: Amount,
+    min_amount: Amount,
+    fee_on: impl Fn(Amount) -> Result<Amount, Error>,
+) -> Result<Amount, Error> {
+    let amount = max_amount_after_fee(subtotal, fee_on)?;
+
+    if amount == Amount::ZERO || amount < min_amount {
+        return Err(Error::coin_select(format!(
+            "cannot offboard {subtotal} (after input fees): the on-chain output would be \
+             {amount}, below the minimum of {min_amount}"
+        )));
+    }
+
+    Ok(amount)
+}
+
+/// The largest `a` with `a + fee(a) <= budget`, found by bisection.
+///
+/// The fee depends on the amount and the amount on the fee, so a single subtraction is only right
+/// for a flat fee. Returns zero if no positive amount fits.
+fn max_amount_after_fee(
+    budget: Amount,
+    fee_on: impl Fn(Amount) -> Result<Amount, Error>,
+) -> Result<Amount, Error> {
+    // Invariant: `lo` is affordable (zero trivially: no output), everything above `hi` is not.
+    let (mut lo, mut hi) = (0u64, budget.to_sat());
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        let fee = fee_on(Amount::from_sat(mid))?;
+        if mid
+            .checked_add(fee.to_sat())
+            .is_some_and(|total| total <= budget.to_sat())
+        {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+
+    Ok(Amount::from_sat(lo))
 }
 
 /// Price a delegation group whose intent is registered at `at`.
@@ -613,6 +649,38 @@ mod tests {
     #[test]
     fn sub_dust_change_without_fee_is_still_rejected() {
         change_after_output_fee(Amount::from_sat(100), Amount::from_sat(330), flat(0)).unwrap_err();
+    }
+
+    #[test]
+    fn offboard_all_sends_everything_after_a_flat_fee() {
+        // The example from the 100k wallet: 100_000 in, a flat 200 on-chain output fee.
+        let amount =
+            offboard_all_amount(Amount::from_sat(100_000), Amount::from_sat(330), flat(200))
+                .unwrap();
+
+        assert_eq!(amount, Amount::from_sat(99_800));
+    }
+
+    #[test]
+    fn offboard_all_rounds_a_percentage_fee_up_and_fits() {
+        // 1% of 99_009 rounds up to 991: 99_009 + 991 = 100_000, and 99_010 no longer fits.
+        let amount =
+            offboard_all_amount(Amount::from_sat(100_000), Amount::ZERO, percent(1)).unwrap();
+
+        assert_eq!(amount, Amount::from_sat(99_009));
+    }
+
+    #[test]
+    fn offboard_all_below_minimum_is_rejected() {
+        let err = offboard_all_amount(Amount::from_sat(500), Amount::from_sat(330), flat(200))
+            .unwrap_err();
+
+        assert!(err.to_string().contains("below the minimum"), "{err}");
+    }
+
+    #[test]
+    fn offboard_all_with_fee_above_subtotal_is_rejected() {
+        offboard_all_amount(Amount::from_sat(100), Amount::ZERO, flat(200)).unwrap_err();
     }
 
     /// An intent input worth `amount`, with a distinct outpoint per `seed`.
