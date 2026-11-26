@@ -937,7 +937,8 @@ const EXIT_FEE: Amount = Amount::from_sat(1_000);
 fn onchain_address() -> bitcoin::Address {
     bitcoin::Address::<NetworkUnchecked>::from_str("bcrt1q8df4sx3hz63tq44ve3q6tr4qz0q30usk5sntpt")
         .unwrap()
-        .assume_checked()
+        .require_network(bitcoin::Network::Regtest)
+        .unwrap()
 }
 
 /// Run every input through libbitcoinconsensus, which checks the witness against the leaf,

@@ -41,6 +41,7 @@ use ark_core::unilateral_exit::ContractExitInput;
 use ark_core::ArkAddress;
 use ark_core::VTXO_CONDITION_KEY;
 use ark_introspector_client::IntrospectorClient;
+use bitcoin::absolute;
 use bitcoin::key::Secp256k1;
 use bitcoin::psbt;
 use bitcoin::relative;
@@ -552,7 +553,9 @@ where
         let now = u64::try_from(unix_now()?)
             .map_err(|_| Error::ad_hoc("system time is before the Unix epoch"))?;
 
-        // The server still knows unrolled VTXOs; we only ask it whether they carry assets.
+        // The server still knows unrolled VTXOs; we only ask it whether they carry assets. This is
+        // best effort: an exit must not depend on the server, so an output it no longer reports is
+        // not refused here.
         let vtxos = self
             .fetch_all_vtxos(GetVtxosRequest::new_for_outpoints(outpoints))
             .await
@@ -659,6 +662,26 @@ where
                             )));
                         }
                     }
+                }
+            }
+
+            if let Some(locktime) = plan
+                .selection
+                .locktime
+                .filter(|locktime| *locktime != absolute::LockTime::ZERO)
+            {
+                let mature = match locktime {
+                    absolute::LockTime::Seconds(time) => {
+                        Some(now > u64::from(time.to_consensus_u32()))
+                    }
+                    absolute::LockTime::Blocks(height) => options
+                        .block_height
+                        .map(|tip| tip >= height.to_consensus_u32()),
+                };
+                if mature == Some(false) {
+                    return Err(Error::ad_hoc(format!(
+                        "VTXO {outpoint}: the leaf's locktime {locktime} has not passed yet"
+                    )));
                 }
             }
 
