@@ -449,10 +449,10 @@ pub async fn e2e_contract_vhtlc_not_spent_by_wallet_flows() {
 
 /// After the batch expires, arkd sweeps the VHTLC; the sender recovers it in a batch.
 ///
-/// Slow: waits out `ARKD_VTXO_TREE_EXPIRY` (512 s on the regtest stack).
+/// Slow: waits out `ARKD_VTXO_TREE_EXPIRY` (512 s on the regtest stack), so CI skips it (`_slow`).
 #[tokio::test]
 #[ignore]
-pub async fn e2e_contract_settle_swept_vhtlc() {
+pub async fn e2e_contract_settle_swept_vhtlc_slow() {
     init_tracing();
 
     let f = Fixture::set_up(Setup::v2(EXPIRED_REFUND_LOCKTIME)).await;
@@ -496,10 +496,11 @@ pub async fn e2e_contract_settle_swept_vhtlc() {
 /// The receiver exits unilaterally and claims on-chain through `unilateral_claim`: preimage,
 /// receiver signature, CSV. This one also waits out the real CSV and broadcasts.
 ///
-/// Slow: waits out `ARKD_UNILATERAL_EXIT_DELAY` (512 s on the regtest stack).
+/// Slow: waits out `ARKD_UNILATERAL_EXIT_DELAY` (512 s on the regtest stack), so CI skips it
+/// (`_slow`).
 #[tokio::test]
 #[ignore]
-pub async fn e2e_contract_exit_v2_unilateral_claim() {
+pub async fn e2e_contract_exit_v2_unilateral_claim_slow() {
     init_tracing();
 
     let f = Fixture::set_up(Setup::v2(unexpired_refund_locktime())).await;
