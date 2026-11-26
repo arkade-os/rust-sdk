@@ -848,6 +848,7 @@ where
 
         tracing::debug!(ark_server_url = ?self.network_client, "Connected to Ark server");
 
+        validate_server_info(&server_info)?;
         let fee_estimator = build_fee_estimator(&server_info)?;
         let mut contract_manager = self.contract_manager(server_info.network)?;
         contract_manager.register_builtins()?;
@@ -980,10 +981,26 @@ fn build_fee_estimator(server_info: &server::Info) -> Result<ark_fees::Estimator
     ark_fees::Estimator::new(fee_estimator_config).map_err(Error::ark_server)
 }
 
+/// Validate server-controlled `/info` fields before the client acts on them.
+///
+/// Runs on connect and on every refresh, so every send and claim builds its checkpoint outputs
+/// from a validated [`server::Info::checkpoint_tapscript`].
+fn validate_server_info(server_info: &server::Info) -> Result<(), Error> {
+    server::validate_checkpoint_tapscript(
+        &server_info.checkpoint_tapscript,
+        server_info.network,
+        server_info.forfeit_pk.x_only_public_key().0,
+    )
+    .map_err(Error::ark_server)?;
+
+    Ok(())
+}
+
 fn update_server_state(
     state: &Arc<RwLock<ServerState>>,
     server_info: server::Info,
 ) -> Result<(), Error> {
+    validate_server_info(&server_info)?;
     let fee_estimator = build_fee_estimator(&server_info)?;
     let mut state = state
         .write()
@@ -1057,11 +1074,15 @@ where
     /// Callers must already hold `server_info_refresh_lock`, or otherwise guarantee that
     /// concurrent refreshes are serialized.
     async fn refresh_server_info_unlocked(&self) -> Result<server::Info, Error> {
-        let server_info = timeout_op(self.inner.timeout, self.network_client().get_info())
+        let network_client = self.network_client();
+        let server_info = timeout_op(self.inner.timeout, network_client.fetch_info())
             .await
             .context("Failed to refresh Ark server info")??;
 
+        // Commit the transport digest only once the info is accepted, so a rejected refresh
+        // keeps sending the digest of the cached info.
         update_server_state(&self.state, server_info.clone())?;
+        network_client.commit_info_digest(server_info.digest.clone());
 
         Ok(server_info)
     }
@@ -2373,6 +2394,12 @@ mod digest_guard_tests {
     struct MockState {
         get_info_calls: AtomicUsize,
         list_vtxos_calls: AtomicUsize,
+        /// Overrides the advertised checkpoint tapscript (hex) when set.
+        checkpoint_tapscript: Mutex<Option<String>>,
+        /// Overrides the advertised digest when set.
+        digest: Mutex<Option<String>>,
+        /// The `x-digest` header of the last `GetVtxos` request.
+        last_list_vtxos_digest: Mutex<Option<String>>,
     }
 
     #[derive(Clone)]
@@ -2544,7 +2571,14 @@ mod digest_guard_tests {
 
         fn call(&mut self, _request: tonic::Request<test_utils::GetInfoRequest>) -> Self::Future {
             self.state.get_info_calls.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async { Ok(tonic::Response::new(info_response("fresh-digest"))) })
+            let digest = self.state.digest.lock().unwrap().clone();
+            let mut info = info_response(digest.as_deref().unwrap_or("fresh-digest"));
+            if let Some(checkpoint_tapscript) =
+                self.state.checkpoint_tapscript.lock().unwrap().clone()
+            {
+                info.checkpoint_tapscript = checkpoint_tapscript;
+            }
+            Box::pin(async { Ok(tonic::Response::new(info)) })
         }
     }
 
@@ -2559,8 +2593,13 @@ mod digest_guard_tests {
             Box<dyn Future<Output = Result<tonic::Response<Self::Response>, tonic::Status>> + Send>,
         >;
 
-        fn call(&mut self, _request: tonic::Request<test_utils::GetVtxosRequest>) -> Self::Future {
+        fn call(&mut self, request: tonic::Request<test_utils::GetVtxosRequest>) -> Self::Future {
             self.state.list_vtxos_calls.fetch_add(1, Ordering::SeqCst);
+            *self.state.last_list_vtxos_digest.lock().unwrap() = request
+                .metadata()
+                .get("x-digest")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
             Box::pin(async {
                 Err(tonic::Status::failed_precondition(
                     "DIGEST_MISMATCH: invalid digest header",
@@ -2616,7 +2655,11 @@ mod digest_guard_tests {
             signer_pubkey: public_key.to_string(),
             forfeit_pubkey: public_key.to_string(),
             forfeit_address: address.to_string(),
-            checkpoint_tapscript: String::new(),
+            checkpoint_tapscript: ark_core::script::csv_sig_script(
+                bitcoin::Sequence::from_512_second_intervals(1),
+                xonly,
+            )
+            .to_hex_string(),
             network: "regtest".to_string(),
             session_duration: 60,
             unilateral_exit_delay: 144,
@@ -2648,6 +2691,104 @@ mod digest_guard_tests {
         let info = client.server_info().await.unwrap();
         assert_eq!(info.digest, "fresh-digest");
         assert_eq!(state.get_info_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn connect_rejects_invalid_checkpoint_tapscript() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let mock = MockArkServer::default();
+        *mock.state.checkpoint_tapscript.lock().unwrap() = Some(String::new());
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+        let indexer_mock = MockIndexerServer(mock.clone());
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(mock)
+                .add_service(indexer_mock)
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+
+        let secp = Secp256k1::new();
+        let keypair = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[3; 32]).unwrap());
+        let result =
+            OfflineClient::<DummyBlockchain, DummyWallet, InMemorySwapStorage>::with_keypair(
+                OfflineClientConfig {
+                    ark_server_url: format!("http://{addr}"),
+                    boltz_url: "http://127.0.0.1:1".to_string(),
+                    ..Default::default()
+                },
+                keypair,
+                Arc::new(DummyBlockchain),
+                Arc::new(DummyWallet::new()),
+                Arc::new(InMemorySwapStorage::default()),
+            )
+            .connect()
+            .await;
+
+        let err = match result {
+            Ok(_) => panic!("connect unexpectedly succeeded"),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            err.contains("checkpoint exit delay rejected"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_rejects_invalid_checkpoint_tapscript_and_keeps_cached_info() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let mock = MockArkServer::default();
+        let state = mock.state.clone();
+        let client = connect_test_client(mock).await;
+        let cached = client.server_info().await.unwrap().checkpoint_tapscript;
+
+        // Advertise a seconds-typed delay below the 512-second floor.
+        let secret_key = SecretKey::from_slice(&[1; 32]).unwrap();
+        let (xonly, _) =
+            Keypair::from_secret_key(&Secp256k1::new(), &secret_key).x_only_public_key();
+        *state.checkpoint_tapscript.lock().unwrap() = Some(
+            ark_core::script::csv_sig_script(
+                bitcoin::Sequence::from_512_second_intervals(0),
+                xonly,
+            )
+            .to_hex_string(),
+        );
+
+        let err = client.refresh_server_info().await.unwrap_err().to_string();
+        assert!(
+            err.contains("checkpoint exit delay rejected"),
+            "unexpected error: {err}"
+        );
+
+        let info = client.server_info().await.unwrap();
+        assert_eq!(info.checkpoint_tapscript, cached);
+    }
+
+    #[tokio::test]
+    async fn rejected_refresh_keeps_sending_the_cached_digest() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let mock = MockArkServer::default();
+        let state = mock.state.clone();
+        let client = connect_test_client(mock).await;
+
+        // The server moves to a new digest whose info fails validation.
+        *state.digest.lock().unwrap() = Some("rejected-digest".to_string());
+        *state.checkpoint_tapscript.lock().unwrap() = Some(String::new());
+        client.refresh_server_info().await.unwrap_err();
+
+        let _ = client.list_vtxos().await;
+        assert_eq!(
+            state.last_list_vtxos_digest.lock().unwrap().as_deref(),
+            Some("fresh-digest")
+        );
     }
 
     #[tokio::test]
