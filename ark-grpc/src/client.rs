@@ -302,6 +302,20 @@ impl Client {
         self.ark()?.get_info().await
     }
 
+    /// Fetch `/info` without committing its digest to the `x-digest` header.
+    ///
+    /// Use this when the caller validates the info before acting on it: commit the digest with
+    /// [`Self::commit_info_digest`] only once the info is accepted, so later requests never claim
+    /// a snapshot the caller rejected.
+    pub async fn fetch_info(&self) -> Result<Info, Error> {
+        self.ark()?.fetch_info().await
+    }
+
+    /// Send `digest` in the `x-digest` header of subsequent requests.
+    pub fn commit_info_digest(&self, digest: String) {
+        self.shared.headers.set_digest(digest);
+    }
+
     /// List VTXOs with pagination support.
     /// Returns a single page of results along with pagination info.
     pub async fn list_vtxos(&self, request: GetVtxosRequest) -> Result<ListVtxosResponse, Error> {
@@ -1519,6 +1533,12 @@ impl TryFrom<generated::ark::v1::GetSubscriptionResponse> for SubscriptionRespon
             .map(VirtualTxOutPoint::try_from)
             .collect::<Result<Vec<_>, _>>()?;
 
+        let swept_vtxos = value
+            .swept_vtxos
+            .iter()
+            .map(VirtualTxOutPoint::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+
         let tx = if value.tx.is_empty() {
             None
         } else {
@@ -1574,6 +1594,7 @@ impl TryFrom<generated::ark::v1::GetSubscriptionResponse> for SubscriptionRespon
             scripts,
             new_vtxos,
             spent_vtxos,
+            swept_vtxos,
             tx,
             checkpoint_txs,
         })))
@@ -1685,6 +1706,10 @@ mod guarded {
 
         pub(super) async fn get_info(&self) -> Result<Info, Error> {
             self.shared.get_info_unguarded(self.raw.clone()).await
+        }
+
+        pub(super) async fn fetch_info(&self) -> Result<Info, Error> {
+            self.shared.fetch_info_unguarded(self.raw.clone()).await
         }
     }
 

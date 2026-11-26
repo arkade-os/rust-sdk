@@ -13,6 +13,7 @@ description = "Core Arkade types and transaction utilities"
 workspace = true
 
 [dependencies]
+ark-script = { path = "../ark-script", version = "0.12.0" }
 bech32 = "0.11"
 bitcoin = { version = "0.32.7", features = ["base64", "rand", "serde"] }
 bs58 = "0.5"

@@ -593,12 +593,17 @@ impl ServerSignerStatus {
 impl Info {
     /// Returns the checkpoint exit scripts a checkpoint output may commit to: the current
     /// [`Self::checkpoint_tapscript`], followed by one variant per deprecated signer with the
-    /// current signer key replaced.
+    /// operator key in the script replaced by the deprecated one.
     ///
-    /// A checkpoint built before a signer rotation commits to the signer key of that time.
+    /// arkd commits the checkpoint script to its forfeit key, which can differ from the signer
+    /// key. Both are treated as the operator key here, matching the ts-sdk. A checkpoint built
+    /// before a signer rotation may commit to a deprecated signer key.
     pub fn checkpoint_exit_scripts(&self) -> Vec<ScriptBuf> {
         let current = &self.checkpoint_tapscript;
-        let signer = self.signer_pk.x_only_public_key().0.serialize();
+        let operator_keys = [
+            self.forfeit_pk.x_only_public_key().0.serialize(),
+            self.signer_pk.x_only_public_key().0.serialize(),
+        ];
 
         let mut scripts = vec![current.clone()];
         for deprecated in &self.deprecated_signers {
@@ -607,7 +612,7 @@ impl Info {
             let mut replaced = false;
             for (index, instruction) in current.instruction_indices().flatten() {
                 if let Instruction::PushBytes(push) = instruction {
-                    if push.as_bytes() == signer {
+                    if operator_keys.iter().any(|key| push.as_bytes() == key) {
                         // `index` points at the push opcode; the key follows it.
                         bytes[index + 1..index + 1 + key.len()].copy_from_slice(&key);
                         replaced = true;
@@ -857,6 +862,7 @@ pub struct SubscriptionEvent {
     pub scripts: Vec<ScriptBuf>,
     pub new_vtxos: Vec<VirtualTxOutPoint>,
     pub spent_vtxos: Vec<VirtualTxOutPoint>,
+    pub swept_vtxos: Vec<VirtualTxOutPoint>,
     pub tx: Option<Transaction>,
     pub checkpoint_txs: HashMap<OutPoint, Txid>,
 }
@@ -1012,6 +1018,165 @@ pub fn parse_fee_amount(amount_str: Option<String>) -> Amount {
         .unwrap_or(Amount::ZERO)
 }
 
+/// Smallest checkpoint exit delay we accept, in seconds.
+///
+/// This is the smallest seconds-typed BIP-68 relative timelock (one 512-second unit).
+pub const MIN_CHECKPOINT_EXIT_DELAY_SECONDS: u64 = 512;
+
+/// Nominal seconds per block, only used to compare a block-typed timelock against
+/// [`MIN_CHECKPOINT_EXIT_DELAY_SECONDS`]. Block-typed delays are only accepted on regtest.
+const NOMINAL_BLOCK_SECONDS: u64 = 600;
+
+/// A decoded and validated server checkpoint tapscript.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckpointTapscript {
+    /// The relative timelock after which the server can claim a checkpoint output.
+    pub exit_delay: bitcoin::relative::LockTime,
+    /// The single key that can claim a checkpoint output after [`Self::exit_delay`].
+    pub pubkey: XOnlyPublicKey,
+}
+
+/// Decode and validate the server-advertised [`Info::checkpoint_tapscript`].
+///
+/// Every offchain send builds the server leaf of its checkpoint outputs from this script, so a
+/// script with a missing or too short delay, or the wrong key, would let the server sweep an
+/// in-flight checkpoint before it settles.
+///
+/// The script must be the canonical CSV-multisig tapscript `<seq> CSV DROP <pk> CHECKSIG` that
+/// arkd builds, where:
+///
+/// - `pk` is the only key and equals `forfeit_pk` (arkd commits the checkpoint exit path to its
+///   forfeit key).
+/// - `seq` is a BIP-68 relative timelock of at least [`MIN_CHECKPOINT_EXIT_DELAY_SECONDS`].
+///   Block-typed timelocks are only accepted on [`bitcoin::Network::Regtest`]. The BIP-68 type flag
+///   decides the unit, not the magnitude.
+pub fn validate_checkpoint_tapscript(
+    script: &ScriptBuf,
+    network: bitcoin::Network,
+    forfeit_pk: XOnlyPublicKey,
+) -> Result<CheckpointTapscript, Error> {
+    let reject =
+        |reason: String| Error::ad_hoc(format!("checkpoint exit delay rejected: {reason}"));
+
+    let (sequence, pubkeys) = decode_csv_multisig_script(script).ok_or_else(|| {
+        reject(format!(
+            "invalid checkpoint tapscript from server ({})",
+            script.as_bytes().to_lower_hex_string()
+        ))
+    })?;
+
+    let pubkey = match pubkeys.as_slice() {
+        [pubkey] => *pubkey,
+        _ => {
+            return Err(reject(format!(
+                "checkpoint tapscript must commit to exactly one pubkey, got {} [{}]",
+                pubkeys.len(),
+                pubkeys
+                    .iter()
+                    .map(|pk| pk.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+    };
+
+    if pubkey != forfeit_pk {
+        return Err(reject(format!(
+            "checkpoint tapscript pubkey {pubkey} does not match the advertised forfeit pubkey \
+             {forfeit_pk}"
+        )));
+    }
+
+    let exit_delay = sequence.to_relative_lock_time().ok_or_else(|| {
+        reject(format!(
+            "checkpoint tapscript sequence {sequence} is not a relative timelock"
+        ))
+    })?;
+
+    let (seconds, description) = match exit_delay {
+        bitcoin::relative::LockTime::Blocks(height) => {
+            if network != bitcoin::Network::Regtest {
+                return Err(reject(format!(
+                    "block-typed timelocks are not accepted (got {} blocks)",
+                    height.value()
+                )));
+            }
+
+            let blocks = u64::from(height.value());
+            (blocks * NOMINAL_BLOCK_SECONDS, format!("{blocks} blocks"))
+        }
+        bitcoin::relative::LockTime::Time(time) => {
+            let seconds = u64::from(time.value()) * 512;
+            (seconds, format!("{seconds} seconds"))
+        }
+    };
+
+    if seconds < MIN_CHECKPOINT_EXIT_DELAY_SECONDS {
+        return Err(reject(format!(
+            "{description} is below the {MIN_CHECKPOINT_EXIT_DELAY_SECONDS}s floor"
+        )));
+    }
+
+    Ok(CheckpointTapscript { exit_delay, pubkey })
+}
+
+/// Decode `<seq> CSV DROP (<pk> CHECKSIGVERIFY)* <pk> CHECKSIG`, accepting only the canonical
+/// encoding.
+fn decode_csv_multisig_script(
+    script: &ScriptBuf,
+) -> Option<(bitcoin::Sequence, Vec<XOnlyPublicKey>)> {
+    use bitcoin::opcodes::all::OP_CHECKSIG;
+    use bitcoin::opcodes::all::OP_CHECKSIGVERIFY;
+    use bitcoin::opcodes::all::OP_CSV;
+    use bitcoin::opcodes::all::OP_DROP;
+
+    let instructions = script.instructions().collect::<Result<Vec<_>, _>>().ok()?;
+
+    let (sequence, rest) = match instructions.as_slice() {
+        [seq, Instruction::Op(OP_CSV), Instruction::Op(OP_DROP), rest @ ..] => {
+            let sequence = u32::try_from(seq.script_num()?).ok()?;
+            (bitcoin::Sequence::from_consensus(sequence), rest)
+        }
+        _ => return None,
+    };
+
+    if rest.is_empty() || rest.len() % 2 != 0 {
+        return None;
+    }
+
+    let last = rest.len() / 2 - 1;
+    let mut pubkeys = Vec::with_capacity(rest.len() / 2);
+    for (i, pair) in rest.chunks_exact(2).enumerate() {
+        let expected_op = if i == last {
+            OP_CHECKSIG
+        } else {
+            OP_CHECKSIGVERIFY
+        };
+
+        match pair {
+            [Instruction::PushBytes(bytes), Instruction::Op(op)] if *op == expected_op => {
+                pubkeys.push(XOnlyPublicKey::from_slice(bytes.as_bytes()).ok()?);
+            }
+            _ => return None,
+        }
+    }
+
+    // Re-encode to reject non-minimal pushes and other malleated encodings.
+    let mut builder = ScriptBuf::builder()
+        .push_int(sequence.to_consensus_u32() as i64)
+        .push_opcode(OP_CSV)
+        .push_opcode(OP_DROP);
+    for (i, pk) in pubkeys.iter().enumerate() {
+        builder = builder.push_x_only_key(pk).push_opcode(if i == last {
+            OP_CHECKSIG
+        } else {
+            OP_CHECKSIGVERIFY
+        });
+    }
+
+    (builder.into_script() == *script).then_some((sequence, pubkeys))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1084,6 +1249,23 @@ mod tests {
                 crate::script::csv_sig_script(delay, xonly(PK_A)),
                 crate::script::csv_sig_script(delay, xonly(PK_B)),
                 crate::script::csv_sig_script(delay, xonly(PK_C)),
+            ]
+        );
+    }
+
+    #[test]
+    fn checkpoint_exit_scripts_replace_forfeit_key_when_it_differs_from_signer() {
+        let delay = bitcoin::Sequence::from_height(144);
+        let mut info = make_info(PK_A, vec![(PK_B, 1000)]);
+        // arkd commits the checkpoint script to its forfeit key, not its signer key.
+        info.forfeit_pk = pk(PK_C);
+        info.checkpoint_tapscript = crate::script::csv_sig_script(delay, xonly(PK_C));
+
+        assert_eq!(
+            info.checkpoint_exit_scripts(),
+            vec![
+                crate::script::csv_sig_script(delay, xonly(PK_C)),
+                crate::script::csv_sig_script(delay, xonly(PK_B)),
             ]
         );
     }
@@ -1284,6 +1466,224 @@ mod tests {
             assert!(vtxo.is_recoverable(DUST));
             assert!(vtxo.is_unspent(DUST));
             assert!(!vtxo.is_spent_status(DUST));
+        }
+    }
+
+    // ── validate_checkpoint_tapscript ────────────────────────────────────────
+
+    mod checkpoint_tapscript {
+        use super::*;
+        use bitcoin::hex::FromHex;
+        use bitcoin::opcodes::all::*;
+        use bitcoin::Network;
+        use bitcoin::Sequence;
+
+        fn seconds(units_of_512: u16) -> Sequence {
+            Sequence::from_512_second_intervals(units_of_512)
+        }
+
+        fn script(sequence: Sequence, pubkeys: &[XOnlyPublicKey]) -> ScriptBuf {
+            let mut builder = ScriptBuf::builder()
+                .push_int(sequence.to_consensus_u32() as i64)
+                .push_opcode(OP_CSV)
+                .push_opcode(OP_DROP);
+            for (i, pk) in pubkeys.iter().enumerate() {
+                let op = if i == pubkeys.len() - 1 {
+                    OP_CHECKSIG
+                } else {
+                    OP_CHECKSIGVERIFY
+                };
+                builder = builder.push_x_only_key(pk).push_opcode(op);
+            }
+            builder.into_script()
+        }
+
+        fn validate(script: &ScriptBuf, network: Network) -> Result<CheckpointTapscript, Error> {
+            validate_checkpoint_tapscript(script, network, xonly(PK_A))
+        }
+
+        fn assert_rejected(script: &ScriptBuf, network: Network, needle: &str) {
+            let err = validate(script, network).unwrap_err().to_string();
+            assert!(
+                err.starts_with("checkpoint exit delay rejected: ") && err.contains(needle),
+                "unexpected error: {err}"
+            );
+        }
+
+        #[test]
+        fn accepts_seconds_typed_delays() {
+            for network in [Network::Bitcoin, Network::Signet, Network::Regtest] {
+                // 512 seconds is the smallest seconds-typed CSV.
+                for units in [1, 8, 1182] {
+                    let delay = seconds(units);
+                    let checkpoint = script(delay, &[xonly(PK_A)]);
+
+                    let validated = validate(&checkpoint, network).unwrap();
+
+                    assert_eq!(validated.exit_delay, delay.to_relative_lock_time().unwrap());
+                    assert_eq!(validated.pubkey, xonly(PK_A));
+                }
+            }
+        }
+
+        #[test]
+        fn csv_sig_script_matches_canonical_encoding() {
+            let checkpoint = crate::script::csv_sig_script(seconds(1), xonly(PK_A));
+
+            assert!(validate(&checkpoint, Network::Bitcoin).is_ok());
+        }
+
+        #[test]
+        fn accepts_what_hosted_services_serve() {
+            for (network, hex, pk) in [
+                (
+                    Network::Bitcoin,
+                    "039e0440b27520b43a8363118c084a04d4f6a50ebfa58e81957f8cceceb2aee0ab64c9fd2d9977ac",
+                    "b43a8363118c084a04d4f6a50ebfa58e81957f8cceceb2aee0ab64c9fd2d9977",
+                ),
+                (
+                    Network::Signet,
+                    "03080040b27520dfcaec558c7e78cf3e38b898ba8a43cfb5727266bae32c5c5b3aeb32c558aa0bac",
+                    "dfcaec558c7e78cf3e38b898ba8a43cfb5727266bae32c5c5b3aeb32c558aa0b",
+                ),
+            ] {
+                let checkpoint = ScriptBuf::from_bytes(Vec::from_hex(hex).unwrap());
+                let pk = XOnlyPublicKey::from_str(pk).unwrap();
+
+                assert!(validate_checkpoint_tapscript(&checkpoint, network, pk).is_ok());
+            }
+        }
+
+        #[test]
+        fn rejects_seconds_below_floor() {
+            // Zero 512-second units: the only seconds-typed value below 512 seconds.
+            let checkpoint = script(seconds(0), &[xonly(PK_A)]);
+
+            for network in [Network::Bitcoin, Network::Regtest] {
+                assert_rejected(&checkpoint, network, "0 seconds is below the 512s floor");
+            }
+        }
+
+        #[test]
+        fn rejects_block_typed_delays_off_regtest() {
+            for network in [Network::Bitcoin, Network::Testnet, Network::Signet] {
+                // 511 is the largest block value that would read as blocks by magnitude; 1000
+                // is block-typed despite exceeding 512.
+                for blocks in [1, 511, 1000] {
+                    let checkpoint = script(Sequence::from_height(blocks), &[xonly(PK_A)]);
+
+                    assert_rejected(
+                        &checkpoint,
+                        network,
+                        &format!("block-typed timelocks are not accepted (got {blocks} blocks)"),
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn accepts_block_typed_delays_on_regtest() {
+            for blocks in [1, 20, 600] {
+                let delay = Sequence::from_height(blocks);
+                let checkpoint = script(delay, &[xonly(PK_A)]);
+
+                let validated = validate(&checkpoint, Network::Regtest).unwrap();
+
+                assert_eq!(validated.exit_delay, delay.to_relative_lock_time().unwrap());
+            }
+        }
+
+        #[test]
+        fn rejects_zero_blocks_on_regtest() {
+            let checkpoint = script(Sequence::from_height(0), &[xonly(PK_A)]);
+
+            assert_rejected(
+                &checkpoint,
+                Network::Regtest,
+                "0 blocks is below the 512s floor",
+            );
+        }
+
+        #[test]
+        fn rejects_disabled_relative_timelock() {
+            // The disable flag is bit 31, which does not fit a 4-byte script number.
+            let checkpoint = script(Sequence::MAX, &[xonly(PK_A)]);
+
+            assert_rejected(
+                &checkpoint,
+                Network::Bitcoin,
+                "invalid checkpoint tapscript from server",
+            );
+        }
+
+        #[test]
+        fn rejects_wrong_key() {
+            let checkpoint = script(seconds(1182), &[xonly(PK_B)]);
+
+            assert_rejected(
+                &checkpoint,
+                Network::Bitcoin,
+                "does not match the advertised forfeit pubkey",
+            );
+        }
+
+        #[test]
+        fn rejects_two_keys() {
+            for pubkeys in [[xonly(PK_A), xonly(PK_B)], [xonly(PK_B), xonly(PK_A)]] {
+                let checkpoint = script(seconds(1182), &pubkeys);
+
+                assert_rejected(
+                    &checkpoint,
+                    Network::Bitcoin,
+                    "must commit to exactly one pubkey, got 2",
+                );
+            }
+        }
+
+        #[test]
+        fn rejects_garbage() {
+            let non_minimal_sequence = ScriptBuf::builder()
+                .push_slice([0x01, 0x00, 0x40, 0x00])
+                .push_opcode(OP_CSV)
+                .push_opcode(OP_DROP)
+                .push_x_only_key(&xonly(PK_A))
+                .push_opcode(OP_CHECKSIG)
+                .into_script();
+            let missing_drop = ScriptBuf::builder()
+                .push_sequence(seconds(1182))
+                .push_opcode(OP_CSV)
+                .push_x_only_key(&xonly(PK_A))
+                .push_opcode(OP_CHECKSIG)
+                .into_script();
+            let trailing_op = {
+                let mut bytes = script(seconds(1182), &[xonly(PK_A)]).into_bytes();
+                bytes.push(OP_PUSHNUM_1.to_u8());
+                ScriptBuf::from_bytes(bytes)
+            };
+            let wrong_final_op = ScriptBuf::builder()
+                .push_sequence(seconds(1182))
+                .push_opcode(OP_CSV)
+                .push_opcode(OP_DROP)
+                .push_x_only_key(&xonly(PK_A))
+                .push_opcode(OP_CHECKSIGVERIFY)
+                .into_script();
+            let op_true = ScriptBuf::builder().push_opcode(OP_PUSHNUM_1).into_script();
+
+            for checkpoint in [
+                ScriptBuf::new(),
+                op_true,
+                ScriptBuf::from_bytes(vec![0xff, 0x4c]),
+                non_minimal_sequence,
+                missing_drop,
+                trailing_op,
+                wrong_final_op,
+            ] {
+                assert_rejected(
+                    &checkpoint,
+                    Network::Bitcoin,
+                    "invalid checkpoint tapscript from server",
+                );
+            }
         }
     }
 }
