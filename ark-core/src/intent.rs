@@ -165,6 +165,11 @@ impl Input {
     pub fn extra_witness(&self) -> Option<&[Vec<u8>]> {
         self.extra_witness.as_deref()
     }
+
+    /// The absolute locktime the spend leaf needs, `0` if none.
+    pub fn locktime(&self) -> absolute::LockTime {
+        self.locktime
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -499,7 +504,7 @@ impl IntentMessage {
 /// Encode witness elements in the format used by PSBT condition witness field.
 ///
 /// Format: [num_elements as varint] [len1 as varint] [elem1] [len2 as varint] [elem2] ...
-pub(crate) fn encode_witness(elements: &[Vec<u8>]) -> Vec<u8> {
+pub fn encode_witness(elements: &[Vec<u8>]) -> Vec<u8> {
     let mut result = Vec::new();
 
     // Write number of elements as compact size

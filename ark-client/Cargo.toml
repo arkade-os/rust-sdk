@@ -16,6 +16,7 @@ workspace = true
 ark-core = { path = "../ark-core", version = "0.12.1" }
 ark-delegator = { path = "../ark-delegator", version = "0.12.1" }
 ark-fees = { path = "../ark-fees", version = "0.12.1" }
+ark-introspector-client = { path = "../ark-introspector-client", version = "0.12.1" }
 async-stream = "0.3"
 async-trait = "0.1"
 base64 = "0.22.1"

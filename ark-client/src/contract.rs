@@ -6,6 +6,7 @@ use ark_core::contract::ContractState;
 use ark_core::contract::ContractType;
 use ark_core::contract::DefaultVtxoContract;
 use ark_core::contract::DelegateVtxoContract;
+use ark_core::contract::PathContext;
 use ark_core::contract::SpendSelection;
 use ark_core::contract::StoredContract;
 use ark_core::contract::VhtlcContract;
@@ -39,6 +40,20 @@ trait DynContractHandler: Send + Sync {
         stored: &StoredContract,
         ctx: &ContractContext,
     ) -> Result<Vec<SpendSelection>, Error>;
+    fn contract_spend(
+        &self,
+        stored: &StoredContract,
+        ctx: &ContractContext,
+        signers: &dyn Fn(&XOnlyPublicKey) -> bool,
+        path_ctx: PathContext,
+    ) -> Result<ContractSpendPlan, Error>;
+}
+
+/// How to spend an output of a stored contract: the selected leaf and the full tree.
+#[derive(Clone, Debug)]
+pub struct ContractSpendPlan {
+    pub selection: SpendSelection,
+    pub tapscripts: Vec<ScriptBuf>,
 }
 
 struct ContractHandler<T> {
@@ -88,6 +103,27 @@ impl<T: ContractSpec> DynContractHandler for ContractHandler<T> {
         let data: T = serde_json::from_value(stored.data.clone())
             .map_err(|e| Error::ad_hoc(format!("failed to decode contract data: {e}")))?;
         data.spendable_selections(ctx).map_err(Into::into)
+    }
+
+    fn contract_spend(
+        &self,
+        stored: &StoredContract,
+        ctx: &ContractContext,
+        signers: &dyn Fn(&XOnlyPublicKey) -> bool,
+        mut path_ctx: PathContext,
+    ) -> Result<ContractSpendPlan, Error> {
+        self.validate(stored, ctx)?;
+        let data: T = serde_json::from_value(stored.data.clone())
+            .map_err(|e| Error::ad_hoc(format!("failed to decode contract data: {e}")))?;
+        path_ctx.signers = data
+            .participant_keys()
+            .into_iter()
+            .filter(|key| signers(key))
+            .collect();
+        Ok(ContractSpendPlan {
+            selection: data.select_path(ctx, &path_ctx)?,
+            tapscripts: data.tapscripts(ctx)?,
+        })
     }
 }
 
@@ -860,6 +896,25 @@ impl ContractManager {
         let ctx = ContractContext::new(self.network);
         let handler = self.registry.handler_for(&stored.contract_type)?;
         handler.spendable_selections(stored, &ctx)
+    }
+
+    /// Pick the leaf to spend an output of `stored` through.
+    ///
+    /// `signers` tells which of the contract's participant keys the spender can sign for; the
+    /// resulting [`PathContext::signers`] overrides whatever `path_ctx` carried.
+    pub fn contract_spend(
+        &self,
+        stored: &StoredContract,
+        signers: &dyn Fn(&XOnlyPublicKey) -> bool,
+        path_ctx: PathContext,
+    ) -> Result<ContractSpendPlan, Error> {
+        let ctx = ContractContext::new(self.network);
+        let handler = self.registry.handler_for(&stored.contract_type)?;
+        handler.contract_spend(stored, &ctx, signers, path_ctx)
+    }
+
+    pub fn get_by_script(&self, script_pubkey: &Script) -> Result<Option<StoredContract>, Error> {
+        self.store.get_by_script(script_pubkey)
     }
 
     pub(crate) fn active_offchain_contracts(

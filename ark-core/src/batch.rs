@@ -12,6 +12,7 @@ use crate::tree_tx_output_script::TreeTxOutputScript;
 use crate::Error;
 use crate::ErrorContext;
 use crate::TxGraph;
+use crate::VTXO_CONDITION_KEY;
 use crate::VTXO_COSIGNER_PSBT_KEY;
 use crate::VTXO_INPUT_INDEX;
 use bitcoin::absolute::LockTime;
@@ -30,6 +31,7 @@ use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
 use bitcoin::Psbt;
+use bitcoin::Sequence;
 use bitcoin::TapLeafHash;
 use bitcoin::TapSighashType;
 use bitcoin::Transaction;
@@ -50,7 +52,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone)]
 pub struct OnChainInput {
     /// The sequence needed by the selected spend path.
-    sequence: bitcoin::Sequence,
+    sequence: Sequence,
     /// The script pubkey of the UTXO.
     script_pubkey: bitcoin::ScriptBuf,
     /// The full tapscript set for the contract.
@@ -67,7 +69,7 @@ pub struct OnChainInput {
 
 impl OnChainInput {
     pub fn new(
-        sequence: bitcoin::Sequence,
+        sequence: Sequence,
         script_pubkey: bitcoin::ScriptBuf,
         tapscripts: Vec<bitcoin::ScriptBuf>,
         spend_info: (bitcoin::ScriptBuf, taproot::ControlBlock),
@@ -87,7 +89,7 @@ impl OnChainInput {
     }
 
     pub fn new_with_spend_selection(
-        default_sequence: bitcoin::Sequence,
+        default_sequence: Sequence,
         script_pubkey: bitcoin::ScriptBuf,
         tapscripts: Vec<bitcoin::ScriptBuf>,
         spend_selection: SpendSelection,
@@ -107,7 +109,7 @@ impl OnChainInput {
         )
     }
 
-    pub fn sequence(&self) -> bitcoin::Sequence {
+    pub fn sequence(&self) -> Sequence {
         self.sequence
     }
 
@@ -284,7 +286,7 @@ pub fn aggregate_nonces(tree_tx_nonce_pks: TreeTxNoncePks) -> musig::AggregatedN
 /// `our_nonce_kps` to provide our share of each aggregate nonce.
 pub fn sign_batch_tree_tx(
     tree_txid: Txid,
-    vtxo_tree_expiry: bitcoin::Sequence,
+    vtxo_tree_expiry: Sequence,
     server_pk: XOnlyPublicKey,
     own_cosigner_kp: &Keypair,
     agg_nonce_pk: musig::AggregatedNonce,
@@ -421,9 +423,17 @@ where
             script_pubkey: server_forfeit_address.script_pubkey(),
         };
 
+        // A CLTV leaf needs the locktime on the forfeit and a sequence that enables it, which is
+        // also how arkd rebuilds the forfeit to check it.
+        let (lock_time, vtxo_sequence) = if vtxo_input.locktime() == LockTime::ZERO {
+            (LockTime::ZERO, Sequence::MAX)
+        } else {
+            (vtxo_input.locktime(), Sequence::ENABLE_LOCKTIME_NO_RBF)
+        };
+
         let mut forfeit_psbt = Psbt::from_unsigned_tx(Transaction {
             version: transaction::Version::non_standard(3),
-            lock_time: LockTime::ZERO,
+            lock_time,
             input: vec![
                 TxIn {
                     previous_output: *connector_outpoint,
@@ -431,6 +441,7 @@ where
                 },
                 TxIn {
                     previous_output: outpoint,
+                    sequence: vtxo_sequence,
                     ..Default::default()
                 },
             ],
@@ -459,6 +470,18 @@ where
                 (forfeit_script.clone(), leaf_version),
             );
         forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX].witness_script = Some(forfeit_script.clone());
+
+        // A condition leaf (e.g. a VHTLC claim) needs its witness, such as the preimage, on the
+        // forfeit too: arkd copies it into the forfeit it finalizes.
+        if let Some(extra_witness) = vtxo_input.extra_witness() {
+            forfeit_psbt.inputs[FORFEIT_TX_VTXO_INDEX].unknown.insert(
+                psbt::raw::Key {
+                    type_value: 222,
+                    key: VTXO_CONDITION_KEY.to_vec(),
+                },
+                intent::encode_witness(extra_witness),
+            );
+        }
 
         let prevouts = forfeit_psbt
             .inputs
