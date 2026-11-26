@@ -180,18 +180,31 @@ where
             .map_err(Error::from)
             .context("failed to build offchain transactions")?;
 
-        let extra_witnesses = inputs
-            .iter()
-            .filter(|input| !input.plan.selection.extra_witness.is_empty())
-            .map(|input| {
-                (
-                    input.plan.selection.path.script.clone(),
-                    input.plan.selection.extra_witness.clone(),
-                )
-            })
-            .collect::<HashMap<_, _>>();
+        // Keyed by leaf script: outputs of the same contract share a leaf, and so its witness.
+        let mut extra_witnesses = HashMap::<ScriptBuf, Vec<Vec<u8>>>::new();
+        for input in &inputs {
+            let selection = &input.plan.selection;
+            if selection.extra_witness.is_empty() {
+                continue;
+            }
+            match extra_witnesses.get(&selection.path.script) {
+                Some(existing) if *existing != selection.extra_witness => {
+                    return Err(Error::ad_hoc(
+                        "two inputs spend the same leaf with different condition witnesses",
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    extra_witnesses.insert(
+                        selection.path.script.clone(),
+                        selection.extra_witness.clone(),
+                    );
+                }
+            }
+        }
+        let secp = Secp256k1::new();
         let sign_fn = |psbt_input: &mut psbt::Input, msg: secp256k1::Message| {
-            self.sign_contract_input(psbt_input, msg, &extra_witnesses, options.cosigner)
+            self.sign_contract_input(psbt_input, msg, &extra_witnesses, options.cosigner, &secp)
         };
 
         let ark_txid = if let Some(arkade_script) = covenant.into_iter().next() {
@@ -371,9 +384,7 @@ where
         outpoints: &[OutPoint],
         options: &ContractSpendOptions<'_>,
     ) -> Result<Vec<ContractInput>, Error> {
-        if outpoints.is_empty() {
-            return Err(Error::ad_hoc("no outpoints to spend"));
-        }
+        check_outpoints(outpoints)?;
 
         let vtxos = self
             .fetch_all_vtxos(GetVtxosRequest::new_for_outpoints(outpoints))
@@ -406,8 +417,14 @@ where
                     .find(|vtxo| vtxo.outpoint == *outpoint)
                     .cloned()
                     .ok_or_else(|| Error::ad_hoc(format!("VTXO {outpoint} not found")))?;
-                if vtxo.is_spent || vtxo.is_unrolled {
+                if vtxo.is_spent {
                     return Err(Error::ad_hoc(format!("VTXO {outpoint} is already spent")));
+                }
+                if vtxo.is_unrolled {
+                    return Err(Error::ad_hoc(format!(
+                        "VTXO {outpoint} is unrolled: spend it on-chain with \
+                         `send_contract_on_chain`"
+                    )));
                 }
                 reject_assets(&vtxo)?;
 
@@ -441,9 +458,7 @@ where
         &self,
         outpoints: &[OutPoint],
     ) -> Result<Vec<Vec<Transaction>>, Error> {
-        if outpoints.is_empty() {
-            return Err(Error::ad_hoc("no outpoints to exit"));
-        }
+        check_outpoints(outpoints)?;
 
         let vtxos = self
             .fetch_all_vtxos(GetVtxosRequest::new_for_outpoints(outpoints))
@@ -526,9 +541,7 @@ where
         fee: Amount,
         options: ContractSpendOptions<'_>,
     ) -> Result<(Transaction, Vec<TxOut>), Error> {
-        if outpoints.is_empty() {
-            return Err(Error::ad_hoc("no outpoints to spend"));
-        }
+        check_outpoints(outpoints)?;
         if options.introspector.is_some() {
             return Err(Error::ad_hoc(
                 "an on-chain spend can't go through the emulator",
@@ -657,8 +670,9 @@ where
         }
 
         let no_extra_witness = HashMap::new();
+        let secp = Secp256k1::new();
         let tx = create_contract_exit_transaction(to_address, fee, &inputs, |input, msg| {
-            self.sign_contract_input(input, msg, &no_extra_witness, options.cosigner)
+            self.sign_contract_input(input, msg, &no_extra_witness, options.cosigner, &secp)
         })
         .map_err(Error::from)?;
 
@@ -690,6 +704,7 @@ where
         msg: secp256k1::Message,
         extra_witnesses: &HashMap<ScriptBuf, Vec<Vec<u8>>>,
         cosigner: Option<&dyn ExternalSigner>,
+        secp: &Secp256k1<secp256k1::All>,
     ) -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
         let script = input
             .witness_script
@@ -706,7 +721,6 @@ where
             );
         }
 
-        let secp = Secp256k1::new();
         let cosigner_keys = cosigner.map(|c| c.public_keys()).unwrap_or_default();
         let mut sigs = Vec::new();
         for pk in extract_checksig_pubkeys(&script) {
@@ -734,4 +748,15 @@ fn reject_assets(vtxo: &VirtualTxOutPoint) -> Result<(), Error> {
             vtxo.outpoint
         )))
     }
+}
+
+fn check_outpoints(outpoints: &[OutPoint]) -> Result<(), Error> {
+    if outpoints.is_empty() {
+        return Err(Error::ad_hoc("no outpoints to spend"));
+    }
+    let mut seen = std::collections::HashSet::new();
+    if let Some(duplicate) = outpoints.iter().find(|outpoint| !seen.insert(**outpoint)) {
+        return Err(Error::ad_hoc(format!("duplicate outpoint {duplicate}")));
+    }
+    Ok(())
 }

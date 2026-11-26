@@ -145,6 +145,38 @@ pub async fn e2e_contract_spend_v2_collaborative_refund() {
     assert!(format!("{err:#}").contains("opens at Unix time"), "{err:#}");
 
     let receiver = KeypairSigner(f.receiver_kp.unwrap());
+
+    // A batch spend signs with the wallet's keys only.
+    let err = f
+        .carol
+        .settle_contract_vtxos(
+            &mut thread_rng(),
+            &[f.outpoint.outpoint],
+            f.sender_payout,
+            ContractSpendOptions {
+                cosigner: Some(&receiver),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("wallet's keys only"), "{err:#}");
+
+    // Naming the same output twice is refused up front.
+    let err = f
+        .carol
+        .send_contract_vtxos(
+            &[f.outpoint.outpoint, f.outpoint.outpoint],
+            f.sender_payout,
+            ContractSpendOptions {
+                cosigner: Some(&receiver),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("duplicate outpoint"), "{err:#}");
+
     let txid = f
         .carol
         .send_contract_vtxos(
@@ -811,7 +843,7 @@ impl Fixture {
             )
             .await
             .unwrap_err();
-        assert!(format!("{err:#}").contains("already spent"), "{err:#}");
+        assert!(format!("{err:#}").contains("is unrolled"), "{err:#}");
     }
 
     /// Build the on-chain exit transaction as if the exit delay had passed.
