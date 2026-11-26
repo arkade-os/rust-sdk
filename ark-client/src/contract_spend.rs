@@ -497,9 +497,9 @@ where
     /// [`Self::build_contract_exit_trees`]) and the leaf's CSV must have matured. Unlike a batch
     /// spend, a co-signer can sign here, such as the receiver in a VHTLC's `unilateral_refund`.
     ///
-    /// A time-based CSV is checked against the wall clock, but the chain measures it in median
-    /// time past, which lags behind; the node can still refuse the spend for a while after this
-    /// check passes.
+    /// A time-based CSV or CLTV is checked against the wall clock, but the chain measures both in
+    /// median time past, which lags behind; the node can still refuse the spend for a while after
+    /// this check passes.
     pub async fn send_contract_on_chain(
         &self,
         outpoints: &[OutPoint],
