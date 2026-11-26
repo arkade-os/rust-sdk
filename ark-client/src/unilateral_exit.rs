@@ -10,6 +10,7 @@ use crate::Client;
 use crate::GetVtxosRequestFilter;
 use ark_core::build_unilateral_exit_tree_txids;
 use ark_core::script::extract_checksig_pubkeys;
+use ark_core::server::VirtualTxOutPoint;
 use ark_core::unilateral_exit;
 use ark_core::unilateral_exit::create_unilateral_exit_transaction;
 use ark_core::unilateral_exit::finalize_unilateral_exit_tree;
@@ -49,11 +50,23 @@ where
             .await
             .context("failed to get spendable VTXOs")?;
 
+        let vtxos = vtxo_list
+            .could_exit_unilaterally()
+            .map(|contract_vtxo| contract_vtxo.vtxo().clone())
+            .collect::<Vec<_>>();
+
+        self.build_exit_branches(&vtxos).await
+    }
+
+    /// Build the finalized unilateral exit branches for `vtxos`, whatever their script.
+    pub(crate) async fn build_exit_branches(
+        &self,
+        vtxos: &[VirtualTxOutPoint],
+    ) -> Result<Vec<Vec<Transaction>>, Error> {
         let mut unilateral_exit_trees = Vec::new();
 
-        // For each spendable VTXO, generate its unilateral exit tree.
-        for contract_vtxo in vtxo_list.could_exit_unilaterally() {
-            let virtual_tx_outpoint = contract_vtxo.vtxo();
+        // For each VTXO, generate its unilateral exit tree.
+        for virtual_tx_outpoint in vtxos {
             let vtxo_chain_response = timeout_op(
                 self.inner.timeout,
                 self.network_client().get_vtxo_chain(

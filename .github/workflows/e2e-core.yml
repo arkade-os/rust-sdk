@@ -101,7 +101,9 @@ jobs:
         run: |
           test_name=$(basename "$TEST_BINARY")
           echo "Running test: $test_name"
-          "$TEST_BINARY" --ignored --test-threads=1 --nocapture
+          # Tests named `*_slow` wait out multi-minute timelocks; run them locally with
+          # `just e2e-tests`.
+          "$TEST_BINARY" --ignored --test-threads=1 --nocapture --skip _slow
 
       - name: Print container logs on failure
         if: failure()

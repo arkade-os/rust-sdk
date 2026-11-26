@@ -184,6 +184,49 @@ impl BitcoinRpc {
         bitcoin::consensus::deserialize(&bytes).ok()
     }
 
+    /// Submit `tx` to the node, returning its reject reason on failure.
+    fn send_raw_transaction(&self, tx: &Transaction) -> Result<(), Error> {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "sendrawtransaction",
+            "params": [bitcoin::consensus::encode::serialize_hex(tx)],
+        })
+        .to_string();
+        let auth = base64::engine::general_purpose::STANDARD
+            .encode(format!("{}:{}", self.username, self.password));
+        let value = minreq::post(&self.url)
+            .with_header("Content-Type", "application/json")
+            .with_header("Authorization", format!("Basic {auth}"))
+            .with_body(body)
+            .send()
+            .map_err(|e| Error::wallet(format!("Bitcoin RPC transport error: {e}")))?
+            .json::<serde_json::Value>()
+            .map_err(|e| Error::wallet(format!("Bitcoin RPC parse error: {e}")))?;
+        match value.get("error").filter(|e| !e.is_null()) {
+            Some(error) => Err(Error::wallet(format!("sendrawtransaction failed: {error}"))),
+            None => Ok(()),
+        }
+    }
+
+    /// Whether the node would accept `tx` into its mempool, with the reject reason if not.
+    fn test_mempool_accept(&self, tx: &Transaction) -> Result<(), String> {
+        let hex = bitcoin::consensus::encode::serialize_hex(tx);
+        let result = self
+            .rpc_call("testmempoolaccept", serde_json::json!([[hex]]))
+            .map_err(|e| e.to_string())?
+            .ok_or("testmempoolaccept returned no result")?;
+        let entry = result.get(0).ok_or("testmempoolaccept returned no entry")?;
+        if entry.get("allowed").and_then(serde_json::Value::as_bool) == Some(true) {
+            Ok(())
+        } else {
+            Err(entry
+                .get("reject-reason")
+                .map(ToString::to_string)
+                .unwrap_or_else(|| entry.to_string()))
+        }
+    }
+
     /// The block time a transaction was confirmed at, or `None` if it is
     /// unconfirmed or unknown (or on RPC error).
     fn get_tx_blocktime(&self, txid: &Txid) -> Option<i64> {
@@ -322,6 +365,12 @@ impl Regtest {
     pub fn set_outpoint_blocktime_offset(&self, outpoint_blocktime_offset: u64) {
         let mut guard = self.outpoint_blocktime_offset.write().unwrap();
         *guard = outpoint_blocktime_offset;
+    }
+
+    /// Whether the node would accept `tx` into its mempool, with the reject reason if not.
+    #[allow(unused)]
+    pub fn test_mempool_accept(&self, tx: &Transaction) -> Result<(), String> {
+        self.bitcoin_rpc.test_mempool_accept(tx)
     }
 
     #[allow(unused)]
@@ -474,12 +523,10 @@ impl Blockchain for Regtest {
         })
     }
 
-    // TODO: Make sure we return a proper error here, so that we can retry if we encounter a
-    // `bad-txns-inputs-missingorspent` error.
     async fn broadcast(&self, tx: &Transaction) -> Result<(), Error> {
-        self.esplora_client.broadcast(tx).unwrap();
-
-        Ok(())
+        // Straight to the node: mempool's esplora endpoint hides the reject reason behind a bare
+        // `code -1`.
+        self.bitcoin_rpc.send_raw_transaction(tx)
     }
 
     async fn get_fee_rate(&self) -> Result<f64, Error> {
