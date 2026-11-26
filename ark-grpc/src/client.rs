@@ -1835,7 +1835,7 @@ mod guarded {
 }
 
 #[cfg(test)]
-mod tests {
+mod subscription_tests {
     use super::read_subscription_started;
     use crate::Error;
     use ark_core::server::SubscriptionEvent;
@@ -1852,6 +1852,7 @@ mod tests {
             scripts: Vec::new(),
             new_vtxos: Vec::new(),
             spent_vtxos: Vec::new(),
+            swept_vtxos: Vec::new(),
             tx: None,
             checkpoint_txs: Default::default(),
         }))
