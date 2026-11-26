@@ -21,38 +21,36 @@ use ark_core::ArkNote;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
 
-/// 2025-01-01T00:00:00Z.
-///
-/// The operator reports `expires_at` as a Unix timestamp, or as a block height for block-based
-/// batch expiries. Anything below this is taken to be a height, which the fee programs' `expiry`
-/// variable cannot express, so it is left unset.
-const EXPIRY_MIN_PLAUSIBLE_SECS: i64 = 1_735_689_600;
-
 /// The [`ark_fees::OffchainInput`] fields that come from the VTXO itself.
 ///
-/// A swept VTXO is priced as `recoverable`, anything else as `vtxo`. `birth` and `expiry` are Unix
-/// timestamps in seconds; an expiry that is really a block height is omitted.
-pub fn offchain_input_fee_params(vtxo: &VirtualTxOutPoint) -> ark_fees::OffchainInput {
+/// A swept VTXO is priced as `recoverable`, anything else as `vtxo`. `birth` and `expiry` are
+/// `created_at` and `expires_at` as the indexer reports them.
+///
+/// This mirrors what arkd feeds its own fee programs (`toArkFeeOffchainInput` in
+/// `internal/infrastructure/feemanager/arkfee.go`), so the client computes the fee the operator
+/// will. In particular arkd passes `expires_at` as the `expiry` variable even when it is a block
+/// height, which it is when the batch expiry is counted in blocks.
+pub(crate) fn offchain_input_fee_params(vtxo: &VirtualTxOutPoint) -> ark_fees::OffchainInput {
     let input_type = if vtxo.is_swept {
         ark_fees::VtxoType::Recoverable
     } else {
         ark_fees::VtxoType::Vtxo
     };
 
-    let expiry = (vtxo.expires_at >= EXPIRY_MIN_PLAUSIBLE_SECS).then_some(vtxo.expires_at);
-
     ark_fees::OffchainInput {
         amount: vtxo.amount.to_sat(),
-        expiry,
+        expiry: Some(vtxo.expires_at),
         birth: Some(vtxo.created_at),
         input_type,
+        // arkd never sets `weight` when it prices an input (`toArkFeeOffchainInput`), so its fee
+        // programs always see 0. Passing anything else would make us compute a different fee.
         weight: 0.0,
     }
 }
 
 /// The [`ark_fees::OffchainInput`] for redeeming an ArkNote: priced as a `note`, with neither
 /// birth nor expiry.
-pub fn note_fee_params(note: &ArkNote) -> ark_fees::OffchainInput {
+pub(crate) fn note_fee_params(note: &ArkNote) -> ark_fees::OffchainInput {
     ark_fees::OffchainInput {
         amount: note.value().to_sat(),
         expiry: None,
@@ -63,7 +61,7 @@ pub fn note_fee_params(note: &ArkNote) -> ark_fees::OffchainInput {
 }
 
 /// The [`ark_fees::OnchainInput`] for a boarding output worth `amount`.
-pub fn onchain_input_fee_params(amount: Amount) -> ark_fees::OnchainInput {
+pub(crate) fn onchain_input_fee_params(amount: Amount) -> ark_fees::OnchainInput {
     ark_fees::OnchainInput {
         amount: amount.to_sat(),
     }
@@ -183,13 +181,6 @@ impl PricedInputs {
 
     pub fn is_empty(&self) -> bool {
         self.boarding.is_empty() && self.vtxos.is_empty()
-    }
-
-    /// Keep only the boarding inputs in `boarding` and the VTXO inputs in `vtxos`.
-    pub fn retain_outpoints(&mut self, boarding: &[OutPoint], vtxos: &[OutPoint]) {
-        self.boarding
-            .retain(|p| boarding.contains(&p.input.outpoint()));
-        self.vtxos.retain(|p| vtxos.contains(&p.input.outpoint()));
     }
 
     /// Apply `policy` to inputs that cost at least as much to spend as they are worth.
@@ -339,6 +330,71 @@ pub(crate) fn change_after_output_fee(
     Ok(change)
 }
 
+/// Price a delegation group whose intent is registered at `at`.
+///
+/// The intent must leave the operator's intent fee unclaimed: the inputs' offchain input fees,
+/// plus the offchain output fee on the delegator's fee output (paid to `delegator_fee_script`)
+/// and on the renewed VTXO (paid to `renewed_script`). Both come out of the renewed VTXO. Every
+/// program is evaluated with `now()` pinned to `at`, as the operator will.
+///
+/// Returns the economic inputs and the renewed VTXO amount, or `None` if the group is not worth
+/// delegating.
+pub(crate) fn price_delegation(
+    estimator: &ark_fees::Estimator,
+    vtxo_inputs: Vec<(intent::Input, ark_fees::OffchainInput)>,
+    delegator_fee: Amount,
+    delegator_fee_script: &str,
+    renewed_script: &str,
+    dust: Amount,
+    at: i64,
+) -> Result<Option<(PricedInputs, Amount)>, Error> {
+    let mut inputs = PricedInputs::price(estimator, Vec::new(), vtxo_inputs, Some(at))?;
+    inputs.retain_economic(UneconomicInputs::Skip)?;
+    if inputs.is_empty() {
+        return Ok(None);
+    }
+    let total_amount = inputs.net_total();
+
+    let output_fee = |amount: Amount, script: &str| {
+        estimator
+            .eval_offchain_output_at(
+                ark_fees::Output {
+                    amount: amount.to_sat(),
+                    script: script.to_string(),
+                },
+                at,
+            )
+            .map(fee_to_amount)
+            .map_err(Error::ad_hoc)
+    };
+
+    let fee_output_fee = if delegator_fee > Amount::ZERO {
+        output_fee(delegator_fee, delegator_fee_script)?
+    } else {
+        Amount::ZERO
+    };
+
+    let Some(subtotal) = total_amount
+        .checked_sub(delegator_fee)
+        .and_then(|a| a.checked_sub(fee_output_fee))
+        .filter(|a| *a > Amount::ZERO)
+    else {
+        tracing::warn!(
+            %total_amount, %delegator_fee, %fee_output_fee,
+            "Delegator fee exceeds VTXO group value, skipping"
+        );
+        return Ok(None);
+    };
+
+    match settlement_output_amount(subtotal, dust, |amount| output_fee(amount, renewed_script)) {
+        Ok(renewed) => Ok(Some((inputs, renewed))),
+        Err(e) => {
+            tracing::warn!(%subtotal, "Net amount after fees is below dust, skipping: {e}");
+            Ok(None)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,10 +449,10 @@ mod tests {
     }
 
     #[test]
-    fn block_height_expiry_is_omitted() {
+    fn block_height_expiry_is_passed_through_as_arkd_does() {
         let params = offchain_input_fee_params(&vtxo(10_000, 1_750_000_000, 850_000, false));
 
-        assert_eq!(params.expiry, None);
+        assert_eq!(params.expiry, Some(850_000));
     }
 
     #[test]
@@ -707,29 +763,100 @@ mod tests {
     }
 
     #[test]
-    fn retain_outpoints_filters_both_kinds() {
-        let mut priced = PricedInputs::price(
-            &mutinynet_like(),
-            vec![boarding_input(1, 1_000), boarding_input(2, 1_000)],
+    fn delegation_leaves_every_fee_unclaimed() {
+        let at = 1_800_000_000;
+        let estimator = mutinynet_like();
+        let delegator_fee = Amount::from_sat(1_000);
+
+        let (inputs, renewed) = price_delegation(
+            &estimator,
             vec![
-                (intent_input(3, 1_000), old_vtxo_params(1_000, 0)),
-                (intent_input(4, 1_000), old_vtxo_params(1_000, 0)),
+                (intent_input(1, 50_000), young_vtxo_params(50_000, at)),
+                (intent_input(2, 50_000), old_vtxo_params(50_000, at)),
             ],
-            None,
+            delegator_fee,
+            "",
+            "",
+            Amount::from_sat(330),
+            at,
         )
+        .unwrap()
         .unwrap();
-        let keep = [
-            priced.boarding[1].input.outpoint(),
-            priced.vtxos[0].input.outpoint(),
-        ];
 
-        // The VTXO outpoint in the boarding list matches no boarding input.
-        priced.retain_outpoints(&keep, &keep[1..]);
+        // 100_000 in, 500 input fee, 1_000 to the delegator, 1% of 1_000 (= 10) on its output,
+        // then 1% of the 98_490 subtotal (= 985) on the renewed VTXO.
+        assert_eq!(inputs.total_fee(), Amount::from_sat(500));
+        assert_eq!(renewed, Amount::from_sat(97_505));
 
-        assert_eq!(priced.boarding.len(), 1);
-        assert_eq!(priced.vtxos.len(), 1);
-        assert_eq!(priced.boarding[0].input.outpoint(), keep[0]);
-        assert_eq!(priced.vtxos[0].input.outpoint(), keep[1]);
+        // What the operator computes for the registered intent at `at` is covered.
+        let output = |amount: Amount| {
+            fee_to_amount(
+                estimator
+                    .eval_offchain_output_at(
+                        ark_fees::Output {
+                            amount: amount.to_sat(),
+                            script: String::new(),
+                        },
+                        at,
+                    )
+                    .unwrap(),
+            )
+        };
+        let operator_fee = inputs.total_fee() + output(delegator_fee) + output(renewed);
+        let unclaimed = Amount::from_sat(100_000) - delegator_fee - renewed;
+        assert!(unclaimed >= operator_fee, "{unclaimed} < {operator_fee}");
+    }
+
+    #[test]
+    fn delegation_prices_inputs_at_registration_time() {
+        let now = 1_800_000_000;
+        let estimator = mutinynet_like();
+
+        // Young now, but more than an hour old by the time the intent is registered.
+        let price_at = |at| {
+            price_delegation(
+                &estimator,
+                vec![(intent_input(1, 50_000), young_vtxo_params(50_000, now))],
+                Amount::ZERO,
+                "",
+                "",
+                Amount::from_sat(330),
+                at,
+            )
+            .unwrap()
+            .unwrap()
+            .0
+            .total_fee()
+        };
+
+        assert_eq!(price_at(now), Amount::from_sat(500));
+        assert_eq!(price_at(now + 7_200), Amount::ZERO);
+    }
+
+    #[test]
+    fn delegation_not_worth_it_is_skipped() {
+        let at = 1_800_000_000;
+        let estimator = mutinynet_like();
+
+        let priced = |delegator_fee: u64| {
+            price_delegation(
+                &estimator,
+                vec![(intent_input(1, 2_000), old_vtxo_params(2_000, at))],
+                Amount::from_sat(delegator_fee),
+                "",
+                "",
+                Amount::from_sat(330),
+                at,
+            )
+            .unwrap()
+        };
+
+        // The delegator fee eats the whole group.
+        assert!(priced(2_000).is_none());
+        // What is left after the delegator is below dust.
+        assert!(priced(1_800).is_none());
+        // Enough left to renew.
+        assert!(priced(1_000).is_some());
     }
 
     #[test]

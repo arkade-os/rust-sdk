@@ -320,11 +320,14 @@ where
         let (to_address, _) = self.get_offchain_address_with_server_info(server_info)?;
 
         let mut inputs = self
-            .fetch_priced_commitment_transaction_inputs(server_info, crate::utils::unix_now()?)
+            .fetch_priced_commitment_transaction_inputs_for(
+                server_info,
+                crate::utils::unix_now()?,
+                boarding_outpoints,
+                vtxo_outpoints,
+                uneconomic_inputs,
+            )
             .await?;
-
-        // Keep only the specified inputs.
-        inputs.retain_outpoints(boarding_outpoints, vtxo_outpoints);
         inputs.retain_economic(uneconomic_inputs)?;
 
         if inputs.is_empty() {
@@ -1227,14 +1230,17 @@ where
             })?;
 
         let script = change_address.to_p2tr_script_pubkey().to_hex_string();
-        intent_fee::change_after_output_fee(left, dust, |amount| {
-            self.eval_offchain_output_fee(
-                ark_fees::Output {
-                    amount: amount.to_sat(),
-                    script: script.clone(),
-                },
-                None,
-            )
+        // One read of the fee programs for the whole bisection.
+        self.with_fee_estimator(|estimator| {
+            intent_fee::change_after_output_fee(left, dust, |amount| {
+                estimator
+                    .eval_offchain_output(ark_fees::Output {
+                        amount: amount.to_sat(),
+                        script: script.clone(),
+                    })
+                    .map(intent_fee::fee_to_amount)
+                    .map_err(Error::ad_hoc)
+            })
         })
     }
 
@@ -1248,6 +1254,51 @@ where
         let (boarding_inputs, vtxo_inputs, _) = self
             .fetch_commitment_transaction_inputs_with_fee_params(server_info, now)
             .await?;
+
+        self.price_inputs(boarding_inputs, vtxo_inputs, None)
+    }
+
+    /// Like [`Self::fetch_priced_commitment_transaction_inputs`], for the named inputs only.
+    ///
+    /// Only the named inputs are priced. A named input that isn't settleable (unknown, spent, or
+    /// a boarding output that isn't confirmed yet) fails the call under
+    /// [`UneconomicInputs::Reject`] and is skipped under [`UneconomicInputs::Skip`].
+    pub(crate) async fn fetch_priced_commitment_transaction_inputs_for(
+        &self,
+        server_info: &server::Info,
+        now: i64,
+        boarding_outpoints: &[OutPoint],
+        vtxo_outpoints: &[OutPoint],
+        policy: UneconomicInputs,
+    ) -> Result<PricedInputs, Error> {
+        let (mut boarding_inputs, mut vtxo_inputs, _) = self
+            .fetch_commitment_transaction_inputs_with_fee_params(server_info, now)
+            .await?;
+
+        boarding_inputs.retain(|input| boarding_outpoints.contains(&input.outpoint()));
+        vtxo_inputs.retain(|(input, _)| vtxo_outpoints.contains(&input.outpoint()));
+
+        let missing =
+            boarding_outpoints
+                .iter()
+                .filter(|outpoint| !boarding_inputs.iter().any(|i| i.outpoint() == **outpoint))
+                .chain(vtxo_outpoints.iter().filter(|outpoint| {
+                    !vtxo_inputs.iter().any(|(i, _)| i.outpoint() == **outpoint)
+                }))
+                .collect::<Vec<_>>();
+        if let Some(outpoint) = missing.first() {
+            match policy {
+                UneconomicInputs::Reject => {
+                    return Err(Error::coin_select(format!(
+                        "input {outpoint} can't be settled: it is unknown, spent, or not \
+                         confirmed yet"
+                    )));
+                }
+                UneconomicInputs::Skip => {
+                    tracing::debug!(?missing, "Skipping inputs that can't be settled");
+                }
+            }
+        }
 
         self.price_inputs(boarding_inputs, vtxo_inputs, None)
     }

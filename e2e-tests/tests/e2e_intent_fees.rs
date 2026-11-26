@@ -59,26 +59,55 @@ fn get_intent_fees() -> IntentFees {
 }
 
 fn set_intent_fees(fees: &IntentFees) {
+    try_set_intent_fees(fees).unwrap();
+}
+
+fn try_set_intent_fees(fees: &IntentFees) -> Result<(), String> {
     let response = minreq::post(format!("{ARKD_ADMIN_URL}/v1/admin/intentFees"))
         .with_json(&UpdateIntentFeesRequest { fees })
-        .unwrap()
+        .map_err(|e| e.to_string())?
         .send()
-        .unwrap();
-    assert_eq!(response.status_code, 200, "{}", response.as_str().unwrap());
+        .map_err(|e| e.to_string())?;
+    if response.status_code != 200 {
+        return Err(format!(
+            "status {}: {}",
+            response.status_code,
+            response.as_str().unwrap_or_default()
+        ));
+    }
 
-    let applied = get_intent_fees();
-    assert_eq!(applied.offchain_input_fee, fees.offchain_input_fee);
-    assert_eq!(applied.onchain_input_fee, fees.onchain_input_fee);
-    assert_eq!(applied.offchain_output_fee, fees.offchain_output_fee);
-    assert_eq!(applied.onchain_output_fee, fees.onchain_output_fee);
+    let response = minreq::get(format!("{ARKD_ADMIN_URL}/v1/admin/intentFees"))
+        .send()
+        .map_err(|e| e.to_string())?;
+    let applied = response
+        .json::<GetIntentFeesResponse>()
+        .map_err(|e| e.to_string())?
+        .fees;
+    if applied.offchain_input_fee != fees.offchain_input_fee
+        || applied.onchain_input_fee != fees.onchain_input_fee
+        || applied.offchain_output_fee != fees.offchain_output_fee
+        || applied.onchain_output_fee != fees.onchain_output_fee
+    {
+        return Err("the operator did not apply the fee programs".to_string());
+    }
+
+    Ok(())
 }
 
 /// Restores the operator's fees when dropped, even if the test panics.
 struct RestoreFees(IntentFees);
 
 impl Drop for RestoreFees {
+    #[allow(clippy::print_stderr)]
     fn drop(&mut self) {
-        set_intent_fees(&self.0);
+        if let Err(e) = try_set_intent_fees(&self.0) {
+            // `eprintln!`: tracing may already be torn down. A failed restore leaves the operator
+            // charging the test's fees, which breaks every test that runs after this one.
+            eprintln!("FAILED TO RESTORE THE OPERATOR'S INTENT FEES: {e}");
+            if !std::thread::panicking() {
+                panic!("failed to restore the operator's intent fees: {e}");
+            }
+        }
     }
 }
 

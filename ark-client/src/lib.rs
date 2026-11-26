@@ -60,7 +60,7 @@ use std::time::Instant;
 
 pub mod contract;
 pub mod error;
-pub mod intent_fee;
+mod intent_fee;
 pub mod key_provider;
 pub mod swap_storage;
 pub mod vtxo_watcher;
