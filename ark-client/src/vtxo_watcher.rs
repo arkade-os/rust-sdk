@@ -791,7 +791,7 @@ async fn delegate_vtxos<B, W, S>(
     }
 }
 
-/// Price a delegation group at `valid_at`; see [`intent_fee::price_delegation`].
+/// Price a delegation group valid from `valid_at`; see [`intent_fee::price_delegation`].
 ///
 /// Returns the economic inputs, the delegator fee and the renewed VTXO amount, or `None` if the
 /// group is not worth delegating.

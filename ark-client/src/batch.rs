@@ -1288,7 +1288,7 @@ where
             self.eval_offchain_output_fee(
                 ark_fees::Output {
                     amount: amount.to_sat(),
-                    script,
+                    script: script.clone(),
                 },
                 at,
             )

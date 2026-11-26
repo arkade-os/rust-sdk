@@ -50,6 +50,11 @@ pub(crate) fn offchain_input_fee_params(vtxo: &VirtualTxOutPoint) -> ark_fees::O
 
 /// The [`ark_fees::OffchainInput`] for redeeming an ArkNote: priced as a `note`, with neither
 /// birth nor expiry.
+///
+/// arkd prices a note with the time it created the note as its birth (`CreatedAt` in
+/// `CreateNotes`), which the note itself doesn't carry, so the client can't reproduce it. A fee
+/// program that reads `birth` for notes will price them differently here than on the operator;
+/// one that branches on `inputType == 'note'` first is unaffected.
 pub(crate) fn note_fee_params(note: &ArkNote) -> ark_fees::OffchainInput {
     ark_fees::OffchainInput {
         amount: note.value().to_sat(),
@@ -183,6 +188,10 @@ impl PricedInputs {
         self.boarding.is_empty() && self.vtxos.is_empty()
     }
 
+    pub fn len(&self) -> usize {
+        self.boarding.len() + self.vtxos.len()
+    }
+
     /// Apply `policy` to inputs that cost at least as much to spend as they are worth.
     pub fn retain_economic(&mut self, policy: UneconomicInputs) -> Result<(), Error> {
         retain_economic(&mut self.boarding, policy)?;
@@ -253,16 +262,26 @@ fn net_total<T: FeeInput>(inputs: &[Priced<T>]) -> Amount {
 /// is deliberate: solving the fixed point exactly risks landing one sat under what the operator
 /// requires.
 ///
+/// A fee that is higher for smaller amounts would make that output underpay, so the result is
+/// checked against its own fee, falling back to the largest amount that pays it.
+///
 /// Fails if the fee consumes the subtotal or leaves less than `dust`.
 pub(crate) fn settlement_output_amount(
     subtotal: Amount,
     dust: Amount,
-    output_fee: impl FnOnce(Amount) -> Result<Amount, Error>,
+    output_fee: impl Fn(Amount) -> Result<Amount, Error>,
 ) -> Result<Amount, Error> {
     let fee = output_fee(subtotal)?;
-    let amount = subtotal.checked_sub(fee).ok_or_else(|| {
+    let mut amount = subtotal.checked_sub(fee).ok_or_else(|| {
         Error::coin_select(format!("cannot settle {subtotal}: the output fee is {fee}"))
     })?;
+
+    if amount
+        .checked_add(output_fee(amount)?)
+        .is_none_or(|total| total > subtotal)
+    {
+        amount = max_amount_after_fee(subtotal, &output_fee)?;
+    }
 
     if amount < dust {
         return Err(Error::coin_select(format!(
@@ -366,16 +385,78 @@ fn max_amount_after_fee(
     Ok(Amount::from_sat(lo))
 }
 
+/// Price a delegation group whose intent becomes valid at `valid_at`.
+///
+/// A delegation intent has no expiry, so the delegator may register it at any point from
+/// `valid_at` on, and the operator evaluates its fee programs at registration time. The group is
+/// priced at `valid_at` and again when its first input expires, the latest point the delegator
+/// is expected to register, and the higher fee wins. A program that peaks strictly between the
+/// two can still be underpaid; fee programs that rise or fall with time are covered.
+///
+/// Returns the economic inputs and the renewed VTXO amount, or `None` if the group is not worth
+/// delegating at either end, or if an input is only economic at one of them.
+pub(crate) fn price_delegation(
+    estimator: &ark_fees::Estimator,
+    vtxo_inputs: Vec<(intent::Input, ark_fees::OffchainInput)>,
+    delegator_fee: Amount,
+    delegator_fee_script: &str,
+    renewed_script: &str,
+    dust: Amount,
+    valid_at: i64,
+) -> Result<Option<(PricedInputs, Amount)>, Error> {
+    // Block-height expiries are below any timestamp and drop out here.
+    let latest = vtxo_inputs
+        .iter()
+        .filter_map(|(_, params)| params.expiry)
+        .filter(|expiry| *expiry > valid_at)
+        .min();
+
+    let price_at = |at| {
+        price_delegation_at(
+            estimator,
+            vtxo_inputs.clone(),
+            delegator_fee,
+            delegator_fee_script,
+            renewed_script,
+            dust,
+            at,
+        )
+    };
+
+    let Some(early) = price_at(valid_at)? else {
+        return Ok(None);
+    };
+    let Some(latest) = latest else {
+        return Ok(Some(early));
+    };
+    let Some(late) = price_at(latest)? else {
+        tracing::warn!(
+            valid_at,
+            latest,
+            "Delegation not worth it by the time it may register, skipping"
+        );
+        return Ok(None);
+    };
+
+    if early.0.len() != late.0.len() {
+        tracing::warn!(
+            valid_at,
+            latest,
+            "Delegation group's economic inputs change within its window, skipping"
+        );
+        return Ok(None);
+    }
+
+    Ok(Some(if late.1 < early.1 { late } else { early }))
+}
+
 /// Price a delegation group whose intent is registered at `at`.
 ///
 /// The intent must leave the operator's intent fee unclaimed: the inputs' offchain input fees,
 /// plus the offchain output fee on the delegator's fee output (paid to `delegator_fee_script`)
 /// and on the renewed VTXO (paid to `renewed_script`). Both come out of the renewed VTXO. Every
 /// program is evaluated with `now()` pinned to `at`, as the operator will.
-///
-/// Returns the economic inputs and the renewed VTXO amount, or `None` if the group is not worth
-/// delegating.
-pub(crate) fn price_delegation(
+fn price_delegation_at(
     estimator: &ark_fees::Estimator,
     vtxo_inputs: Vec<(intent::Input, ark_fees::OffchainInput)>,
     delegator_fee: Amount,
@@ -882,7 +963,7 @@ mod tests {
 
         // Young now, but more than an hour old by the time the intent is registered.
         let price_at = |at| {
-            price_delegation(
+            price_delegation_at(
                 &estimator,
                 vec![(intent_input(1, 50_000), young_vtxo_params(50_000, now))],
                 Amount::ZERO,
@@ -899,6 +980,76 @@ mod tests {
 
         assert_eq!(price_at(now), Amount::from_sat(500));
         assert_eq!(price_at(now + 7_200), Amount::ZERO);
+    }
+
+    #[test]
+    fn settlement_output_pays_a_fee_that_falls_with_the_amount() {
+        // 100 under 10_000, 50 from 10_000 up. 10_020 minus fee(10_020) = 9_970, which owes 100,
+        // not 50; the largest output that pays its own fee is 9_920.
+        let fee_on = |amount: Amount| {
+            Ok(Amount::from_sat(if amount.to_sat() < 10_000 {
+                100
+            } else {
+                50
+            }))
+        };
+
+        let amount =
+            settlement_output_amount(Amount::from_sat(10_020), Amount::from_sat(330), fee_on)
+                .unwrap();
+
+        assert_eq!(amount, Amount::from_sat(9_920));
+    }
+
+    #[test]
+    fn delegation_pays_the_fee_charged_near_expiry() {
+        let valid_at = 1_800_000_000;
+        // Free while the VTXO is fresh, 1_000 in its last day.
+        let estimator = estimator(ark_fees::Config {
+            intent_offchain_input_program: "expiry - now() < 86400.0 ? 1000.0 : 0.0".to_string(),
+            ..Default::default()
+        });
+
+        let (inputs, renewed) = price_delegation(
+            &estimator,
+            vec![(intent_input(1, 50_000), old_vtxo_params(50_000, valid_at))],
+            Amount::ZERO,
+            "",
+            "",
+            Amount::from_sat(330),
+            valid_at,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(inputs.total_fee(), Amount::from_sat(1_000));
+        assert_eq!(renewed, Amount::from_sat(49_000));
+    }
+
+    #[test]
+    fn delegation_with_inputs_economic_at_one_end_only_is_skipped() {
+        let valid_at = 1_800_000_000;
+        // A 2_000 VTXO costs 5_000 in its last day, so it drops out at the late end only.
+        let estimator = estimator(ark_fees::Config {
+            intent_offchain_input_program: "expiry - now() < 86400.0 ? 5000.0 : 0.0".to_string(),
+            ..Default::default()
+        });
+
+        let priced = price_delegation(
+            &estimator,
+            vec![
+                (intent_input(1, 50_000), old_vtxo_params(50_000, valid_at)),
+                (intent_input(2, 2_000), old_vtxo_params(2_000, valid_at)),
+            ],
+            Amount::ZERO,
+            "",
+            "",
+            Amount::from_sat(330),
+            valid_at,
+        )
+        .unwrap();
+
+        assert!(priced.is_none());
     }
 
     #[test]
