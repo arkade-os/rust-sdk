@@ -156,11 +156,13 @@ jobs:
             return 1
           }
 
-          # Leaf crates: no internal unpublished dependencies.
-          publish_crate ark-core
-          publish_crate ark-fees
+          # Leaf crates: no internal dependencies.
           publish_crate ark-script
+          publish_crate ark-fees
           publish_crate ark-introspector-client
+
+          # ark-core depends on ark-script.
+          publish_crate ark-core
 
           # Mid-level crates.
           publish_crate ark-grpc
