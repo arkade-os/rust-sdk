@@ -8,7 +8,7 @@ This crate contains the generated Arkade gRPC types plus a Rust client wrapper u
 
 ```toml
 [dependencies]
-ark-grpc = "0.12.1"
+ark-grpc = "0.13.0"
 ```
 
 TLS root options are available through the `tls-native-roots` and `tls-webpki-roots` features.
