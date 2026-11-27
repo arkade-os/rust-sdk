@@ -5,7 +5,6 @@ use crate::intent_fee::note_fee_params;
 use crate::intent_fee::offchain_input_fee_params;
 use crate::intent_fee::PricedInputs;
 use crate::intent_fee::UneconomicInputs;
-use crate::swap_storage::SwapStorage;
 use crate::utils::sleep;
 use crate::utils::timeout_op;
 use crate::wallet::OnchainWallet;
@@ -58,11 +57,10 @@ use rand::Rng;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-impl<B, W, S> Client<B, W, S>
+impl<B, W> Client<B, W>
 where
     B: Blockchain,
     W: OnchainWallet,
-    S: SwapStorage + 'static,
 {
     /// Settle _all_ prior VTXOs and boarding outputs into the next batch, generating new confirmed
     /// VTXOs.

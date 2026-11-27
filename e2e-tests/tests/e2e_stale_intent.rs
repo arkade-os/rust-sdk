@@ -2,7 +2,6 @@
 
 use ark_bdk_wallet::Wallet;
 use ark_client::Client;
-use ark_client::InMemorySwapStorage;
 use bitcoin::key::Secp256k1;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
@@ -16,7 +15,7 @@ use std::time::Duration;
 
 mod common;
 
-type TestClient = Client<Regtest, Wallet, InMemorySwapStorage>;
+type TestClient = Client<Regtest, Wallet>;
 
 /// The admin API of the regtest arkd.
 const ARKD_ADMIN_URL: &str = "http://localhost:7071";

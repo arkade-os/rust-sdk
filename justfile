@@ -7,7 +7,7 @@ set dotenv-load := true
 regtest_dir := "regtest"
 regtest_env := ".env.regtest"
 # Profiles the e2e suite needs: `emulator` transitively pulls in `base` + `ark`
-# (arkd) plus the arkade-script emulator used by the introspector tests. boltz /
+# (arkd) plus the arkade-script emulator used by the introspector tests.
 # delegate / solver are not exercised by the `e2e_*` suite.
 regtest_profiles := "emulator"
 

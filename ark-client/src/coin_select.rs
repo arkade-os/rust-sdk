@@ -1,5 +1,4 @@
 use crate::error::ErrorContext;
-use crate::swap_storage::SwapStorage;
 use crate::wallet::OnchainWallet;
 use crate::Blockchain;
 use crate::Client;
@@ -23,8 +22,8 @@ use std::time::Duration;
 /// https://github.com/bitcoindevkit/coin-select.
 ///
 /// TODO: Part of this logic needs to be extracted into `ark-core`.
-pub async fn coin_select_for_onchain<B, W, S>(
-    client: &Client<B, W, S>,
+pub async fn coin_select_for_onchain<B, W>(
+    client: &Client<B, W>,
     target_amount: Amount,
 ) -> Result<
     (
@@ -36,7 +35,6 @@ pub async fn coin_select_for_onchain<B, W, S>(
 where
     B: Blockchain,
     W: OnchainWallet,
-    S: SwapStorage + 'static,
 {
     let boarding_outputs = client.boarding_outputs()?;
 

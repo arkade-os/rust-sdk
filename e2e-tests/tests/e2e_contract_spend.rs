@@ -13,7 +13,6 @@ use ark_client::wallet::OnchainWallet;
 use ark_client::Client;
 use ark_client::ContractSpendOptions;
 use ark_client::ExternalSigner;
-use ark_client::InMemorySwapStorage;
 use ark_core::contract::SpendPathKind;
 use ark_core::contract::VhtlcContract;
 use ark_core::contract::VhtlcV2Contract;
@@ -659,9 +658,9 @@ impl Setup {
 /// as the receiver. Both bob and carol track the contract.
 struct Fixture {
     regtest: Arc<Regtest>,
-    bob: Client<Regtest, Wallet, InMemorySwapStorage>,
+    bob: Client<Regtest, Wallet>,
     bob_wallet: Arc<Wallet>,
-    carol: Client<Regtest, Wallet, InMemorySwapStorage>,
+    carol: Client<Regtest, Wallet>,
     carol_wallet: Arc<Wallet>,
     grpc_client: ark_grpc::Client,
     introspector: IntrospectorClient,
@@ -795,7 +794,7 @@ impl Fixture {
     }
 
     /// Put the VHTLC on-chain, fee-bumping through `client`'s on-chain wallet.
-    async fn unroll(&self, client: &Client<Regtest, Wallet, InMemorySwapStorage>, wallet: &Wallet) {
+    async fn unroll(&self, client: &Client<Regtest, Wallet>, wallet: &Wallet) {
         let onchain = client.get_onchain_address().unwrap();
         for _ in 0..3 {
             self.regtest
@@ -850,7 +849,7 @@ impl Fixture {
     /// Build the on-chain exit transaction as if the exit delay had passed.
     async fn exit_tx(
         &self,
-        client: &Client<Regtest, Wallet, InMemorySwapStorage>,
+        client: &Client<Regtest, Wallet>,
         options: ContractSpendOptions<'_>,
     ) -> (Transaction, Vec<TxOut>) {
         let delay = client.server_info().await.unwrap().unilateral_exit_delay;

@@ -2,10 +2,8 @@
 
 use ark_bdk_wallet::Wallet;
 use ark_client::error::Error;
-use ark_client::lightning_invoice::Bolt11Invoice;
 use ark_client::Blockchain;
 use ark_client::Client;
-use ark_client::InMemorySwapStorage;
 use ark_client::OfflineClient;
 use ark_client::OfflineClientConfig;
 use ark_client::SpendStatus;
@@ -35,7 +33,6 @@ use std::sync::Arc;
 use std::sync::Once;
 use std::sync::RwLock;
 use std::time::Duration;
-use tokio::task::JoinHandle;
 
 pub struct BitcoinRpc {
     url: String,
@@ -548,7 +545,7 @@ pub async fn set_up_client(
     _name: String,
     regtest: Arc<Regtest>,
     secp: Secp256k1<All>,
-) -> (Client<Regtest, Wallet, InMemorySwapStorage>, Arc<Wallet>) {
+) -> (Client<Regtest, Wallet>, Arc<Wallet>) {
     let mut rng = thread_rng();
 
     let sk = SecretKey::new(&mut rng);
@@ -565,14 +562,12 @@ pub async fn set_up_client(
     let client = OfflineClient::with_bip32(
         OfflineClientConfig {
             ark_server_url: "http://localhost:7070".to_string(),
-            boltz_url: "http://localhost:9069".to_string(),
             ..Default::default()
         },
         xpriv,
         None,
         regtest,
         wallet.clone(),
-        Arc::new(InMemorySwapStorage::default()),
     )
     .connect_with_retries(5)
     .await
@@ -587,7 +582,7 @@ pub async fn set_up_client_with_delegator(
     regtest: Arc<Regtest>,
     secp: Secp256k1<All>,
     delegator_pk: XOnlyPublicKey,
-) -> (Client<Regtest, Wallet, InMemorySwapStorage>, Arc<Wallet>) {
+) -> (Client<Regtest, Wallet>, Arc<Wallet>) {
     let mut rng = thread_rng();
 
     let sk = SecretKey::new(&mut rng);
@@ -603,23 +598,15 @@ pub async fn set_up_client_with_delegator(
 
     let config = OfflineClientConfig {
         ark_server_url: "http://localhost:7070".to_string(),
-        boltz_url: "http://localhost:9069".to_string(),
         delegator_pk: Some(delegator_pk),
         historical_delegator_pks: vec![delegator_pk],
         ..Default::default()
     };
 
-    let client = OfflineClient::with_bip32(
-        config,
-        xpriv,
-        None,
-        regtest,
-        wallet.clone(),
-        Arc::new(InMemorySwapStorage::default()),
-    )
-    .connect_with_retries(5)
-    .await
-    .unwrap();
+    let client = OfflineClient::with_bip32(config, xpriv, None, regtest, wallet.clone())
+        .connect_with_retries(5)
+        .await
+        .unwrap();
 
     (client, wallet)
 }
@@ -698,7 +685,7 @@ pub async fn set_up_client_with_seed(
     regtest: Arc<Regtest>,
     secp: Secp256k1<All>,
     seed: [u8; 32],
-) -> (Client<Regtest, Wallet, InMemorySwapStorage>, Arc<Wallet>) {
+) -> (Client<Regtest, Wallet>, Arc<Wallet>) {
     set_up_client_with_seed_and_server_info_ttl(
         name,
         regtest,
@@ -717,7 +704,7 @@ pub async fn set_up_client_with_seed_and_server_info_ttl(
     secp: Secp256k1<All>,
     seed: [u8; 32],
     server_info_ttl: Duration,
-) -> (Client<Regtest, Wallet, InMemorySwapStorage>, Arc<Wallet>) {
+) -> (Client<Regtest, Wallet>, Arc<Wallet>) {
     let mut rng = thread_rng();
 
     let sk = SecretKey::new(&mut rng);
@@ -733,7 +720,6 @@ pub async fn set_up_client_with_seed_and_server_info_ttl(
     let client = OfflineClient::with_bip32(
         OfflineClientConfig {
             ark_server_url: "http://localhost:7070".to_string(),
-            boltz_url: "http://localhost:9069".to_string(),
             server_info_ttl,
             ..Default::default()
         },
@@ -741,107 +727,12 @@ pub async fn set_up_client_with_seed_and_server_info_ttl(
         None,
         regtest,
         wallet.clone(),
-        Arc::new(InMemorySwapStorage::default()),
     )
     .connect_with_retries(5)
     .await
     .unwrap();
 
     (client, wallet)
-}
-
-#[derive(serde::Deserialize)]
-struct LnAddInvoiceResponse {
-    payment_request: String,
-}
-
-#[allow(unused)]
-pub async fn create_lnd_invoice(amount: Amount) -> Bolt11Invoice {
-    create_lnd_invoice_with_expiry(amount, None).await
-}
-
-#[allow(unused)]
-pub async fn create_lnd_invoice_with_expiry(
-    amount: Amount,
-    expiry_secs: Option<u64>,
-) -> Bolt11Invoice {
-    let amount = amount.to_sat().to_string();
-    let expiry = expiry_secs.map(|expiry| expiry.to_string());
-    let mut args = vec![
-        "exec",
-        "lnd",
-        "lncli",
-        "--network=regtest",
-        "addinvoice",
-        "--amt",
-        &amount,
-    ];
-    if let Some(expiry) = expiry.as_ref() {
-        args.extend(["--expiry", expiry]);
-    }
-
-    let output = tokio::process::Command::new("docker")
-        .args(args)
-        .output()
-        .await
-        .expect("failed to run lncli addinvoice");
-
-    assert!(
-        output.status.success(),
-        "failed to create LND invoice: {}",
-        format_command_output(&output)
-    );
-
-    let response: LnAddInvoiceResponse = serde_json::from_slice(&output.stdout)
-        .expect("lncli addinvoice should return JSON with payment_request");
-    response
-        .payment_request
-        .parse()
-        .expect("lncli should return a valid BOLT11 invoice")
-}
-
-#[allow(unused)]
-pub fn start_lnd_payment(invoice: &str) -> JoinHandle<std::io::Result<Output>> {
-    let invoice = invoice.to_string();
-    tokio::spawn(async move {
-        tokio::process::Command::new("docker")
-            .args([
-                "exec",
-                "lnd",
-                "lncli",
-                "--network=regtest",
-                "payinvoice",
-                "--force",
-                &invoice,
-            ])
-            .output()
-            .await
-    })
-}
-
-#[allow(unused)]
-pub async fn wait_for_lnd_payment(payment: JoinHandle<std::io::Result<Output>>) {
-    let output = tokio::time::timeout(Duration::from_secs(30), payment)
-        .await
-        .expect("LN payment did not complete")
-        .expect("lncli payinvoice task panicked")
-        .expect("failed to wait for lncli payinvoice");
-
-    assert!(
-        output.status.success(),
-        "failed to pay invoice: {}",
-        format_command_output(&output)
-    );
-}
-
-#[allow(unused)]
-pub fn format_command_output(output: &Output) -> String {
-    format!(
-        "status={} stdout={} stderr={}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    )
 }
 
 pub fn init_tracing() {

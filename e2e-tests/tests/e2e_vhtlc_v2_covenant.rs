@@ -9,7 +9,6 @@
 use crate::common::wait_until_balance;
 use ark_bdk_wallet::Wallet;
 use ark_client::Client;
-use ark_client::InMemorySwapStorage;
 use ark_core::introspector::packet::add_packet_to_psbt;
 use ark_core::introspector::packet::IntrospectorEntry;
 use ark_core::introspector::packet::Packet;
@@ -94,7 +93,7 @@ pub async fn e2e_vhtlc_v2_nine_leaf_claim() {
     let sign_fn = |input: &mut psbt::Input,
                    msg: secp256k1::Message|
      -> Result<Vec<(schnorr::Signature, XOnlyPublicKey)>, ark_core::Error> {
-        // The preimage travels as the VTXO condition witness, as the Boltz claim does.
+        // The preimage travels as the VTXO condition witness, as a swap claim does.
         let mut bytes = vec![1];
         VarInt::from(preimage.len() as u64)
             .consensus_encode(&mut bytes)
@@ -223,8 +222,8 @@ pub async fn e2e_vhtlc_v2_timelocked_non_interactive_refund_via_emulator() {
 /// receiver's payout, arkd the server, and the introspector the emulator. Bob and carol start
 /// empty, so a payout to either is observable as an exact balance.
 struct FundedVhtlc {
-    bob: Client<Regtest, Wallet, InMemorySwapStorage>,
-    carol: Client<Regtest, Wallet, InMemorySwapStorage>,
+    bob: Client<Regtest, Wallet>,
+    carol: Client<Regtest, Wallet>,
     grpc_client: ark_grpc::Client,
     introspector: IntrospectorClient,
     server_info: ark_core::server::Info,

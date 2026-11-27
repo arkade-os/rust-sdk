@@ -3,7 +3,6 @@
 use ark_bdk_wallet::Wallet;
 use ark_client::Client;
 use ark_client::DeprecatedSignerStatus;
-use ark_client::InMemorySwapStorage;
 use ark_core::server;
 use bitcoin::key::Secp256k1;
 use bitcoin::Amount;
@@ -373,7 +372,7 @@ pub async fn e2e_signer_rotation_status_due_now() {
     tracing::info!(?row, "DueNow status test passed");
 }
 
-type TestClient = Client<Regtest, Wallet, InMemorySwapStorage>;
+type TestClient = Client<Regtest, Wallet>;
 
 async fn wait_for_deprecated_signer(client: &TestClient) -> server::Info {
     let mut last_error = None;

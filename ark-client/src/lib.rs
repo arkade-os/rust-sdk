@@ -62,13 +62,11 @@ pub mod contract;
 pub mod error;
 mod intent_fee;
 pub mod key_provider;
-pub mod swap_storage;
 pub mod vtxo_watcher;
 pub mod wallet;
 
 mod asset;
 mod batch;
-mod boltz;
 mod coin_select;
 mod contract_spend;
 mod fee_estimation;
@@ -81,21 +79,6 @@ pub use ark_core::server::DeprecatedSignerStatus;
 pub use ark_core::server::GetVtxosRequestFilter;
 pub use ark_core::server::ServerSignerStatus;
 pub use asset::IssueAssetResult;
-pub use boltz::BoltzVhtlcWatcherConfig;
-pub use boltz::BoltzVhtlcWatcherHandle;
-pub use boltz::ChainSwapAmount;
-pub use boltz::ChainSwapData;
-pub use boltz::ChainSwapDirection;
-pub use boltz::ChainSwapResult;
-pub use boltz::PendingVhtlcSpendTx;
-pub use boltz::PendingVhtlcSpendType;
-pub use boltz::ReverseSwapData;
-pub use boltz::SubmarineSwapData;
-pub use boltz::SwapAmount;
-pub use boltz::SwapStatus;
-pub use boltz::SwapStatusInfo;
-pub use boltz::SwapType;
-pub use boltz::TimeoutBlockHeights;
 pub use contract::AnnotatedBoardingOutput;
 pub use contract::AnnotatedVtxo;
 pub use contract::AnnotatedVtxoList;
@@ -113,27 +96,18 @@ pub use key_provider::Bip32KeyProvider;
 pub use key_provider::DiscoverableKeyProvider;
 pub use key_provider::KeyProvider;
 pub use key_provider::StaticKeyProvider;
-pub use lightning_invoice;
 pub use migration::DeprecatedSignerMigrationReport;
 pub use migration::DeprecatedSignerReport;
 pub use migration::MigrationLegReport;
 pub use migration::MigrationSkipReason;
 pub use migration::MigrationVtxoRef;
 pub use migration::MAX_VTXOS_PER_SETTLEMENT;
-pub use swap_storage::InMemorySwapStorage;
-#[cfg(feature = "sqlite")]
-pub use swap_storage::SqliteSwapStorage;
-pub use swap_storage::SwapStorage;
 
 /// Default gap limit for BIP44-style key discovery
 ///
 /// This is the number of consecutive unused addresses to scan before
 /// assuming all used addresses have been found.
 pub const DEFAULT_GAP_LIMIT: u32 = 20;
-
-/// Default Boltz `referralId` sent with swap creation requests when the caller does not
-/// provide one. Identifies traffic originating from this SDK.
-pub const DEFAULT_BOLTZ_REFERRAL_ID: &str = "arkade-rs-SDK";
 
 /// Summary returned by [`Client::restore_contracts`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -243,29 +217,11 @@ pub const ARKADE_MAINNET_URL: &str = "https://arkade.computer";
 /// Default mutinynet Arkade server URL.
 pub const ARKADE_MUTINYNET_URL: &str = "https://mutinynet.arkade.sh";
 
-/// Default mainnet Boltz API URL.
-pub const BOLTZ_MAINNET_URL: &str = "https://api.boltz.exchange";
-
-/// Default mutinynet Boltz API URL.
-pub const BOLTZ_MUTINYNET_URL: &str = "https://api.boltz.mutinynet.arkade.sh";
-
 /// Default timeout for network operations.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Default maximum age for cached Ark server info.
 pub const DEFAULT_SERVER_INFO_TTL: Duration = Duration::from_secs(15 * 60);
-
-/// Boltz referral ID behavior for swap creation requests.
-#[derive(Clone, Debug, Default)]
-pub enum BoltzReferralId {
-    /// Use [`DEFAULT_BOLTZ_REFERRAL_ID`].
-    #[default]
-    Default,
-    /// Send no `referralId` field with Boltz swap creation requests.
-    Disabled,
-    /// Send a custom `referralId` field with Boltz swap creation requests.
-    Custom(String),
-}
 
 /// Configuration for constructing an [`OfflineClient`].
 ///
@@ -274,10 +230,8 @@ pub enum BoltzReferralId {
 #[derive(Clone, Debug)]
 pub struct OfflineClientConfig {
     pub ark_server_url: String,
-    pub boltz_url: String,
     pub timeout: Duration,
     pub server_info_ttl: Duration,
-    pub boltz_referral_id: BoltzReferralId,
     pub delegator_pk: Option<XOnlyPublicKey>,
     pub historical_delegator_pks: Vec<XOnlyPublicKey>,
 }
@@ -286,10 +240,8 @@ impl Default for OfflineClientConfig {
     fn default() -> Self {
         Self {
             ark_server_url: ARKADE_MAINNET_URL.to_string(),
-            boltz_url: BOLTZ_MAINNET_URL.to_string(),
             timeout: DEFAULT_TIMEOUT,
             server_info_ttl: DEFAULT_SERVER_INFO_TTL,
-            boltz_referral_id: BoltzReferralId::default(),
             delegator_pk: None,
             historical_delegator_pks: Vec::new(),
         }
@@ -311,7 +263,6 @@ impl Default for OfflineClientConfig {
 /// # use std::sync::Arc;
 /// # use bitcoin::{Address, Amount, FeeRate, Psbt, Transaction, Txid};
 /// # use ark_client::wallet::{Balance, OnchainWallet};
-/// # use ark_client::InMemorySwapStorage;
 /// # use ark_core::{UtxoCoinSelection, ExplorerUtxo};
 /// # use ark_client::StaticKeyProvider;
 ///
@@ -385,7 +336,7 @@ impl Default for OfflineClientConfig {
 /// #
 ///
 /// // Initialize the client with a static keypair
-/// async fn init_client_with_keypair() -> Result<Client<MyBlockchain, MyWallet, InMemorySwapStorage>, ark_client::Error> {
+/// async fn init_client_with_keypair() -> Result<Client<MyBlockchain, MyWallet>, ark_client::Error> {
 ///     // Create a keypair for signing transactions
 ///     let secp = bitcoin::key::Secp256k1::new();
 ///     let secret_key = SecretKey::from_str("your_private_key_here").unwrap();
@@ -397,7 +348,6 @@ impl Default for OfflineClientConfig {
 ///
 ///     let config = OfflineClientConfig {
 ///         ark_server_url: "https://ark-server.example.com".to_string(),
-///         boltz_url: "http://boltz.example.com".to_string(),
 ///         ..Default::default()
 ///     };
 ///
@@ -406,7 +356,6 @@ impl Default for OfflineClientConfig {
 ///         keypair,
 ///         blockchain,
 ///         wallet,
-///         Arc::new(InMemorySwapStorage::default()),
 ///     );
 ///
 ///     // Connect to the Ark server and get server info
@@ -417,7 +366,7 @@ impl Default for OfflineClientConfig {
 ///
 /// // Initialize the client with a BIP32 HD wallet
 /// # use bitcoin::bip32::{Xpriv, DerivationPath};
-/// async fn init_client_with_bip32() -> Result<Client<MyBlockchain, MyWallet, InMemorySwapStorage>, ark_client::Error> {
+/// async fn init_client_with_bip32() -> Result<Client<MyBlockchain, MyWallet>, ark_client::Error> {
 ///     // Create a BIP32 master key and derivation path
 ///     let master_key = Xpriv::from_str("xprv...").unwrap();
 ///     let derivation_path = DerivationPath::from_str("m/84'/0'/0'/0/0").unwrap();
@@ -428,7 +377,6 @@ impl Default for OfflineClientConfig {
 ///
 ///     let config = OfflineClientConfig {
 ///         ark_server_url: "https://ark-server.example.com".to_string(),
-///         boltz_url: "http://boltz.example.com".to_string(),
 ///         ..Default::default()
 ///     };
 ///
@@ -438,7 +386,6 @@ impl Default for OfflineClientConfig {
 ///         Some(derivation_path),
 ///         blockchain,
 ///         wallet,
-///         Arc::new(InMemorySwapStorage::default()),
 ///     );
 ///
 ///     // Connect to the Ark server and get server info
@@ -448,7 +395,7 @@ impl Default for OfflineClientConfig {
 /// }
 /// ```
 #[derive(Clone)]
-pub struct OfflineClient<B, W, S> {
+pub struct OfflineClient<B, W> {
     // TODO: We could introduce a generic interface so that consumers can use either GRPC or REST.
     network_client: ark_grpc::Client,
     key_provider: Arc<dyn KeyProvider>,
@@ -456,9 +403,6 @@ pub struct OfflineClient<B, W, S> {
     blockchain: Arc<B>,
     secp: Secp256k1<All>,
     wallet: Arc<W>,
-    swap_storage: Arc<S>,
-    boltz_url: String,
-    boltz_referral_id: Option<String>,
     timeout: Duration,
     server_info_ttl: Duration,
     contract_store: Arc<Mutex<Option<Box<dyn ContractStore>>>>,
@@ -469,8 +413,8 @@ pub struct OfflineClient<B, W, S> {
 /// A client to interact with Ark server
 ///
 /// See [`OfflineClient`] docs for details.
-pub struct Client<B, W, S> {
-    inner: OfflineClient<B, W, S>,
+pub struct Client<B, W> {
+    inner: OfflineClient<B, W>,
     state: Arc<RwLock<ServerState>>,
     server_info_refresh_lock: Arc<tokio::sync::Mutex<()>>,
 }
@@ -651,11 +595,10 @@ pub trait Blockchain {
     ) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
-impl<B, W, S> OfflineClient<B, W, S>
+impl<B, W> OfflineClient<B, W>
 where
     B: Blockchain,
     W: OnchainWallet,
-    S: SwapStorage + 'static,
 {
     /// Create a new offline client with a generic key provider.
     pub fn with_key_provider(
@@ -663,9 +606,8 @@ where
         key_provider: Arc<dyn KeyProvider>,
         blockchain: Arc<B>,
         wallet: Arc<W>,
-        swap_storage: Arc<S>,
     ) -> Self {
-        Self::with_key_provider_parts(config, key_provider, None, blockchain, wallet, swap_storage)
+        Self::with_key_provider_parts(config, key_provider, None, blockchain, wallet)
     }
 
     /// Create a new offline client with a discoverable key provider.
@@ -674,7 +616,6 @@ where
         key_provider: Arc<P>,
         blockchain: Arc<B>,
         wallet: Arc<W>,
-        swap_storage: Arc<S>,
     ) -> Self
     where
         P: DiscoverableKeyProvider + 'static,
@@ -687,7 +628,6 @@ where
             Some(discoverable_key_provider),
             blockchain,
             wallet,
-            swap_storage,
         )
     }
 
@@ -697,7 +637,6 @@ where
         discoverable_key_provider: Option<Arc<dyn DiscoverableKeyProvider>>,
         blockchain: Arc<B>,
         wallet: Arc<W>,
-        swap_storage: Arc<S>,
     ) -> Self {
         let secp = Secp256k1::new();
         let network_client = ark_grpc::Client::new(config.ark_server_url);
@@ -716,11 +655,6 @@ where
             historical_delegator_pks.insert(0, pk);
         }
 
-        let boltz_referral_id = match config.boltz_referral_id {
-            BoltzReferralId::Default => Some(DEFAULT_BOLTZ_REFERRAL_ID.to_string()),
-            BoltzReferralId::Disabled => None,
-            BoltzReferralId::Custom(referral_id) => Some(referral_id),
-        };
         Self {
             network_client,
             key_provider,
@@ -728,9 +662,6 @@ where
             blockchain,
             secp,
             wallet,
-            swap_storage,
-            boltz_url: config.boltz_url.trim_end_matches('/').to_string(),
-            boltz_referral_id,
             timeout: config.timeout,
             server_info_ttl: config.server_info_ttl,
             contract_store: Arc::new(Mutex::new(None)),
@@ -745,10 +676,9 @@ where
         kp: Keypair,
         blockchain: Arc<B>,
         wallet: Arc<W>,
-        swap_storage: Arc<S>,
     ) -> Self {
         let key_provider = Arc::new(StaticKeyProvider::new(kp));
-        Self::with_key_provider(config, key_provider, blockchain, wallet, swap_storage)
+        Self::with_key_provider(config, key_provider, blockchain, wallet)
     }
 
     /// Create a new offline client with an [`Xpriv`].
@@ -758,13 +688,12 @@ where
         path: Option<DerivationPath>,
         blockchain: Arc<B>,
         wallet: Arc<W>,
-        swap_storage: Arc<S>,
     ) -> Self {
         let path = path.unwrap_or(
             DerivationPath::from_str(DEFAULT_DERIVATION_PATH).expect("valid derivation path"),
         );
         let key_provider = Arc::new(Bip32KeyProvider::new(xpriv, path));
-        Self::with_discoverable_key_provider(config, key_provider, blockchain, wallet, swap_storage)
+        Self::with_discoverable_key_provider(config, key_provider, blockchain, wallet)
     }
 
     /// Use a custom contract store for the connected client.
@@ -785,11 +714,6 @@ where
         self.delegator_pk
     }
 
-    /// Returns the Boltz referral ID sent with all swap creation requests, if any.
-    pub fn boltz_referral_id(&self) -> Option<&str> {
-        self.boltz_referral_id.as_deref()
-    }
-
     fn contract_manager(&self, network: Network) -> Result<ContractManager, Error> {
         let store = self
             .contract_store
@@ -805,7 +729,7 @@ where
     /// # Errors
     ///
     /// Returns an error if the connection fails or times out.
-    pub async fn connect(mut self) -> Result<Client<B, W, S>, Error> {
+    pub async fn connect(mut self) -> Result<Client<B, W>, Error> {
         timeout_op(self.timeout, self.network_client.connect())
             .await
             .context("Failed to connect to Ark server")??;
@@ -820,10 +744,7 @@ where
     /// # Errors
     ///
     /// Returns an error if the connection fails or times out.
-    pub async fn connect_with_retries(
-        mut self,
-        max_retries: usize,
-    ) -> Result<Client<B, W, S>, Error> {
+    pub async fn connect_with_retries(mut self, max_retries: usize) -> Result<Client<B, W>, Error> {
         let mut n_retries = 0;
         while n_retries < max_retries {
             let res = timeout_op(self.timeout, self.network_client.connect())
@@ -847,7 +768,7 @@ where
         self.finish_connect().await
     }
 
-    async fn finish_connect(mut self) -> Result<Client<B, W, S>, Error> {
+    async fn finish_connect(mut self) -> Result<Client<B, W>, Error> {
         let server_info = timeout_op(self.timeout, self.network_client.get_info())
             .await
             .context("Failed to get Ark server info")??;
@@ -876,16 +797,6 @@ where
             state,
             server_info_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
-
-        match client.migrate_boltz_vhtlc_contracts(&server_info).await {
-            Ok(migrated) if migrated > 0 => {
-                tracing::info!(migrated, "Migrated Boltz VHTLC contracts at connect");
-            }
-            Ok(_) => {}
-            Err(error) => {
-                tracing::warn!(?error, "Failed to migrate Boltz VHTLC contracts at connect");
-            }
-        }
 
         client.hydrate_persisted_contract_keys()?;
 
@@ -1034,11 +945,10 @@ fn update_server_state(
     Ok(())
 }
 
-impl<B, W, S> Client<B, W, S>
+impl<B, W> Client<B, W>
 where
     B: Blockchain,
     W: OnchainWallet,
-    S: SwapStorage + 'static,
 {
     /// Returns Ark server info, refreshing the cached snapshot when its TTL has expired.
     pub async fn server_info(&self) -> Result<server::Info, Error> {
@@ -1152,11 +1062,6 @@ where
     /// Returns the currently configured delegator pubkey, if any.
     pub fn delegator_pk(&self) -> Option<XOnlyPublicKey> {
         self.inner.delegator_pk()
-    }
-
-    /// Returns the Boltz referral ID sent with all swap creation requests, if any.
-    pub fn boltz_referral_id(&self) -> Option<&str> {
-        self.inner.boltz_referral_id()
     }
 
     /// List all contracts currently known to this wallet.
@@ -2223,10 +2128,6 @@ where
         &self.inner.blockchain
     }
 
-    fn swap_storage(&self) -> &S {
-        &self.inner.swap_storage
-    }
-
     /// Use the P2A output of a transaction to bump its transaction fee with a child transaction.
     pub async fn bump_tx(&self, parent: &Transaction) -> Result<Transaction, Error> {
         let fee_rate = timeout_op(self.inner.timeout, self.blockchain().get_fee_rate())
@@ -2715,9 +2616,7 @@ mod digest_guard_tests {
         }
     }
 
-    async fn connect_test_client(
-        mock: MockArkServer,
-    ) -> Client<DummyBlockchain, DummyWallet, InMemorySwapStorage> {
+    async fn connect_test_client(mock: MockArkServer) -> Client<DummyBlockchain, DummyWallet> {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
@@ -2733,16 +2632,14 @@ mod digest_guard_tests {
 
         let secp = Secp256k1::new();
         let keypair = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[3; 32]).unwrap());
-        OfflineClient::<DummyBlockchain, DummyWallet, InMemorySwapStorage>::with_keypair(
+        OfflineClient::<DummyBlockchain, DummyWallet>::with_keypair(
             OfflineClientConfig {
                 ark_server_url: format!("http://{addr}"),
-                boltz_url: "http://127.0.0.1:1".to_string(),
                 ..Default::default()
             },
             keypair,
             Arc::new(DummyBlockchain),
             Arc::new(DummyWallet::new()),
-            Arc::new(InMemorySwapStorage::default()),
         )
         .connect()
         .await
@@ -2822,20 +2719,17 @@ mod digest_guard_tests {
 
         let secp = Secp256k1::new();
         let keypair = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[3; 32]).unwrap());
-        let result =
-            OfflineClient::<DummyBlockchain, DummyWallet, InMemorySwapStorage>::with_keypair(
-                OfflineClientConfig {
-                    ark_server_url: format!("http://{addr}"),
-                    boltz_url: "http://127.0.0.1:1".to_string(),
-                    ..Default::default()
-                },
-                keypair,
-                Arc::new(DummyBlockchain),
-                Arc::new(DummyWallet::new()),
-                Arc::new(InMemorySwapStorage::default()),
-            )
-            .connect()
-            .await;
+        let result = OfflineClient::<DummyBlockchain, DummyWallet>::with_keypair(
+            OfflineClientConfig {
+                ark_server_url: format!("http://{addr}"),
+                ..Default::default()
+            },
+            keypair,
+            Arc::new(DummyBlockchain),
+            Arc::new(DummyWallet::new()),
+        )
+        .connect()
+        .await;
 
         let err = match result {
             Ok(_) => panic!("connect unexpectedly succeeded"),
