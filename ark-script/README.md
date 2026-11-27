@@ -8,7 +8,7 @@ This crate contains script-building utilities for Arkade-specific opcodes, key t
 
 ```toml
 [dependencies]
-ark-script = "0.12.1"
+ark-script = "0.13.0"
 ```
 
 ## Documentation

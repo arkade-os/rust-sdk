@@ -8,7 +8,7 @@ This crate contains the shared data structures and protocol primitives used by t
 
 ```toml
 [dependencies]
-ark-core = "0.12.1"
+ark-core = "0.13.0"
 ```
 
 ## Documentation

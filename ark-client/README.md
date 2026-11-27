@@ -8,13 +8,13 @@ High-level client library for building Arkade wallets in Rust.
 
 ```toml
 [dependencies]
-ark-client = "0.12.1"
+ark-client = "0.13.0"
 ```
 
 Enable optional SQLite storage support with:
 
 ```toml
-ark-client = { version = "0.12.1", features = ["sqlite"] }
+ark-client = { version = "0.13.0", features = ["sqlite"] }
 ```
 
 ## Documentation
