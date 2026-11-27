@@ -60,6 +60,7 @@ use std::time::Instant;
 
 pub mod contract;
 pub mod error;
+mod intent_fee;
 pub mod key_provider;
 pub mod swap_storage;
 pub mod vtxo_watcher;
@@ -1072,10 +1073,49 @@ where
             .map_err(|_| Error::ad_hoc("client server state lock poisoned"))
     }
 
+    fn with_fee_estimator<T>(
+        &self,
+        f: impl FnOnce(&ark_fees::Estimator) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        self.with_server_state(|state| f(&state.fee_estimator))?
+    }
+
+    fn eval_fee(
+        &self,
+        f: impl FnOnce(&ark_fees::Estimator) -> Result<ark_fees::FeeAmount, ark_fees::Error>,
+    ) -> Result<Amount, Error> {
+        self.with_fee_estimator(|estimator| {
+            f(estimator)
+                .map(intent_fee::fee_to_amount)
+                .map_err(Error::ad_hoc)
+        })
+    }
+
     fn eval_onchain_output_fee(&self, output: ark_fees::Output) -> Result<Amount, Error> {
-        self.with_server_state(|state| state.fee_estimator.eval_onchain_output(output))?
-            .map(|fee| Amount::from_sat(fee.to_satoshis()))
-            .map_err(Error::ad_hoc)
+        self.eval_fee(|e| e.eval_onchain_output(output))
+    }
+
+    /// The intent fee for an offchain (VTXO) output, with `now()` pinned to `at` if given.
+    fn eval_offchain_output_fee(
+        &self,
+        output: ark_fees::Output,
+        at: Option<i64>,
+    ) -> Result<Amount, Error> {
+        self.eval_fee(|e| match at {
+            Some(at) => e.eval_offchain_output_at(output, at),
+            None => e.eval_offchain_output(output),
+        })
+    }
+
+    /// Price boarding and VTXO inputs against the current intent-fee programs, with the offchain
+    /// input program's `now()` pinned to `at` if given.
+    fn price_inputs(
+        &self,
+        boarding: Vec<ark_core::batch::OnChainInput>,
+        vtxos: Vec<(ark_core::intent::Input, ark_fees::OffchainInput)>,
+        at: Option<i64>,
+    ) -> Result<intent_fee::PricedInputs, Error> {
+        self.with_fee_estimator(|e| intent_fee::PricedInputs::price(e, boarding, vtxos, at))
     }
 
     /// Force-fetch the latest Ark server `/info` and replace the cached server state.

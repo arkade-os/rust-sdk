@@ -2,8 +2,11 @@
 
 use ark_core::asset::ControlAssetConfig;
 use ark_core::send::SendReceiver;
+use bitcoin::key::Keypair;
 use bitcoin::key::Secp256k1;
+use bitcoin::Address;
 use bitcoin::Amount;
+use bitcoin::Network;
 use common::init_tracing;
 use common::set_up_client;
 use common::Regtest;
@@ -21,7 +24,7 @@ pub async fn e2e_assets() {
     let mut rng = thread_rng();
 
     let (alice, _) = set_up_client("alice".to_string(), regtest.clone(), secp.clone()).await;
-    let (bob, _) = set_up_client("bob".to_string(), regtest.clone(), secp).await;
+    let (bob, _) = set_up_client("bob".to_string(), regtest.clone(), secp.clone()).await;
 
     // Fund Alice with 1 BTC and settle.
     let alice_boarding_address = alice.get_boarding_address().await.unwrap();
@@ -240,4 +243,18 @@ pub async fn e2e_assets() {
         bob_final_asset = send_amount,
         "All asset operations completed successfully"
     );
+
+    tracing::info!("=== Offboarding everything refuses asset VTXOs ===");
+
+    let offboard_address = Address::p2tr(
+        &secp,
+        Keypair::new(&secp, &mut rng).x_only_public_key().0,
+        None,
+        Network::Regtest,
+    );
+    let err = alice
+        .offboard_all(&mut rng, offboard_address)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("carries assets"), "{err}");
 }

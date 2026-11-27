@@ -1,4 +1,10 @@
+use crate::contract::AnnotatedVtxo;
 use crate::error::ErrorContext as _;
+use crate::intent_fee;
+use crate::intent_fee::note_fee_params;
+use crate::intent_fee::offchain_input_fee_params;
+use crate::intent_fee::PricedInputs;
+use crate::intent_fee::UneconomicInputs;
 use crate::swap_storage::SwapStorage;
 use crate::utils::sleep;
 use crate::utils::timeout_op;
@@ -79,21 +85,29 @@ where
         // Get off-chain address and send all funds to this address, no change output 🦄
         let (to_address, _) = self.get_offchain_address_with_server_info(&server_info)?;
 
-        let (boarding_inputs, vtxo_inputs, total_amount) = self
-            .fetch_commitment_transaction_inputs(&server_info, now)
+        let mut inputs = self
+            .fetch_priced_commitment_transaction_inputs(&server_info, now)
             .await?;
+        inputs.retain_economic(UneconomicInputs::Skip)?;
+
+        if inputs.is_empty() {
+            tracing::debug!("No inputs to board with");
+            return Ok(None);
+        }
+
+        let input_fee = inputs.total_fee();
+        let total_amount =
+            self.settled_output_amount(inputs.net_total(), &to_address, server_info.dust, None)?;
+        let (boarding_inputs, vtxo_inputs) = inputs.into_inputs();
 
         tracing::debug!(
             offchain_adress = %to_address.encode(),
             ?boarding_inputs,
             ?vtxo_inputs,
+            %input_fee,
+            %total_amount,
             "Attempting to settle outputs"
         );
-
-        if boarding_inputs.is_empty() && vtxo_inputs.is_empty() {
-            tracing::debug!("No inputs to board with");
-            return Ok(None);
-        }
 
         let join_next_batch = || async {
             self.join_next_batch(
@@ -169,8 +183,14 @@ where
             "Attempting to settle expired/recoverable VTXOs and boarding outputs"
         );
 
-        self.settle_vtxos_with_server_info(rng, &server_info, &vtxo_outpoints, &boarding_outpoints)
-            .await
+        self.settle_vtxos_with_server_info(
+            rng,
+            &server_info,
+            &vtxo_outpoints,
+            &boarding_outpoints,
+            UneconomicInputs::Skip,
+        )
+        .await
     }
 
     /// Settle _all_ prior VTXOs, boarding outputs, and the provided ArkNotes into the next batch.
@@ -190,36 +210,40 @@ where
 
         let (to_address, _) = self.get_offchain_address_with_server_info(&server_info)?;
 
-        let (boarding_inputs, vtxo_inputs, mut total_amount) = self
-            .fetch_commitment_transaction_inputs(&server_info, crate::utils::unix_now()?)
+        let mut inputs = self
+            .fetch_priced_commitment_transaction_inputs(&server_info, crate::utils::unix_now()?)
             .await?;
+        inputs.retain_economic(UneconomicInputs::Skip)?;
 
-        // Convert arknotes to intent inputs and add their value to total
-        let note_inputs: Vec<intent::Input> = notes
+        // Convert arknotes to intent inputs, priced as `note` inputs. The caller named the notes,
+        // so one that is not worth its fee is an error rather than silently left out.
+        let note_inputs = notes
             .iter()
-            .map(|note| {
-                total_amount += note.value();
-                note.to_intent_input()
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|note| Ok((note.to_intent_input()?, note_fee_params(note))))
+            .collect::<Result<Vec<_>, Error>>()?;
+        let mut notes_priced = self.price_inputs(Vec::new(), note_inputs, None)?;
+        notes_priced.retain_economic(UneconomicInputs::Reject)?;
+        inputs.vtxos.extend(notes_priced.vtxos);
 
-        // Combine VTXO inputs with note inputs
-        let all_vtxo_inputs: Vec<intent::Input> =
-            vtxo_inputs.into_iter().chain(note_inputs).collect();
+        if inputs.is_empty() {
+            tracing::debug!("No inputs to settle");
+            return Ok(None);
+        }
+
+        let input_fee = inputs.total_fee();
+        let total_amount =
+            self.settled_output_amount(inputs.net_total(), &to_address, server_info.dust, None)?;
+        let (boarding_inputs, all_vtxo_inputs) = inputs.into_inputs();
 
         tracing::debug!(
             offchain_address = %to_address.encode(),
             ?boarding_inputs,
             num_vtxo_inputs = all_vtxo_inputs.len(),
             num_notes = notes.len(),
+            %input_fee,
             %total_amount,
             "Attempting to settle outputs with notes"
         );
-
-        if boarding_inputs.is_empty() && all_vtxo_inputs.is_empty() {
-            tracing::debug!("No inputs to settle");
-            return Ok(None);
-        }
 
         let join_next_batch = || async {
             self.join_next_batch(
@@ -255,6 +279,9 @@ where
     ///
     /// Unlike [`Self::settle`], this method allows the caller to specify exactly which VTXOs and
     /// boarding outputs to settle by providing their outpoints.
+    ///
+    /// The operator's intent fee is deducted from the settled VTXO. Fails if one of the specified
+    /// inputs costs at least as much in fees as it is worth.
     pub async fn settle_vtxos<R>(
         &self,
         rng: &mut R,
@@ -265,16 +292,26 @@ where
         R: Rng + CryptoRng + Clone,
     {
         let server_info = self.server_info().await?;
-        self.settle_vtxos_with_server_info(rng, &server_info, vtxo_outpoints, boarding_outpoints)
-            .await
+        self.settle_vtxos_with_server_info(
+            rng,
+            &server_info,
+            vtxo_outpoints,
+            boarding_outpoints,
+            UneconomicInputs::Reject,
+        )
+        .await
     }
 
+    /// Settle the specified inputs into a single VTXO, net of the operator's intent fee.
+    ///
+    /// `uneconomic_inputs` decides what happens to an input whose fee meets or exceeds its value.
     pub(crate) async fn settle_vtxos_with_server_info<R>(
         &self,
         rng: &mut R,
         server_info: &server::Info,
         vtxo_outpoints: &[OutPoint],
         boarding_outpoints: &[OutPoint],
+        uneconomic_inputs: UneconomicInputs,
     ) -> Result<Option<Txid>, Error>
     where
         R: Rng + CryptoRng + Clone,
@@ -282,41 +319,35 @@ where
         // Get off-chain address and send all funds to this address, no change output.
         let (to_address, _) = self.get_offchain_address_with_server_info(server_info)?;
 
-        let (all_boarding_inputs, all_vtxo_inputs, _) = self
-            .fetch_commitment_transaction_inputs(server_info, crate::utils::unix_now()?)
+        let mut inputs = self
+            .fetch_priced_commitment_transaction_inputs_for(
+                server_info,
+                crate::utils::unix_now()?,
+                boarding_outpoints,
+                vtxo_outpoints,
+                uneconomic_inputs,
+            )
             .await?;
+        inputs.retain_economic(uneconomic_inputs)?;
 
-        // Filter boarding inputs to only those specified.
-        let boarding_inputs: Vec<_> = all_boarding_inputs
-            .into_iter()
-            .filter(|input| boarding_outpoints.contains(&input.outpoint()))
-            .collect();
+        if inputs.is_empty() {
+            tracing::debug!("No matching inputs to settle");
+            return Ok(None);
+        }
 
-        // Filter VTXO inputs to only those specified.
-        let vtxo_inputs: Vec<_> = all_vtxo_inputs
-            .into_iter()
-            .filter(|input| vtxo_outpoints.contains(&input.outpoint()))
-            .collect();
-
-        // Recalculate total amount from filtered inputs.
-        let total_amount = boarding_inputs
-            .iter()
-            .map(|i| i.amount())
-            .chain(vtxo_inputs.iter().map(|i| i.amount()))
-            .fold(Amount::ZERO, |acc, a| acc + a);
+        let input_fee = inputs.total_fee();
+        let total_amount =
+            self.settled_output_amount(inputs.net_total(), &to_address, server_info.dust, None)?;
+        let (boarding_inputs, vtxo_inputs) = inputs.into_inputs();
 
         tracing::debug!(
             offchain_address = %to_address.encode(),
             ?boarding_inputs,
             ?vtxo_inputs,
+            %input_fee,
             %total_amount,
             "Attempting to settle specific outputs"
         );
-
-        if boarding_inputs.is_empty() && vtxo_inputs.is_empty() {
-            tracing::debug!("No matching inputs to settle");
-            return Ok(None);
-        }
 
         let join_next_batch = || async {
             self.join_next_batch(
@@ -350,6 +381,9 @@ where
 
     /// Settle _some_ prior VTXOs and boarding outputs into the next batch, generating UTXOs as
     /// outputs to a new commitment transaction.
+    ///
+    /// `to_address` receives exactly `to_amount`; the operator's intent fee comes out of the
+    /// change VTXO.
     pub async fn collaborative_redeem<R>(
         &self,
         rng: &mut R,
@@ -363,29 +397,34 @@ where
 
         let (change_address, _) = self.get_offchain_address_with_server_info(&server_info)?;
 
-        let (boarding_inputs, vtxo_inputs, total_amount) = self
-            .fetch_commitment_transaction_inputs(&server_info, crate::utils::unix_now()?)
+        let mut inputs = self
+            .fetch_priced_commitment_transaction_inputs(&server_info, crate::utils::unix_now()?)
             .await?;
+        inputs.retain_economic(UneconomicInputs::Skip)?;
+
+        let input_fee = inputs.total_fee();
+        let total_amount = inputs.net_total();
 
         let onchain_fee = self.eval_onchain_output_fee(ark_fees::Output {
             amount: to_amount.to_sat(),
-            script: to_address.script_pubkey().to_string(),
+            script: to_address.script_pubkey().to_hex_string(),
         })?;
 
-        // Fee comes out of change, not the send amount.
-        let change_amount = total_amount
-            .checked_sub(to_amount)
-            .and_then(|a| a.checked_sub(onchain_fee))
-            .ok_or_else(|| {
-                Error::coin_select(format!(
-                    "insufficient balance: {total_amount} < {to_amount} (send) + {onchain_fee} (fee)"
-                ))
-            })?;
+        // Fees come out of change, not the send amount.
+        let change_amount = self.offboard_change_amount(
+            total_amount,
+            to_amount,
+            onchain_fee,
+            &change_address,
+            server_info.dust,
+        )?;
+        let (boarding_inputs, vtxo_inputs) = inputs.into_inputs();
 
         tracing::info!(
             %to_address,
             send_amount = %to_amount,
-            fee = %onchain_fee,
+            %input_fee,
+            %onchain_fee,
             change_address = %change_address.encode(),
             %change_amount,
             ?boarding_inputs,
@@ -424,8 +463,111 @@ where
         Ok(commitment_txid)
     }
 
+    /// Send the whole offchain balance, boarding outputs included, to `to_address` in the next
+    /// batch, with no change output.
+    ///
+    /// Unlike [`Self::collaborative_redeem`], the caller doesn't pick the amount: the client sends
+    /// the most the inputs can pay for after the operator's intent fees, which also avoids
+    /// leaving change too small to become a VTXO. Returns the commitment txid and the amount sent.
+    ///
+    /// Fails if a VTXO carries assets: they can't go on-chain, and there is no change VTXO to keep
+    /// them in.
+    pub async fn offboard_all<R>(
+        &self,
+        rng: &mut R,
+        to_address: Address,
+    ) -> Result<(Txid, Amount), Error>
+    where
+        R: Rng + CryptoRng + Clone,
+    {
+        let server_info = self.server_info().await?;
+
+        // Unused: the intent has no change output.
+        let (change_address, _) = self.get_offchain_address_with_server_info(&server_info)?;
+
+        let mut inputs = self
+            .fetch_priced_commitment_transaction_inputs(&server_info, crate::utils::unix_now()?)
+            .await?;
+        inputs.retain_economic(UneconomicInputs::Skip)?;
+
+        if inputs.is_empty() {
+            return Err(Error::coin_select("nothing to offboard"));
+        }
+
+        let input_fee = inputs.total_fee();
+        let subtotal = inputs.net_total();
+
+        let script = to_address.script_pubkey().to_hex_string();
+        let min_amount = server_info.utxo_min_amount.unwrap_or(server_info.dust);
+        // One read of the fee programs for the whole bisection.
+        let to_amount = self.with_fee_estimator(|estimator| {
+            intent_fee::offboard_all_amount(subtotal, min_amount, |amount| {
+                estimator
+                    .eval_onchain_output(ark_fees::Output {
+                        amount: amount.to_sat(),
+                        script: script.clone(),
+                    })
+                    .map(intent_fee::fee_to_amount)
+                    .map_err(Error::ad_hoc)
+            })
+        })?;
+        let (boarding_inputs, vtxo_inputs) = inputs.into_inputs();
+
+        // Assets need an offchain output to land in, and this intent has none.
+        if let Some(input) = vtxo_inputs.iter().find(|input| !input.assets().is_empty()) {
+            return Err(Error::ad_hoc(format!(
+                "VTXO {} carries assets, which can't be offboarded: move them to another VTXO \
+                 first",
+                input.outpoint()
+            )));
+        }
+
+        tracing::info!(
+            %to_address,
+            send_amount = %to_amount,
+            %input_fee,
+            %subtotal,
+            ?boarding_inputs,
+            "Attempting to offboard all funds"
+        );
+
+        let join_next_batch = || async {
+            self.join_next_batch(
+                &mut rng.clone(),
+                &server_info,
+                boarding_inputs.clone(),
+                vtxo_inputs.clone(),
+                BatchOutputType::OffBoard {
+                    to_address: to_address.clone(),
+                    to_amount,
+                    change_address,
+                    change_amount: Amount::ZERO,
+                },
+            )
+            .await
+        };
+
+        // Joining a batch can fail depending on the timing, so we try a few times.
+        let commitment_txid = join_next_batch
+            .retry(ExponentialBuilder::default().with_max_times(3))
+            .sleep(sleep)
+            .when(|err| !err.is_server_info_changed())
+            .notify(|err: &Error, dur: std::time::Duration| {
+                tracing::warn!("Retrying joining next batch after {dur:?}. Error: {err}");
+            })
+            .await
+            .context("Failed to join batch")?;
+
+        tracing::info!(%commitment_txid, %to_amount, "Offboard of all funds success");
+
+        Ok((commitment_txid, to_amount))
+    }
+
     /// Settle a selection of VTXOs into the next batch, generating UTXOs as
     /// outputs to a new commitment transaction.
+    ///
+    /// `to_address` receives exactly `to_amount`; the operator's intent fee comes out of the
+    /// change VTXO. Fails if a selected VTXO costs at least as much in fees as it is worth.
     pub async fn collaborative_redeem_vtxo_selection<R>(
         &self,
         rng: &mut R,
@@ -441,37 +583,39 @@ where
         let (change_address, _) = self.get_offchain_address_with_server_info(&server_info)?;
 
         let vtxo_inputs = self
-            .selected_batch_settleable_vtxo_inputs(&server_info, input_vtxos)
+            .selected_batch_settleable_vtxo_inputs_with_fee_params(&server_info, input_vtxos)
             .await?;
 
         if vtxo_inputs.is_empty() {
             return Err(Error::ad_hoc("no matching VTXO outpoints found"));
         }
 
-        // Check that total amount is sufficient
-        let total_input_amount = vtxo_inputs
-            .iter()
-            .fold(Amount::ZERO, |acc, vtxo| acc + vtxo.amount());
+        let mut inputs = self.price_inputs(Vec::new(), vtxo_inputs, None)?;
+        inputs.retain_economic(UneconomicInputs::Reject)?;
+
+        let input_fee = inputs.total_fee();
+        let total_input_amount = inputs.net_total();
 
         let onchain_fee = self.eval_onchain_output_fee(ark_fees::Output {
             amount: to_amount.to_sat(),
-            script: to_address.script_pubkey().to_string(),
+            script: to_address.script_pubkey().to_hex_string(),
         })?;
 
-        // Fee comes out of change, not the send amount.
-        let change_amount = total_input_amount
-            .checked_sub(to_amount)
-            .and_then(|a| a.checked_sub(onchain_fee))
-            .ok_or_else(|| {
-                Error::coin_select(format!(
-                    "insufficient VTXO amount: {total_input_amount} < {to_amount} (send) + {onchain_fee} (fee)"
-                ))
-            })?;
+        // Fees come out of change, not the send amount.
+        let change_amount = self.offboard_change_amount(
+            total_input_amount,
+            to_amount,
+            onchain_fee,
+            &change_address,
+            server_info.dust,
+        )?;
+        let (_, vtxo_inputs) = inputs.into_inputs();
 
         tracing::info!(
             %to_address,
             send_amount = %to_amount,
-            fee = %onchain_fee,
+            %input_fee,
+            %onchain_fee,
             change_address = %change_address.encode(),
             %change_amount,
             "Attempting to collaboratively redeem outputs"
@@ -514,6 +658,20 @@ where
         server_info: &server::Info,
         input_vtxos: impl IntoIterator<Item = OutPoint>,
     ) -> Result<Vec<intent::Input>, Error> {
+        let inputs = self
+            .selected_batch_settleable_vtxo_inputs_with_fee_params(server_info, input_vtxos)
+            .await?;
+
+        Ok(inputs.into_iter().map(|(input, _)| input).collect())
+    }
+
+    /// Like [`Self::selected_batch_settleable_vtxo_inputs`], pairing every input with its
+    /// intent-fee parameters.
+    async fn selected_batch_settleable_vtxo_inputs_with_fee_params(
+        &self,
+        server_info: &server::Info,
+        input_vtxos: impl IntoIterator<Item = OutPoint>,
+    ) -> Result<Vec<(intent::Input, ark_fees::OffchainInput)>, Error> {
         let requested: HashSet<OutPoint> = input_vtxos.into_iter().collect();
 
         let vtxo_list = self
@@ -550,23 +708,7 @@ where
 
         settleable
             .into_iter()
-            .map(|entry| {
-                let spend_selection = entry.spend_selection(SpendPathKind::Forfeit)?;
-
-                Ok(intent::Input::new_with_spend_selection(
-                    entry.vtxo().outpoint,
-                    entry.exit_delay()?,
-                    TxOut {
-                        value: entry.vtxo().amount,
-                        script_pubkey: entry.script_pubkey(),
-                    },
-                    entry.tapscripts(),
-                    spend_selection,
-                    false,
-                    entry.vtxo().is_swept,
-                    entry.vtxo().assets.clone(),
-                ))
-            })
+            .map(forfeit_intent_input)
             .collect::<Result<Vec<_>, Error>>()
     }
 
@@ -593,17 +735,20 @@ where
         let (to_address, _) = self.get_offchain_address_with_server_info(&server_info)?;
 
         // Simply collect all VTXOs that can be settled.
-        let (_, vtxo_inputs, _) = self
-            .fetch_commitment_transaction_inputs(&server_info, crate::utils::unix_now()?)
+        let mut inputs = self
+            .fetch_priced_commitment_transaction_inputs(&server_info, crate::utils::unix_now()?)
             .await?;
+        inputs.boarding.clear();
+        inputs.retain_economic(UneconomicInputs::Skip)?;
 
-        let total_amount = vtxo_inputs
-            .iter()
-            .fold(Amount::ZERO, |acc, v| acc + v.amount());
-
-        if vtxo_inputs.is_empty() {
+        if inputs.is_empty() {
             return Err(Error::ad_hoc("no inputs to settle via delegate"));
         }
+
+        // The intent is valid immediately (see `prepare_delegate_psbts`), so price it now.
+        let total_amount =
+            self.settled_output_amount(inputs.net_total(), &to_address, server_info.dust, None)?;
+        let (_, vtxo_inputs) = inputs.into_inputs();
 
         let mut outputs = vec![intent::Output::Offchain(TxOut {
             value: total_amount,
@@ -1127,6 +1272,151 @@ where
         server_info: &server::Info,
         now: i64,
     ) -> Result<(Vec<batch::OnChainInput>, Vec<intent::Input>, Amount), Error> {
+        let (boarding_inputs, vtxo_inputs, total_amount) = self
+            .fetch_commitment_transaction_inputs_with_fee_params(server_info, now)
+            .await?;
+
+        Ok((
+            boarding_inputs,
+            vtxo_inputs.into_iter().map(|(input, _)| input).collect(),
+            total_amount,
+        ))
+    }
+
+    /// The amount of the single VTXO to `to_address` that settles `subtotal` (inputs net of their
+    /// own fees), after that output's offchain output fee. See
+    /// [`intent_fee::settlement_output_amount`] for how the fee is resolved.
+    ///
+    /// With `at`, the output fee program sees `now()` as that Unix timestamp.
+    pub(crate) fn settled_output_amount(
+        &self,
+        subtotal: Amount,
+        to_address: &ArkAddress,
+        dust: Amount,
+        at: Option<i64>,
+    ) -> Result<Amount, Error> {
+        let script = to_address.to_p2tr_script_pubkey().to_hex_string();
+        intent_fee::settlement_output_amount(subtotal, dust, |amount| {
+            self.eval_offchain_output_fee(
+                ark_fees::Output {
+                    amount: amount.to_sat(),
+                    script: script.clone(),
+                },
+                at,
+            )
+        })
+    }
+
+    /// The change VTXO left by a collaborative exit paying exactly `to_amount` to the destination.
+    ///
+    /// `subtotal` is the inputs net of their own fees. The onchain output fee and the change
+    /// output's own offchain fee both come out of the change; zero means no change output.
+    fn offboard_change_amount(
+        &self,
+        subtotal: Amount,
+        to_amount: Amount,
+        onchain_fee: Amount,
+        change_address: &ArkAddress,
+        dust: Amount,
+    ) -> Result<Amount, Error> {
+        let left = subtotal
+            .checked_sub(to_amount)
+            .and_then(|a| a.checked_sub(onchain_fee))
+            .ok_or_else(|| {
+                Error::coin_select(format!(
+                    "insufficient balance: {subtotal} (after input fees) < \
+                     {to_amount} (send) + {onchain_fee} (onchain output fee)"
+                ))
+            })?;
+
+        let script = change_address.to_p2tr_script_pubkey().to_hex_string();
+        // One read of the fee programs for the whole bisection.
+        self.with_fee_estimator(|estimator| {
+            intent_fee::change_after_output_fee(left, dust, |amount| {
+                estimator
+                    .eval_offchain_output(ark_fees::Output {
+                        amount: amount.to_sat(),
+                        script: script.clone(),
+                    })
+                    .map(intent_fee::fee_to_amount)
+                    .map_err(Error::ad_hoc)
+            })
+        })
+    }
+
+    /// Like [`Self::fetch_commitment_transaction_inputs`], with every input priced against the
+    /// operator's intent-fee programs.
+    pub(crate) async fn fetch_priced_commitment_transaction_inputs(
+        &self,
+        server_info: &server::Info,
+        now: i64,
+    ) -> Result<PricedInputs, Error> {
+        let (boarding_inputs, vtxo_inputs, _) = self
+            .fetch_commitment_transaction_inputs_with_fee_params(server_info, now)
+            .await?;
+
+        self.price_inputs(boarding_inputs, vtxo_inputs, None)
+    }
+
+    /// Like [`Self::fetch_priced_commitment_transaction_inputs`], for the named inputs only.
+    ///
+    /// Only the named inputs are priced. A named input that isn't settleable (unknown, spent, or
+    /// a boarding output that isn't confirmed yet) fails the call under
+    /// [`UneconomicInputs::Reject`] and is skipped under [`UneconomicInputs::Skip`].
+    pub(crate) async fn fetch_priced_commitment_transaction_inputs_for(
+        &self,
+        server_info: &server::Info,
+        now: i64,
+        boarding_outpoints: &[OutPoint],
+        vtxo_outpoints: &[OutPoint],
+        policy: UneconomicInputs,
+    ) -> Result<PricedInputs, Error> {
+        let (mut boarding_inputs, mut vtxo_inputs, _) = self
+            .fetch_commitment_transaction_inputs_with_fee_params(server_info, now)
+            .await?;
+
+        boarding_inputs.retain(|input| boarding_outpoints.contains(&input.outpoint()));
+        vtxo_inputs.retain(|(input, _)| vtxo_outpoints.contains(&input.outpoint()));
+
+        let missing =
+            boarding_outpoints
+                .iter()
+                .filter(|outpoint| !boarding_inputs.iter().any(|i| i.outpoint() == **outpoint))
+                .chain(vtxo_outpoints.iter().filter(|outpoint| {
+                    !vtxo_inputs.iter().any(|(i, _)| i.outpoint() == **outpoint)
+                }))
+                .collect::<Vec<_>>();
+        if let Some(outpoint) = missing.first() {
+            match policy {
+                UneconomicInputs::Reject => {
+                    return Err(Error::coin_select(format!(
+                        "input {outpoint} can't be settled: it is unknown, spent, or not \
+                         confirmed yet"
+                    )));
+                }
+                UneconomicInputs::Skip => {
+                    tracing::debug!(?missing, "Skipping inputs that can't be settled");
+                }
+            }
+        }
+
+        self.price_inputs(boarding_inputs, vtxo_inputs, None)
+    }
+
+    /// Like [`Self::fetch_commitment_transaction_inputs`], pairing every VTXO input with its
+    /// intent-fee parameters.
+    async fn fetch_commitment_transaction_inputs_with_fee_params(
+        &self,
+        server_info: &server::Info,
+        now: i64,
+    ) -> Result<
+        (
+            Vec<batch::OnChainInput>,
+            Vec<(intent::Input, ark_fees::OffchainInput)>,
+            Amount,
+        ),
+        Error,
+    > {
         let now = u64::try_from(now).map_err(|_| Error::ad_hoc("negative timestamp"))?;
 
         // Get all known boarding outputs.
@@ -1215,23 +1505,7 @@ where
 
         let vtxo_inputs = settleable_vtxos
             .into_iter()
-            .map(|entry| {
-                let spend_selection = entry.spend_selection(SpendPathKind::Forfeit)?;
-
-                Ok(intent::Input::new_with_spend_selection(
-                    entry.vtxo().outpoint,
-                    entry.exit_delay()?,
-                    TxOut {
-                        value: entry.vtxo().amount,
-                        script_pubkey: entry.script_pubkey(),
-                    },
-                    entry.tapscripts(),
-                    spend_selection,
-                    false,
-                    entry.vtxo().is_swept,
-                    entry.vtxo().assets.clone(),
-                ))
-            })
+            .map(forfeit_intent_input)
             .collect::<Result<Vec<_>, Error>>()?;
 
         Ok((boarding_inputs, vtxo_inputs, total_amount))
@@ -2168,6 +2442,30 @@ where
             }
         }
     }
+}
+
+/// Build the forfeit-path intent input for a batch-settleable VTXO, paired with its intent-fee
+/// parameters.
+fn forfeit_intent_input(
+    entry: &AnnotatedVtxo,
+) -> Result<(intent::Input, ark_fees::OffchainInput), Error> {
+    let spend_selection = entry.spend_selection(SpendPathKind::Forfeit)?;
+
+    let input = intent::Input::new_with_spend_selection(
+        entry.vtxo().outpoint,
+        entry.exit_delay()?,
+        TxOut {
+            value: entry.vtxo().amount,
+            script_pubkey: entry.script_pubkey(),
+        },
+        entry.tapscripts(),
+        spend_selection,
+        false,
+        entry.vtxo().is_swept,
+        entry.vtxo().assets.clone(),
+    );
+
+    Ok((input, offchain_input_fee_params(entry.vtxo())))
 }
 
 #[derive(Debug, Clone)]

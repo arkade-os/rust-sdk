@@ -1026,18 +1026,37 @@ where
             (script_ver.0, control_block),
             false,
             true,
-            vhtlc_outpoint.assets,
+            vhtlc_outpoint.assets.clone(),
         );
+
+        // Leave the operator's intent fee unclaimed: the VHTLC's input fee, then the refund
+        // output's own fee.
+        let mut inputs = self.price_inputs(
+            Vec::new(),
+            vec![(
+                vhtlc_input,
+                crate::intent_fee::offchain_input_fee_params(&vhtlc_outpoint),
+            )],
+            None,
+        )?;
+        inputs.retain_economic(crate::intent_fee::UneconomicInputs::Reject)?;
+        let to_amount = self.settled_output_amount(
+            inputs.net_total(),
+            &refund_address,
+            server_info.dust,
+            None,
+        )?;
+        let (_, vtxo_inputs) = inputs.into_inputs();
 
         let commitment_txid = self
             .join_next_batch(
                 rng,
                 &server_info,
                 Vec::new(),
-                vec![vhtlc_input],
+                vtxo_inputs,
                 BatchOutputType::Board {
                     to_address: refund_address,
-                    to_amount: refund_amount,
+                    to_amount,
                 },
             )
             .await

@@ -90,6 +90,11 @@ e2e-tests:
     @echo running e2e tests
     cargo test -p e2e-tests -- --ignored --nocapture
 
+# Run the e2e test that turns on non-zero intent fees (the regtest stack must be running locally).
+# It changes the operator's fees while it runs, so don't run other tests against the stack meanwhile.
+e2e-fees:
+    cargo test -p e2e-tests --test e2e_intent_fees -- --ignored --nocapture
+
 # Restart the regtest environment and run all e2e tests.
 e2e-full:
     @echo running integration tests
