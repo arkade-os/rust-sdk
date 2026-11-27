@@ -4540,6 +4540,10 @@ where
         return Ok(());
     }
 
+    // `update_subscription` overwrites expressions as a whole but treats scripts as additive. This
+    // flow adds scripts and never sets expressions, so the empty list has nothing to clear. A
+    // future caller that opens the stream with expressions must carry them here instead of wiping
+    // them on the first discovery tick.
     let filter = SubscriptionFilter {
         expressions: Vec::new(),
         add_scripts: new_addrs

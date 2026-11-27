@@ -316,6 +316,21 @@ async fn run_watcher_loop<B, W, S>(
                                     break;
                                 }
                             }
+
+                            // A swept VTXO is recoverable, which the renewal pass settles; run it
+                            // now rather than on the next tick.
+                            if !event.swept_vtxos.is_empty() {
+                                tracing::debug!(
+                                    txid = %event.txid,
+                                    swept_vtxos = event.swept_vtxos.len(),
+                                    "Received subscription event with swept VTXOs"
+                                );
+
+                                if work_tx.send(WatcherWork::RenewTick).await.is_err() {
+                                    tracing::warn!("VTXO worker channel closed. Reconnecting in {backoff:?}");
+                                    break;
+                                }
+                            }
                         }
                         Some(Err(e)) => {
                             tracing::warn!("VTXO subscription error: {e}, reconnecting in {backoff:?}");
