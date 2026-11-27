@@ -3,7 +3,6 @@ use crate::batch::BatchOutputType;
 use crate::wallet::OnchainWallet;
 use crate::Client;
 use crate::Error;
-use crate::SwapStorage;
 use ark_core::ArkAddress;
 use bitcoin::Address;
 use bitcoin::Amount;
@@ -12,11 +11,10 @@ use bitcoin::SignedAmount;
 use rand::CryptoRng;
 use rand::Rng;
 
-impl<B, W, S> Client<B, W, S>
+impl<B, W> Client<B, W>
 where
     B: crate::Blockchain,
     W: OnchainWallet,
-    S: SwapStorage + 'static,
 {
     /// Estimates the fee to collaboratively redeem VTXOs to an on-chain Bitcoin address.
     ///

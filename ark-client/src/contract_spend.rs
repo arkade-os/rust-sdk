@@ -11,7 +11,6 @@ use crate::batch::BatchOutputType;
 use crate::error::ErrorContext;
 use crate::intent_fee;
 use crate::intent_fee::UneconomicInputs;
-use crate::swap_storage::SwapStorage;
 use crate::utils::timeout_op;
 use crate::utils::unix_now;
 use crate::wallet::OnchainWallet;
@@ -98,11 +97,10 @@ struct ContractInput {
     plan: ContractSpendPlan,
 }
 
-impl<B, W, S> Client<B, W, S>
+impl<B, W> Client<B, W>
 where
     B: Blockchain,
     W: OnchainWallet,
-    S: SwapStorage + 'static,
 {
     /// Track a contract, so that its outputs can be spent with [`Self::send_contract_vtxos`] and
     /// [`Self::settle_contract_vtxos`].

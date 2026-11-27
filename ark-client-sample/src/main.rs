@@ -6,19 +6,13 @@ use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use ark_bdk_wallet::Wallet;
-use ark_client::lightning_invoice::Bolt11Invoice;
 use ark_client::Blockchain;
-use ark_client::ChainSwapAmount;
-use ark_client::ChainSwapDirection;
 use ark_client::Error;
 use ark_client::OfflineClient;
 use ark_client::OfflineClientConfig;
 use ark_client::SpendStatus;
 #[cfg(feature = "sqlite")]
 use ark_client::SqliteContractStore;
-#[cfg(feature = "sqlite")]
-use ark_client::SqliteSwapStorage;
-use ark_client::SwapAmount;
 use ark_client::TxStatus;
 use ark_core::asset::ControlAssetConfig;
 use ark_core::contract::SpendPathKind;
@@ -52,17 +46,10 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::fs;
-#[cfg(feature = "sqlite")]
-use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-
-#[cfg(feature = "sqlite")]
-type SampleSwapStorage = SqliteSwapStorage;
-#[cfg(not(feature = "sqlite"))]
-type SampleSwapStorage = ark_client::InMemorySwapStorage;
 
 #[derive(Parser)]
 #[command(name = "ark-sample")]
@@ -143,63 +130,6 @@ enum Commands {
         /// How many sats to send.
         amount: u64,
     },
-    /// Generate a BOLT11 invoice to receive payment via a Boltz reverse submarine swap.
-    LightningInvoice {
-        /// How many sats to receive.
-        amount: u64,
-        /// Optional Arkade address that receives the claimed funds.
-        #[arg(long)]
-        recipient_address: Option<ArkAddress>,
-    },
-    /// Pay a BOLT11 invoice via a Boltz submarine swap.
-    PayInvoice {
-        /// A BOLT11 invoice.
-        invoice: String,
-    },
-    /// Create a chain swap (ARK <-> BTC) via Boltz.
-    ChainSwap {
-        /// Direction: "ark-to-btc" or "btc-to-ark".
-        direction: String,
-        /// Amount in sats.
-        amount: u64,
-        /// Target BTC address (required for ark-to-btc).
-        #[arg(long)]
-        address: Option<String>,
-        /// Fee rate in sat/vB for the on-chain claim (default: 1.0).
-        #[arg(long, default_value = "1.0")]
-        fee_rate: f64,
-    },
-    /// Claim a chain swap after the server has locked funds.
-    ClaimChainSwap {
-        /// The Boltz swap ID.
-        swap_id: String,
-        /// Target BTC address (required for ark-to-btc claims).
-        #[arg(long)]
-        address: Option<String>,
-        /// Fee rate in sat/vB for the on-chain claim (default: 1.0).
-        #[arg(long, default_value = "1.0")]
-        fee_rate: f64,
-    },
-    /// Check the status of a Boltz swap.
-    SwapStatus {
-        /// The Boltz swap ID.
-        swap_id: String,
-    },
-    /// Refund a chain swap (reclaim locked funds after expiry).
-    RefundChainSwap {
-        /// The Boltz swap ID.
-        swap_id: String,
-        /// Target BTC address (required for btc-to-ark refunds).
-        #[arg(long)]
-        address: Option<String>,
-        /// Fee rate in sat/vB for the on-chain refund (default: 1.0).
-        #[arg(long, default_value = "1.0")]
-        fee_rate: f64,
-    },
-    /// Attempt to refund a past swap collaboratively.
-    RefundSwap { swap_id: String },
-    /// Attempt to refund a past swap without the receiver's signature.
-    RefundSwapWithoutReceiver { swap_id: String },
     /// List all known wallet contracts as JSON.
     ListContracts,
     /// List all VTXOs and boarding outputs sorted by expiry, then amount.
@@ -230,13 +160,6 @@ enum Commands {
     ListPendingTxs,
     /// Continue and finalize any pending offchain transactions.
     ContinuePendingTxs,
-    /// List pending (submitted but not finalized) VHTLC swap transactions.
-    ListPendingSwapTxs,
-    /// Continue and finalize a pending VHTLC swap transaction by Boltz swap ID.
-    ContinuePendingSwapTxs {
-        /// The Boltz swap ID of the pending VHTLC swap transaction to finalize.
-        swap_id: String,
-    },
     /// Submit an offchain tx WITHOUT finalizing (for testing pending tx recovery).
     SubmitOnly { address: ArkAddressCli, amount: u64 },
     /// Create ArkNotes via the admin API (regtest only).
@@ -339,12 +262,9 @@ struct Config {
     ark_server_url: String,
     esplora_url: String,
     #[cfg(feature = "sqlite")]
-    swap_storage_path: String,
-    #[cfg(feature = "sqlite")]
     contract_store: Option<ContractStoreConfig>,
     #[cfg(feature = "sqlite")]
     contract_store_path: Option<String>,
-    boltz_url: String,
     delegator_pubkey: Option<String>,
     historical_delegator_pubkeys: Option<Vec<String>>,
 }
@@ -419,7 +339,7 @@ fn format_timestamp(unix_secs: i64) -> Result<String> {
 }
 
 async fn find_unspent_boarding_outputs(
-    client: &ark_client::Client<EsploraClient, Wallet, SampleSwapStorage>,
+    client: &ark_client::Client<EsploraClient, Wallet>,
     esplora_client: &EsploraClient,
 ) -> Result<Vec<ExplorerUtxo>> {
     let mut seen = HashSet::new();
@@ -446,14 +366,13 @@ async fn find_unspent_boarding_outputs(
 }
 
 #[cfg(feature = "sqlite")]
-fn apply_contract_store_path<B, W, S>(
+fn apply_contract_store_path<B, W>(
     config: &Config,
-    offline_client: OfflineClient<B, W, S>,
-) -> Result<OfflineClient<B, W, S>>
+    offline_client: OfflineClient<B, W>,
+) -> Result<OfflineClient<B, W>>
 where
     B: Blockchain,
     W: ark_client::wallet::OnchainWallet,
-    S: ark_client::SwapStorage + 'static,
 {
     match config.contract_store.unwrap_or(ContractStoreConfig::Sqlite) {
         ContractStoreConfig::Memory => Ok(offline_client),
@@ -461,7 +380,7 @@ where
             let contract_store_path = config
                 .contract_store_path
                 .clone()
-                .unwrap_or_else(|| default_contract_store_path(&config.swap_storage_path));
+                .unwrap_or_else(|| DEFAULT_CONTRACT_STORE_PATH.to_string());
 
             Ok(offline_client.with_contract_store(Box::new(
                 SqliteContractStore::new(contract_store_path).map_err(|e| anyhow!(e))?,
@@ -471,14 +390,7 @@ where
 }
 
 #[cfg(feature = "sqlite")]
-fn default_contract_store_path(swap_storage_path: &str) -> String {
-    Path::new(swap_storage_path)
-        .parent()
-        .map(|parent| parent.join("contracts.sqlite"))
-        .unwrap_or_else(|| Path::new("contracts.sqlite").to_path_buf())
-        .to_string_lossy()
-        .into_owned()
-}
+const DEFAULT_CONTRACT_STORE_PATH: &str = "contracts.sqlite";
 
 fn parse_delegator_pubkey(pk: &str) -> Result<bitcoin::XOnlyPublicKey> {
     if let Ok(xonly) = pk.parse::<bitcoin::XOnlyPublicKey>() {
@@ -535,15 +447,6 @@ async fn main() -> Result<()> {
     let esplora_client = EsploraClient::new(&config.esplora_url)?;
     let esplora_client = Arc::new(esplora_client);
 
-    #[cfg(feature = "sqlite")]
-    let storage = Arc::new(
-        SqliteSwapStorage::new(&config.swap_storage_path)
-            .await
-            .map_err(|e| anyhow!(e))?,
-    );
-    #[cfg(not(feature = "sqlite"))]
-    let storage = Arc::new(ark_client::InMemorySwapStorage::new());
-
     let delegator_pk = config
         .delegator_pubkey
         .as_deref()
@@ -574,7 +477,6 @@ async fn main() -> Result<()> {
 
             let client_config = OfflineClientConfig {
                 ark_server_url: config.ark_server_url.clone(),
-                boltz_url: config.boltz_url.clone(),
                 delegator_pk,
                 historical_delegator_pks: historical_delegator_pks.clone(),
                 ..Default::default()
@@ -586,7 +488,6 @@ async fn main() -> Result<()> {
                 None,
                 esplora_client.clone(),
                 wallet,
-                storage,
             );
             #[cfg(feature = "sqlite")]
             let offline_client = apply_contract_store_path(&config, offline_client)?;
@@ -604,19 +505,13 @@ async fn main() -> Result<()> {
 
             let client_config = OfflineClientConfig {
                 ark_server_url: config.ark_server_url.clone(),
-                boltz_url: config.boltz_url.clone(),
                 delegator_pk,
                 historical_delegator_pks: historical_delegator_pks.clone(),
                 ..Default::default()
             };
 
-            let offline_client = OfflineClient::with_keypair(
-                client_config,
-                kp,
-                esplora_client.clone(),
-                wallet,
-                storage,
-            );
+            let offline_client =
+                OfflineClient::with_keypair(client_config, kp, esplora_client.clone(), wallet);
             #[cfg(feature = "sqlite")]
             let offline_client = apply_contract_store_path(&config, offline_client)?;
             let client = offline_client.connect().await.map_err(|e| anyhow!(e))?;
@@ -630,7 +525,7 @@ async fn main() -> Result<()> {
 
 async fn run_command(
     command: Commands,
-    client: ark_client::Client<EsploraClient, Wallet, SampleSwapStorage>,
+    client: ark_client::Client<EsploraClient, Wallet>,
     esplora_client: Arc<EsploraClient>,
 ) -> Result<()> {
     let client = Arc::new(client);
@@ -925,246 +820,6 @@ async fn run_command(
                 txid = txid.to_string(),
                 "Sent funds on-chain using selected VTXOs"
             );
-        }
-        Commands::LightningInvoice {
-            amount,
-            recipient_address,
-        } => {
-            let invoice_amount = SwapAmount::invoice(Amount::from_sat(*amount));
-            let res = if let Some(recipient_address) = recipient_address {
-                client
-                    .get_ln_invoice_for_address(invoice_amount, *recipient_address, None, None)
-                    .await
-                    .map_err(|e| anyhow!(e))?
-            } else {
-                client
-                    .get_ln_invoice(invoice_amount, None, None)
-                    .await
-                    .map_err(|e| anyhow!(e))?
-            };
-
-            let invoice = res.invoice.to_string();
-            let swap_id = res.swap_id;
-
-            tracing::info!(invoice, swap_id, "Lightning invoice");
-
-            client
-                .wait_for_vhtlc(&swap_id)
-                .await
-                .map_err(|e| anyhow!(e))?;
-
-            tracing::info!(invoice, swap_id, "Lightning invoice paid");
-        }
-        Commands::PayInvoice { invoice } => {
-            let invoice = Bolt11Invoice::from_str(invoice)
-                .map_err(|e| anyhow!("failed to parse BOLT11 invoice: {e}"))?;
-
-            let result = client
-                .pay_ln_invoice(invoice)
-                .await
-                .map_err(|e| anyhow!(e))?;
-
-            let swap_id = result.swap_id;
-
-            tracing::info!(swap_id, "Payment sent, waiting for finalization");
-
-            client
-                .wait_for_invoice_paid(swap_id.as_str())
-                .await
-                .map_err(|e| anyhow!(e))?;
-
-            tracing::info!(swap_id, "Payment made");
-        }
-        Commands::ChainSwap {
-            direction,
-            amount,
-            address,
-            fee_rate,
-        } => {
-            let direction = match direction.as_str() {
-                "ark-to-btc" => ChainSwapDirection::ArkToBtc,
-                "btc-to-ark" => ChainSwapDirection::BtcToArk,
-                other => {
-                    bail!("invalid direction '{other}', expected 'ark-to-btc' or 'btc-to-ark'")
-                }
-            };
-
-            let amount = ChainSwapAmount::UserLock(Amount::from_sat(*amount));
-
-            let result = client
-                .create_chain_swap(direction.clone(), amount)
-                .await
-                .map_err(|e| anyhow!(e))?;
-
-            tracing::info!(
-                swap_id = result.swap_id,
-                user_lockup_address = %result.user_lockup_address,
-                user_lockup_amount = %result.user_lockup_amount,
-                server_lockup_amount = %result.server_lockup_amount,
-                bip21 = result.bip21.as_deref().unwrap_or("n/a"),
-                "Chain swap created — fund the user_lockup_address to proceed"
-            );
-
-            match direction {
-                ChainSwapDirection::BtcToArk => {
-                    // BtcToArk: user funds BTC on-chain, then claims Ark VHTLC
-                    tracing::info!(swap_id = result.swap_id, "Waiting for server lockup...");
-
-                    client
-                        .wait_for_chain_swap_server_lockup(&result.swap_id)
-                        .await
-                        .map_err(|e| anyhow!(e))?;
-
-                    tracing::info!(
-                        swap_id = result.swap_id,
-                        "Server locked ARK VHTLC, claiming..."
-                    );
-
-                    let txid = client
-                        .claim_chain_swap(&result.swap_id)
-                        .await
-                        .map_err(|e| anyhow!(e))?;
-
-                    tracing::info!(swap_id = result.swap_id, %txid, "Chain swap claimed (ARK)");
-                }
-                ChainSwapDirection::ArkToBtc => {
-                    // ArkToBtc: fund Ark VHTLC, wait for server BTC lockup, claim BTC
-                    let destination: Address = address
-                        .as_deref()
-                        .ok_or_else(|| anyhow!("--address is required for ark-to-btc"))?
-                        .parse::<Address<NetworkUnchecked>>()
-                        .map_err(|e| anyhow!("invalid BTC address: {e}"))?
-                        .assume_checked();
-
-                    let lockup_address = ArkAddress::decode(&result.user_lockup_address)
-                        .map_err(|e| anyhow!("failed to parse ARK lockup address: {e}"))?;
-
-                    tracing::info!(swap_id = result.swap_id, "Funding ARK VHTLC...");
-
-                    let fund_txid = client
-                        .send(vec![SendReceiver::bitcoin(
-                            lockup_address,
-                            result.user_lockup_amount,
-                        )])
-                        .await
-                        .map_err(|e| anyhow!(e))?;
-
-                    tracing::info!(
-                        swap_id = result.swap_id,
-                        %fund_txid,
-                        "Funded ARK VHTLC, waiting for server BTC lockup..."
-                    );
-
-                    client
-                        .wait_for_chain_swap_server_lockup(&result.swap_id)
-                        .await
-                        .map_err(|e| anyhow!(e))?;
-
-                    tracing::info!(
-                        swap_id = result.swap_id,
-                        "Server locked BTC, claiming on-chain..."
-                    );
-
-                    let txid = client
-                        .claim_chain_swap_btc(&result.swap_id, destination, *fee_rate)
-                        .await
-                        .map_err(|e| anyhow!(e))?;
-
-                    tracing::info!(swap_id = result.swap_id, %txid, "Chain swap claimed (BTC)");
-                }
-            }
-        }
-        Commands::ClaimChainSwap {
-            swap_id,
-            address,
-            fee_rate,
-        } => {
-            // Try Ark VHTLC claim first; if it fails (wrong direction), try BTC claim.
-            match client.claim_chain_swap(swap_id).await {
-                Ok(txid) => {
-                    tracing::info!(%txid, swap_id, "Chain swap claimed (ARK VHTLC)");
-                }
-                Err(_) => {
-                    let destination: Address = address
-                        .as_deref()
-                        .ok_or_else(|| anyhow!("--address is required for ark-to-btc claims"))?
-                        .parse::<Address<NetworkUnchecked>>()
-                        .map_err(|e| anyhow!("invalid BTC address: {e}"))?
-                        .assume_checked();
-
-                    let txid = client
-                        .claim_chain_swap_btc(swap_id, destination, *fee_rate)
-                        .await
-                        .map_err(|e| anyhow!(e))?;
-
-                    tracing::info!(%txid, swap_id, "Chain swap claimed (on-chain BTC)");
-                }
-            }
-        }
-        Commands::SwapStatus { swap_id } => {
-            let info = client
-                .get_swap_status(swap_id.as_str())
-                .await
-                .map_err(|e| anyhow!(e))?;
-
-            tracing::info!(
-                swap_id,
-                swap_type = %info.swap_type,
-                status = ?info.status,
-                "Swap status"
-            );
-        }
-        Commands::RefundChainSwap {
-            swap_id,
-            address,
-            fee_rate,
-        } => {
-            // Try the Ark VHTLC refund first (ArkToBtc direction).
-            match client.refund_chain_swap(swap_id).await {
-                Ok(txid) => {
-                    tracing::info!(%txid, swap_id, "Chain swap refunded (ARK VHTLC)");
-                }
-                Err(ark_err) => {
-                    // If no --address provided, it's an Ark refund that failed — report the error.
-                    let Some(addr_str) = address.as_deref() else {
-                        return Err(anyhow!(ark_err).context(
-                            "Ark VHTLC refund failed (pass --address for on-chain BTC refund)",
-                        ));
-                    };
-
-                    tracing::debug!(
-                        "Ark VHTLC refund failed ({ark_err}), trying on-chain BTC refund"
-                    );
-
-                    let destination: Address = addr_str
-                        .parse::<Address<NetworkUnchecked>>()
-                        .map_err(|e| anyhow!("invalid BTC address: {e}"))?
-                        .assume_checked();
-
-                    let txid = client
-                        .refund_chain_swap_btc(swap_id, destination, *fee_rate)
-                        .await
-                        .map_err(|e| anyhow!(e))?;
-
-                    tracing::info!(%txid, swap_id, "Chain swap refunded (on-chain BTC)");
-                }
-            }
-        }
-        Commands::RefundSwap { swap_id } => {
-            let txid = client
-                .refund_vhtlc(swap_id.as_str())
-                .await
-                .map_err(|e| anyhow!(e))?;
-
-            tracing::info!(?txid, swap_id, "Swap refunded");
-        }
-        Commands::RefundSwapWithoutReceiver { swap_id } => {
-            let txid = client
-                .refund_expired_vhtlc(swap_id.as_str())
-                .await
-                .map_err(|e| anyhow!(e))?;
-
-            tracing::info!(?txid, swap_id, "Swap refunded");
         }
         Commands::RestoreContracts { gap_limit } => {
             let restored = client
@@ -1488,64 +1143,6 @@ async fn run_command(
                     "finalized_txids": finalized.iter().map(|t| t.to_string()).collect::<Vec<_>>()
                 });
                 println!("{}", serde_json::to_string_pretty(&output)?);
-            }
-        }
-        Commands::ListPendingSwapTxs => {
-            let pending = client
-                .list_pending_vhtlc_spend_txs()
-                .await
-                .map_err(|e| anyhow!(e))?;
-
-            let entries: Vec<_> = pending
-                .iter()
-                .map(|tx| {
-                    let swap_id = tx.spend_type.swap_id().to_string();
-                    let ark_txid = tx.pending_tx.ark_txid.to_string();
-                    let spend_type = match &tx.spend_type {
-                        ark_client::PendingVhtlcSpendType::Claim { .. } => "claim",
-                        ark_client::PendingVhtlcSpendType::CollaborativeRefund { .. } => {
-                            "collaborative_refund"
-                        }
-                        ark_client::PendingVhtlcSpendType::ExpiredRefund { .. } => "expired_refund",
-                    };
-                    serde_json::json!({
-                        "swap_id": swap_id,
-                        "ark_txid": ark_txid,
-                        "spend_type": spend_type,
-                    })
-                })
-                .collect();
-
-            println!("{}", serde_json::to_string_pretty(&entries)?);
-        }
-        Commands::ContinuePendingSwapTxs { swap_id } => {
-            let pending = client
-                .list_pending_vhtlc_spend_txs()
-                .await
-                .map_err(|e| anyhow!(e))?;
-
-            let matched = pending
-                .into_iter()
-                .find(|tx| tx.spend_type.swap_id() == swap_id.as_str());
-
-            match matched {
-                None => {
-                    anyhow::bail!(
-                        "No pending VHTLC swap transaction found with swap_id: {swap_id}"
-                    );
-                }
-                Some(pending_tx) => {
-                    let txid = client
-                        .continue_pending_vhtlc_spend_tx(&pending_tx)
-                        .await
-                        .map_err(|e| anyhow!(e))?;
-
-                    let output = serde_json::json!({
-                        "swap_id": swap_id,
-                        "finalized_txid": txid.to_string(),
-                    });
-                    println!("{}", serde_json::to_string_pretty(&output)?);
-                }
             }
         }
         Commands::CreateNote { .. } => {

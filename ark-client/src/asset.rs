@@ -1,7 +1,6 @@
 use crate::error::ErrorContext;
 use crate::send_vtxo::coin_select_vtxo;
 use crate::send_vtxo::select_contract_vtxos;
-use crate::swap_storage::SwapStorage;
 use crate::wallet::OnchainWallet;
 use crate::AnnotatedVtxo;
 use crate::Blockchain;
@@ -30,11 +29,10 @@ pub struct IssueAssetResult {
     pub asset_ids: Vec<AssetId>,
 }
 
-impl<B, W, S> Client<B, W, S>
+impl<B, W> Client<B, W>
 where
     B: Blockchain,
     W: OnchainWallet,
-    S: SwapStorage + 'static,
 {
     /// Issue a new asset.
     ///
