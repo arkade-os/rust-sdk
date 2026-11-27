@@ -548,7 +548,7 @@ pub async fn set_up_client(
     _name: String,
     regtest: Arc<Regtest>,
     secp: Secp256k1<All>,
-) -> (Client<Regtest, Wallet, InMemorySwapStorage>, Arc<Wallet>) {
+) -> (Client<Regtest, InMemorySwapStorage>, Arc<Wallet>) {
     let mut rng = thread_rng();
 
     let sk = SecretKey::new(&mut rng);
@@ -571,7 +571,6 @@ pub async fn set_up_client(
         xpriv,
         None,
         regtest,
-        wallet.clone(),
         Arc::new(InMemorySwapStorage::default()),
     )
     .connect_with_retries(5)
@@ -587,7 +586,7 @@ pub async fn set_up_client_with_delegator(
     regtest: Arc<Regtest>,
     secp: Secp256k1<All>,
     delegator_pk: XOnlyPublicKey,
-) -> (Client<Regtest, Wallet, InMemorySwapStorage>, Arc<Wallet>) {
+) -> (Client<Regtest, InMemorySwapStorage>, Arc<Wallet>) {
     let mut rng = thread_rng();
 
     let sk = SecretKey::new(&mut rng);
@@ -614,7 +613,6 @@ pub async fn set_up_client_with_delegator(
         xpriv,
         None,
         regtest,
-        wallet.clone(),
         Arc::new(InMemorySwapStorage::default()),
     )
     .connect_with_retries(5)
@@ -698,7 +696,7 @@ pub async fn set_up_client_with_seed(
     regtest: Arc<Regtest>,
     secp: Secp256k1<All>,
     seed: [u8; 32],
-) -> (Client<Regtest, Wallet, InMemorySwapStorage>, Arc<Wallet>) {
+) -> (Client<Regtest, InMemorySwapStorage>, Arc<Wallet>) {
     set_up_client_with_seed_and_server_info_ttl(
         name,
         regtest,
@@ -717,7 +715,7 @@ pub async fn set_up_client_with_seed_and_server_info_ttl(
     secp: Secp256k1<All>,
     seed: [u8; 32],
     server_info_ttl: Duration,
-) -> (Client<Regtest, Wallet, InMemorySwapStorage>, Arc<Wallet>) {
+) -> (Client<Regtest, InMemorySwapStorage>, Arc<Wallet>) {
     let mut rng = thread_rng();
 
     let sk = SecretKey::new(&mut rng);
@@ -740,7 +738,6 @@ pub async fn set_up_client_with_seed_and_server_info_ttl(
         xpriv,
         None,
         regtest,
-        wallet.clone(),
         Arc::new(InMemorySwapStorage::default()),
     )
     .connect_with_retries(5)
