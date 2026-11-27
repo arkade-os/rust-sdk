@@ -506,7 +506,9 @@ where
     ///
     /// A time-based CSV or CLTV is checked against the wall clock, but the chain measures both in
     /// median time past, which lags behind; the node can still refuse the spend for a while after
-    /// this check passes.
+    /// this check passes. A height-based CLTV is only checked when
+    /// [`ContractSpendOptions::block_height`] is set; without it, an immature one is left for the
+    /// node to refuse.
     pub async fn send_contract_on_chain(
         &self,
         outpoints: &[OutPoint],

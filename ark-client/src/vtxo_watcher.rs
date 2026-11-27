@@ -17,6 +17,7 @@ use crate::Client;
 use crate::Error;
 use crate::GetVtxosRequestFilter;
 use ark_core::intent;
+use ark_core::server::SubscriptionEvent;
 use ark_core::server::SubscriptionFilter;
 use ark_core::server::SubscriptionResponse;
 use ark_core::server::VirtualTxOutPoint;
@@ -97,9 +98,27 @@ impl Default for VtxoWatcherConfig {
     }
 }
 
+#[derive(Debug, PartialEq)]
 enum WatcherWork {
     NewVtxos { vtxos: Vec<VirtualTxOutPoint> },
     RenewTick,
+}
+
+/// The work a subscription event asks of the worker.
+///
+/// New VTXOs go to delegation. A swept VTXO is recoverable, which the renewal pass settles, so a
+/// sweep runs that pass now rather than on the next tick.
+fn event_work(event: SubscriptionEvent) -> Vec<WatcherWork> {
+    let mut work = Vec::new();
+    if !event.new_vtxos.is_empty() {
+        work.push(WatcherWork::NewVtxos {
+            vtxos: event.new_vtxos,
+        });
+    }
+    if !event.swept_vtxos.is_empty() {
+        work.push(WatcherWork::RenewTick);
+    }
+    work
 }
 
 impl<B, W, S> Client<B, W, S>
@@ -303,21 +322,23 @@ async fn run_watcher_loop<B, W, S>(
                             tracing::debug!(subscription_id, "Subscription started");
                         }
                         Some(Ok(SubscriptionResponse::Event(event))) => {
-                            if !event.new_vtxos.is_empty() {
-                                tracing::debug!(
-                                    txid = %event.txid,
-                                    new_vtxos = event.new_vtxos.len(),
-                                    "Received subscription event with new VTXOs"
-                                );
+                            tracing::debug!(
+                                txid = %event.txid,
+                                new_vtxos = event.new_vtxos.len(),
+                                swept_vtxos = event.swept_vtxos.len(),
+                                "Received subscription event"
+                            );
 
-                                if work_tx.send(WatcherWork::NewVtxos {
-                                    vtxos: event.new_vtxos,
-                                })
-                                .await.is_err()
-                                {
-                                    tracing::warn!("VTXO worker channel closed. Reconnecting in {backoff:?}");
+                            let mut channel_closed = false;
+                            for work in event_work(*event) {
+                                if work_tx.send(work).await.is_err() {
+                                    channel_closed = true;
                                     break;
                                 }
+                            }
+                            if channel_closed {
+                                tracing::warn!("VTXO worker channel closed. Reconnecting in {backoff:?}");
+                                break;
                             }
                         }
                         Some(Err(e)) => {
@@ -1351,6 +1372,80 @@ mod tests {
         let a = ark_address(1);
         let subscribed: HashSet<_> = [a].into_iter().collect();
         assert!(additional_scripts_filter(vec![a], &subscribed).is_none());
+    }
+
+    fn event_vtxo(vout: u32, is_swept: bool) -> VirtualTxOutPoint {
+        VirtualTxOutPoint {
+            outpoint: OutPoint::new(Txid::all_zeros(), vout),
+            created_at: 0,
+            expires_at: 1_000,
+            amount: Amount::from_sat(10_000),
+            script: ScriptBuf::new(),
+            is_preconfirmed: false,
+            is_swept,
+            is_unrolled: false,
+            is_spent: false,
+            spent_by: None,
+            commitment_txids: vec![],
+            settled_by: None,
+            ark_txid: None,
+            assets: vec![],
+            depth: 0,
+        }
+    }
+
+    fn event(
+        new_vtxos: Vec<VirtualTxOutPoint>,
+        swept_vtxos: Vec<VirtualTxOutPoint>,
+    ) -> SubscriptionEvent {
+        SubscriptionEvent {
+            txid: Txid::all_zeros(),
+            scripts: vec![],
+            new_vtxos,
+            spent_vtxos: vec![],
+            swept_vtxos,
+            tx: None,
+            checkpoint_txs: Default::default(),
+        }
+    }
+
+    #[test]
+    fn swept_vtxos_run_the_renewal_pass() {
+        let work = event_work(event(vec![], vec![event_vtxo(0, true)]));
+
+        assert_eq!(work, vec![WatcherWork::RenewTick]);
+    }
+
+    #[test]
+    fn new_vtxos_go_to_delegation() {
+        let vtxo = event_vtxo(0, false);
+
+        let work = event_work(event(vec![vtxo.clone()], vec![]));
+
+        assert_eq!(work, vec![WatcherWork::NewVtxos { vtxos: vec![vtxo] }]);
+    }
+
+    #[test]
+    fn event_with_new_and_swept_vtxos_delegates_then_renews() {
+        let new = event_vtxo(0, false);
+
+        let work = event_work(event(vec![new.clone()], vec![event_vtxo(1, true)]));
+
+        assert_eq!(
+            work,
+            vec![
+                WatcherWork::NewVtxos { vtxos: vec![new] },
+                WatcherWork::RenewTick
+            ]
+        );
+    }
+
+    #[test]
+    fn spend_only_event_needs_no_work() {
+        let mut spend = event(vec![], vec![]);
+        spend.spent_vtxos.push(event_vtxo(0, false));
+
+        assert!(event_work(spend).is_empty());
     }
 
     #[tokio::test]

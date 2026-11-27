@@ -607,14 +607,15 @@ impl Info {
 
         let mut scripts = vec![current.clone()];
         for deprecated in &self.deprecated_signers {
-            let key = deprecated.pk.x_only_public_key().0.serialize();
+            let deprecated_key = deprecated.pk.x_only_public_key().0.serialize();
             let mut bytes = current.to_bytes();
             let mut replaced = false;
             for (index, instruction) in current.instruction_indices().flatten() {
                 if let Instruction::PushBytes(push) = instruction {
-                    if operator_keys.iter().any(|key| push.as_bytes() == key) {
+                    if operator_keys.iter().any(|op_key| push.as_bytes() == op_key) {
                         // `index` points at the push opcode; the key follows it.
-                        bytes[index + 1..index + 1 + key.len()].copy_from_slice(&key);
+                        bytes[index + 1..index + 1 + deprecated_key.len()]
+                            .copy_from_slice(&deprecated_key);
                         replaced = true;
                     }
                 }
